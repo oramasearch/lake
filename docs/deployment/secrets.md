@@ -17,7 +17,9 @@ Level 1 is lake's configuration and stays out of this page's migration: the Stri
 `LAKE_STRIPE_SECRET_KEY` and `LAKE_STRIPE_WEBHOOK_SECRET` (lake#628, [aks.md](aks.md#stripe)),
 Resend's, for the order sheet's email, is `LAKE_RESEND_API_KEY` ([resend.md](resend.md)),
 OpenAI's is `LAKE_OPENAI_API_KEY` ([aks.md](aks.md#speech-to-text-key)), Clerk's publishable key is
-`LAKE_CLERK_PUBLISHABLE_KEY` (public by design; lake holds no Clerk secret key), and Clerk's webhook
+`LAKE_CLERK_PUBLISHABLE_KEY` (public by design). `LAKE_CLERK_SECRET_KEY` checks current
+account restriction state at each template exchange (lake#948); a missing key or failed Backend API check
+refuses sign-in. This is the instance server key, never a browser value. Clerk's webhook
 signing secret is `LAKE_CLERK_WEBHOOK_SECRET` (`whsec_…`, an Orama platform key the operator injects
 from the instance's Clerk configuration, orama-operator#541; without it `POST
 /identity/clerk-webhook` answers 404, [../api/clerk.md](../api/clerk.md#webhooks)).

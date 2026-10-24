@@ -5,6 +5,7 @@
 #include <set>
 #include <vector>
 
+#include "lake/control/authentication_limits.hpp"
 #include "lake/control/store.hpp"
 
 namespace lake::control {
@@ -430,6 +431,8 @@ public:
     Result<CloudOrder> transition_cloud_order(const CloudOrderTransition& change) override;
     Result<CloudOrderPaymentResult>
     apply_cloud_order_payment(const CloudOrderPayment& payment) override;
+    Result<CloudOrderPaymentResult>
+    apply_cloud_order_subscription(const CloudOrderSubscriptionEvent& event) override;
     Result<std::vector<CloudOrder>> claim_cloud_order_emails(int limit, int lease_seconds) override;
     Result<void> record_cloud_order_email(const CloudOrderEmailOutcome& outcome) override;
     Result<std::vector<CloudOrderEvent>> unaudited_cloud_order_events(int limit) override;
@@ -447,6 +450,9 @@ public:
     create_pki_certificate(const NewPkiCertificateRecord& value) override;
     Result<PkiCertificateRecord> get_pki_certificate(const std::string& id) override;
     Result<PkiCertificateRecord> revoke_pki_certificate(const std::string& id) override;
+    Result<bool> has_active_agent_certificate(const std::string& customer_id,
+                                              const std::string& taap_id,
+                                              const std::string& at) override;
     Result<AgentSession> create_agent_session(const NewAgentSession& value) override;
     Result<AgentSession> revoke_agent_session(const std::string& customer_id,
                                               const std::string& id) override;
@@ -499,10 +505,18 @@ public:
     Result<IssuedSession> sign_up_password(const NewPasswordUser&) override;
     Result<IdentityProofChallenge> begin_identity_proof(const std::string& pool_id,
                                                         const std::string& document) override;
+    Result<AuthenticationAttempt>
+    authentication_attempt(const std::string& pool_id,
+                           const std::string& email,
+                           const std::string& user_id,
+                           const std::string& client_address) override;
+    Result<void> authentication_attempt_finished(const AuthenticationAttempt&,
+                                                 AuthenticationOutcome) override;
     Result<IssuedSession> sign_in_password(const PasswordSignIn&) override;
     Result<IssuedSession> sign_in_taap(const TaapSignIn&) override;
     Result<MfaEnrollment> enroll_mfa(const std::string& user_id,
-                                     const std::string& pool_id) override;
+                                     const std::string& pool_id,
+                                     const MfaEnrollmentProof& proof) override;
     Result<void> disable_mfa(const std::string& user_id,
                              const std::string& pool_id,
                              const std::string& code) override;
@@ -523,6 +537,9 @@ public:
     Result<IssuedSession> sign_in_oauth(const OAuthIdentity&) override;
     Result<IssuedSession> sign_in_clerk(const ClerkIdentity&) override;
     Result<ClerkUserProvisioned> provision_clerk_user(const ClerkIdentity&) override;
+    Result<bool> apply_clerk_user_state(const ClerkUserState&) override;
+    Result<void> revoke_clerk_sessions(const std::string& subject,
+                                       std::int64_t revoked_at) override;
     Result<std::string> update_clerk_user(const ClerkIdentity&) override;
     Result<std::string> disable_clerk_user(const std::string& subject) override;
     Result<bool> clerk_webhook_applied(const std::string& delivery_id) override;
@@ -545,7 +562,9 @@ public:
     Result<void> begin_oauth(const OAuthFlow&) override;
     Result<void> begin_saml(const SamlRequest&) override;
     Result<SamlRequest> consume_saml(const SamlAnswer&) override;
-    Result<OAuthFlow> consume_oauth(const std::string& provider, const std::string& state) override;
+    Result<OAuthFlow> consume_oauth(const std::string& provider,
+                                    const std::string& state,
+                                    const std::string& browser_binding) override;
     Result<IssuedSession> create_token(const NewToken&) override;
     Result<std::vector<Session>> list_sessions(const std::string& user_id,
                                                const std::string& pool_id) override;
@@ -565,7 +584,10 @@ public:
                                             const std::string& device_name) override;
     Result<RecoveryAttempt> begin_email_recovery(const std::string& pool_id,
                                                  const std::string& email,
-                                                 int cooling_seconds) override;
+                                                 int cooling_seconds,
+                                                 const std::string& client_address = {}) override;
+    Result<RecoveryAttempt> cancel_recovery(const std::string& user_id,
+                                            const std::string& recovery_id) override;
     Result<RecoveryAttempt> begin_admin_recovery(const std::string& organization_id,
                                                  const std::string& user_id,
                                                  const std::string& requested_by) override;
@@ -612,6 +634,9 @@ public:
                                                                     int limit) override;
 
 private:
+    // Caller holds mutex_. Userless system work is allowed; person-owned work needs a live user.
+    Result<void> active_delegator_locked(const std::string& user_id) const;
+    void revoke_agent_delegations_locked(const std::string& user_id);
     Result<void> check_network_scope_locked(const NetworkScope&) const;
     Result<void> check_network_target_locked(const NetworkScope&,
                                              const std::string& kind,
@@ -747,9 +772,11 @@ private:
     std::vector<CustomerKekRecord> customer_keks_;
     std::vector<SecretMountRoute> secret_mount_routes_;
     std::vector<SecretLeaseRoute> secret_lease_routes_;
+    AuthenticationAttempts authentication_budgets_;
     struct PasswordCredential {
         std::string user_id, pool_id, email, password, totp_secret;
-        std::vector<std::string> recovery_hashes;
+        std::map<std::string, std::string> recovery_hashes;
+        std::int64_t last_totp_step = -1;
     };
     struct PasskeyCredential {
         std::string user_id, pool_id, credential_id, public_key_pem, name, device_id, revoked_at;
@@ -773,6 +800,8 @@ private:
     // Accounts disabled by a Clerk user.deleted (lake#765), and the deliveries applied.
     std::set<std::string> disabled_users_;
     std::set<std::string> clerk_webhook_deliveries_;
+    std::map<std::string, ClerkUserState> clerk_user_states_;
+    std::map<std::string, std::int64_t> clerk_revoked_before_;
     // user id -> when its managed seed was destroyed by using its own identity (lake#762).
     std::map<std::string, std::string> managed_seed_destroyed_at_;
     struct IdentityLinkChallengeRecord {
@@ -810,7 +839,13 @@ private:
         std::vector<std::string> approvals;
         std::chrono::system_clock::time_point ready_at;
         std::chrono::system_clock::time_point expires_at;
+        std::chrono::system_clock::time_point created_at = std::chrono::system_clock::now();
     };
+    struct RecoveryBudget {
+        std::chrono::system_clock::time_point started_at;
+        int requests = 0;
+    };
+    std::map<std::string, RecoveryBudget> recovery_budgets_;
     std::vector<RecoveryRecord> recovery_attempts_;
     std::vector<RecoveryDelivery> recovery_deliveries_;
     std::vector<RecoveryNotification> recovery_notifications_;

@@ -22,8 +22,8 @@ belong to no workspace and always go unprefixed. Files are under `frontend/src/p
 
 - **Secrets are shown once and never stored.** A new token's secret, the MFA authenticator URI and
   the recovery codes live only in that page's memory and are gone when it is left. Re-enrollment
-  replaces the current seed and recovery codes; disabling requires a fresh TOTP or an unused
-  recovery code.
+  requires the current password and replaces the current seed and recovery codes; disabling
+  requires a fresh TOTP or an unused recovery code.
 - **Passwords and identity documents never go in a URL.** They travel in the JSON body.
 - **The MFA step keeps its input in memory.** When `sign_in_password` answers `mfa_required`, the
   page asks for the code and calls `verify_mfa` with the email and password it still holds.
@@ -122,3 +122,8 @@ browser instead, and this one's next call shows *Your session has ended*.
 Add behaviour to the registry first, then call it from the page with `act`/`useRead` and
 `NO_WORKSPACE`. Never add a sign-in path that sets the cookie outside a capability or the server's
 sign-in routes ([README.md](README.md#what-lake-serves)). Update this table and the page table in [README.md](README.md#pages).
+
+The MFA page warns that legacy 12-character recovery codes are retired and asks the person to
+enter their current password and re-enroll for new `rc1_` codes (lake#969). Passwords, TOTP and
+passkeys remain available. The recovery-code list wraps long codes inside each grid cell.
+Authentication throttles use the existing error notice; client cooldowns last at most fifteen minutes. See [attempt limits](../api/identity.md#authentication-attempt-limits).

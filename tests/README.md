@@ -1,5 +1,41 @@
 # Tests
 
+`test_workspace_records.cpp` runs `DisablingAUserRevokesAgentDelegation` and
+`DisabledUsersCannotDriveAgentOrMcpStreams` on memory and PostgreSQL (lake#951). They exercise
+retained launch/schedule/task credentials, direct disabled rows, lease renewal and queued claims,
+cached-context creation, repeat offboarding, stream-trigger and MCP streaming cleanup, and an
+unaffected person's launch. Run them with `LAKE_TEST_DB_URI` and `ctest --timeout 600 -R
+'DisablingAUserRevokesAgentDelegation|DisabledUsersCannotDriveAgentOrMcpStreams'`.
+`test_api.cpp`'s `Export.*` cases bind manifest signer IDs to their embedded keys (LSR-088,
+lake#954), refuse an archive re-signed by another key before any destination write, and accept
+valid and rotated instance keys. They check local authors and grant attestations naming the importer,
+untrusted provenance on both forge import passes, cleared artifact verification, and release
+evidence retained only as untrusted history. See [export.md](../docs/api/export.md).
+`test_agents.cpp` runs dispatcher and durable-agent registration checks against memory and
+PostgreSQL: an authenticated customer writer cannot name another dispatcher or an agent without
+an active certificate for that customer. It also checks direct service calls and non-expiring
+keys. See [agent session keys](../docs/api/agents.md#verify-and-change).
+`Workspaces.DatasetAndModelMetadataRequireAuthenticatedCustomerRead` in `test_workspaces.cpp`
+checks customer authorization before dataset/model workspace exchanges through REST dispatch and
+MCP, including URL workspace context and the model alias. `test_api.cpp`'s
+`Models.AnonymousDatasetAndModelRevisionsRequirePublicRepositories` retains anonymous public
+revision reads and private revision refusals (lake#970, LSR-104; [contract](../docs/api/models.md)).
+`test_pki.cpp` rejects SAN configuration injection through ACME, SPIFFE and agent issuance
+(lake#946), validates malformed DNS/SPIFFE identifiers, and decodes successful certificates to
+check one SAN with exactly the requested type and bytes. See [PKI](../docs/api/pki.md).
+`Pipeline.*` checks pipeline budgets, original-index topology order, atomic final validation and
+validation of a reversed 50,000-step chain within one second (lake#967).
+`Workspaces.EditPipelineReadsValidatesAndSavesTheWholeGraph` checks oversized stored graphs on
+edit/render, both save spellings and bounded-pool saturation.
+
+`test_http_server.cpp` covers pre-body capability admission (lake#944): headers declaring 2 MiB
+receive 413 on public identity routes and 401 on protected routes before any body bytes are sent.
+The tests exercise both URL forms, rejected credentials, workspace Zetta and model gateway
+adapters, anonymous MCP's 256 KiB cap, chunked bodies, depth and element limits, duplicate keys,
+anonymous discovery and authenticated bulk inputs. See [HTTP limits](../docs/serving/http.md#request-body-limits).
+
+`OidcJwks.*` covers invalid tokens, signature failures, unknown key IDs, cooldowns, rotation, concurrent refreshes and failed transports. `HttpServer.ClerkInvalidTokensNeverFetchAndEachIngressClientHasItsOwnLimit` checks that two ingress-reported addresses behind one socket peer get separate limits and a direct client is still limited; `HttpServer.ClerkJwksFetchDoesNotBlockOtherRequests` keeps a fake fetch blocked while a health request completes; `HttpServer.ClerkBackendStatusDoesNotBlockOtherRequests` covers the uncached account-status request too (lake#956).
+
 `test_platform.cpp`'s `LiquidIdFixture` covers deployment rows that name a repository by the liquid
 id `liquid deploy` sends, by lake's UUID, by an unknown id (reported, not skipped) and by a liquid
 id two repositories share (lake#805); `*.RecordsAndFindsLiquidIds` runs the store contract on
@@ -576,6 +612,12 @@ the provider's refusals without echoing Lake's key, `model_completion` counting 
 launch's tokens in the run's workspace with the prompt kept out of the audit, every other caller
 refused before the provider, the monthly `model_tokens` limit refusing with `usage_limit_reached`,
 and the OpenAI-compatible `/openai/v1/*` route over a real server, all against a fake provider.
+LSR-094 (lake#960) checks hosted tools, media, asynchronous work, stored references and unknown
+fields on every endpoint before the fake provider is called, including global and workspace HTTP
+routes; positive cases preserve text, function history and application schemas. Transport failures
+without an HTTP status are counted by estimate against the originating workspace. A chat
+completion's assistant message sent back as history, with OpenAI's output-only `annotations`,
+`refusal` and null `audio`, is accepted and forwarded without them.
 Streaming (lake#665): a stream's usage read piece by piece however the pieces cut its events, a
 relayed stream counted from its last event and one without usage audited `usage_reported: false`,
 and the route over a real server and its outbound client against a loopback provider that holds its
@@ -606,6 +648,10 @@ refusals and missing, malformed and unknown `workspace_id` central, sealed recor
 workspace's endpoint only, a second replica's appends never forking the chain, verify, export,
 `audit` and `my_audit`, a workspace that is not ready, workspace deletion, the bound, tampering,
 a lake without workspaces), and `TheOneShotCopyMovesWorkspaceAuditEvents` the copy in both stores.
+`AuditQueueIsolatesUnavailableCustomersDuringFlush` and
+`AuditQueueOverflowPreservesResultsAndSignedDeliveryEvidence` cover customer/workspace limits,
+accepted retries during a flush, signed overflow evidence and preserved operation outcomes (LSR-098),
+including direct push/reference recording.
 `AuditRouting.EveryRegisteredCapabilityIsClassified` (`test_audit_isolation.cpp`) holds every
 registered capability to one of the two tables. `PostgresAudit.MigrationRecordsEachWorkspaceEventsOwnerForTheCopy`
 covers `0063_audit_workspaces`. `PostgresSync.*` and `PlatformFixture.*` read pushes, branch
@@ -799,3 +845,96 @@ pre-open on, runs 32 first uses of liquid's local identity at once, then reads a
 the operator token, waits for the `repositories_preopened` line of each workspace on stderr before
 it stops the server (the pre-open runs beside the requests, lake#614), and checks them. It guards the
 start-time creation of the identity ([`../docs/deployment/store-volume.md`](../docs/deployment/store-volume.md#liquids-local-identity)).
+
+`test_mcp_client.cpp` covers the 64-container response limit, duplicate keys, every transport,
+batches, notifications, old tool records, and recovery after rejection. `test_workspace_records.cpp`
+adds `McpOAuthRejectsDeepMetadataRegistrationAndTokens` for both stores: resource/issuer metadata,
+registration, authorization-code and refresh tokens. Run
+`ctest --test-dir build --timeout 600 -R 'McpClient|McpOAuth' --output-on-failure`. See
+[MCP connections](../docs/api/mcp-connections.md#the-client) (lake#958, LSR-092).
+`Drive.SharingCannotGrantActionsTheCallerDoesNotHold` (`test_api.cpp`, lake#955) checks role
+attenuation for live grants and bearer links, member-only sharing by non-admins, combined grants
+and admin sharing to known outsiders. See [sharing](../docs/api/sharing.md).
+`test_deletions.cpp` runs `OwnershipRequiresAnOrganizationOwnerOnEveryMembershipPath` and
+`OwnerInvitationsRecheckTheInvitersCurrentAuthority` over memory and PostgreSQL (LSR-099,
+lake#965): admin self-promotion, owner tenure, both scopes, invitation acceptance and stale
+inviter authority, direct admin grants, foreign-organization owners, owner approval, the operator
+and deletion refusal. `ConcurrentOwnerRemovalsPreserveOneOwner` covers owner counts across independent PostgreSQL
+connections.
+Run with `ctest --test-dir build --timeout 600 -R 'OwnershipRequires|OwnerInvitations|ConcurrentOwnerRemovals'` and a
+configured `LAKE_TEST_DB_URI`; the [API contract](../docs/api/organizations.md) explains the rule.
+
+The policy and billing fixtures establish the first owner of an operator-created organization
+with the reserved operator; subsequent owner grants require an existing organization owner.
+
+
+`DrivesHttp.NestedMutationsRefuseProtectedDescendantsBeforeChangingMain` (lake#962, LSR-096)
+checks direct/nested/mixed uploads, protected overwrites, recursive deletion/move and raw commits
+against real repository refs, then permits an allowed sibling.
+`Drive.MutationChecksTheLockedTreeAndRestoreChecksMain` checks a changed node at commit time and
+historical-ref restore and conflict resolution into protected current main. See [drive.md](../docs/api/drive.md).
+Dynamic-secret transparency privacy (lake#953, LSR-087):
+`SecretsCapabilities.DynamicSecretTransparencyPublishesOnlySuccessfulCommitments` decodes anonymous
+tiles for lease, renew and revoke, compares their digest-only payloads with the private signed events,
+and checks cross-tenant denials and failures append nothing. `TransparencyLog.Audit*` covers raw
+append/replication rejection of full audit records, malformed commitment payloads, replication of
+commitments and identity scans that reveal no principal or signer.
+
+`WorkspaceRecordStores.DynamicSecretsInAWorkspaceKeepTheirInstanceLogLeaf` retains its memory and
+PostgreSQL coverage of central routing, private lifecycle events and ordered instance leaves; its
+public leaves now contain only the matching event digests and exclude tenant and lease identifiers.
+Model entitlement and model/direction billing (LSR-095, lake#961) are documented in
+[`model-gateway.md`](../docs/api/model-gateway.md). The configured exact model/provider allowlist applies before dispatch on every transport;
+billing additionally requires positive model input and output rates. `model_tokens` classes
+preserve raw counts and bill each direction separately. `test_model_gateway.cpp` and
+`test_billing.cpp` cover provider-call refusal and invoice amounts, including a missing price.
+`ModelCompletion.ASeededInstanceCallsTheDefaultModelsWithBillingOnAtTheSeededPrices` makes a model
+call with billing on against a fresh PostgreSQL control plane, priced only by the rates migration
+0095 seeds, and checks the bill; `PostgresBilling.ModelTokenPricesAreSeededOnceOnFreshAndExistingInstances`
+checks the seed on a fresh database and on a simulated existing one, and that it runs once.
+
+`RecordModelUsage.UnpricedReportsCannotPoisonABilledAccountsLedger` rejects unpriced reports
+before recording, permits priced outside reports without granting provider access, and retains
+billing-off reporting.
+
+`TransparencyLog.AuditLegacyForgedSignatureCannotClaimVerifiedIdentities` refuses a forged audit
+signature with a valid self-digest on append, replication and historical scans.
+`TransparencyRegistry.ReplicationAuthenticatesTheBatchHeadBeforeWriting` checks trusted checkpoint
+authentication, proof rejection without writes, and honest partial catch-up (lake#974, LSR-107).
+`test_authentication_limits.cpp` exercises bounded account/client state, selector-backed recovery,
+legacy refusal, concurrent one-use consumption and worker saturation (lake#969).
+`HttpServer.RecoveryWorkCannotBlockHealthOrTheSharedStoreConnection` holds a recovery row lock
+while probing health and reading an unrelated store row; the client-limit HTTP test alternates
+REST/MCP, gives two ingress addresses behind one proxy peer separate budgets and still limits
+direct connections. See [the contract](../docs/api/identity.md#authentication-attempt-limits).
+`SuspendedUsersLoseAgentDelegation` and `SuspendedUsersCannotDriveAgentOrMcpStreams` run the
+offboarding fixtures on both stores with reversible Clerk suspension, including cached contexts,
+lease claims, cleanup across worker restarts, and fresh work after an unban (lake#948).
+`Forge.ReleaseRejectsArtifactsBoundToAnotherSource` and
+`Forge.RequiredVerificationRechecksEveryReleaseArtifactSource` cover LSR-106: wrong repository or
+change, unbound legacy/imported snapshots, multiple artifacts, malformed snapshots, disappearing
+evidence and repository-store failures. `RepositoryHttp.PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden`
+adds a real signed SLSA action environment and checks matching and mismatched release creation.
+See [source binding](../docs/api/forge.md#source-binding-lsr-106).
+`UsageLimits.SignedUpAccountAdminCannotChangeStorageThroughEitherSetter` uses a real password
+sign-up in the in-memory control store to prove account administrators cannot clear, raise or
+lower storage through either setter, using synchronous and asynchronous registry calls, while
+non-storage limits remain editable. `UsageLimits.OperatorAndInstanceAdministratorCanChangeBothStorageSetters`
+checks both privileged callers can set and clear storage (lake#976, LSR-109).
+`Stores/EmailRecoveryLimits.*` in `test_offline_recovery.cpp` repeats the email recovery abuse
+and cancellation contract on memory and PostgreSQL: concurrent first starts, case variants,
+delivery/notice deduplication, account/client/global budgets, persisted budget reset and owner-only
+cancellation, including refusal of later administrator approval. See
+[recovery.md](../docs/api/recovery.md#email-recovery-budgets).
+`Stores/ClerkRevocation.SuspensionAlsoStopsEmailRecovery` in `test_clerk_webhooks.cpp` checks
+that a suspended account's email recovery is accepted but queues no mail until the suspension is
+lifted, on both stores.
+`OrdersEntitlement.*` (lake#972, LSR-105) sends synthetic signed renewal, failed-collection and subscription-end events through production webhook handling against both stores. It checks grace expiry, recovery, retry-invoice binding, failure events that cannot restore expired access, stale and duplicate snapshots, identity mismatches, trials, early delivery and invalid signatures; PostgreSQL verifies that the desired-state view suspends an already-ready order without another event and restores it on payment. See [orders](../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
+
+The Stripe ownership fixture in `test_stripe.cpp` includes the event timestamp, customer, subscription and recurring period required to accept an order renewal; all ownership assertions remain in place.
+
+`TokenAttenuation.AuthenticationLimits*` alternates REST/MCP and connections to prove account and client budgets on memory/PostgreSQL, cooldown expiry, resets only after full credential verification, no instance-wide ceiling (failures against other accounts never refuse a sign-in), pending concurrent requests and single-use TOTP/recovery codes (lake#966).
+
+`PostgresProvisioning.MfaVerificationLocksTheAccountBeforeItsFactors` holds an account row
+as deletion does and checks that authentication waits without holding its factor rows,
+then succeeds when the account transaction releases its lock (lake#966).

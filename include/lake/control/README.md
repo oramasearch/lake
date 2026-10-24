@@ -1,5 +1,10 @@
 # Public control types
 
+`User::disabled_at` retains offboarding state for administrative reads and the stream workers.
+Person-owned agent creation, claims, renewal and credential resolution require an active account;
+offboarding withdraws its launches/schedules and invalidates its tasks in the same store operation
+([Clerk offboarding](../../../docs/api/clerk.md#webhooks), lake#951).
+
 `network_records.hpp` defines the scoped session/activity provider and its explicit pending
 default. `pki::Service` can ensure a persisted customer authority and sign a tunnel CSR without
 handling the recipient's private key. `network.hpp` carries public client/relay CA fields and
@@ -30,7 +35,7 @@ refuse it, and counts per kind. `Store` also gains `revoke_invitation`, `get_gra
 `AccountDeletion` and `AccountOrganization` (lake#810) are what `Store::delete_account` removes or
 would remove: the user, its personal space and live workspaces, each organization it is in with its
 role and how many other owners and members it has, counts per kind, and the invoices kept.
-`Store::verify_mfa_code` checks a TOTP or recovery code without changing anything
+`Store::verify_mfa_code` consumes a TOTP time step or recovery code
 ([identity.md](../../../docs/api/identity.md#deleting-an-account)).
 
 `StreamOwner` is a topic's creator; `stream_owners.hpp` keeps it as a sealed record in the
@@ -55,6 +60,12 @@ contract in `docs/api/identity.md` updated with changes to token derivation.
 `Store::list_customers(limit, user_id)` optionally selects the personal owner before limiting.
 Audit filters select exact request IDs and continue after event IDs in append order. Both stores
 and the telemetry wrapper preserve these filters; see `docs/build/testing.md`.
+
+`agents::Service::mint` takes the authenticated acting identity separately from `MintRequest`.
+It requires the dispatcher to match and calls `Store::has_active_agent_certificate` to verify
+customer registration before signing. The lookup matches customer, TAAP subject, `agent` profile,
+revocation and expiry at issuance in both stores and through telemetry. See
+[agent session keys](../../../docs/api/agents.md).
 
 `agent_bus.hpp` is the agent bus (`docs/api/agent-bus.md`). `AgentBus` is the pub/sub interface,
 with a Zetta implementation and an in-memory one for tests. `AgentTaskBus` is lake's side of it.
@@ -297,3 +308,18 @@ migration `0083_methodology_deployments`), its operator status, `methodology_dep
 (the `lmd.` credential, which reaches only `methodology_deployment_input`) and
 `methodology_deployment_endpoint_valid` (only a serve Service's in-cluster URL). `methodologies.hpp`
 adds the chunked artifact bounds (8 MiB chunks, 1 GiB in all) and the predict row limit.
+
+`authentication_limits.hpp` provides the bounded fixed-window attempt table used by both stores
+and HTTP client admission (lake#969). Full tables fail closed without evicting active budgets.
+The store's protected account admission uses resolved user ids across all password/MFA/recovery
+verification paths; see [the contract](../../../docs/api/identity.md#authentication-attempt-limits).
+`begin_email_recovery` accepts trusted transport client metadata and returns an empty attempt
+for unknown accounts or exhausted budgets. `cancel_recovery` takes the signed-in user id and
+checks ownership again in the store. Contracts: [recovery](../../../docs/api/recovery.md).
+`CloudOrderEntitlement` and `CloudOrderSubscriptionEvent` (lake#972) carry signed recurring subscription snapshots. `apply_cloud_order_subscription` matches subscription/customer/order, applies events once under serialization, and retains an access deadline; `cloud_order_entitlement_state` evaluates it at the supplied clock. Both stores share the ordering and expiry rules. See [orders](../../../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
+`authentication_limits.hpp` implements the in-memory reservation table. PostgreSQL keeps the
+same per-account and per-client policy in `authentication_attempts`; transports use the public Store
+admission/completion interface. `authentication.hpp` settles outcomes and normalizes credential
+refusals. Capacity includes in-flight work; verified success clears account/client failures;
+there is no instance-wide ceiling. See [the contract](../../../docs/api/identity.md#authentication-attempt-limits)
+(lake#966).

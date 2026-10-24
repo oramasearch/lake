@@ -113,12 +113,42 @@ McpStreamPass McpStreamWorker::pass(ApiContext& context) {
                 continue;
             }
             ++report.connections;
-            seen.insert(connection.id);
             // The person a connection's streams act as: who last set its agent or streams. Their
             // permission on the workspace decides, as a schedule's runs act as whoever set the
             // schedule.
             const auto person =
                 stream_person(context, connection.streams_set_by, "mcp_connection_stream");
+            if (!person) {
+                if (person.error().code == "not_found" || person.error().code == "unauthorized") {
+                    auto changed =
+                        control::settled(liquid::runtime::block_on(control::change_mcp_connection(
+                            *records,
+                            customer_id,
+                            connection.id,
+                            [&](McpConnection& next) -> std::optional<control::ZettaControlError> {
+                                // A different person may have taken over while this pass read it.
+                                if (next.streams_set_by == connection.streams_set_by) {
+                                    next.input_topic.clear();
+                                    next.output_topic.clear();
+                                    next.notifications_topic.clear();
+                                    next.subscribe_resources.clear();
+                                    next.pending_launches.clear();
+                                    next.streams_set_by.clear();
+                                }
+                                return std::nullopt;
+                            })));
+                    if (changed) {
+                        static_cast<void>(
+                            record_mcp_connection_dispatch(context, workspace->id, *changed));
+                    } else {
+                        report.problems.push_back(connection.name + ": " + changed.error().message);
+                    }
+                } else {
+                    report.problems.push_back(connection.name + ": " + person.error().message);
+                }
+                continue; // no notifications, new runs or result publication under this person
+            }
+            seen.insert(connection.id);
 
             // 1. Notifications, mirrored with no agent needed.
             do {

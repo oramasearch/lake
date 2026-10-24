@@ -1,14 +1,257 @@
 #include "lake/api/model_gateway.hpp"
 
+#include "lake/api/billing.hpp"
+
 #include <algorithm>
 #include <format>
 #include <optional>
+#include <set>
 
 namespace lake::api {
 namespace {
 
 // A model can think for minutes before it answers.
 constexpr std::chrono::seconds model_timeout{600};
+
+using Json = nlohmann::json;
+
+Json closed_object(Json properties, Json required = Json::array()) {
+    return {{"type", "object"},
+            {"properties", std::move(properties)},
+            {"required", std::move(required)},
+            {"additionalProperties", false}};
+}
+
+// These are request schemas, not the provider's entire API. New provider features stay disabled
+// until their charges can be counted. Schemas supplied as function parameters or output formats
+// describe data only and cannot launch provider work.
+Json token_request_schema(std::string_view endpoint) {
+    const Json string{{"type", "string"}};
+    const Json boolean{{"type", {"boolean", "null"}}};
+    const Json number{{"type", {"number", "null"}}};
+    const Json integer{{"type", {"integer", "null"}}};
+    const Json disabled{{"enum", {false, nullptr}}};
+    const auto array = [](Json items) {
+        return Json{{"type", "array"}, {"items", std::move(items)}};
+    };
+    const Json function = closed_object({{"name", string},
+                                         {"description", string},
+                                         {"parameters", {{"type", "object"}}},
+                                         {"strict", boolean}},
+                                        {"name"});
+    const Json format = closed_object({{"type", {{"enum", {"text", "json_object", "json_schema"}}}},
+                                       {"name", string},
+                                       {"description", string},
+                                       {"schema", {{"type", "object"}}},
+                                       {"strict", boolean}},
+                                      {"type"});
+    const Json chat_format =
+        closed_object({{"type", {{"enum", {"text", "json_object", "json_schema"}}}},
+                       {"json_schema",
+                        closed_object({{"name", string},
+                                       {"description", string},
+                                       {"schema", {{"type", "object"}}},
+                                       {"strict", boolean}},
+                                      {"name", "schema"})}},
+                      {"type"});
+    Json properties{{"model", string}, {"stream", boolean}};
+    if (endpoint == "embeddings") {
+        properties["input"] = {
+            {"type", {"string", "array"}},
+            {"items",
+             {{"type", {"string", "integer", "array"}}, {"items", {{"type", "integer"}}}}}};
+        properties["encoding_format"] = {{"enum", {"float", "base64"}}};
+        properties["dimensions"] = integer;
+        properties["user"] = string;
+        return closed_object(std::move(properties));
+    }
+    properties.update({{"background", disabled},
+                       {"store", disabled},
+                       {"temperature", number},
+                       {"top_p", number},
+                       {"parallel_tool_calls", boolean}});
+    Json tool = function;
+    tool["properties"]["type"] = {{"enum", {"function"}}};
+    tool["required"].push_back("type");
+    if (endpoint == "chat/completions") {
+        tool = closed_object({{"type", {{"enum", {"function"}}}}, {"function", function}},
+                             {"type", "function"});
+        const Json part =
+            closed_object({{"type", {{"enum", {"text"}}}}, {"text", string}}, {"type", "text"});
+        const Json call = closed_object(
+            {{"id", string},
+             {"type", {{"enum", {"function"}}}},
+             {"function",
+              closed_object({{"name", string}, {"arguments", string}}, {"name", "arguments"})}},
+            {"id", "type", "function"});
+        properties.update(
+            {{"messages",
+              array(closed_object(
+                  {{"role",
+                    {{"enum", {"system", "developer", "user", "assistant", "tool", "function"}}}},
+                   {"content", {{"type", {"string", "array", "null"}}, {"items", part}}},
+                   {"name", string},
+                   {"tool_call_id", string},
+                   {"tool_calls", array(call)},
+                   {"function_call",
+                    closed_object({{"name", string}, {"arguments", string}},
+                                  {"name", "arguments"})}},
+                  {"role"}))},
+             {"stream_options", closed_object({{"include_usage", boolean}})},
+             {"response_format", chat_format},
+             {"max_tokens", integer},
+             {"max_completion_tokens", integer},
+             {"reasoning_effort", string},
+             {"verbosity", string},
+             {"frequency_penalty", number},
+             {"presence_penalty", number},
+             {"seed", integer},
+             {"n", integer},
+             {"logprobs", boolean},
+             {"top_logprobs", integer},
+             {"logit_bias", {{"type", {"object", "null"}}}},
+             {"stop", {{"type", {"string", "array", "null"}}, {"items", string}}},
+             {"user", string},
+             {"functions", array(function)}});
+    } else {
+        properties.update({{"input", {{"type", {"string", "array"}}}},
+                           {"instructions", string},
+                           {"max_output_tokens", integer},
+                           {"max_tool_calls", integer},
+                           {"reasoning", closed_object({{"effort", string}})},
+                           {"text", closed_object({{"format", format}, {"verbosity", string}})},
+                           {"truncation", {{"enum", {"auto", "disabled"}}}}});
+    }
+    properties["tools"] = array(tool);
+    // Object tool choices are checked below; the provider must never choose a hosted tool.
+    properties["tool_choice"] = {{"type", {"string", "object"}}};
+    if (endpoint == "chat/completions") {
+        properties["function_call"] = {{"type", {"string", "object"}}};
+    }
+    return closed_object(std::move(properties));
+}
+
+// An agent sends the provider's last assistant message back as history, as the SDK dumped it.
+// OpenAI's chat messages carry fields that only describe an answer: `annotations` (citations,
+// `[]` without a hosted tool), `refusal` (the refusal text) and `audio` (null without audio
+// output). They launch no provider work, so they are dropped here rather than refused, and are
+// never forwarded. A non-null `audio` names audio the provider stored, so it stays and is
+// refused by the closed message schema. Only assistant messages are touched.
+void drop_output_only_message_fields(Json& request) {
+    const auto messages = request.find("messages");
+    if (messages == request.end() || !messages->is_array()) {
+        return;
+    }
+    for (auto& message : *messages) {
+        if (!message.is_object()) {
+            continue;
+        }
+        const auto role = message.find("role");
+        if (role == message.end() || *role != "assistant") {
+            continue;
+        }
+        message.erase("annotations");
+        message.erase("refusal");
+        if (const auto audio = message.find("audio"); audio != message.end() && audio->is_null()) {
+            message.erase(audio);
+        }
+    }
+}
+
+std::optional<ApiError> token_request_error(std::string_view endpoint, const Json& request) {
+    const auto validate = [](const Json& schema,
+                             const Json& value,
+                             const std::string& path) -> std::optional<ApiError> {
+        const Capability rule{.input_schema = closed_object({{"value", schema}}, {"value"})};
+        const auto result = validate_input(rule, {{"value", value}});
+        if (!result.ok) {
+            return ApiError{"invalid_input",
+                            result.error.message,
+                            path + result.error.path.substr(std::string("/value").size())};
+        }
+        return std::nullopt;
+    };
+    static const Json chat = token_request_schema("chat/completions");
+    static const Json responses = token_request_schema("responses");
+    static const Json embeddings = token_request_schema("embeddings");
+    const auto& schema = endpoint == "chat/completions" ? chat
+                         : endpoint == "responses"      ? responses
+                                                        : embeddings;
+    if (auto error = validate(schema, request, "/request")) {
+        return error;
+    }
+    if (const auto bias = request.find("logit_bias"); bias != request.end() && bias->is_object()) {
+        for (auto entry = bias->begin(); entry != bias->end(); ++entry) {
+            if (!entry->is_number()) {
+                const auto path = Json::json_pointer("/request/logit_bias") / entry.key();
+                return ApiError{
+                    "invalid_input", "logit_bias: values must be numbers", path.to_string()};
+            }
+        }
+    }
+    for (const char* key : {"tool_choice", "function_call"}) {
+        const auto choice = request.find(key);
+        if (choice == request.end()) {
+            continue;
+        }
+        Json choice_schema;
+        if (choice->is_string()) {
+            choice_schema = {{"enum", {"auto", "none", "required"}}};
+        } else if (std::string_view(key) == "function_call") {
+            choice_schema = closed_object({{"name", {{"type", "string"}}}}, {"name"});
+        } else {
+            Json fields{{"type", {{"enum", {"function"}}}}};
+            const Json name = closed_object({{"name", {{"type", "string"}}}}, {"name"});
+            if (endpoint == "chat/completions") {
+                fields["function"] = name;
+                choice_schema = closed_object(fields, {"type", "function"});
+            } else {
+                fields["name"] = {{"type", "string"}};
+                choice_schema = closed_object(fields, {"type", "name"});
+            }
+        }
+        if (auto error = validate(choice_schema, *choice, std::string("/request/") + key)) {
+            return error;
+        }
+    }
+    // Responses input is a tagged union. Only inline text and caller-executed function history
+    // are accepted: item references and provider-owned files/conversations are never resolved.
+    if (endpoint == "responses" && request.contains("input") && request.at("input").is_array()) {
+        const Json string{{"type", "string"}};
+        const auto& input = request.at("input");
+        for (std::size_t i = 0; i < input.size(); ++i) {
+            const auto& item = input[i];
+            const Json type =
+                item.is_object() && item.contains("type") ? item.at("type") : Json("message");
+            Json fields{{"type", {{"enum", {"message"}}}},
+                        {"role", {{"enum", {"system", "developer", "user", "assistant"}}}},
+                        {"content",
+                         {{"type", {"string", "array"}},
+                          {"items",
+                           closed_object({{"type", {{"enum", {"input_text", "output_text"}}}},
+                                          {"text", string}},
+                                         {"type", "text"})}}}};
+            Json required{"role", "content"};
+            if (type == "function_call") {
+                fields = {{"type", {{"enum", {"function_call"}}}},
+                          {"call_id", string},
+                          {"name", string},
+                          {"arguments", string}};
+                required = {"type", "call_id", "name", "arguments"};
+            } else if (type == "function_call_output") {
+                fields = {{"type", {{"enum", {"function_call_output"}}}},
+                          {"call_id", string},
+                          {"output", string}};
+                required = {"type", "call_id", "output"};
+            }
+            if (auto error = validate(
+                    closed_object(fields, required), item, "/request/input/" + std::to_string(i))) {
+                return error;
+            }
+        }
+    }
+    return std::nullopt;
+}
 
 std::optional<std::uint64_t> count(const nlohmann::json& usage, const char* name) {
     const auto found = usage.find(name);
@@ -99,6 +342,101 @@ std::string provider_message(std::string_view body) {
 
 } // namespace
 
+std::vector<GatewayModel> default_gateway_models() {
+    return {{"gpt-5.5"}, {"gpt-5"}, {"gpt-4o"}, {"text-embedding-3-small"}};
+}
+
+std::expected<std::vector<GatewayModel>, std::string> parse_gateway_models(std::string_view text) {
+    if (text.empty()) {
+        return default_gateway_models();
+    }
+    const auto parsed = nlohmann::json::parse(text, nullptr, false);
+    if (!parsed.is_array()) {
+        return std::unexpected(
+            "LAKE_MODEL_GATEWAY_MODELS must be an array of model/provider objects");
+    }
+    std::vector<GatewayModel> models;
+    std::set<std::string> seen;
+    for (const auto& entry : parsed) {
+        if (!entry.is_object() || entry.size() != 2 || !entry.contains("model") ||
+            !entry.at("model").is_string() || !entry.contains("provider") ||
+            entry.at("provider") != "openai") {
+            return std::unexpected("each gateway model needs model and provider: openai");
+        }
+        const std::string name = entry.at("model");
+        if (name.empty() || name.size() > 128 ||
+            !std::ranges::all_of(name, [](unsigned char c) { return c > 32 && c < 127; }) ||
+            !seen.insert(name).second) {
+            return std::unexpected(
+                "gateway model names must be distinct printable names (1-128 bytes)");
+        }
+        models.push_back({name, "openai"});
+    }
+    return models;
+}
+
+bool gateway_model_allowed(const std::vector<GatewayModel>& models, std::string_view name) {
+    return std::ranges::any_of(models, [name](const GatewayModel& model) {
+        return model.provider == "openai" && model.name == name && !name.empty();
+    });
+}
+
+std::string model_token_class(std::string_view model, std::string_view kind) {
+    return std::format("{}/{}", model, kind);
+}
+
+std::expected<void, ApiError>
+validate_model_prices(std::string_view model, ApiContext& context, std::string_view path) {
+    const auto refused = [path] {
+        return std::unexpected(
+            ApiError{"invalid_input",
+                     "model: this Lake requires positive input and output prices for this model",
+                     std::string(path)});
+    };
+    if (!billing_registered(context.registry)) {
+        return {};
+    }
+    if (!context.store) {
+        return std::unexpected(ApiError{"store_unavailable", "model prices could not be read", ""});
+    }
+    const auto stored = context.store->billing_plans();
+    if (!stored) {
+        return std::unexpected(ApiError{"store_unavailable", "model prices could not be read", ""});
+    }
+    const std::chrono::year_month_day today{
+        std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now())};
+    const auto list =
+        price_list_for(price_lists(*stored),
+                       std::format("{:04}-{:02}", int(today.year()), unsigned(today.month())));
+    if (!list) {
+        return refused();
+    }
+    for (const auto kind : {"input", "output"}) {
+        const std::string key = model_token_class(model, kind);
+        std::size_t matches = 0;
+        for (const auto& price : list->prices) {
+            if (price.dimension == "model_tokens" && price.class_name == key) {
+                if (price.unit_micros == 0 || price.per == 0) {
+                    return refused();
+                }
+                ++matches;
+            }
+        }
+        if (matches != 1) {
+            return refused();
+        }
+    }
+    return {};
+}
+
+std::expected<void, ApiError> validate_gateway_model(std::string_view model, ApiContext& context) {
+    if (!gateway_model_allowed(context.model_gateway_models, model)) {
+        return std::unexpected(ApiError{
+            "invalid_input", "model: not in this Lake's configured model list", "/request/model"});
+    }
+    return validate_model_prices(model, context);
+}
+
 bool is_model_gateway_endpoint(std::string_view endpoint) {
     return std::ranges::find(model_gateway_endpoints, endpoint) != model_gateway_endpoints.end();
 }
@@ -138,6 +476,16 @@ std::expected<nlohmann::json, ApiError> prepare_model_request(std::string_view e
     if (streamed && endpoint == "embeddings") {
         return std::unexpected(
             ApiError{"invalid_input", "stream: embeddings do not stream", "/request/stream"});
+    }
+    if (endpoint == "chat/completions") {
+        drop_output_only_message_fields(request);
+    }
+    if (auto error = token_request_error(endpoint, request)) {
+        return std::unexpected(*error);
+    }
+    if (endpoint != "embeddings") {
+        // Responses otherwise stores answers by default under the shared platform account.
+        request["store"] = false;
     }
     if (streamed && endpoint == "chat/completions") {
         nlohmann::json options = request.value("stream_options", nlohmann::json::object());

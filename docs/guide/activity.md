@@ -97,8 +97,8 @@ checkpoints of it. Anyone can check that a statement naming an identity is in th
 1. Open the **Transparency Monitor** at `/transparency` (no sign-in needed).
 2. Enter a **TAAP identity** (`taap:1:…`) and scan.
 
-The page reads every tile of the current checkpoint, verifies the checkpoint's root, and lists the
-attestations that name that identity. Modified tiles are refused.
+The page verifies the current checkpoint's root over the log's tiles and lists the attestations
+that name that identity, 100 a page; **Next** opens the following page. Modified tiles are refused.
 
 - REST: `GET /v1/transparency_identity_scan?identity=<TAAP identity>`.
 - MCP: `transparency_identity_scan`.

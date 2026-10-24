@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <map>
 #include <string>
@@ -3654,4 +3655,171 @@ TEST(PostgresBilling, CronRunsAreAWorkloadKindAndTheirEndIsRead) {
     ASSERT_EQ(runs->size(), 1U);
     EXPECT_EQ(runs->front().created_at, "2026-10-11T03:00:00Z");
     EXPECT_EQ(runs->front().status_updated_at, "2026-10-11T03:02:30Z");
+}
+
+// LSR-095: model/direction rates and frozen invoice lines must survive the PostgreSQL constraints.
+TEST(PostgresBilling, ModelDirectionPricesAndInvoiceLinesRoundTrip) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping());
+    const auto user =
+        store->create_user({"taap:1:ed25519:model-billing", "model@example.test", "Model"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "model-billing"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    lake::control::BillingPlan plan;
+    plan.id = "usage-200001-00000000000000001";
+    plan.name = "Usage";
+    plan.currency = "USD";
+    plan.prices = {{"model_tokens", 6, 1, 0, "gpt-5.5/input"},
+                   {"model_tokens", 36, 1, 0, "gpt-5.5/output"}};
+    const auto kept = store->put_billing_plan(plan);
+    ASSERT_TRUE(kept) << kept.error().message;
+    ASSERT_EQ(kept->prices.size(), 2U);
+    EXPECT_EQ(kept->prices[0].class_name, "gpt-5.5/input");
+    EXPECT_EQ(kept->prices[1].class_name, "gpt-5.5/output");
+    lake::control::Invoice invoice;
+    invoice.customer_id = customer->id;
+    invoice.period = "2026-09";
+    invoice.plan_id = plan.id;
+    invoice.plan_name = plan.name;
+    invoice.currency = "USD";
+    invoice.provider = "manual";
+    invoice.total_micros = 7800;
+    invoice.lines = {
+        {"usage", "model_tokens", "Input", "tokens", 100, 0, 100, 6, 1, 600, "gpt-5.5/input"},
+        {"usage", "model_tokens", "Output", "tokens", 200, 0, 200, 36, 1, 7200, "gpt-5.5/output"}};
+    const auto issued = store->create_invoice(invoice);
+    ASSERT_TRUE(issued) << issued.error().message;
+    ASSERT_EQ(issued->lines.size(), 2U);
+    EXPECT_EQ(issued->lines[0].class_name, "gpt-5.5/input");
+    EXPECT_EQ(issued->lines[1].class_name, "gpt-5.5/output");
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        EXPECT_FALSE(
+            tx.exec("SELECT 1 FROM schema_migrations WHERE version = '0095_model_token_prices'")
+                .empty());
+        EXPECT_FALSE(tx.exec("SELECT to_regclass('model_token_prices_guard')")[0][0].is_null());
+        EXPECT_THROW(tx.exec_params("INSERT INTO billing_plan_prices (plan_id, dimension, class, "
+                                    "unit_micros) VALUES ($1, 'gpu', 'gpt-5.5/input', 1)",
+                                    plan.id),
+                     pqxx::check_violation);
+    }
+}
+
+// Migration 0095 seeds the default gateway models' token prices once, on a fresh and an existing
+// control plane alike (docs/api/billing.md#rates). The fixture database is fresh: it already has
+// them, in a list for this month. An existing instance is simulated by putting back what it had
+// before 0095 (a list in force with its own rates, one for a later month, the migration not yet
+// recorded) and running the migration's seed block again, twice.
+TEST(PostgresBilling, ModelTokenPricesAreSeededOnceOnFreshAndExistingInstances) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    std::ifstream file(std::filesystem::path(LAKE_TEST_SOURCE_DIR) / "db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("DO $model_token_prices$");
+    ASSERT_NE(start, std::string::npos);
+    const std::string end_marker = "$model_token_prices$;";
+    const auto end = schema.find(end_marker, start + 1);
+    ASSERT_NE(end, std::string::npos);
+    const std::string seed = schema.substr(start, end + end_marker.size() - start);
+    const std::chrono::year_month_day today{
+        std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now())};
+    const std::string month = std::format("{:04}{:02}", int(today.year()), unsigned(today.month()));
+    const std::map<std::string, std::int64_t> seeded{{"gpt-5.5/input", 6'500'000},
+                                                     {"gpt-5.5/output", 39'000'000},
+                                                     {"gpt-5/input", 1'625'000},
+                                                     {"gpt-5/output", 13'000'000},
+                                                     {"gpt-4o/input", 3'250'000},
+                                                     {"gpt-4o/output", 13'000'000},
+                                                     {"text-embedding-3-small/input", 26'000},
+                                                     {"text-embedding-3-small/output", 26'000}};
+    const auto rates = [](pqxx::work& tx, const std::string& plan) {
+        std::map<std::string, std::int64_t> out;
+        for (const auto& row :
+             tx.exec_params("SELECT dimension || ':' || class, unit_micros, per FROM "
+                            "billing_plan_prices WHERE plan_id = $1",
+                            plan)) {
+            out[row[0].as<std::string>()] = row[1].as<std::int64_t>();
+            if (row[0].as<std::string>().starts_with("model_tokens:") &&
+                row[0].as<std::string>() != "model_tokens:") {
+                EXPECT_EQ(row[2].as<std::int64_t>(), 1'000'000) << row[0].as<std::string>();
+            }
+        }
+        return out;
+    };
+    const auto lists = [](pqxx::work& tx) {
+        std::vector<std::string> out;
+        for (const auto& row : tx.exec("SELECT id FROM billing_plans ORDER BY id")) {
+            out.push_back(row[0].as<std::string>());
+        }
+        return out;
+    };
+
+    pqxx::connection connection(uri);
+    {
+        pqxx::work tx(connection);
+        const auto fresh = lists(tx);
+        ASSERT_EQ(fresh.size(), 1U) << "a fresh instance gets one list, for this month";
+        EXPECT_TRUE(fresh[0].starts_with("usage-" + month + "-")) << fresh[0];
+        std::map<std::string, std::int64_t> expected;
+        for (const auto& [name, micros] : seeded) {
+            expected["model_tokens:" + name] = micros;
+        }
+        EXPECT_EQ(rates(tx, fresh[0]), expected);
+        tx.commit();
+    }
+    {
+        pqxx::work tx(connection);
+        tx.exec("DELETE FROM billing_plans");
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0095_model_token_prices'");
+        const std::string current = "usage-" + month + "-00000000000000001";
+        tx.exec_params(
+            "INSERT INTO billing_plans (id, name, currency) VALUES ($1, 'Usage', 'USD'), "
+            "('usage-209912-00000000000000001', 'Usage', 'USD')",
+            current);
+        tx.exec_params(
+            "INSERT INTO billing_plan_prices (plan_id, dimension, class, unit_micros, per) VALUES "
+            "($1, 'calls', '', 2000000, 1000000), ($1, 'model_tokens', '', 9000000, 1000000), "
+            "($1, 'model_tokens', 'gpt-5/input', 1700000, 1000000), "
+            "('usage-209912-00000000000000001', 'storage', '', 40000, 1073741824)",
+            current);
+        tx.exec(seed);
+        tx.exec("INSERT INTO schema_migrations (version) VALUES ('0095_model_token_prices')");
+        tx.exec(seed); // a later schema application seeds nothing more
+        tx.commit();
+    }
+    {
+        pqxx::work tx(connection);
+        const auto after = lists(tx);
+        ASSERT_EQ(after.size(), 3U);
+        const std::string current = "usage-" + month + "-00000000000000001";
+        EXPECT_EQ(after[0], current);
+        EXPECT_TRUE(after[1].starts_with("usage-" + month + "-")) << after[1];
+        EXPECT_GT(after[1], current) << "the new publication is the one in force";
+        EXPECT_EQ(after[2], "usage-209912-00000000000000001");
+        // The published list is kept as it was.
+        EXPECT_EQ(rates(tx, current),
+                  (std::map<std::string, std::int64_t>{{"calls:", 2'000'000},
+                                                       {"model_tokens:", 9'000'000},
+                                                       {"model_tokens:gpt-5/input", 1'700'000}}));
+        // The new one: its rates, the operator's own model rate kept, the seeded ones added.
+        std::map<std::string, std::int64_t> in_force{{"calls:", 2'000'000},
+                                                     {"model_tokens:", 9'000'000}};
+        std::map<std::string, std::int64_t> later{{"storage:", 40'000}};
+        for (const auto& [name, micros] : seeded) {
+            in_force["model_tokens:" + name] = micros;
+            later["model_tokens:" + name] = micros;
+        }
+        in_force["model_tokens:gpt-5/input"] = 1'700'000;
+        EXPECT_EQ(rates(tx, after[1]), in_force);
+        EXPECT_EQ(rates(tx, after[2]), later);
+    }
 }

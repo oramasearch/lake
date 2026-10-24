@@ -26,12 +26,19 @@ every page and API call is resolved by `context_for` as before.
 2. With a Clerk session present, the page asks Clerk for a token from the **`lake` JWT template**
    and posts it once, as an ordinary form, to `POST /identity/clerk-session`.
 3. lake verifies the token with `identity_crypto::verify_oidc_id_token` against the instance JWKS
-   (`<issuer>/.well-known/jwks.json`, cached for an hour and refreshed once on a miss): RS256,
+   (`<issuer>/.well-known/jwks.json`, with the bounded refresh policy below): RS256,
    `iss` equal to the instance issuer, `aud` equal to `lake`, `exp` in the future, and `nbf` and
    `iat` not more than 60 seconds ahead. Clerk's default session token has no `aud` and is
    refused; only the template token is accepted.
-4. `Store::sign_in_clerk` finds the lake user for the Clerk subject, links or creates them (below),
-   and issues a 30-day session. The handler records an `authentication` audit event with object
+4. Lake checks `GET https://api.clerk.com/v1/users/<sub>` with `LAKE_CLERK_SECRET_KEY`,
+   without caching. A missing key, transport failure, non-200 reply, mismatched user or incomplete
+   status refuses exchange. A banned, locked or Directory Sync deprovisioned account is suspended
+   locally and refused. The
+   request uses public HTTPS only and a ten-second timeout; its response and key are never logged.
+   `Store::sign_in_clerk` finds the lake user for the Clerk subject, links or creates them (below),
+   and issues a 30-day session. It refuses a template whose signed `iat` is at or before the
+   account's last upstream revocation, including other Clerk subjects linked to that account.
+   The handler records an `authentication` audit event with object
    `clerk` and method `clerk`, success or denied, then redirects with the `lake_session` cookie
    (`HttpOnly`, `SameSite=Lax`, `Secure` over HTTPS) to the posted `next` field when it is a
    same-origin path (one leading `/`, never `//` or `/\`) or a Ship app return
@@ -44,8 +51,9 @@ every page and API call is resolved by `context_for` as before.
    which signs the browser out of Clerk as well. Without that, the next visit would sign the person
    straight back in.
 
-lake holds **no Clerk secret key**. Verification of sign-in needs only the public JWKS; the one
-Clerk secret Lake may hold is the webhook signing secret ([Webhooks](#webhooks)).
+Lake verifies the template signature with the public JWKS and checks account status with the
+instance's secret key. `LAKE_CLERK_SECRET_KEY` is an Orama platform credential, injected from the
+same instance as the publishable key. The webhook secret is separate ([Webhooks](#webhooks)).
 
 ## Who a Clerk sign-in becomes
 
@@ -71,7 +79,8 @@ identity document is sent.
 
 ## Webhooks
 
-**Status: implemented 2026-10-17 (lake#765, migration `0087_clerk_webhooks`), not deployed.**
+**Status: implemented, not deployed.** Account provisioning uses `0087_clerk_webhooks` (lake#765);
+ordered suspension and account-wide revocation use `0094_clerk_revocation` (lake#948, LSR-085).
 
 Without webhooks a Lake account exists only from a person's first sign-in. With them, Clerk's user
 events reach Lake as they happen: a user made in Clerk (an invitation, a waitlist approval, the
@@ -95,16 +104,54 @@ account is disabled.
   account that already has the subject is found again; one with the same **verified** primary email
   is linked. An unverified primary email is never used: the account is created without an email,
   and a later `user.updated` sets it once Clerk has verified it.
-- **`user.updated`** sets the verified primary email and the display name (first and last name, else
+- **`user.updated`** applies `banned`, `locked` or `deprovisioned` as account suspension,
+  revoking every Lake
+  session, API/static token and device for the linked account, including token descendants.
+  Suspension also withdraws agent launches and schedules, invalidates task credentials and
+  leases, and blocks new delegated work and agent/MCP streams through the same account-state
+  predicate as deletion. Stream cleanup follows the durable offboarding process below; an unban
+  permits new work and never restores withdrawn credentials or stream settings.
+  Each Clerk subject's state follows its own millisecond `data.updated_at` (event `timestamp`
+  when absent). Older updates are ignored; at equal timestamps a ban, lock or deletion wins and a permissive
+  update is ignored. A strictly newer unban/unlock for that subject permits new sign-ins;
+  revoked credentials stay revoked. Any suspended Clerk subject linked to the account keeps it
+  suspended; a deletion stays permanent. State is kept before provisioning,
+  and the security update commits before a profile conflict can refuse an email change. An
+  identical current delivery can retry unfinished provisioning/profile work. Linking a suspended
+  subject to an existing account revokes that account's credentials before any later unban.
+  `deprovisioned` is optional for older payloads; a present value must be boolean.
+  It also sets the verified primary email and the display name (first and last name, else
   the username) of the account linked to the subject. It never links or relinks an account. An
   email another account has is refused.
 - **`user.deleted`** disables the linked account (`users.disabled_at`) and revokes every session,
-  token and device of it in one transaction. **Nothing is erased**: the account, its workspaces and its
+  token and device of it in one transaction. It also withdraws its agent launches and schedules,
+  removes task credentials and leases, and prevents queued tasks from being claimed (lake#951,
+  LSR-086). Agent credential resolution and new person-owned launches, schedules and tasks require
+  an active account, including accounts disabled before this change. Creation, claims and lease
+  renewals lock that account against concurrent offboarding. **Nothing is erased**: the account, its workspaces and its
   audit stay; deleting data is a separate, confirmed step. A disabled account is issued no session
   (`issue_session`) and its credentials no longer resolve (`context_for`), so Clerk sign-in, TAAP
   sign-in and tokens all stop.
-- Other event types are acknowledged and ignored. `session.revoked` is not acted on: a Lake session
-  is Lake's own, not tied to a Clerk session id.
+  Agent stream triggers and MCP streams refuse that person's authority immediately. Their sealed
+  workspace records retain pending cleanup across restarts: on the next reachable worker pass,
+  agent triggers are removed and MCP streaming settings, subscriptions and pending results are
+  cleared. A storage outage leaves those records for retry and grants no authority; other workspace
+  data and the MCP connection remain. The same agent-workload withdrawal runs on account deletion.
+- **`session.revoked`, `session.removed`, `session.ended`** revoke every session, API/static token
+  and device of the account linked to `data.user_id`. This intentionally signs out its other Lake
+  sessions too. Clerk [custom JWT templates](https://clerk.com/docs/guides/sessions/jwt-templates)
+  do not contain a trusted session id, so revocation is account-wide. The event's millisecond
+  `timestamp` is a monotonic revocation watermark; older revocation events are ignored and
+  equal-timestamp restrictions apply.
+  This watermark is independent of profile ordering, so a newer profile cannot hide a delayed
+  revocation. A template minted in the revocation's second or earlier cannot be exchanged again.
+  Revocation is retained before the first exchange, and account row locks serialize it with
+  session/token issuance. Password recovery with Clerk's `signOutOfOtherSessions` and account
+  sign-out depend on these events reaching Lake; replaying the old Lake bearer then fails through
+  the common `context_for` path. These events govern the account's session, API/static-token
+  and device family. Independently delegated agent work and stream settings retain their own
+  lifecycle; bans, locks, deprovisioning and deletion withdraw and gate that authority as described
+  above. Other event types are acknowledged and ignored.
 - **Audit:** every delivery is one central event, object `clerk`, method `clerk_webhook`, action
   `webhook.<type>` (`webhook` for a refused or replayed delivery), outcome `success`, `failure` or
   `denied`, with the `svix_id`, the Clerk user and the Lake user in its details.
@@ -113,8 +160,16 @@ account is disabled.
   that is not a Clerk event.
 
 **Configure the Clerk instance:** add an endpoint `https://<lake host>/identity/clerk-webhook`
-subscribed to `user.created`, `user.updated` and `user.deleted`, and give its signing secret to the
-Lake as `LAKE_CLERK_WEBHOOK_SECRET` (orama-operator#541 does both per instance).
+subscribed to `user.created`, `user.updated`, `user.deleted`, `session.revoked`, `session.removed`
+and `session.ended`, and give its signing secret to Lake as `LAKE_CLERK_WEBHOOK_SECRET`. Before rollout, the operator must vendor `db/schema.sql`,
+select `clerk_revocation_guard`, add any missing event subscriptions, and inject the instance's
+secret key as `LAKE_CLERK_SECRET_KEY`. No operator files are changed by lake#948.
+Migration 0094 revokes every existing session, token and device of Clerk-linked accounts once,
+and sets their token cutoff to migration time. This requires a fresh Clerk sign-in: old ignored
+webhooks were already acknowledged and cannot reliably be replayed. Reapplying the schema never
+revokes credentials issued after its first application. Drain and stop old replicas before applying
+this migration, then start the fixed binary: old code must not issue credentials or acknowledge
+webhooks after the migration cutoff.
 
 **Verify:** `ctest --test-dir build -R 'ClerkWebhook'` (with `LAKE_TEST_DB_URI` set). It covers
 Svix's documented signature vector, a wrong secret, a tampered body, a changed id, old and future
@@ -123,6 +178,12 @@ first sign-in (and a later sign-in reaching it), linking by verified email only,
 and `user.deleted` disabling the account with its session no longer working; and the route's `404`
 without the secret, `401` to a forged delivery and `200` creating the account.
 
+`ctest --test-dir build --timeout 600 -R 'DisablingAUserRevokesAgentDelegation|DisabledUsersCannotDriveAgentOrMcpStreams'`
+checks retained launch, schedule and running-task credentials, queued claims, cached stream
+contexts, direct disabled-account state, repeat offboarding and another person's unaffected launch
+on memory and PostgreSQL. Keep the store checks and the shared stream-person resolver together
+when changing offboarding; workload cleanup alone does not protect previously disabled accounts.
+
 ## Configuration
 
 Setting up an instance and its social connections is the runbook [`../deployment/sign-in.md`](../deployment/sign-in.md).
@@ -130,6 +191,7 @@ Setting up an instance and its social connections is the runbook [`../deployment
 | Setting | Where | Value |
 |---|---|---|
 | `LAKE_CLERK_PUBLISHABLE_KEY` / `--clerk-publishable-key` | lake runtime | The instance's `pk_test_…` or `pk_live_…`. Public. Empty or `xxx` turns Clerk off |
+| `LAKE_CLERK_SECRET_KEY` | lake runtime, an Orama platform key | The instance's server key. Required for exchange; Backend API errors fail closed. Never sent to the browser |
 | `LAKE_CLERK_WEBHOOK_SECRET` / `--clerk-webhook-secret` | lake runtime, an Orama platform key | The webhook endpoint's `whsec_…` signing secret. Empty: no webhook route ([Webhooks](#webhooks)) |
 
 Everything else is derived from the key: the publishable key is `pk_test_` or `pk_live_` followed
@@ -172,6 +234,17 @@ a refused token, logout, and the exchange being absent without Clerk. The browse
 needs a real Clerk instance: sign in at `/sign-in` with an invited address and confirm you land on
 `/repositories` with a `lake_session` cookie.
 
+`Stores/ClerkRevocation.*` runs signed session events, bans, locks, Directory Sync deprovisioning, ordered unban/unlock,
+pre-exchange delivery, old-template replay, token descendants, provisioning retries and suspended
+account linking, a suspended account's email recovery queueing no mail, and a delayed ban after
+another subject's newer profile on memory and PostgreSQL stores.
+`Clerk.BackendStatusFailsClosedAndUsesOnlyTheFixedApiOrigin` checks malformed and failed Backend
+API responses; `ClerkWebhooks.MigrationRevokesLegacyCredentialsOnceAndRejectsOldTemplates`
+checks the one-time upgrade, native-account isolation, old-template rejection and repeatability.
+`Clerk.TemplateExchangeChecksLiveAccountStateWithoutCaching` exercises the real
+exchange route with signed template tokens and an isolated HTTP double. Run
+`ctest --test-dir build -R 'Clerk' --timeout 600 --output-on-failure` with PostgreSQL configured.
+
 ## Change it
 
 - A different instance: change `LAKE_CLERK_PUBLISHABLE_KEY` and create the `lake` template there.
@@ -180,3 +253,41 @@ needs a real Clerk instance: sign in at `/sign-in` with an invited address and c
   *Create account* again.
 - Keep the verifier strict: any change to the claims lake reads belongs in both the template and
   `serve_clerk_session`, with a test in `tests/test_clerk.cpp`.
+
+## Bounded key refresh (lake#956, LSR-090)
+
+Clerk and generic OIDC share `OidcJwks`. Before any network request, it rejects tokens over
+16 KiB, malformed JWTs, absent key IDs, unsupported algorithms and invalid issuer, audience,
+nonce or time claims, including Clerk's required positive `iat`. Present time claims must be
+integers within the verifier's signed range; token JSON nesting is limited to 16 levels.
+A failed signature with a cached key never refreshes the JWKS. An unknown
+key ID can trigger one fetch per URL and address policy per 60 seconds, including failed fetches.
+Only one fetch can run at a time; other requests needing that fetch fail closed and can retry.
+A valid token using keys older than an hour also renews through this same gate. Key rotation can
+therefore require a retry after the cooldown. A failed refresh never authenticates an unknown key.
+
+Verification, JWKS fetching and the uncached Backend API account-status check run on the bounded
+blocking pool, so a slow Clerk endpoint does not
+hold the inbound I/O thread. An offloaded task owns its cache and transport through shutdown,
+even if its response is abandoned. All JWKS HTTP requests have the OIDC ten-second deadline.
+`ServerOptions.oidc_jwks_fetch` substitutes the transport in tests.
+
+`POST /identity/clerk-session` accepts 60 attempts per minute per client address, counting
+successes and failures before reading the body. Further attempts answer 429 with `Retry-After: 60`
+and do not add an authentication audit row. The address comes from the trusted ingress hop, as the
+order sheet's does ([orders](orders.md#abuse-protection), lake#838): `X-Real-IP`, which
+ingress-nginx always sets itself, else the last `X-Forwarded-For` hop. The socket peer is the
+ingress pod, so keying on it would put every user in one bucket. A client that reaches Lake
+without either header shares one `direct` bucket, which is still limited. Lake trusts these
+headers only because the ingress is its one way in; a deployment that exposes Lake's port
+directly lets a sender choose its bucket. The address map holds at most 4,096 active buckets,
+refuses new addresses when full, and releases buckets after a minute without evicting active
+limits.
+
+Verify with `ctest --test-dir build --timeout 600 -R 'OidcJwks|HttpServer.Clerk'`.
+The fake fetch tests send 100 invalid tokens per case, advance a monotonic clock across the
+cooldown, hold one refresh open during concurrent attempts, and exercise key rotation and failed
+fetches. The HTTP tests hold JWKS and Backend API requests open while health requests complete,
+and send 61 exchanges from each of two ingress-reported addresses and a direct client over one
+socket peer. Change the limits in `oidc_jwks.cpp` and `http_server.cpp`, updating these tests and
+this contract together.

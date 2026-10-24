@@ -1,7 +1,8 @@
 /** The API client: the app calls lake's `/v1` capabilities and nothing else, the same ones MCP
  * and agents call (docs/api/README.md). A read is `GET /v1/<name>?<input>`, an action is
  * `POST /v1/<name>` with the input as JSON. Both answer `{ok, value, duration_ms}` or
- * `{ok: false, error: {code, message, path}}` (docs/api/errors.md).
+ * `{ok: false, error: {code, message, path}}` (docs/api/errors.md), with `details` on a
+ * `safe_mode_warning` (docs/api/safe-mode.md).
  *
  * The credential is the HttpOnly `lake_session` cookie that sign-in sets. The page never sees the
  * secret, and the cookie is resolved by the same `context_for` as a bearer, so the app can do
@@ -18,6 +19,9 @@ export class ApiError extends Error {
     public path = "",
     /** Who answered when lake did not (the `server` header and Cloudflare's ray), lake#573. */
     public edge = "",
+    /** `safe_mode_warning` only: the statements, the database or connection and the confirmation
+     * (docs/api/safe-mode.md, lake#906). */
+    public details: Record<string, unknown> | null = null,
   ) {
     super(message);
   }
@@ -43,12 +47,12 @@ export function isSignedIn(): boolean {
   return announceSessionEnd;
 }
 
-function failure(status: number, code: string, message: string, path = "", edge = ""): ApiError {
+function failure(status: number, code: string, message: string, path = "", edge = "", details: Record<string, unknown> | null = null): ApiError {
   if (status === 401) {
     if (announceSessionEnd) sessionEndedListeners.forEach((listener) => listener());
     return new ApiError(401, code, announceSessionEnd ? SESSION_ENDED : message, path);
   }
-  return new ApiError(status, code, message, path, edge);
+  return new ApiError(status, code, message, path, edge, details);
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -122,7 +126,8 @@ function unwrapBody<T>(response: Response, body: Body): T {
       );
     }
     const error = body?.error ?? {};
-    throw failure(response.status, error.code ?? "error", error.message ?? response.statusText ?? "The request failed.", error.path ?? "");
+    const details = error.details && typeof error.details === "object" ? (error.details as Record<string, unknown>) : null;
+    throw failure(response.status, error.code ?? "error", error.message ?? response.statusText ?? "The request failed.", error.path ?? "", "", details);
   }
   return body.value as T;
 }

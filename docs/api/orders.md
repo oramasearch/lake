@@ -290,6 +290,87 @@ Lake writes every column; the operator reads `paid` rows and writes only `state`
 `failure_reason`, `claimed_by`, `claimed_at` and `cloud_order_events` rows. The trigger keeps
 `updated_at` on every write and announces a `paid` order on the `lake_cloud_orders` channel.
 
+## Recurring entitlement (LSR-105, lake#972)
+
+Migration `0097_cloud_order_entitlements` keeps each checkout order's unique Stripe subscription
+and customer, `subscription_status`, `paid_through`, `entitlement_access_until`,
+`subscription_event_created`, `entitlement_grace_seconds`, and `entitlement_retry_invoice_id`.
+Times are UTC Unix seconds.
+`paid_through` advances only on a signed paid invoice snapshot (`invoice.paid` or an
+`invoice.updated` whose status is `paid`), using the recurring lines' paid period,
+not the invoice's billing-period summary. Active and trialing subscription snapshots grant access
+until their period or trial ends. A failed payment keeps the last paid period and may extend access
+to Stripe's signed `next_payment_attempt` (also read from `invoice.updated` for Stripe Automations).
+The first unpaid invoice owns that retry window until positive entitlement evidence resets it;
+new monthly unpaid invoices cannot move it forward. Negative events cannot create entitlement or
+restore an order that has already expired, including when a grace configuration increases.
+PostgreSQL rechecks its own clock while updating the locked row.
+An unpaid, paused, incomplete, unknown, or canceled
+subscription ends access at the earlier existing deadline or the event's end time. A canceled
+subscription cannot be revived; purchasing a new subscription requires a new order.
+
+`LAKE_ORDER_ENTITLEMENT_GRACE_SECONDS` sets the grace while entitled or on positive evidence
+(default `259200`, three
+days; integer `0` through `2592000`). Invalid configuration stops startup. Subscription grace starts
+at the access deadline, so redelivery cannot keep moving it forward. Initial paid Checkout gets
+one grace window from receipt while the signed subscription/invoice snapshot arrives; it does not
+invent a paid month. Existing orders with no entitlement proof default to suspended until a valid
+signed snapshot arrives. No data or order is removed.
+
+The verified Stripe webhook handles `invoice.paid`, `invoice.payment_failed`, `invoice.voided`,
+`invoice.marked_uncollectible`, `invoice.payment_action_required`, `invoice.updated`, and
+`customer.subscription.{created,updated,deleted,paused,resumed}` for order subscriptions. It accepts
+the pinned 2024 invoice `subscription_details` and current `parent.subscription_details`, legacy
+subscription periods and current item periods, and string or expanded customer/subscription ids.
+An event must match the recorded subscription, customer and order and this Lake's metadata.
+Before Checkout completes, a signed event can bind the pending checkout order by its metadata;
+a later Checkout cannot replace that binding. Both stores apply an event id once, serialize
+updates, ignore stale access changes (while retaining paid-period evidence), prefer denial on
+ambiguous same-second updates, and retain
+terminal cancellations even if delivered after a newer invoice. Subscription changes write an
+order event for the central audit pass. Ordinary usage invoice processing stays separate.
+
+### Operator handoff required before release
+
+Lake supplies **`cloud_order_desired_state`**, a view containing every `cloud_orders` column as of
+`0097_cloud_order_entitlements`, named one by one, plus the two below. The columns are listed rather
+than `cloud_orders.*`, so a later `ALTER TABLE cloud_orders ADD COLUMN` cannot break applying the
+schema again; a later migration that wants a new column in the view appends it after
+`desired_state`.
+
+The unique index `cloud_orders_subscription_unique` on `stripe_subscription_id` makes a subscription
+belong to one order. Creating it fails, and with it the whole schema apply, if two existing orders
+already share a subscription id; such rows must be corrected first. On the existing Lakes every order
+is test data.
+
+| Column | Values |
+|---|---|
+| `entitlement_state` | `active` before the access deadline, `grace` before deadline + grace, otherwise `suspended`; order forms are `not_applicable` |
+| `desired_state` | `present` only for checkout orders in `paid`, `provisioning` or `ready` with active/grace entitlement; otherwise `suspended`; order forms are `unmanaged` |
+
+These values use PostgreSQL's statement clock on every read, including when no more webhook arrives.
+The operator must vendor `db/schema.sql` byte-for-byte, select `cloud_order_entitlements_guard`,
+register the event types above in `lake_payments.go`, and read this view for first provisioning
+and every managed checkout order or owned resource, including in-flight, ready, failed and canceled
+orders. Do not filter suspended rows out of reconciliation. It must suspend compute and prevent recreation when
+`desired_state = 'suspended'`, retain customer data and order/resource identity, and restore compute
+when a later signed renewal or active snapshot makes the same order `present`. Recheck entitlement
+before provisioning writes so a claim or stale ready row cannot bypass expiry. Fake-store operator
+tests must cover initial provisioning, missing-resource recreation, grace expiry, subscription
+end, in-flight claims, partial failures, restoration, and data retention. This Lake change supplies the contract; **operator suspension
+and webhook registration are not implemented here**, so the issue remains open until that paired
+change ships. Do not enable automatic order provisioning on the old operator.
+
+Verify Lake with `ctest --test-dir build --timeout 600 -R 'OrdersEntitlement|OrdersCheckout|OrdersStore'`.
+The signed lifecycle runs against both stores; the PostgreSQL view test expires an already-ready
+order without another webhook and restores it on renewal. The tests exercise retry grace,
+cancellation, stale and duplicate delivery, identity mismatches, trials, configurable grace,
+pre-Checkout delivery and invalid signatures. Stripe's field and event contracts are documented in
+[subscription webhooks](https://docs.stripe.com/billing/subscriptions/webhooks),
+[subscriptions](https://docs.stripe.com/api/subscriptions/object),
+[invoices](https://docs.stripe.com/api/invoices/object), and
+[retry events](https://docs.stripe.com/billing/revenue-recovery/smart-retries).
+
 ## Metrics
 
 `lake_cloud_orders_total{offer,path}` (orders recorded), `lake_cloud_orders_refused_total{reason}`

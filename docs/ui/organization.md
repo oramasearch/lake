@@ -30,7 +30,7 @@ the rows already read.
 | Settings | `/settings?tab=` | Tabs of cards (profile and MFA state, sessions and devices figures, passkeys, tokens, notifications) |
 | Sessions and Devices | `/sessions` | This browser's session first, highlighted, with "Revoke and sign out" behind a confirmation; other sessions in a table with kind and state chips; devices as cards |
 | API Tokens | `/tokens` | Figures; "New token" in a drawer (the Liquid scopes can be filled in with one click); the secret shows once in a highlighted callout |
-| Passkeys, MFA | `/passkeys`, `/mfa` | Cards; the authenticator URI and recovery codes show once in a highlighted callout |
+| Passkeys, MFA | `/passkeys`, `/mfa` | Cards; enrolling or replacing MFA asks for the current password and clears it after the request; the authenticator URI and recovery codes show once in a highlighted callout |
 
 `organizations/shared.tsx` holds what the three folders share: `RoleBadge` (a role chip), `When`
 (relative time, the full date on hover), `NameCell`, `ObjectChip`, `QueryTabs` (tabs kept in the

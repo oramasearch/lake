@@ -5,6 +5,17 @@ vendored copy at `internal/controller/assets/lake-schema.sql` and applies it to 
 Postgres. Change the schema here, then copy it into the operator in the same change; the
 operator's test checks the copy carries the source-of-truth header.
 
+`0094_clerk_revocation` (lake#948, LSR-085) adds `clerk_user_states`: upstream user id, the
+last applied timestamp for that Clerk subject, an independent revocation watermark, suspension
+and terminal deletion. Both timestamps are Clerk milliseconds. Rows remain when an event precedes provisioning;
+revocation prevents re-exchange of old template JWTs and revokes all existing account credentials.
+`users.clerk_suspended` blocks every resolved user principal and every PostgreSQL session issuance
+path, while a newer unban/unlock can clear it without clearing `users.disabled_at` or reviving
+revoked credentials. The first application revokes all existing Clerk-linked sessions, tokens and
+devices and initializes the revocation watermark to migration time: old ignored webhook deliveries
+cannot reliably be replayed. Later schema applications preserve newer credentials. Guard
+`clerk_revocation_guard`; the operator must vendor this schema and select the guard before rollout. See [Clerk](../api/clerk.md#webhooks).
+
 `0088_repository_liquid_ids` (lake#805) adds nullable `repositories.liquid_id`, the id liquid gave
 the repository (32 lowercase hex digits, what `liquid deploy` sends), with the partial index
 `repositories_liquid_id_idx`; it is not unique, because a repository pushed from another's clone
@@ -1338,3 +1349,49 @@ share's evidence digest stays in `pki_recovery_shares`. A ceremony begun before 
 no rows here and cannot be completed. Additive and idempotent; guard
 `root_recovery_participants_guard`. The operator vendors the schema and selects that guard before a
 lake with this change is rolled.
+
+## Model token prices migration
+
+Migration `0095_model_token_prices` (LSR-095, lake#961) extends the `class` checks on
+`billing_plan_prices` and `billing_invoice_lines` to accept exact `<model>/input` and
+`<model>/output` names for `model_tokens`. Other dimensions retain their GPU-style class checks;
+workload resource classes are unchanged. No records are rewritten. The new constraints preserve
+all existing class names, and reapplying the schema is idempotent.
+
+It also seeds the default gateway models' input and output prices (OpenAI's published price plus
+30%, Steve 2026-10-23), once, while `0095_model_token_prices` is not yet recorded: a new
+publication for the current UTC month with the rates of the list in force (none on a fresh
+instance) plus the model rates, and the model rates added to any later list; an operator's rate for
+the same class is kept. The rates and their source are in
+[model-gateway.md](../api/model-gateway.md#configuration).
+
+The operator must vendor `db/schema.sql` and select `model_token_prices_guard` before the new
+Lake binary is deployed. The operator is not edited here. `PostgresBilling.ModelDirectionPricesAndInvoiceLinesRoundTrip`
+checks persisted rates and invoice lines, the migration marker and guard, and the GPU constraint.
+The [gateway contract](../api/model-gateway.md#configuration) explains the allowlist and required
+input/output prices. Change model entitlement in Lake configuration and published prices; changing
+class syntax also requires updating the API schema and both database checks.
+
+## Email Recovery Limits Migration
+
+`0096_email_recovery_limits` (lake#968, LSR-102) extends the recovery status check with
+`cancelled` and adds `offline_recovery_budgets` (`id`, `started_at`, `requests`). The global
+bucket and hashed client buckets admit bounded hourly requests across replicas; account starts
+lock the user and reuse an unexpired attempt before inserting. No address is persisted.
+The operator must vendor this schema and select `email_recovery_limits_guard` before rollout.
+The [recovery contract](../api/recovery.md#email-recovery-budgets) lists limits and verification.
+
+## Cloud order entitlements migration
+
+`0097_cloud_order_entitlements` (lake#972, LSR-105) adds subscription status, paid-through and access deadlines (Unix seconds), the signed-event watermark, first-unpaid-invoice binding and per-order grace to `cloud_orders`. A partial unique index makes a subscription belong to one order; creating it fails the apply if two existing orders already share a subscription id. Defaults suspend orders without payment evidence. The operator reads `cloud_order_desired_state` on every reconciliation; the view names its columns instead of `cloud_orders.*`, so a later column on `cloud_orders` cannot fail a repeated apply; its entitlement and desired state expire at read time. Vendor this schema and select `cloud_order_entitlements_guard` before rolling Lake, and ship the paired operator suspension/event-registration change before enabling order provisioning. See [the contract and verification](../api/orders.md#recurring-entitlement-lsr-105-lake972).
+
+## Authentication attempts (migration `0098_authentication_attempts`)
+
+`authentication_attempts` keeps SHA-256 keys, failure/pending counts, window ids and fifteen-minute expiry times for the shared
+[account and client budgets](../api/identity.md#authentication-attempt-limits) (lake#966, LSR-100).
+Admission commits independently of credential verification and serializes across PostgreSQL
+connections. Expired keys are pruned and live keys are capped at 100,000. Existing TOTP credentials
+also record `last_used_step` in `public_data`, updated while holding the credential row lock.
+The operator must vendor this schema and select `authentication_attempts_guard` before deployment.
+Change the store budgets and their contract tests
+together; verify with `ctest --test-dir <build> --timeout 600 -R AuthenticationLimits`.

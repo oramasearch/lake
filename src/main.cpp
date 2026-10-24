@@ -17,6 +17,7 @@
 
 #include "lake/api/billing.hpp"
 #include "lake/api/capabilities.hpp"
+#include "lake/api/model_gateway.hpp"
 #include "lake/api/server.hpp"
 #include "lake/api/tunnel_clients.hpp"
 #include "lake/control/agent_bus.hpp"
@@ -90,6 +91,7 @@ int usage() {
     std::println("  LAKE_OPENAI_API_KEY OpenAI key for speech-to-text and the model gateway "
                  "(/openai/v1); LAKE_TRANSCRIBE_MODEL the speech model "
                  "(default gpt-4o-transcribe)");
+    std::println("  LAKE_MODEL_GATEWAY_MODELS JSON model/provider allowlist; [] disables calls");
     std::println("  LAKE_MODEL_PROVIDER_URL the model gateway's OpenAI-compatible provider "
                  "(default https://api.openai.com/v1)");
     std::println("  LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1 lets MCP connections reach loopback and "
@@ -101,6 +103,8 @@ int usage() {
         "install, billing is absent. LAKE_BILLING_INSTRUCTIONS tells accounts how to pay");
     std::println("  LAKE_STRIPE_SECRET_KEY, LAKE_STRIPE_WEBHOOK_SECRET Stripe's keys (lake's own "
                  "platform credentials); either unset, invoices are paid outside lake");
+    std::println("  LAKE_ORDER_ENTITLEMENT_GRACE_SECONDS subscription expiry grace (default "
+                 "259200; 0 to 2592000)");
     std::println("  LAKE_LOG_MODE air-gapped, witnessed (default), or anchored when "
                  "LAKE_STORE_ROOT is set");
     std::println("  LAKE_LOG_WITNESSES JSON witness endpoint/public_key records; "
@@ -205,12 +209,19 @@ int main(int argc, char** argv) {
     opts.instance_kek = env_or("LAKE_INSTANCE_KEK", "");
     opts.clerk_publishable_key = env_or("LAKE_CLERK_PUBLISHABLE_KEY", "");
     opts.clerk_webhook_secret = env_or("LAKE_CLERK_WEBHOOK_SECRET", "");
+    opts.clerk_secret_key = env_or("LAKE_CLERK_SECRET_KEY", "");
     // The cluster delivery key the operator publishes (a public key, not a secret): the only one
     // mint_sealed_secret seals a user's secret to (lake#625).
     opts.sealing_public_key = env_or("LAKE_SEALING_PUBLIC_KEY", "");
     // Speech-to-text (docs/api/transcripts.md): without a key, transcribe answers not_supported.
     opts.openai_api_key = env_or("LAKE_OPENAI_API_KEY", "");
     opts.model_provider_url = env_or("LAKE_MODEL_PROVIDER_URL", "");
+    auto gateway_models = lake::api::parse_gateway_models(env_or("LAKE_MODEL_GATEWAY_MODELS", ""));
+    if (!gateway_models) {
+        std::println(stderr, "lake: {}", gateway_models.error());
+        return 2;
+    }
+    opts.model_gateway_models = std::move(*gateway_models);
     opts.transcribe_model = env_or("LAKE_TRANSCRIBE_MODEL", "");
     // MCP connections reach only public addresses unless this is set, for local development
     // against an MCP server on the same machine (docs/api/mcp-connections.md#the-client).
@@ -296,6 +307,16 @@ int main(int argc, char** argv) {
             return 2;
         }
         opts.order_sheet = std::move(*sheet);
+        const auto grace = env_or("LAKE_ORDER_ENTITLEMENT_GRACE_SECONDS", "259200");
+        const auto parsed = std::from_chars(
+            grace.data(), grace.data() + grace.size(), opts.order_entitlement_grace_seconds);
+        if (parsed.ec != std::errc{} || parsed.ptr != grace.data() + grace.size() ||
+            opts.order_entitlement_grace_seconds < 0 ||
+            opts.order_entitlement_grace_seconds > 30 * 86400) {
+            std::println(
+                stderr, "lake: LAKE_ORDER_ENTITLEMENT_GRACE_SECONDS must be between 0 and 2592000");
+            return 2;
+        }
         opts.regions.order_sheet_url = opts.order_sheet.url;
         auto resend = lake::api::resend_settings_from_environment(env_or("LAKE_RESEND_API_KEY", ""),
                                                                   env_or("LAKE_RESEND_FROM", ""),

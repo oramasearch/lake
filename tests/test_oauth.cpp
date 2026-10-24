@@ -125,7 +125,9 @@ std::string request(unsigned short port,
                     std::string_view method,
                     std::string_view target,
                     std::string_view body = {},
-                    std::string_view content_type = {}) {
+                    std::string_view content_type = {},
+                    std::string_view cookie = {},
+                    std::string_view extra_headers = {}) {
     const int descriptor = ::socket(AF_INET, SOCK_STREAM, 0);
     if (descriptor < 0) {
         return {};
@@ -143,6 +145,10 @@ std::string request(unsigned short port,
     if (!content_type.empty()) {
         message += "Content-Type: " + std::string(content_type) + "\r\n";
     }
+    if (!cookie.empty()) {
+        message += "Cookie: " + std::string(cookie) + "\r\n";
+    }
+    message += extra_headers;
     message += "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n";
     message += body;
     std::size_t sent = 0;
@@ -420,7 +426,22 @@ std::string callback_target(const std::string& location) {
     return path == std::string::npos ? std::string("/") : location.substr(path);
 }
 
-std::string authorize_once(unsigned short lake_port, unsigned short provider_port) {
+struct BrowserFlow {
+    std::string location, cookie;
+};
+
+std::string flow_cookie(const std::string& started) {
+    const std::string cookie = response_header(started, "Set-Cookie");
+    EXPECT_TRUE(cookie.starts_with("lake_oauth_")) << cookie;
+    EXPECT_NE(cookie.find("; HttpOnly"), std::string::npos);
+    EXPECT_NE(cookie.find("; SameSite=Lax"), std::string::npos);
+    EXPECT_NE(cookie.find("; Path=/"), std::string::npos);
+    EXPECT_NE(cookie.find("; Max-Age=300"), std::string::npos);
+    EXPECT_EQ(cookie.find("Domain="), std::string::npos);
+    return cookie.substr(0, cookie.find(';'));
+}
+
+BrowserFlow authorize_once(unsigned short lake_port, unsigned short provider_port) {
     const std::string started =
         request(lake_port,
                 "POST",
@@ -430,10 +451,13 @@ std::string authorize_once(unsigned short lake_port, unsigned short provider_por
     EXPECT_NE(started.find(" 200 "), std::string::npos) << started;
     const json value = json::parse(response_body(started));
     const std::string authorization_url = value["value"]["authorization_url"].get<std::string>();
+    const std::string cookie = flow_cookie(started);
+    const std::string binding = cookie.substr(cookie.find('=') + 1);
+    EXPECT_EQ(response_body(started).find(binding), std::string::npos);
     const std::string target = callback_target(authorization_url);
     const std::string authorized = request(provider_port, "GET", target);
     EXPECT_NE(authorized.find(" 302 "), std::string::npos) << authorized;
-    return response_header(authorized, "Location");
+    return {response_header(authorized, "Location"), flow_cookie(started)};
 }
 
 } // namespace
@@ -460,9 +484,28 @@ TEST(OAuth, AuthorizationCodePkceOidcAndCachedJwks) {
     lake::api::ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
 
-    const std::string first_location = authorize_once(
+    const auto first = authorize_once(
         lake_port, std::stoi(provider.issuer().substr(provider.issuer().rfind(':') + 1)));
-    const std::string first_callback = request(lake_port, "GET", callback_target(first_location));
+    const std::string target = callback_target(first.location);
+    const std::string without_cookie = request(lake_port, "GET", target);
+    EXPECT_NE(without_cookie.find(" 403 "), std::string::npos) << without_cookie;
+    EXPECT_TRUE(response_header(without_cookie, "Set-Cookie").empty());
+    EXPECT_FALSE(provider.pkce_verified());
+    // A second browser starts another valid flow while the first is still pending.
+    const std::string other_started =
+        request(lake_port, "POST", "/v1/start_oauth", R"({"provider":"stub"})", "application/json");
+    ASSERT_NE(other_started.find(" 200 "), std::string::npos) << other_started;
+    const std::string other_cookie = flow_cookie(other_started);
+    EXPECT_NE(first.cookie.substr(0, first.cookie.find('=')),
+              other_cookie.substr(0, other_cookie.find('=')));
+    // Even copying this URL's cookie name cannot make the other browser's secret match.
+    const std::string foreign_cookie = first.cookie.substr(0, first.cookie.find('=') + 1) +
+                                       other_cookie.substr(other_cookie.find('=') + 1);
+    const std::string foreign = request(lake_port, "GET", target, {}, {}, foreign_cookie);
+    EXPECT_NE(foreign.find(" 403 "), std::string::npos) << foreign;
+    EXPECT_TRUE(response_header(foreign, "Set-Cookie").empty());
+    EXPECT_FALSE(provider.pkce_verified());
+    const std::string first_callback = request(lake_port, "GET", target, {}, {}, first.cookie);
     ASSERT_NE(first_callback.find(" 302 "), std::string::npos) << first_callback;
     // Nothing named a page: the account lands on the home, Ask Orama (lake#600).
     EXPECT_EQ(response_header(first_callback, "Location"), "/");
@@ -482,13 +525,17 @@ TEST(OAuth, AuthorizationCodePkceOidcAndCachedJwks) {
                event.draft.outcome == "success";
     }));
 
-    const std::string replay = request(lake_port, "GET", callback_target(first_location));
+    const std::string replay = request(lake_port, "GET", target, {}, {}, first.cookie);
     EXPECT_NE(replay.find(" 403 "), std::string::npos);
 
     const unsigned short provider_port = static_cast<unsigned short>(
         std::stoi(provider.issuer().substr(provider.issuer().rfind(':') + 1)));
-    const std::string second_location = authorize_once(lake_port, provider_port);
-    const std::string second_callback = request(lake_port, "GET", callback_target(second_location));
+    const std::string other_url =
+        json::parse(response_body(other_started))["value"]["authorization_url"];
+    const std::string other_authorized = request(provider_port, "GET", callback_target(other_url));
+    const BrowserFlow second{response_header(other_authorized, "Location"), other_cookie};
+    const std::string second_callback =
+        request(lake_port, "GET", callback_target(second.location), {}, {}, second.cookie);
     EXPECT_NE(second_callback.find(" 302 "), std::string::npos) << second_callback;
     EXPECT_EQ(provider.jwks_requests(), 1);
 
@@ -548,9 +595,70 @@ TEST(OAuth, EnterpriseOidcAuthorizationCodeCallback) {
                 "GET",
                 callback_target(authorization_url));
     ASSERT_NE(authorized.find(" 302 "), std::string::npos) << authorized;
-    const std::string callback =
-        request(lake_port, "GET", callback_target(response_header(authorized, "Location")));
+    const std::string target = callback_target(response_header(authorized, "Location"));
+    const std::string cookie = flow_cookie(started);
+    const std::string missing = request(lake_port, "GET", target);
+    EXPECT_NE(missing.find(" 403 "), std::string::npos) << missing;
+    EXPECT_FALSE(provider.pkce_verified());
+    const std::string wrong = request(lake_port, "GET", target, {}, {}, cookie + "wrong");
+    EXPECT_NE(wrong.find(" 403 "), std::string::npos) << wrong;
+    EXPECT_TRUE(response_header(wrong, "Set-Cookie").empty());
+    const std::string callback = request(lake_port, "GET", target, {}, {}, cookie);
     EXPECT_NE(callback.find(" 302 "), std::string::npos) << callback;
+    EXPECT_TRUE(provider.pkce_verified());
+    EXPECT_NE(request(lake_port, "GET", target, {}, {}, cookie).find(" 403 "), std::string::npos);
+    server.stop();
+}
+
+TEST(OAuth, HttpsStartsRequireTheHostPrefixedCookie) {
+    StubProvider provider;
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    ASSERT_TRUE(store->register_oauth_provider(
+        {"lake", "stub", provider.issuer(), "lake-test", "stub-secret", {"openid"}}));
+    lake::api::ServerOptions options;
+    options.port = unused_port();
+    options.public_host = "127.0.0.1:" + std::to_string(options.port);
+    options.store = store;
+    options.oidc_allow_private_addresses = true;
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string started = request(options.port,
+                                        "POST",
+                                        "/v1/start_oauth",
+                                        R"({"provider":"stub","identity_document":"{}"})",
+                                        "application/json",
+                                        {},
+                                        "X-Forwarded-Proto: https\r\n");
+    ASSERT_NE(started.find(" 200 "), std::string::npos) << started;
+    const std::string cookie = response_header(started, "Set-Cookie");
+    ASSERT_TRUE(cookie.starts_with("__Host-lake_oauth_")) << cookie;
+    EXPECT_NE(cookie.find("; Secure"), std::string::npos);
+    EXPECT_NE(cookie.find("; HttpOnly"), std::string::npos);
+    EXPECT_NE(cookie.find("; SameSite=Lax"), std::string::npos);
+    EXPECT_NE(cookie.find("; Path=/"), std::string::npos);
+    EXPECT_EQ(cookie.find("Domain="), std::string::npos);
+    const std::string url = json::parse(response_body(started))["value"]["authorization_url"];
+    const auto authorized =
+        request(static_cast<unsigned short>(
+                    std::stoi(provider.issuer().substr(provider.issuer().rfind(':') + 1))),
+                "GET",
+                callback_target(url));
+    ASSERT_NE(authorized.find(" 302 "), std::string::npos) << authorized;
+    const std::string target = callback_target(response_header(authorized, "Location"));
+    // A cookie without the browser-enforced host prefix is never accepted over HTTPS.
+    const std::string unprefixed = cookie.substr(7, cookie.find(';') - 7);
+    const std::string refused =
+        request(options.port, "GET", target, {}, {}, unprefixed, "X-Forwarded-Proto: https\r\n");
+    EXPECT_NE(refused.find(" 403 "), std::string::npos) << refused;
+    EXPECT_FALSE(provider.pkce_verified());
+    const std::string signed_in = request(options.port,
+                                          "GET",
+                                          target,
+                                          {},
+                                          {},
+                                          cookie.substr(0, cookie.find(';')),
+                                          "X-Forwarded-Proto: https\r\n");
+    EXPECT_NE(signed_in.find(" 302 "), std::string::npos) << signed_in;
     EXPECT_TRUE(provider.pkce_verified());
     server.stop();
 }

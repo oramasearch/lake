@@ -154,6 +154,19 @@ Verify: `ctest --test-dir build -R DeletingAnAgentStopsItsLaunchesAndSchedules`
 
 ## Stream triggers
 
+**Offboarding stops delegated automation (lake#951, LSR-086).** Launch, schedule and task
+credentials require a present, enabled user. Disabling an account withdraws its launches and
+schedules and invalidates its tasks and leases atomically; creating new person-owned work and
+claiming or renewing tasks also checks the account under the offboarding lock. This protects a
+stream context reconstructed before disablement and accounts disabled before this fix.
+
+Both stream workers reject missing or disabled people before doing delegated work. Agent triggers
+are removed on the next reachable workspace pass; MCP streaming settings and pending results are
+cleared there too. These existing records retain cleanup work across restarts, and storage errors
+leave them for retry. Authority ends immediately, even while the workspace is unavailable. Verify
+with `ctest --test-dir build --timeout 600 -R
+'DisablingAUserRevokesAgentDelegation|DisabledUsersCannotDriveAgentOrMcpStreams'` on both stores.
+
 **An agent can be started by a workspace stream, not only a schedule (lake#677).** A Python agent's
 stream triggers name topics of its workspace Zetta (`list_streams`, Train → Streams); each message
 published to one after the trigger is set starts one `job` launch of the agent, with the message as

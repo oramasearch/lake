@@ -7,6 +7,9 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <barrier>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -14,6 +17,9 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <mutex>
+#include <optional>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -26,16 +32,18 @@
 #include <liquid/identity.hpp>
 #include <liquid/runtime.hpp>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <pqxx/pqxx>
 
 #include "lake/api/audit_routing.hpp"
 #include "lake/api/server.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/application_webhook_records.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/postgres_store.hpp"
-#include "lake/control/application_webhook_records.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "lake/thread.hpp"
 #include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
 
@@ -66,7 +74,9 @@ std::string request(unsigned short port,
                     const std::string& secret,
                     const std::string& request_id,
                     const std::string& method,
-                    bool cookie = false) {
+                    bool cookie = false,
+                    const std::string& forwarded = {},
+                    const std::string& trusted_client = "198.51.100.7") {
     const int socket_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (socket_fd < 0) {
         return {};
@@ -88,6 +98,10 @@ std::string request(unsigned short port,
     wire += "\r\nX-Request-ID: " + request_id + "\r\n";
     if (!secret.empty()) {
         wire += (cookie ? "Cookie: lake_session=" : "Authorization: Bearer ") + secret + "\r\n";
+    }
+    if (!forwarded.empty()) {
+        wire += "X-Real-IP: " + trusted_client + "\r\nX-Forwarded-For: " + forwarded + ", " +
+                trusted_client + "\r\nCF-Connecting-IP: " + forwarded + "\r\n";
     }
     wire += "\r\n" + body;
     std::size_t sent = 0;
@@ -184,12 +198,16 @@ protected:
                        {"params", {{"name", name}, {"arguments", input}}}};
         }
         const bool read = name == "list_devices" || name == "list_sessions";
-        const auto wire = request(server_->port(),
-                                  mcp_ ? "/mcp" : "/v1/" + name,
-                                  payload,
-                                  secret,
-                                  id,
-                                  !mcp_ && read ? "GET" : "POST");
+        const auto wire =
+            request(server_->port(),
+                    mcp_ ? "/mcp" : "/v1/" + name,
+                    payload,
+                    secret,
+                    id,
+                    !mcp_ && read ? "GET" : "POST",
+                    false,
+                    forge_forwarded_ ? "192.0.2." + std::to_string(++forged_peer_) : "",
+                    trusted_client_);
         const auto body = wire.find("\r\n\r\n");
         EXPECT_NE(body, std::string::npos);
         if (body == std::string::npos) {
@@ -203,11 +221,15 @@ protected:
         }
         // A credential lake no longer accepts is 401 unauthenticated; one that does not grant
         // the call is 403 unauthorized (lake#450).
-        EXPECT_NE(wire.find(mcp_ || result.at("ok").get<bool>()                  ? " 200 "
-                            : result.at("error").at("code") == "unauthenticated" ? " 401 "
-                            : result.at("error").at("code") == "unauthorized"    ? " 403 "
-                                                                                 : " 400 "),
-                  std::string::npos);
+        const int expected_status = mcp_ || result.at("ok").get<bool>()                  ? 200
+                                    : result.at("error").at("code") == "unauthenticated" ? 401
+                                    : (result.at("error").at("code") == "unauthorized" ||
+                                       result.at("error").at("code") == "mfa_required")
+                                        ? 403
+                                    : result.at("error").at("code") == "not_found"    ? 404
+                                    : result.at("error").at("code") == "rate_limited" ? 429
+                                                                                      : 400;
+        EXPECT_NE(wire.find(" " + std::to_string(expected_status) + " "), std::string::npos);
         if (!secret.empty()) {
             secrets_.push_back(secret);
         }
@@ -343,11 +365,527 @@ protected:
     std::string database_uri_;
     bool postgres_ = false;
     bool mcp_ = false;
+    bool forge_forwarded_ = false;
+    unsigned forged_peer_ = 0;
+    std::string trusted_client_ = "198.51.100.7";
     std::shared_ptr<lake::control::Store> store_;
     std::unique_ptr<lake::api::ApiServer> server_;
     json browser_;
     std::vector<std::string> secrets_;
 };
+
+// RFC 6238 code from the raw hexadecimal seed returned by the store's enrollment.
+std::string authentication_totp(const std::string& seed) {
+    std::vector<unsigned char> key;
+    for (std::size_t i = 0; i < seed.size(); i += 2)
+        key.push_back(static_cast<unsigned char>(std::stoul(seed.substr(i, 2), nullptr, 16)));
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+    const auto counter = static_cast<std::uint64_t>(seconds / 30);
+    std::array<unsigned char, 8> message{};
+    for (unsigned i = 0; i < 8; ++i)
+        message[7 - i] = counter >> (8 * i);
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned length = 0;
+    HMAC(
+        EVP_sha1(), key.data(), key.size(), message.data(), message.size(), digest.data(), &length);
+    const auto offset = digest[length - 1] & 15;
+    const unsigned value = ((digest[offset] & 127) << 24) | (digest[offset + 1] << 16) |
+                           (digest[offset + 2] << 8) | digest[offset + 3];
+    std::ostringstream code;
+    code << std::setw(6) << std::setfill('0') << value % 1000000;
+    return code.str();
+}
+
+TEST_P(TokenAttenuation, AuthenticationLimitsShareAccountsAcrossTransportsAndConnections) {
+    const auto user = store_->get_user(browser_.at("session").at("user_id"));
+    ASSERT_TRUE(user);
+    std::string upper = user->email;
+    std::ranges::transform(upper, upper.begin(), [](unsigned char c) { return std::toupper(c); });
+    const auto recovery = store_->begin_email_recovery("lake", user->email, 24 * 60 * 60);
+    ASSERT_TRUE(recovery);
+    for (int i = 0; i < 10; ++i) {
+        mcp_ = !mcp_;
+        const std::string name = i % 3 == 0   ? "sign_in_password"
+                                 : i % 3 == 1 ? "verify_mfa"
+                                              : "recover_with_code";
+        json input = {{"email", i % 2 ? upper : user->email}};
+        if (name != "recover_with_code")
+            input["password"] = "wrong password";
+        if (name != "sign_in_password")
+            input["code"] = "000000";
+        const auto refused = call(name, input, "");
+        ASSERT_FALSE(refused.at("ok"));
+        ASSERT_EQ(refused.at("error").at("code"), "unauthenticated") << i;
+    }
+    const auto blocked =
+        call("sign_in_password",
+             {{"email", user->email}, {"password", "correct horse battery staple"}},
+             "");
+    ASSERT_FALSE(blocked.at("ok"));
+    EXPECT_EQ(blocked.at("error").at("code"), "unauthenticated");
+    const auto enrollment = store_->enroll_mfa(
+        user->id, "lake", {browser_.at("session").at("id"), "correct horse battery staple"});
+    ASSERT_FALSE(enrollment);
+    EXPECT_EQ(enrollment.error().code, "unauthenticated");
+    const auto step_up = store_->verify_mfa_code(user->id, "lake", "000000");
+    ASSERT_FALSE(step_up);
+    EXPECT_EQ(step_up.error().code, "unauthenticated");
+    const auto disabled = store_->disable_mfa(user->id, "lake", "000000");
+    ASSERT_FALSE(disabled);
+    EXPECT_EQ(disabled.error().code, "unauthenticated");
+    const auto completion = store_->complete_recovery(recovery->id, "wrong token", "new device");
+    ASSERT_FALSE(completion);
+    EXPECT_EQ(completion.error().code, "unauthenticated");
+    const auto email_recovery = call("begin_email_recovery", {{"email", upper}}, "");
+    ASSERT_TRUE(email_recovery.at("ok")) << "accepted recovery initiation cannot reset a cooldown";
+    if (postgres_) {
+        auto other_connection =
+            lake::control::make_postgres_store(database_uri_, std::string(instance_kek));
+        const auto retry = other_connection->sign_in_password(
+            {"lake", upper, "correct horse battery staple", "", "other"});
+        ASSERT_FALSE(retry);
+        EXPECT_EQ(retry.error().code, "unauthenticated");
+        // Historical MFA factors may outlive their password credential; the account key stays.
+        pqxx::connection connection(database_uri_);
+        {
+            pqxx::work tx(connection);
+            tx.exec_params("UPDATE credentials SET revoked_at = now() WHERE user_id = $1::uuid "
+                           "AND kind = 'password'",
+                           user->id);
+            tx.commit();
+        }
+        const auto without_password = other_connection->verify_mfa_code(user->id, "lake", "000000");
+        ASSERT_FALSE(without_password);
+        EXPECT_EQ(without_password.error().code, "unauthenticated");
+        {
+            pqxx::work tx(connection);
+            tx.exec_params("UPDATE credentials SET revoked_at = NULL WHERE user_id = $1::uuid "
+                           "AND kind = 'password'",
+                           user->id);
+            tx.commit();
+        }
+    }
+    // A different account still works while the first is cooling down.
+    const std::string email = lake::control::new_uuid_v4() + "@example.test";
+    auto signup = call("sign_up_password",
+                       with_identity({{"email", email},
+                                      {"password", "correct horse battery staple"},
+                                      {"display_name", "Unrelated"}},
+                                     *store_,
+                                     "lake",
+                                     email,
+                                     postgres_),
+                       "");
+    ASSERT_TRUE(signup.at("ok"));
+    EXPECT_TRUE(call("sign_in_password",
+                     {{"email", email}, {"password", "correct horse battery staple"}},
+                     "")
+                    .at("ok"));
+    const auto still_blocked = store_->sign_in_password(
+        {"lake", user->email, "correct horse battery staple", "", "still cooling"});
+    ASSERT_FALSE(still_blocked);
+    EXPECT_EQ(still_blocked.error().code, "unauthenticated");
+    if (postgres_) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec("UPDATE authentication_attempts SET expires_at = clock_timestamp() - interval '1 "
+                "second'");
+        tx.commit();
+        EXPECT_TRUE(store_->sign_in_password(
+            {"lake", upper, "correct horse battery staple", "", "after cooldown"}));
+    }
+}
+
+TEST_P(TokenAttenuation, AuthenticationLimitsClientsAcrossAccountsAndTransports) {
+    forge_forwarded_ = true;
+    for (int i = 0; i < 100; ++i) {
+        mcp_ = !mcp_;
+        const auto refused =
+            call("sign_in_password",
+                 {{"email", std::to_string(i) + "@missing.example.test"}, {"password", "wrong"}},
+                 "");
+        ASSERT_FALSE(refused.at("ok"));
+        ASSERT_NE(refused.at("error").at("code"), "rate_limited") << i;
+    }
+    const auto user = store_->get_user(browser_.at("session").at("user_id"));
+    ASSERT_TRUE(user);
+    const auto refused =
+        call("sign_in_password",
+             {{"email", user->email}, {"password", "correct horse battery staple"}},
+             "");
+    ASSERT_FALSE(refused.at("ok"));
+    EXPECT_EQ(refused.at("error").at("code"), "rate_limited");
+    // A separate client budget and the untouched account remain usable.
+    trusted_client_ = "198.51.100.8";
+    EXPECT_TRUE(call("sign_in_password",
+                     {{"email", user->email}, {"password", "correct horse battery staple"}},
+                     "")
+                    .at("ok"));
+    EXPECT_TRUE(store_->sign_in_password(
+        {"lake", user->email, "correct horse battery staple", "", "other client"}));
+}
+
+TEST_P(TokenAttenuation, AuthenticationLimitsTreatUnknownAddressesUniformly) {
+    const auto user = store_->get_user(browser_.at("session").at("user_id"));
+    ASSERT_TRUE(user);
+    const auto wrong_password =
+        store_->sign_in_password({"lake", user->email, "wrong", "", "browser"});
+    ASSERT_FALSE(wrong_password);
+    for (int i = 0; i < 15; ++i) {
+        mcp_ = !mcp_;
+        const auto result =
+            call("sign_in_password",
+                 {{"email", i % 2 ? "MISSING@EXAMPLE.TEST" : "missing@example.test"},
+                  {"password", "wrong"}},
+                 "");
+        ASSERT_FALSE(result.at("ok"));
+        EXPECT_EQ(result.at("error").at("code"), wrong_password.error().code);
+        EXPECT_EQ(result.at("error").at("message"), wrong_password.error().message);
+    }
+    const auto limited =
+        call("sign_in_password", {{"email", "missing@example.test"}, {"password", "wrong"}}, "");
+    ASSERT_FALSE(limited.at("ok"));
+    EXPECT_EQ(limited.at("error").at("code"), wrong_password.error().code);
+    EXPECT_EQ(limited.at("error").at("message"), wrong_password.error().message);
+    EXPECT_TRUE(call("sign_in_password",
+                     {{"email", user->email}, {"password", "correct horse battery staple"}},
+                     "")
+                    .at("ok"));
+}
+
+TEST_P(TokenAttenuation, AuthenticationLimitsSerializeConcurrentAdmissions) {
+    std::shared_ptr<lake::control::Store> other = store_;
+    if (postgres_)
+        other = lake::control::make_postgres_store(database_uri_, std::string(instance_kek));
+    const auto user = store_->get_user(browser_.at("session").at("user_id"));
+    ASSERT_TRUE(user);
+    std::barrier ready(2);
+    std::atomic<unsigned> accepted = 0;
+    std::mutex admitted_mutex;
+    std::vector<lake::control::AuthenticationAttempt> admitted;
+    auto attempt = [&](lake::control::Store& store, bool by_id) {
+        ready.arrive_and_wait();
+        for (unsigned i = 0; i < 30; ++i) {
+            const auto gate = store.authentication_attempt(
+                by_id ? "" : "lake", by_id ? "" : user->email, by_id ? user->id : "", "");
+            if (gate) {
+                ++accepted;
+                std::lock_guard lock(admitted_mutex);
+                admitted.push_back(*gate);
+            } else
+                EXPECT_EQ(gate.error().code, "unauthenticated");
+        }
+    };
+    lake::Thread first([&] { attempt(*store_, false); });
+    lake::Thread second([&] { attempt(*other, true); });
+    first.join();
+    second.join();
+    ASSERT_EQ(accepted.load(), 10u);
+    ASSERT_EQ(admitted.size(), 10u);
+    auto stale = admitted.front();
+    stale.window_id = lake::control::new_uuid_v4();
+    ASSERT_TRUE(store_->authentication_attempt_finished(
+        stale, lake::control::AuthenticationOutcome::success));
+    EXPECT_FALSE(other->authentication_attempt("lake", user->email, "", ""))
+        << "a stale completion cannot clear a replacement window";
+    ASSERT_TRUE(store_->authentication_attempt_finished(
+        admitted.front(), lake::control::AuthenticationOutcome::success));
+    EXPECT_TRUE(other->authentication_attempt("lake", user->email, "", ""));
+    EXPECT_FALSE(other->authentication_attempt("lake", user->email, "", ""))
+        << "success must retain the nine other in-flight reservations";
+}
+
+TEST_P(TokenAttenuation, AuthenticationLimitsConsumeTotpAcrossSignInAndStepUp) {
+    const std::string user_id = browser_.at("session").at("user_id");
+    const auto user = store_->get_user(user_id);
+    ASSERT_TRUE(user);
+    const auto enrollment = store_->enroll_mfa(
+        user_id, "lake", {browser_.at("session").at("id"), "correct horse battery staple"});
+    ASSERT_TRUE(enrollment);
+    const std::string code = authentication_totp(enrollment->secret);
+    const auto first =
+        call("verify_mfa",
+             {{"email", user->email}, {"password", "correct horse battery staple"}, {"code", code}},
+             "");
+    ASSERT_TRUE(first.at("ok"));
+    mcp_ = !mcp_;
+    EXPECT_FALSE(
+        call("verify_mfa",
+             {{"email", user->email}, {"password", "correct horse battery staple"}, {"code", code}},
+             "")
+            .at("ok"));
+    EXPECT_FALSE(store_->verify_mfa_code(user_id, "lake", code));
+    EXPECT_FALSE(store_->disable_mfa(user_id, "lake", code));
+    if (postgres_) {
+        auto connection =
+            lake::control::make_postgres_store(database_uri_, std::string(instance_kek));
+        EXPECT_FALSE(connection->verify_mfa_code(user_id, "lake", code));
+    }
+    EXPECT_TRUE(store_->verify_mfa_code(user_id, "lake", enrollment->recovery_codes[0]));
+    EXPECT_FALSE(
+        store_->recover_with_code("lake", user->email, enrollment->recovery_codes[0], "replay"));
+    const auto replacement = store_->enroll_mfa(
+        user_id, "lake", {browser_.at("session").at("id"), "correct horse battery staple"});
+    ASSERT_TRUE(replacement);
+    const auto fresh_code = authentication_totp(replacement->secret);
+    std::shared_ptr<lake::control::Store> other = store_;
+    if (postgres_)
+        other = lake::control::make_postgres_store(database_uri_, std::string(instance_kek));
+    std::barrier ready(2);
+    std::atomic<unsigned> accepted = 0;
+    lake::Thread first_verifier([&] {
+        ready.arrive_and_wait();
+        if (store_->verify_mfa_code(user_id, "lake", fresh_code))
+            ++accepted;
+    });
+    lake::Thread second_verifier([&] {
+        ready.arrive_and_wait();
+        if (other->verify_mfa_code(user_id, "lake", fresh_code))
+            ++accepted;
+    });
+    first_verifier.join();
+    second_verifier.join();
+    EXPECT_EQ(accepted.load(), 1u);
+    EXPECT_FALSE(store_->sign_in_totp(
+        {"lake", user->email, "correct horse battery staple", fresh_code, "replay step-up"}));
+}
+
+// LAKE_AUTH_GLOBAL_FAILURE_LIMIT configured an instance-wide failure ceiling that is gone
+// (lake#966): a test sets it to show nothing reads it any more.
+struct RetiredGlobalFailureLimitEnv {
+    std::optional<std::string> previous;
+    explicit RetiredGlobalFailureLimitEnv(const char* limit) {
+        if (const auto* value = std::getenv("LAKE_AUTH_GLOBAL_FAILURE_LIMIT"))
+            previous = value;
+        setenv("LAKE_AUTH_GLOBAL_FAILURE_LIMIT", limit, 1);
+    }
+    ~RetiredGlobalFailureLimitEnv() {
+        if (previous)
+            setenv("LAKE_AUTH_GLOBAL_FAILURE_LIMIT", previous->c_str(), 1);
+        else
+            unsetenv("LAKE_AUTH_GLOBAL_FAILURE_LIMIT");
+    }
+};
+
+TEST_P(TokenAttenuation, AuthenticationLimitsResetOnlyAfterFullCredentialVerification) {
+    const auto user = store_->get_user(browser_.at("session").at("user_id"));
+    ASSERT_TRUE(user);
+    const auto login = [&](const std::string& password) {
+        return call("sign_in_password", {{"email", user->email}, {"password", password}}, "");
+    };
+    for (unsigned cycle = 0; cycle < 2; ++cycle) {
+        for (unsigned i = 0; i < 9; ++i)
+            ASSERT_FALSE(login("wrong").at("ok"));
+        ASSERT_TRUE(login("correct horse battery staple").at("ok"));
+    }
+    for (unsigned i = 0; i < 12; ++i)
+        ASSERT_TRUE(login("correct horse battery staple").at("ok"))
+            << "successes do not spend failures";
+    const auto factor = store_->enroll_mfa(
+        user->id, "lake", {browser_.at("session").at("id"), "correct horse battery staple"});
+    ASSERT_TRUE(factor);
+    for (unsigned i = 0; i < 9; ++i)
+        ASSERT_FALSE(store_->verify_mfa_code(user->id, "lake", "not-a-code"));
+    const auto password_only = login("correct horse battery staple");
+    ASSERT_FALSE(password_only.at("ok"));
+    EXPECT_EQ(password_only.at("error").at("code"), "mfa_required");
+    ASSERT_FALSE(store_->verify_mfa_code(user->id, "lake", "not-a-code"));
+    const auto locked = store_->verify_mfa_code(user->id, "lake", factor->recovery_codes[0]);
+    ASSERT_FALSE(locked);
+    EXPECT_EQ(locked.error().code, "unauthenticated")
+        << "a known password cannot clear an MFA failure budget";
+}
+
+TEST_P(TokenAttenuation, AuthenticationLimitsResetClientFailuresAfterVerifiedSignIn) {
+    const auto user = store_->get_user(browser_.at("session").at("user_id"));
+    ASSERT_TRUE(user);
+    forge_forwarded_ = true;
+    for (unsigned cycle = 0; cycle < 2; ++cycle) {
+        for (unsigned i = 0; i < 99; ++i) {
+            mcp_ = !mcp_;
+            const auto failure =
+                call("sign_in_password",
+                     {{"email", std::to_string(i) + "@unknown.test"}, {"password", "wrong"}},
+                     "");
+            ASSERT_FALSE(failure.at("ok"));
+            ASSERT_EQ(failure.at("error").at("code"), "unauthenticated");
+        }
+        ASSERT_TRUE(call("sign_in_password",
+                         {{"email", user->email}, {"password", "correct horse battery staple"}},
+                         "")
+                        .at("ok"));
+    }
+}
+
+TEST_P(TokenAttenuation, AuthenticationLimitsHaveNoGlobalCeiling) {
+    // Failures against other accounts never refuse this account's sign-in: only the account's
+    // own budget (10) and the client's (100) apply, and the retired setting is not read.
+    RetiredGlobalFailureLimitEnv configured("3");
+    const auto user = store_->get_user(browser_.at("session").at("user_id"));
+    ASSERT_TRUE(user);
+    for (unsigned i = 0; i < 12; ++i) {
+        const auto failed = store_->sign_in_password(
+            {"lake", std::to_string(i) + "@unknown.test", "wrong", "", "test"});
+        ASSERT_FALSE(failed);
+        ASSERT_EQ(failed.error().code, "unauthenticated");
+    }
+    ASSERT_TRUE(store_->sign_in_password(
+        {"lake", user->email, "correct horse battery staple", "", "after others failed"}));
+    setenv("LAKE_AUTH_GLOBAL_FAILURE_LIMIT", "0", 1);
+    ASSERT_TRUE(store_->sign_in_password(
+        {"lake", user->email, "correct horse battery staple", "", "setting not read"}));
+}
+
+TEST_P(TokenAttenuation, MfaEnrollmentRejectsUnverifiedSessionsAndTokens) {
+    const auto token = issue(browser_, {"enroll_mfa"}, 60);
+    ASSERT_TRUE(token.contains("secret"));
+    for (const auto& credential : {token, browser_}) {
+        const auto result = call("enroll_mfa", json::object(), credential.at("secret"));
+        EXPECT_FALSE(result.at("ok").get<bool>());
+        EXPECT_FALSE(result.contains("value"));
+    }
+    const auto with_password =
+        call("enroll_mfa", {{"password", "correct horse battery staple"}}, token.at("secret"));
+    EXPECT_FALSE(with_password.at("ok").get<bool>());
+    EXPECT_FALSE(with_password.contains("value"));
+    const auto enrolled = store_->mfa_enrolled(browser_.at("session").at("user_id"), "lake");
+    ASSERT_TRUE(enrolled);
+    EXPECT_FALSE(*enrolled);
+}
+
+TEST_P(TokenAttenuation, MfaEnrollmentPreservesExistingFactorUntilPasswordVerification) {
+    const std::string user_id = browser_.at("session").at("user_id");
+    const std::string session_id = browser_.at("session").at("id");
+    const std::string password = "correct horse battery staple";
+    const auto enrollment = call("enroll_mfa", {{"password", password}}, browser_.at("secret"));
+    ASSERT_TRUE(enrollment.at("ok"));
+    const auto original = enrollment.at("value");
+    ASSERT_EQ(original.at("recovery_codes").size(), 8u);
+    secrets_.push_back(password);
+    secrets_.push_back(original.at("otpauth_uri"));
+    for (const auto& code : original.at("recovery_codes")) {
+        secrets_.push_back(code);
+    }
+
+    const auto scoped = issue(browser_, {"enroll_mfa"}, 60);
+    const auto wildcard = issue(browser_, {"*"}, 60);
+    const auto standing = store_->create_token(
+        {user_id, "lake", "MFA static", "MFA enrollment test", {"enroll_mfa"}, 0, true});
+    ASSERT_TRUE(standing);
+    const json static_token = {{"secret", standing->secret},
+                               {"session", {{"id", standing->session.id}}}};
+    const auto before = store_->list_sessions(user_id, "lake");
+    ASSERT_TRUE(before);
+    std::string original_seed;
+    if (postgres_) {
+        pqxx::connection connection(database_uri_);
+        pqxx::read_transaction tx(connection);
+        original_seed =
+            tx.exec_params("SELECT public_data::text FROM credentials WHERE user_id = $1::uuid "
+                           "AND pool_id = 'lake' AND kind = 'totp'",
+                           user_id)[0][0]
+                .as<std::string>();
+    }
+    // Even possession of the password cannot turn a scoped or wildcard API token into a
+    // recovery credential. Missing proof and a wrong password cannot replace a factor either.
+    for (const auto& token : {scoped, wildcard, static_token}) {
+        const auto result = call("enroll_mfa", {{"password", password}}, token.at("secret"));
+        EXPECT_FALSE(result.at("ok").get<bool>());
+        EXPECT_EQ(result.at("error").at("code"), "unauthorized");
+        EXPECT_FALSE(result.contains("value"));
+        const auto direct =
+            store_->enroll_mfa(user_id, "lake", {token.at("session").at("id"), password});
+        EXPECT_FALSE(direct);
+    }
+    for (const auto& input : {json::object(), json{{"password", "wrong password"}}}) {
+        const auto result = call("enroll_mfa", input, browser_.at("secret"));
+        EXPECT_FALSE(result.at("ok").get<bool>());
+        EXPECT_FALSE(result.contains("value"));
+    }
+    EXPECT_FALSE(store_->enroll_mfa(user_id, "lake", {session_id, "wrong password"}));
+    EXPECT_FALSE(store_->enroll_mfa(user_id, "lake", {"", password}));
+    EXPECT_FALSE(store_->enroll_mfa(user_id, "another-pool", {session_id, password}));
+    EXPECT_FALSE(store_->enroll_mfa(lake::control::new_uuid_v4(), "lake", {session_id, password}));
+    const auto after = store_->list_sessions(user_id, "lake");
+    ASSERT_TRUE(after);
+    EXPECT_EQ(after->size(), before->size()) << "refusals issue no login sessions";
+    for (const auto& code : original.at("recovery_codes")) {
+        EXPECT_TRUE(store_->verify_mfa_code(user_id, "lake", code.get<std::string>()));
+    }
+    if (postgres_) {
+        pqxx::connection connection(database_uri_);
+        pqxx::read_transaction tx(connection);
+        const auto seed =
+            tx.exec_params("SELECT public_data::text FROM credentials WHERE user_id = $1::uuid "
+                           "AND pool_id = 'lake' AND kind = 'totp'",
+                           user_id)[0][0]
+                .as<std::string>();
+        EXPECT_TRUE(seed == original_seed);
+    }
+    const auto user = store_->get_user(user_id);
+    ASSERT_TRUE(user);
+    const auto recovered =
+        call("recover_with_code",
+             {{"email", user->email}, {"code", original.at("recovery_codes").at(0)}},
+             "");
+    ASSERT_FALSE(recovered.at("ok")) << "step-up consumed the original recovery code";
+
+    const auto replacement = call("enroll_mfa", {{"password", password}}, browser_.at("secret"));
+    ASSERT_TRUE(replacement.at("ok"));
+    for (const auto& code : original.at("recovery_codes")) {
+        EXPECT_FALSE(store_->verify_mfa_code(user_id, "lake", code.get<std::string>()));
+    }
+    EXPECT_TRUE(store_->verify_mfa_code(
+        user_id, "lake", replacement.at("value").at("recovery_codes").at(0).get<std::string>()));
+    ASSERT_TRUE(store_->revoke_session(user_id, session_id));
+    EXPECT_FALSE(store_->enroll_mfa(user_id, "lake", {session_id, password}));
+}
+
+TEST_P(TokenAttenuation, MfaEnrollmentCannotCrossApplicationPools) {
+    const auto customer =
+        lake::test::personal_customer(*store_, browser_.at("session").at("user_id"));
+    ASSERT_TRUE(customer);
+    const std::string workspace_id = lake::test::ready_workspace(
+        *store_, workspace_dir_, customer->id, "mfa", postgres_ ? database_uri_ : "");
+    const auto application = call("register_application",
+                                  {{"customer_id", customer->id},
+                                   {"workspace_id", workspace_id},
+                                   {"name", "MFA pool"},
+                                   {"allowed_origins", {"https://client.example.test"}},
+                                   {"redirect_uris", {"https://client.example.test/callback"}}},
+                                  operator_secret_);
+    ASSERT_TRUE(application.at("ok"));
+    const std::string pool_id = application.at("value").at("pool_id");
+    const std::string suffix = lake::control::new_uuid_v4();
+    const std::string password = "correct horse battery staple";
+    const auto signup = call(
+        "sign_up_password",
+        with_identity(
+            {{"pool_id", pool_id}, {"email", suffix + "@example.test"}, {"password", password}},
+            *store_,
+            pool_id,
+            suffix,
+            postgres_),
+        "");
+    ASSERT_TRUE(signup.at("ok"));
+    const auto account = signup.at("value");
+    const auto token = issue(account, {"enroll_mfa"}, 60);
+    const auto refused = call("enroll_mfa", {{"password", password}}, token.at("secret"));
+    EXPECT_FALSE(refused.at("ok").get<bool>());
+    EXPECT_FALSE(refused.contains("value"));
+    const std::string user_id = account.at("session").at("user_id");
+    EXPECT_FALSE(store_->enroll_mfa(user_id, "lake", {account.at("session").at("id"), password}));
+    EXPECT_FALSE(store_->enroll_mfa(user_id, pool_id, {browser_.at("session").at("id"), password}));
+    const auto enrollment = call("enroll_mfa", {{"password", password}}, account.at("secret"));
+    ASSERT_TRUE(enrollment.at("ok"));
+    EXPECT_TRUE(store_->verify_mfa_code(
+        user_id, pool_id, enrollment.at("value").at("recovery_codes").at(0).get<std::string>()));
+    const auto lake_enrolled = store_->mfa_enrolled(browser_.at("session").at("user_id"), "lake");
+    ASSERT_TRUE(lake_enrolled);
+    EXPECT_FALSE(*lake_enrolled);
+}
 
 TEST_P(TokenAttenuation, ScopeLifetimeAndRecursiveRevocation) {
     const auto parent = issue(browser_, {"create_token"}, 60);

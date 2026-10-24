@@ -24,9 +24,14 @@ pull receives zero bytes, and the source and destination trees match.
 
 ## `/v1` capabilities
 
-All capabilities use the repository policy object. Read capabilities allow anonymous access only
-when the repository is public; action capabilities require repository `write` access. They are
-registered once and therefore appear in `/v1/openapi.json` and `POST /mcp` automatically.
+Repository capabilities use the repository policy object. Read capabilities allow anonymous
+access only when the repository is public; action capabilities require repository `write`
+access. Without `revision`, `get_dataset` and `get_model` read private workspace metadata and
+require a signed-in Lake caller with `read` on the customer that owns the workspace (lake#970,
+LSR-104). Supplying `customer_id` and `workspace_id` grants no access. The shared workspace
+customer resolver requires authentication before accepting either an explicit customer or an
+Application Agent task's customer; Registry enforces credential scopes and customer `read` before
+dispatch. All capabilities are registered once for `/v1/openapi.json` and `POST /mcp`.
 
 | Capability | Input | Result |
 |---|---|---|
@@ -220,6 +225,14 @@ model and dataset transfers.
 
 ## Verification
 
+- `Workspaces.DatasetAndModelMetadataRequireAuthenticatedCustomerRead` checks both metadata
+  capabilities through the REST registry path and MCP, including the `model_id` alias and
+  workspace URL context. Anonymous callers, unrelated signed-in people and credentials without
+  the capability scope are refused before any workspace exchange; the customer owner succeeds.
+- `Models.AnonymousDatasetAndModelRevisionsRequirePublicRepositories` keeps anonymous model and
+  dataset revision reads working for public repositories and refuses private repositories.
+  Change workspace admission in `workspace_dataset_customer` in `src/api/model_capabilities.cpp`
+  and retain these checks when changing either capability's repository/workspace dispatch.
 - `ModelSync.MultiGigabyteRevisionsDeduplicateAndResumePull` uses a process-unique temporary
   repository root so concurrent test processes cannot share fixture state, and proves measured
   deduplication and repeat-pull resumption with a 4 GiB logical two-revision model.

@@ -219,12 +219,14 @@ append-only Merkle log, and publishes signed checkpoints that bind its size and 
 can require witness cosignatures before they become current. Anyone can check, without a key:
 
 - `GET /v1/transparency_checkpoint`: the current signed checkpoint.
-- `GET /v1/transparency_identity_scan?identity=<TAAP identity>`: every attestation that names an
-  identity, after recomputing the whole log's root; a changed or missing entry fails the scan rather
-  than returning partial results. The **Transparency Monitor** page (`/transparency`) runs it: enter
-  an identity and press **Scan**.
-- `GET /v1/transparency_proof_bundle?leaf_index=0`: a self-contained bundle (checkpoint, tiles and an
-  inclusion proof) that liquid's verifier checks offline, with no further call to Lake.
+- `GET /v1/transparency_identity_scan?identity=<TAAP identity>`: the attestations that name an
+  identity, 100 a page (`next_index` is the next page's `start_index`), after checking the log
+  against the signed root; a changed or missing entry fails the scan rather than returning partial
+  results. The **Transparency Monitor** page (`/transparency`) runs it: enter an identity and press
+  **Scan**.
+- `GET /v1/transparency_proof_bundle?leaf_index=0`: a bundle (checkpoint, tiles and an inclusion
+  proof) that liquid's verifier checks offline, with no further call to Lake. It carries 16 tiles
+  a page; a larger log's later pages name the first page's `tree_size` and `next_tile_offset`.
 
 Two different checkpoints for the same log size are evidence of a split view, and liquid's verifier
 refuses the second.

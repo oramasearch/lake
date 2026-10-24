@@ -27,7 +27,7 @@ if(NOT DEFINED CMAKE_CXX_COMPILER AND NOT LAKE_USE_SYSTEM_COMPILER)
   endif()
 endif()
 
-project(lake VERSION 0.4.0 LANGUAGES C CXX)
+project(lake VERSION 0.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -182,7 +182,11 @@ if(NOT EXISTS "${LAKE_ZETTA_SOURCE_DIR}/include/zetta/connect/http_transport.hpp
 endif()
 add_library(zetta-api STATIC
   "${LAKE_ZETTA_SOURCE_DIR}/src/core/connect/http_transport.cpp"
+  "${LAKE_ZETTA_SOURCE_DIR}/src/core/connect/egress_policy.cpp"
+  "${LAKE_ZETTA_SOURCE_DIR}/src/core/connect/connector_destinations.cpp"
+  "${LAKE_ZETTA_SOURCE_DIR}/src/core/connect/destination_policy.cpp"
   "${LAKE_ZETTA_SOURCE_DIR}/src/core/api/native_http_transport.cpp"
+  "${LAKE_ZETTA_SOURCE_DIR}/src/core/api/system_trust_store.cpp"
   "${LAKE_ZETTA_SOURCE_DIR}/src/core/runtime.cpp")
 target_compile_features(zetta-api PUBLIC cxx_std_26)
 target_include_directories(zetta-api PUBLIC "${LAKE_ZETTA_SOURCE_DIR}/include")
@@ -209,6 +213,7 @@ add_subdirectory(modules/libpqxx EXCLUDE_FROM_ALL)
 # REST / OpenAPI / MCP renderings, the control-plane store interface and the in-memory store.
 add_library(lake-core STATIC
   src/control/apps.cpp
+  src/control/order_entitlements.cpp
   src/control/builds.cpp
   ${LAKE_EMBEDDED_FONTS_CPP}
   ${LAKE_EMBEDDED_GUIDE_CPP}
@@ -267,6 +272,7 @@ add_library(lake-core STATIC
   src/api/markdown.cpp
   src/api/oauth.cpp
   src/api/saml.cpp
+  src/api/oidc_jwks.cpp
   src/api/clerk.cpp
   src/api/workspace_capabilities.cpp
   src/api/repository_records_api.cpp

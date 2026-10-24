@@ -284,7 +284,8 @@ TEST(ApplicationAuth, RegistrationHostedIdentityJwtWebhooksAndIsolation) {
                                                {"email", "user@example.test"},
                                                {"password", "correct horse battery staple"}});
     EXPECT_FALSE(cross_pool.ok);
-    EXPECT_EQ(cross_pool.error.code, "unauthorized");
+    // Credential failures share the generic 401 (lake#966).
+    EXPECT_EQ(cross_pool.error.code, "unauthenticated");
 }
 
 TEST(ApplicationAuth, HostedRenderersApplyThemeAndLimitScriptsToWebAuthn) {

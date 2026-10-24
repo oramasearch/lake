@@ -10,6 +10,7 @@
 #include <tuple>
 
 #include "lake/control/agent_runs.hpp"
+#include "lake/control/authentication.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/metering.hpp"
@@ -1735,6 +1736,9 @@ Result<ManagedStore> InMemoryStore::withdraw_store(const std::string& id) {
 
 Result<AgentLaunch> InMemoryStore::create_agent_launch(const NewAgentLaunch& in) {
     std::lock_guard lock(mutex_);
+    if (auto active = active_delegator_locked(in.created_by_user_id); !active) {
+        return std::unexpected(active.error());
+    }
     if (std::ranges::none_of(customers_,
                              [&](const Customer& value) { return value.id == in.customer_id; })) {
         return std::unexpected(StoreError{"not_found", "no customer " + in.customer_id});
@@ -2158,6 +2162,9 @@ InMemoryStore::put_methodology_deployment_status(const std::string& id,
 Result<AgentCronSchedule>
 InMemoryStore::create_agent_cron_schedule(const NewAgentCronSchedule& in) {
     std::lock_guard lock(mutex_);
+    if (auto active = active_delegator_locked(in.created_by_user_id); !active) {
+        return std::unexpected(active.error());
+    }
     if (std::ranges::none_of(customers_,
                              [&](const Customer& value) { return value.id == in.customer_id; })) {
         return std::unexpected(StoreError{"not_found", "no customer " + in.customer_id});
@@ -2324,6 +2331,9 @@ Result<void> InMemoryStore::put_agent_cron_run(const std::string& schedule_id,
 
 Result<AgentTask> InMemoryStore::create_agent_task(const AgentTask& in) {
     std::lock_guard lock(mutex_);
+    if (auto active = active_delegator_locked(in.requested_by_user_id); !active) {
+        return std::unexpected(active.error());
+    }
     if (std::ranges::none_of(workspaces_, [&](const Workspace& workspace) {
             return workspace.id == in.workspace_id && workspace.customer_id == in.customer_id &&
                    workspace.desired != "deleted";
@@ -2447,6 +2457,9 @@ Result<AgentTask> InMemoryStore::claim_agent_task(const std::string& id,
     if (found == agent_tasks_.end() || found->desired != "present") {
         return std::unexpected(StoreError{"not_found", "no agent task " + id});
     }
+    if (auto active = active_delegator_locked(found->requested_by_user_id); !active) {
+        return std::unexpected(active.error());
+    }
     if (found->agent != agent || !found->phase.empty() || found->retry_notice_pending) {
         return std::unexpected(StoreError{"conflict", "the task is not waiting for " + agent});
     }
@@ -2469,9 +2482,13 @@ Result<void> InMemoryStore::renew_agent_task_lease(const std::string& id,
                                                    const std::string& credential_sha256) {
     std::lock_guard lock(mutex_);
     const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
-    if (found == agent_tasks_.end() || found->phase != "Running" || credential_sha256.empty() ||
+    if (found == agent_tasks_.end() || found->desired != "present" || found->phase != "Running" ||
+        credential_sha256.empty() ||
         !constant_time_hex_equal(found->credential_sha256, credential_sha256)) {
         return std::unexpected(StoreError{"conflict", "the task claim is no longer active"});
+    }
+    if (auto active = active_delegator_locked(found->requested_by_user_id); !active) {
+        return std::unexpected(active.error());
     }
     const auto lease = std::chrono::seconds(found->lease_seconds);
     found->lease_until = iso8601_at(std::chrono::system_clock::now() + lease);
@@ -3229,7 +3246,9 @@ Result<CloudOrder> InMemoryStore::transition_cloud_order(const CloudOrderTransit
 Result<CloudOrderPaymentResult>
 InMemoryStore::apply_cloud_order_payment(const CloudOrderPayment& payment) {
     if (payment.provider.empty() || payment.event_id.empty() || payment.event_id.size() > 255 ||
-        (payment.state != "paid" && payment.state != "cancelled")) {
+        (payment.state != "paid" && payment.state != "cancelled") || payment.grace_seconds < 0 ||
+        payment.grace_seconds > 30 * 86400 || payment.checkout_session_id.size() > 255 ||
+        payment.subscription_id.size() > 255 || payment.customer_id.size() > 255) {
         return std::unexpected(StoreError{"invalid_input",
                                           "an order payment needs its provider, its id and a "
                                           "state of paid or cancelled"});
@@ -3248,6 +3267,25 @@ InMemoryStore::apply_cloud_order_payment(const CloudOrderPayment& payment) {
     if (found == cloud_orders_.end()) {
         return result;
     }
+    if (!payment.order_id.empty() && payment.order_id != found->id) {
+        return result;
+    }
+    if (found->state != "pending_payment") {
+        result.matched = true;
+        result.order = *found;
+        return result;
+    }
+    if ((!found->stripe_subscription_id.empty() && !payment.subscription_id.empty() &&
+         found->stripe_subscription_id != payment.subscription_id) ||
+        (!found->stripe_customer_id.empty() && !payment.customer_id.empty() &&
+         found->stripe_customer_id != payment.customer_id) ||
+        (!payment.subscription_id.empty() &&
+         std::ranges::any_of(cloud_orders_, [&](const CloudOrder& other) {
+             return other.id != found->id &&
+                    other.stripe_subscription_id == payment.subscription_id;
+         }))) {
+        return result;
+    }
     result.matched = true;
     if (found->state == "pending_payment") {
         found->state = payment.state;
@@ -3257,6 +3295,16 @@ InMemoryStore::apply_cloud_order_payment(const CloudOrderPayment& payment) {
         if (!payment.subscription_id.empty()) {
             found->stripe_subscription_id = payment.subscription_id;
         }
+        if (payment.state == "paid" && found->entitlement.access_until == 0 &&
+            (found->entitlement.subscription_status == "pending" ||
+             found->entitlement.subscription_status == "incomplete") &&
+            !found->stripe_subscription_id.empty()) {
+            found->entitlement.access_until =
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count();
+            found->entitlement.grace_seconds = payment.grace_seconds;
+        }
         found->updated_at = now_iso8601();
         cloud_order_event_locked(found->id,
                                  "pending_payment",
@@ -3265,6 +3313,47 @@ InMemoryStore::apply_cloud_order_payment(const CloudOrderPayment& payment) {
                                  payment.event_type + " " + payment.event_id +
                                      (payment.detail.empty() ? "" : ": " + payment.detail));
         result.changed = true;
+    }
+    result.order = *found;
+    return result;
+}
+
+Result<CloudOrderPaymentResult>
+InMemoryStore::apply_cloud_order_subscription(const CloudOrderSubscriptionEvent& event) {
+    if (!valid_cloud_order_subscription_event(event)) {
+        return std::unexpected(StoreError{"invalid_input", "invalid order subscription event"});
+    }
+    std::lock_guard lock(mutex_);
+    CloudOrderPaymentResult result;
+    if (!payment_events_.insert({event.provider, event.event_id}).second) {
+        result.duplicate = true;
+        return result;
+    }
+    auto found = std::ranges::find(
+        cloud_orders_, event.subscription_id, &CloudOrder::stripe_subscription_id);
+    if (found == cloud_orders_.end()) {
+        found = std::ranges::find(cloud_orders_, event.order_id, &CloudOrder::id);
+        if (found == cloud_orders_.end() || found->state != "pending_payment" ||
+            !found->stripe_subscription_id.empty()) {
+            return result;
+        }
+    }
+    if (found->path != "checkout" || (!event.order_id.empty() && event.order_id != found->id) ||
+        (!found->stripe_customer_id.empty() && found->stripe_customer_id != event.customer_id)) {
+        return result;
+    }
+    found->stripe_subscription_id = event.subscription_id;
+    found->stripe_customer_id = event.customer_id;
+    result.matched = true;
+    result.changed = apply_cloud_order_entitlement(found->entitlement, event);
+    if (result.changed) {
+        found->updated_at = now_iso8601();
+        cloud_order_event_locked(found->id,
+                                 found->state,
+                                 found->state,
+                                 "stripe",
+                                 event.event_type + " " + event.event_id + ": subscription " +
+                                     event.status);
     }
     result.order = *found;
     return result;
@@ -3581,7 +3670,12 @@ nlohmann::json to_json(const RecoveryNotification& value) {
             {"user_id", value.user_id},
             {"device_id", value.device_id},
             {"kind", value.kind},
-            {"created_at", value.created_at}};
+            {"created_at", value.created_at},
+            {"cancel_action",
+             {{"capability", "cancel_recovery"},
+              {"href", "/v1/cancel_recovery"},
+              {"method", "POST"},
+              {"input", {{"recovery_id", value.recovery_id}}}}}};
 }
 
 nlohmann::json to_json(const RecoveryContact& value, bool include_wrapped_key) {
@@ -3855,25 +3949,98 @@ Result<IssuedSession> InMemoryStore::sign_up_password(const NewPasswordUser& inp
     return issued;
 }
 
-Result<IssuedSession> InMemoryStore::sign_in_password(const PasswordSignIn& input) {
+Result<AuthenticationAttempt>
+InMemoryStore::authentication_attempt(const std::string& pool_id,
+                                      const std::string& email,
+                                      const std::string& user_id,
+                                      const std::string& client_address) {
     std::lock_guard lock(mutex_);
-    const std::string pool = input.pool_id.empty() ? "lake" : input.pool_id;
+    const auto now = std::chrono::steady_clock::now();
+    std::string pool = pool_id.empty() ? "lake" : pool_id;
+    std::string subject = user_id.empty() ? "email:" + lower(email) : "user:" + user_id;
     for (const auto& credential : passwords_) {
-        if (credential.pool_id != pool || lower(credential.email) != lower(input.email))
-            continue;
-        if (!identity_crypto::verify_secret(credential.password, input.password))
-            return std::unexpected(StoreError{"unauthorized", "invalid email or password"});
-        if (!credential.totp_secret.empty())
-            return std::unexpected(StoreError{"mfa_required", "TOTP verification is required"});
-        Device& device = add_device(devices_, credential.user_id, input.device_name);
-        IssuedSession issued = add_session(
-            sessions_, credential.user_id, pool, device.id, "browser", "", {"*"}, "", 86400);
-        if (issued.secret.empty())
-            return std::unexpected(StoreError{"store_error", "could not issue session"});
-        issued.session.reason.clear();
-        return issued;
+        if ((!user_id.empty() && credential.user_id == user_id) ||
+            (user_id.empty() && credential.pool_id == pool &&
+             lower(credential.email) == lower(email))) {
+            subject = "user:" + credential.user_id;
+            pool = credential.pool_id;
+            break;
+        }
     }
-    return std::unexpected(StoreError{"unauthorized", "invalid email or password"});
+    const std::string key = identity_crypto::sha256_hex(
+        client_address.empty()
+            ? (subject.starts_with("user:") ? nlohmann::json::array({subject}).dump()
+                                            : nlohmann::json::array({pool, subject}).dump())
+            : "client:" + client_address);
+    const auto reserve =
+        [&](const std::string& bucket_key, unsigned limit, bool account) -> Result<std::string> {
+        if (bucket_key.size() != 64)
+            return std::unexpected(StoreError{"store_error", "could not hash authentication key"});
+        const auto window = authentication_budgets_.reserve(bucket_key, limit, new_uuid_v4(), now);
+        if (!window)
+            return std::unexpected(account && window.error() ==
+                                                  AuthenticationAttempts::Refusal::exhausted
+                                       ? invalid_authentication()
+                                       : authentication_cooldown());
+        return *window;
+    };
+    // Only per-account and per-client budgets: no instance-wide ceiling, so failures against
+    // other accounts can never lock everyone out of sign-in (lake#966).
+    auto window = reserve(key, client_address.empty() ? 10 : 100, client_address.empty());
+    if (!window)
+        return std::unexpected(window.error());
+    return AuthenticationAttempt{key, *window};
+}
+
+Result<void> InMemoryStore::authentication_attempt_finished(const AuthenticationAttempt& attempt,
+                                                            AuthenticationOutcome outcome) {
+    std::lock_guard lock(mutex_);
+    authentication_budgets_.finish(attempt.key, attempt.window_id, outcome, true);
+    return {};
+}
+
+Result<IssuedSession> InMemoryStore::sign_in_password(const PasswordSignIn& input) {
+    return authentication_call(
+        *this,
+        input.pool_id,
+        input.email,
+        "",
+        [&](AuthenticationOutcome&) -> Result<IssuedSession> {
+            std::unique_lock lock(mutex_);
+            const std::string pool = input.pool_id.empty() ? "lake" : input.pool_id;
+            const auto candidate =
+                std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
+                    return value.pool_id == pool && lower(value.email) == lower(input.email);
+                });
+            if (candidate != passwords_.end()) {
+                const PasswordCredential credential = *candidate;
+
+                lock.unlock();
+                if (!identity_crypto::verify_secret(credential.password, input.password))
+                    return std::unexpected(StoreError{"unauthorized", "invalid email or password"});
+                if (!credential.totp_secret.empty())
+                    return std::unexpected(
+                        StoreError{"mfa_required", "TOTP verification is required"});
+                lock.lock();
+                const auto current =
+                    std::ranges::find(passwords_, credential.user_id, &PasswordCredential::user_id);
+                if (current == passwords_.end() || current->password != credential.password ||
+                    current->totp_secret != credential.totp_secret ||
+                    current->recovery_hashes != credential.recovery_hashes)
+                    return std::unexpected(
+                        StoreError{"unauthorized", "authentication credentials changed; retry"});
+                if (auto active = active_delegator_locked(current->user_id); !active)
+                    return std::unexpected(active.error());
+                Device& device = add_device(devices_, current->user_id, input.device_name);
+                IssuedSession issued = add_session(
+                    sessions_, current->user_id, pool, device.id, "browser", "", {"*"}, "", 86400);
+                if (issued.secret.empty())
+                    return std::unexpected(StoreError{"store_error", "could not issue session"});
+                issued.session.reason.clear();
+                return issued;
+            }
+            return std::unexpected(StoreError{"unauthorized", "invalid email or password"});
+        });
 }
 
 Result<IssuedSession> InMemoryStore::sign_in_taap(const TaapSignIn& input) {
@@ -3899,6 +4066,8 @@ Result<IssuedSession> InMemoryStore::sign_in_taap(const TaapSignIn& input) {
     if (user == users_.end() || credential == passwords_.end()) {
         return std::unexpected(StoreError{"unauthorized", "TAAP identity is not registered"});
     }
+    if (auto active = active_delegator_locked(user->id); !active)
+        return std::unexpected(active.error());
     Device& device = add_device(devices_, user->id, input.device_name);
     IssuedSession issued =
         add_session(sessions_, user->id, input.pool_id, device.id, "taap", "", {"*"}, "", 86400);
@@ -3910,39 +4079,80 @@ Result<IssuedSession> InMemoryStore::sign_in_taap(const TaapSignIn& input) {
 }
 
 Result<MfaEnrollment> InMemoryStore::enroll_mfa(const std::string& user_id,
-                                                const std::string& pool_id) {
-    MfaEnrollment enrollment;
-    enrollment.secret = identity_crypto::new_totp_secret();
-    if (enrollment.secret.empty()) {
-        return std::unexpected(StoreError{"store_error", "could not create TOTP secret"});
-    }
-    for (int index = 0; index < 8; ++index) {
-        const std::string code = identity_crypto::random_secret().substr(0, 12);
-        if (code.size() != 12) {
-            return std::unexpected(
-                StoreError{"store_error", "could not create MFA recovery codes"});
-        }
-        enrollment.recovery_codes.push_back(code);
-    }
-    std::lock_guard lock(mutex_);
-    for (auto& credential : passwords_) {
-        if (credential.user_id == user_id && credential.pool_id == pool_id) {
-            credential.totp_secret = enrollment.secret;
-            credential.recovery_hashes.clear();
-            for (const std::string& code : enrollment.recovery_codes) {
+                                                const std::string& pool_id,
+                                                const MfaEnrollmentProof& proof) {
+    return authentication_call(
+        *this, pool_id, "", user_id, [&](AuthenticationOutcome& outcome) -> Result<MfaEnrollment> {
+            outcome = AuthenticationOutcome::neutral;
+            std::unique_lock lock(mutex_);
+            const std::string pool = pool_id.empty() ? "lake" : pool_id;
+            const auto session = std::ranges::find(sessions_, proof.session_id, &Session::id);
+            if (proof.session_id.empty() || session == sessions_.end() ||
+                session->user_id != user_id || session->pool_id != pool ||
+                (session->kind != "browser" && session->kind != "taap") ||
+                session->scopes != std::vector<std::string>{"*"} ||
+                !session->parent_session_id.empty() ||
+                !active_session_lineage(sessions_, devices_, *session) ||
+                disabled_users_.contains(user_id) || deleted_users_.contains(user_id)) {
+                return std::unexpected(
+                    StoreError{"unauthorized",
+                               "MFA enrollment requires an active interactive sign-in session"});
+            }
+            const auto credential = std::ranges::find_if(passwords_, [&](const auto& value) {
+                return value.user_id == user_id && value.pool_id == pool;
+            });
+            if (credential == passwords_.end())
+                return std::unexpected(
+                    StoreError{"unauthorized", "MFA enrollment requires the current password"});
+
+            outcome = AuthenticationOutcome::failure;
+            const std::string password_hash = credential->password;
+            lock.unlock();
+            if (proof.password.empty() ||
+                !identity_crypto::verify_secret(password_hash, proof.password))
+                return std::unexpected(
+                    StoreError{"unauthorized", "MFA enrollment requires the current password"});
+            MfaEnrollment enrollment;
+            enrollment.secret = identity_crypto::new_totp_secret();
+            if (enrollment.secret.empty()) {
+                return std::unexpected(StoreError{"store_error", "could not create TOTP secret"});
+            }
+            std::map<std::string, std::string> recovery_hashes;
+            for (int index = 0; index < 8; ++index) {
+                const std::string code = identity_crypto::new_recovery_code();
+                if (code.empty()) {
+                    return std::unexpected(
+                        StoreError{"store_error", "could not create MFA recovery codes"});
+                }
                 const std::string hash = identity_crypto::hash_secret(code);
                 if (hash.empty()) {
-                    credential.totp_secret.clear();
-                    credential.recovery_hashes.clear();
                     return std::unexpected(
                         StoreError{"store_error", "could not protect MFA recovery codes"});
                 }
-                credential.recovery_hashes.push_back(hash);
+                enrollment.recovery_codes.push_back(code);
+                const auto selector = identity_crypto::recovery_selector(code);
+                if (selector.empty())
+                    return std::unexpected(
+                        StoreError{"store_error", "could not select recovery code"});
+                recovery_hashes.emplace(selector, hash);
             }
+            lock.lock();
+            const auto current =
+                std::ranges::find(passwords_, user_id, &PasswordCredential::user_id);
+            const auto active = std::ranges::find(sessions_, proof.session_id, &Session::id);
+            if (current == passwords_.end() || current->password != password_hash ||
+                active == sessions_.end() ||
+                !active_session_lineage(sessions_, devices_, *active) ||
+                disabled_users_.contains(user_id) || deleted_users_.contains(user_id))
+                return std::unexpected(
+                    StoreError{"unauthorized", "MFA enrollment proof changed; retry"});
+            // Stage the complete replacement so any failure above preserves the original
+            // factor/codes.
+            current->totp_secret = enrollment.secret;
+            current->last_totp_step = -1;
+            current->recovery_hashes = std::move(recovery_hashes);
             return enrollment;
-        }
-    }
-    return std::unexpected(StoreError{"not_found", "password credential not found"});
+        });
 }
 
 Result<bool> InMemoryStore::mfa_enrolled(const std::string& user_id, const std::string& pool_id) {
@@ -3960,76 +4170,138 @@ Result<bool> InMemoryStore::mfa_enrolled(const std::string& user_id, const std::
 Result<void> InMemoryStore::verify_mfa_code(const std::string& user_id,
                                             const std::string& pool_id,
                                             const std::string& code) {
-    std::lock_guard lock(mutex_);
-    for (const auto& credential : passwords_) {
-        if (credential.user_id != user_id || credential.pool_id != pool_id ||
-            credential.totp_secret.empty()) {
-            continue;
-        }
-        if (identity_crypto::verify_totp(credential.totp_secret, code) ||
-            std::ranges::any_of(credential.recovery_hashes, [&](const std::string& hash) {
-                return identity_crypto::verify_secret(hash, code);
-            })) {
+    return authentication_call(
+        *this, pool_id, "", user_id, [&](AuthenticationOutcome&) -> Result<void> {
+            std::unique_lock lock(mutex_);
+            const auto candidate =
+                std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
+                    return value.user_id == user_id && value.pool_id == pool_id &&
+                           !value.totp_secret.empty();
+                });
+            if (candidate == passwords_.end())
+                return std::unexpected(invalid_authentication());
+            const PasswordCredential credential = *candidate;
+            lock.unlock();
+            const auto step = identity_crypto::totp_step(credential.totp_secret, code);
+            const auto recovery =
+                credential.recovery_hashes.find(identity_crypto::recovery_selector(code));
+            if (!step && (recovery == credential.recovery_hashes.end() ||
+                          !identity_crypto::verify_secret(recovery->second, code)))
+                return std::unexpected(invalid_authentication());
+            lock.lock();
+            const auto current =
+                std::ranges::find(passwords_, user_id, &PasswordCredential::user_id);
+            if (current == passwords_.end() || current->password != credential.password ||
+                current->totp_secret != credential.totp_secret ||
+                current->recovery_hashes != credential.recovery_hashes)
+                return std::unexpected(invalid_authentication());
+            if (step) {
+                if (*step <= current->last_totp_step)
+                    return std::unexpected(invalid_authentication());
+                current->last_totp_step = *step;
+            } else {
+                current->recovery_hashes.erase(recovery->first);
+            }
             return {};
-        }
-        return std::unexpected(StoreError{"unauthorized", "a fresh MFA verification is required"});
-    }
-    return std::unexpected(StoreError{"not_found", "MFA is not enrolled"});
+        });
 }
 
 Result<void> InMemoryStore::disable_mfa(const std::string& user_id,
                                         const std::string& pool_id,
                                         const std::string& code) {
-    std::lock_guard lock(mutex_);
-    for (auto& credential : passwords_) {
-        if (credential.user_id != user_id || credential.pool_id != pool_id ||
-            credential.totp_secret.empty()) {
-            continue;
-        }
-        const bool valid_totp = identity_crypto::verify_totp(credential.totp_secret, code);
-        const auto recovery = std::find_if(
-            credential.recovery_hashes.begin(),
-            credential.recovery_hashes.end(),
-            [&](const std::string& hash) { return identity_crypto::verify_secret(hash, code); });
-        if (valid_totp || recovery != credential.recovery_hashes.end()) {
-            credential.totp_secret.clear();
-            credential.recovery_hashes.clear();
+    return authentication_call(
+        *this, pool_id, "", user_id, [&](AuthenticationOutcome&) -> Result<void> {
+            std::unique_lock lock(mutex_);
+            const auto candidate =
+                std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
+                    return value.user_id == user_id && value.pool_id == pool_id &&
+                           !value.totp_secret.empty();
+                });
+            if (candidate == passwords_.end())
+                return std::unexpected(invalid_authentication());
+            const PasswordCredential credential = *candidate;
+            lock.unlock();
+            const auto step = identity_crypto::totp_step(credential.totp_secret, code);
+            const auto recovery =
+                credential.recovery_hashes.find(identity_crypto::recovery_selector(code));
+            if (!step && (recovery == credential.recovery_hashes.end() ||
+                          !identity_crypto::verify_secret(recovery->second, code)))
+                return std::unexpected(invalid_authentication());
+            lock.lock();
+            const auto current =
+                std::ranges::find(passwords_, user_id, &PasswordCredential::user_id);
+            if (current == passwords_.end() || current->password != credential.password ||
+                current->totp_secret != credential.totp_secret ||
+                current->recovery_hashes != credential.recovery_hashes)
+                return std::unexpected(invalid_authentication());
+            if (step) {
+                if (*step <= current->last_totp_step)
+                    return std::unexpected(invalid_authentication());
+                current->last_totp_step = *step;
+            } else {
+                current->recovery_hashes.erase(recovery->first);
+            }
+            current->totp_secret.clear();
+            current->recovery_hashes.clear();
             return {};
-        }
-    }
-    return std::unexpected(StoreError{"unauthorized", "a fresh MFA verification is required"});
+        });
 }
 
 Result<IssuedSession> InMemoryStore::sign_in_totp(const PasswordSignIn& input) {
-    std::lock_guard lock(mutex_);
-    const std::string pool = input.pool_id.empty() ? "lake" : input.pool_id;
-    for (auto& credential : passwords_) {
-        if (credential.pool_id != pool || lower(credential.email) != lower(input.email))
-            continue;
-        const bool valid_totp =
-            identity_crypto::verify_totp(credential.totp_secret, input.totp_code);
-        auto recovery =
-            std::find_if(credential.recovery_hashes.begin(),
-                         credential.recovery_hashes.end(),
-                         [&](const std::string& hash) {
-                             return identity_crypto::verify_secret(hash, input.totp_code);
-                         });
-        if (!identity_crypto::verify_secret(credential.password, input.password) ||
-            (!valid_totp && recovery == credential.recovery_hashes.end())) {
+    return authentication_call(
+        *this,
+        input.pool_id,
+        input.email,
+        "",
+        [&](AuthenticationOutcome&) -> Result<IssuedSession> {
+            std::unique_lock lock(mutex_);
+            const std::string pool = input.pool_id.empty() ? "lake" : input.pool_id;
+            const auto candidate =
+                std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
+                    return value.pool_id == pool && lower(value.email) == lower(input.email);
+                });
+            if (candidate != passwords_.end()) {
+                const PasswordCredential credential = *candidate;
+
+                lock.unlock();
+                const auto totp =
+                    identity_crypto::totp_step(credential.totp_secret, input.totp_code);
+                auto recovery = credential.recovery_hashes.find(
+                    identity_crypto::recovery_selector(input.totp_code));
+                if (!identity_crypto::verify_secret(credential.password, input.password) ||
+                    (!totp &&
+                     (recovery == credential.recovery_hashes.end() ||
+                      !identity_crypto::verify_secret(recovery->second, input.totp_code)))) {
+                    return std::unexpected(
+                        StoreError{"unauthorized", "invalid credentials or TOTP code"});
+                }
+                lock.lock();
+                const auto current =
+                    std::ranges::find(passwords_, credential.user_id, &PasswordCredential::user_id);
+                if (current == passwords_.end() || current->password != credential.password ||
+                    current->totp_secret != credential.totp_secret ||
+                    current->recovery_hashes != credential.recovery_hashes)
+                    return std::unexpected(
+                        StoreError{"unauthorized", "authentication credentials changed; retry"});
+                if (auto active = active_delegator_locked(current->user_id); !active)
+                    return std::unexpected(active.error());
+                if (totp) {
+                    if (*totp <= current->last_totp_step)
+                        return std::unexpected(invalid_authentication());
+                    current->last_totp_step = *totp;
+                } else {
+                    current->recovery_hashes.erase(recovery->first);
+                }
+                Device& device = add_device(devices_, current->user_id, input.device_name);
+                IssuedSession issued = add_session(
+                    sessions_, current->user_id, pool, device.id, "browser", "", {"*"}, "", 86400);
+                if (issued.secret.empty())
+                    return std::unexpected(StoreError{"store_error", "could not issue session"});
+                issued.session.reason.clear();
+                return issued;
+            }
             return std::unexpected(StoreError{"unauthorized", "invalid credentials or TOTP code"});
-        }
-        if (!valid_totp) {
-            credential.recovery_hashes.erase(recovery);
-        }
-        Device& device = add_device(devices_, credential.user_id, input.device_name);
-        IssuedSession issued = add_session(
-            sessions_, credential.user_id, pool, device.id, "browser", "", {"*"}, "", 86400);
-        if (issued.secret.empty())
-            return std::unexpected(StoreError{"store_error", "could not issue session"});
-        issued.session.reason.clear();
-        return issued;
-    }
-    return std::unexpected(StoreError{"unauthorized", "invalid credentials or TOTP code"});
+        });
 }
 
 Result<WebAuthnChallenge> InMemoryStore::begin_passkey_registration(const std::string& user_id,
@@ -4181,6 +4453,8 @@ Result<IssuedSession> InMemoryStore::sign_in_passkey(const PasskeyAssertion& inp
             return std::unexpected(
                 StoreError{"unauthorized", "passkey sign count did not advance"});
         }
+        if (auto active = active_delegator_locked(credential.user_id); !active)
+            return std::unexpected(active.error());
         credential.sign_count = *sign_count;
         Device& device = add_device(devices_, credential.user_id, input.device_name);
         IssuedSession issued = add_session(sessions_,
@@ -4201,6 +4475,10 @@ Result<IssuedSession> InMemoryStore::sign_in_passkey(const PasskeyAssertion& inp
 }
 
 Result<IssuedSession> InMemoryStore::sign_in_oauth(const OAuthIdentity& input) {
+    if (input.provider == "clerk" && (input.pool_id.empty() || input.pool_id == "lake")) {
+        return std::unexpected(
+            StoreError{"invalid_input", "Clerk requires its verified template exchange"});
+    }
     if (input.provider.empty() || input.subject.empty())
         return std::unexpected(StoreError{"invalid_input", "provider and subject are required"});
     std::lock_guard lock(mutex_);
@@ -4213,6 +4491,8 @@ Result<IssuedSession> InMemoryStore::sign_in_oauth(const OAuthIdentity& input) {
     const std::string subject = input.provider + ":" + input.subject;
     for (const auto& credential : oauth_credentials_) {
         if (credential.pool_id == pool && credential.subject == subject) {
+            if (auto active = active_delegator_locked(credential.user_id); !active)
+                return std::unexpected(active.error());
             Device& device = add_device(devices_, credential.user_id, input.device_name);
             IssuedSession issued = add_session(
                 sessions_, credential.user_id, pool, device.id, "browser", "", {"*"}, "", 86400);
@@ -4293,6 +4573,26 @@ Result<ClerkUserProvisioned> InMemoryStore::clerk_user_locked(const ClerkIdentit
                                 now,
                                 now});
     }
+    if (const auto state = clerk_user_states_.find(input.subject);
+        state != clerk_user_states_.end()) {
+        if (state->second.suspended || state->second.deleted) {
+            auto user = std::ranges::find(users_, result.user_id, &User::id);
+            user->clerk_suspended = true;
+            revoke_agent_delegations_locked(result.user_id);
+            const auto now = now_iso8601();
+            for (auto& session : sessions_) {
+                if (session.user_id == result.user_id && session.revoked_at.empty())
+                    session.revoked_at = now;
+            }
+            for (auto& device : devices_) {
+                if (device.user_id == result.user_id && device.revoked_at.empty())
+                    device.revoked_at = now;
+            }
+        }
+        if (state->second.deleted) {
+            disabled_users_.insert(result.user_id);
+        }
+    }
     for (const auto& user : users_) {
         if (user.id == result.user_id) {
             result.taap_id = user.taap_id;
@@ -4302,14 +4602,35 @@ Result<ClerkUserProvisioned> InMemoryStore::clerk_user_locked(const ClerkIdentit
 }
 
 Result<IssuedSession> InMemoryStore::sign_in_clerk(const ClerkIdentity& input) {
-    std::lock_guard lock(mutex_);
-    const auto found = clerk_user_locked(input);
-    if (!found) {
-        return std::unexpected(found.error());
+    if (input.issued_at <= 0 || input.subject.empty() || input.subject.size() > 256) {
+        return std::unexpected(
+            StoreError{"invalid_input", "a Clerk subject and token issue time are required"});
     }
-    if (disabled_users_.contains(found->user_id)) {
+    std::lock_guard lock(mutex_);
+    if (const auto state = clerk_user_states_.find(input.subject);
+        state != clerk_user_states_.end() && (state->second.suspended || state->second.deleted)) {
         return std::unexpected(StoreError{"unauthorized", "this account is disabled"});
     }
+    if (const auto revoked = clerk_revoked_before_.find(input.subject);
+        revoked != clerk_revoked_before_.end() && input.issued_at <= revoked->second / 1000) {
+        return std::unexpected(StoreError{"unauthorized", "the Clerk token predates revocation"});
+    }
+    const auto found = clerk_user_locked(input);
+    if (!found)
+        return std::unexpected(found.error());
+    for (const auto& credential : oauth_credentials_) {
+        if (credential.user_id == found->user_id && credential.pool_id == "lake" &&
+            credential.subject.starts_with("clerk:")) {
+            const auto revoked = clerk_revoked_before_.find(credential.subject.substr(6));
+            if (revoked != clerk_revoked_before_.end() &&
+                input.issued_at <= revoked->second / 1000) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "the Clerk token predates revocation"});
+            }
+        }
+    }
+    if (auto active = active_delegator_locked(found->user_id); !active)
+        return std::unexpected(active.error());
     Device& device = add_device(devices_, found->user_id, input.device_name);
     IssuedSession issued =
         add_session(sessions_, found->user_id, "lake", device.id, "browser", "", {"*"}, "", 86400);
@@ -4317,6 +4638,95 @@ Result<IssuedSession> InMemoryStore::sign_in_clerk(const ClerkIdentity& input) {
         return std::unexpected(StoreError{"store_error", "could not issue session"});
     issued.session.reason.clear();
     return issued;
+}
+
+Result<void> InMemoryStore::revoke_clerk_sessions(const std::string& subject,
+                                                  std::int64_t revoked_at) {
+    if (subject.empty() || subject.size() > 256 || revoked_at < 0) {
+        return std::unexpected(
+            StoreError{"invalid_input", "a Clerk subject and revocation timestamp are required"});
+    }
+    std::lock_guard lock(mutex_);
+    auto [revoked, inserted] = clerk_revoked_before_.try_emplace(subject, -1);
+    if (revoked_at < revoked->second)
+        return {};
+    revoked->second = revoked_at;
+    for (const auto& credential : oauth_credentials_) {
+        if (credential.pool_id == "lake" && credential.subject == "clerk:" + subject) {
+            const auto now = now_iso8601();
+            for (auto& session : sessions_) {
+                if (session.user_id == credential.user_id && session.revoked_at.empty())
+                    session.revoked_at = now;
+            }
+            for (auto& device : devices_) {
+                if (device.user_id == credential.user_id && device.revoked_at.empty())
+                    device.revoked_at = now;
+            }
+        }
+    }
+    return {};
+}
+
+Result<bool> InMemoryStore::apply_clerk_user_state(const ClerkUserState& input) {
+    if (input.subject.empty() || input.subject.size() > 256 || input.updated_at < 0) {
+        return std::unexpected(
+            StoreError{"invalid_input", "a Clerk subject and state timestamp are required"});
+    }
+    std::lock_guard lock(mutex_);
+    const std::string subject = "clerk:" + input.subject;
+    std::string user_id;
+    for (const auto& credential : oauth_credentials_) {
+        if (credential.pool_id == "lake" && credential.subject == subject) {
+            user_id = credential.user_id;
+        }
+    }
+    auto state = clerk_user_states_.find(input.subject);
+    const std::int64_t latest = state == clerk_user_states_.end() ? -1 : state->second.updated_at;
+    // A retry after security state committed must still finish provisioning/profile work.
+    if (state != clerk_user_states_.end() && input.updated_at == latest &&
+        state->second.updated_at == latest && state->second.deleted == input.deleted &&
+        state->second.suspended == (input.suspended || input.deleted)) {
+        return true;
+    }
+    if ((state != clerk_user_states_.end() && state->second.deleted) || input.updated_at < latest ||
+        (input.updated_at == latest && !input.suspended && !input.deleted)) {
+        return false;
+    }
+    if (input.suspended || input.deleted) {
+        auto [revoked, inserted] = clerk_revoked_before_.try_emplace(input.subject, -1);
+        revoked->second = std::max(revoked->second, input.updated_at);
+    }
+    clerk_user_states_[input.subject] = input;
+    clerk_user_states_[input.subject].updated_at = std::max(latest, input.updated_at);
+    clerk_user_states_[input.subject].suspended = input.suspended || input.deleted;
+    if (!user_id.empty()) {
+        bool suspended = false;
+        for (const auto& credential : oauth_credentials_) {
+            if (credential.user_id == user_id && credential.pool_id == "lake" &&
+                credential.subject.starts_with("clerk:")) {
+                const auto linked = clerk_user_states_.find(credential.subject.substr(6));
+                suspended |= linked != clerk_user_states_.end() && linked->second.suspended;
+            }
+        }
+        auto user = std::ranges::find(users_, user_id, &User::id);
+        user->clerk_suspended = suspended;
+        if (input.deleted) {
+            disabled_users_.insert(user_id);
+        }
+        if (input.suspended || input.deleted) {
+            revoke_agent_delegations_locked(user_id);
+            const std::string now = now_iso8601();
+            for (auto& session : sessions_) {
+                if (session.user_id == user_id && session.revoked_at.empty())
+                    session.revoked_at = now;
+            }
+            for (auto& device : devices_) {
+                if (device.user_id == user_id && device.revoked_at.empty())
+                    device.revoked_at = now;
+            }
+        }
+    }
+    return true;
 }
 
 Result<ClerkUserProvisioned> InMemoryStore::provision_clerk_user(const ClerkIdentity& input) {
@@ -4353,6 +4763,50 @@ Result<std::string> InMemoryStore::update_clerk_user(const ClerkIdentity& input)
     return user_id;
 }
 
+Result<void> InMemoryStore::active_delegator_locked(const std::string& user_id) const {
+    if (user_id.empty()) {
+        return {}; // system work carries no person's authority
+    }
+    const auto user = std::ranges::find(users_, user_id, &User::id);
+    if (user == users_.end() || !user->may_act() || disabled_users_.contains(user_id) ||
+        deleted_users_.contains(user_id)) {
+        return std::unexpected(StoreError{"unauthorized", "delegating account is not active"});
+    }
+    return {};
+}
+
+void InMemoryStore::revoke_agent_delegations_locked(const std::string& user_id) {
+    const auto now = now_iso8601();
+    for (auto& launch : agent_launches_) {
+        if (launch.created_by_user_id == user_id && launch.desired == "present") {
+            launch.desired = "absent";
+            launch.stop_reason = "Stopped: the account that started this run is disabled.";
+            launch.updated_at = now;
+            ++launch.generation;
+        }
+    }
+    for (auto& schedule : agent_cron_schedules_) {
+        if (schedule.created_by_user_id == user_id && schedule.desired == "present") {
+            schedule.desired = "absent";
+            schedule.updated_at = now;
+            ++schedule.generation;
+        }
+    }
+    for (auto& task : agent_tasks_) {
+        if (task.requested_by_user_id == user_id && task.desired == "present") {
+            task.desired = "absent";
+            task.credential_sha256.clear();
+            task.lease_until.clear();
+            task.retry_notice_pending = false;
+            if (task.phase.empty() || task.phase == "Running") {
+                task.phase = "Failed";
+                task.message = "Stopped: the account that requested this task is disabled.";
+                task.finished_at = now;
+            }
+        }
+    }
+}
+
 Result<std::string> InMemoryStore::disable_clerk_user(const std::string& clerk_subject) {
     std::lock_guard lock(mutex_);
     const std::string subject = "clerk:" + clerk_subject;
@@ -4367,6 +4821,12 @@ Result<std::string> InMemoryStore::disable_clerk_user(const std::string& clerk_s
     }
     disabled_users_.insert(user_id);
     const std::string now = now_iso8601();
+    for (auto& user : users_) {
+        if (user.id == user_id && user.disabled_at.empty()) {
+            user.disabled_at = now;
+        }
+    }
+    revoke_agent_delegations_locked(user_id);
     for (auto& session : sessions_) {
         if (session.user_id == user_id && session.revoked_at.empty()) {
             session.revoked_at = now;
@@ -4555,7 +5015,7 @@ Result<OAuthProvider> InMemoryStore::get_oauth_provider(const std::string& pool_
 
 Result<void> InMemoryStore::begin_oauth(const OAuthFlow& input) {
     if (input.pool_id.empty() || input.provider.empty() || input.state.empty() ||
-        input.code_verifier.empty() || input.nonce.empty()) {
+        input.code_verifier.empty() || input.nonce.empty() || input.browser_binding.empty()) {
         return std::unexpected(StoreError{"invalid_input", "OAuth flow material is incomplete"});
     }
     std::lock_guard lock(mutex_);
@@ -4579,11 +5039,20 @@ Result<void> InMemoryStore::begin_oauth(const OAuthFlow& input) {
 }
 
 Result<OAuthFlow> InMemoryStore::consume_oauth(const std::string& provider,
-                                               const std::string& state) {
+                                               const std::string& state,
+                                               const std::string& browser_binding) {
+    if (state.empty() || browser_binding.empty()) {
+        return std::unexpected(StoreError{"unauthorized", "OAuth browser binding is required"});
+    }
+    const std::string binding_hash = identity_crypto::sha256_hex(browser_binding);
+    if (binding_hash.empty()) {
+        return std::unexpected(StoreError{"unauthorized", "OAuth browser binding is invalid"});
+    }
     std::lock_guard lock(mutex_);
     for (OAuthFlowRecord& record : oauth_flows_) {
-        if (record.flow.provider == provider && record.flow.state == state && !record.used &&
-            record.expires_at > std::chrono::steady_clock::now()) {
+        if (record.flow.provider == provider && record.flow.state == state &&
+            identity_crypto::sha256_hex(record.flow.browser_binding) == binding_hash &&
+            !record.used && record.expires_at > std::chrono::steady_clock::now()) {
             record.used = true;
             return record.flow;
         }
@@ -4641,6 +5110,8 @@ Result<IssuedSession> InMemoryStore::create_token(const NewToken& input) {
     if (input.is_static && input.reason.empty())
         return std::unexpected(StoreError{"invalid_input", "a static token requires a reason"});
     std::lock_guard lock(mutex_);
+    if (auto active = active_delegator_locked(input.user_id); !active)
+        return std::unexpected(active.error());
     std::string parent_expiry;
     if (!input.parent_session_id.empty()) {
         const auto parent = std::ranges::find(sessions_, input.parent_session_id, &Session::id);
@@ -4740,7 +5211,13 @@ Result<void> InMemoryStore::revoke_device(const std::string& user_id,
 
 // Every credential's principal passes accepted_principal (lake#870).
 Result<Principal> InMemoryStore::context_for(const std::string& secret) {
-    return accepted_principal(resolve_principal(secret));
+    auto principal = accepted_principal(resolve_principal(secret));
+    if (principal && !principal->user_id.empty()) {
+        std::lock_guard lock(mutex_);
+        if (auto active = active_delegator_locked(principal->user_id); !active)
+            return std::unexpected(active.error());
+    }
+    return principal;
 }
 
 Result<Principal> InMemoryStore::resolve_principal(const std::string& secret) {
@@ -4812,7 +5289,7 @@ Result<Principal> InMemoryStore::resolve_principal(const std::string& secret) {
         }
         const auto user = std::ranges::find_if(
             users_, [&](const User& row) { return row.id == task->requested_by_user_id; });
-        if (user == users_.end() || user->taap_id.empty()) {
+        if (user == users_.end() || user->taap_id.empty() || !active_delegator_locked(user->id)) {
             return std::unexpected(StoreError{"unauthorized", "task identity is unavailable"});
         }
         return Principal{user->id,
@@ -4844,7 +5321,7 @@ Result<Principal> InMemoryStore::resolve_principal(const std::string& secret) {
         }
         const auto user = std::ranges::find_if(
             users_, [&](const User& row) { return row.id == schedule->created_by_user_id; });
-        if (user == users_.end() || user->taap_id.empty()) {
+        if (user == users_.end() || user->taap_id.empty() || !active_delegator_locked(user->id)) {
             return std::unexpected(StoreError{"unauthorized", "schedule identity is unavailable"});
         }
         return Principal{user->id,
@@ -4897,7 +5374,7 @@ Result<Principal> InMemoryStore::resolve_principal(const std::string& secret) {
         }
         const auto user = std::ranges::find_if(
             users_, [&](const User& row) { return row.id == launch->created_by_user_id; });
-        if (user == users_.end() || user->taap_id.empty()) {
+        if (user == users_.end() || user->taap_id.empty() || !active_delegator_locked(user->id)) {
             return std::unexpected(StoreError{"unauthorized", "launch identity is unavailable"});
         }
         return Principal{user->id,
@@ -5212,6 +5689,8 @@ Result<IssuedSession> InMemoryStore::sign_in_sso(const SsoIdentity& input) {
     if (credential == sso_credentials_.end()) {
         sso_credentials_.push_back(SsoCredential{input.provider_id, input.subject, user_id});
     }
+    if (auto active = active_delegator_locked(user_id); !active)
+        return std::unexpected(active.error());
     Device& device = add_device(devices_, user_id, input.device_name);
     return add_session(
         sessions_, user_id, provider->pool_id, device.id, "browser", "", {"*"}, "", 86400);
@@ -6088,8 +6567,32 @@ void InMemoryStore::drop_space_grant_locked(const Membership& membership,
     });
 }
 
+namespace {
+// Called with the store mutex held. Policy admin grants and team ownership do not confer
+// organization ownership; only the reserved operator or a current organization owner may act.
+Result<void> require_organization_owner(const std::vector<Membership>& memberships,
+                                        const std::string& organization_id,
+                                        const std::string& actor) {
+    if (actor == "admin" || std::ranges::any_of(memberships, [&](const Membership& member) {
+            return member.organization_id == organization_id && member.team_id.empty() &&
+                   member.role == "owner" && member.principal_taap_id == actor;
+        })) {
+        return {};
+    }
+    return std::unexpected(
+        StoreError{"unauthorized", "owner changes require an organization owner or the operator"});
+}
+} // namespace
+
 Result<Membership> InMemoryStore::create_membership(const NewMembership& in) {
     std::lock_guard lock(mutex_);
+    if (in.role == "owner") {
+        if (auto allowed =
+                require_organization_owner(memberships_, in.organization_id, in.granted_by_taap_id);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
+    }
     if ((in.principal_type != "user" && in.principal_type != "workload") ||
         in.principal_id.empty() || in.principal_taap_id.empty()) {
         return std::unexpected(StoreError{
@@ -6203,6 +6706,13 @@ Result<Membership> InMemoryStore::set_member_role(const std::string& id,
     if (membership == memberships_.end()) {
         return std::unexpected(StoreError{"not_found", "no membership " + id});
     }
+    if (membership->role == "owner" || role == "owner") {
+        if (auto allowed =
+                require_organization_owner(memberships_, membership->organization_id, actor);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
+    }
     if (membership->role == "owner" && role != "owner") {
         const auto owner_count = std::ranges::count_if(memberships_, [&](const Membership& item) {
             return item.organization_id == membership->organization_id &&
@@ -6241,7 +6751,6 @@ Result<Membership> InMemoryStore::set_member_role(const std::string& id,
     previous.role = previous_role;
     drop_space_grant_locked(previous, previous_role);
     derive_space_grant_locked(*membership, role);
-    static_cast<void>(actor);
     return *membership;
 }
 
@@ -6250,6 +6759,13 @@ Result<void> InMemoryStore::remove_member(const std::string& id, const std::stri
     const auto membership = std::ranges::find(memberships_, id, &Membership::id);
     if (membership == memberships_.end()) {
         return std::unexpected(StoreError{"not_found", "no membership " + id});
+    }
+    if (membership->role == "owner") {
+        if (auto allowed =
+                require_organization_owner(memberships_, membership->organization_id, actor);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
     }
     if (membership->role == "owner") {
         const auto owner_count = std::ranges::count_if(memberships_, [&](const Membership& item) {
@@ -6298,6 +6814,13 @@ Result<void> InMemoryStore::remove_member(const std::string& id, const std::stri
 
 Result<Invitation> InMemoryStore::create_invitation(const NewInvitation& in) {
     std::lock_guard lock(mutex_);
+    if (in.role == "owner") {
+        if (auto allowed =
+                require_organization_owner(memberships_, in.organization_id, in.created_by_taap_id);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
+    }
     if ((in.invitee_type != "email" && in.invitee_type != "handle") || in.invitee.empty() ||
         !valid_membership_role(in.role) || in.expires_at.empty()) {
         return std::unexpected(
@@ -6367,6 +6890,13 @@ Result<Membership> InMemoryStore::accept_invitation(const AcceptInvitation& in) 
         invitations_, [&](const Invitation& row) { return row.id == in.invitation_id; });
     if (invitation == invitations_.end()) {
         return std::unexpected(StoreError{"not_found", "no invitation " + in.invitation_id});
+    }
+    if (invitation->role == "owner") {
+        if (auto allowed = require_organization_owner(
+                memberships_, invitation->organization_id, in.accepted_by_taap_id);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
     }
     if (invitation->status != "pending") {
         return std::unexpected(StoreError{"conflict", "invitation is not pending"});
@@ -7009,6 +7539,17 @@ Result<PkiCertificateRecord> InMemoryStore::revoke_pki_certificate(const std::st
     return *found;
 }
 
+Result<bool> InMemoryStore::has_active_agent_certificate(const std::string& customer_id,
+                                                         const std::string& taap_id,
+                                                         const std::string& at) {
+    std::lock_guard lock(mutex_);
+    return std::ranges::any_of(pki_certificates_, [&](const PkiCertificateRecord& certificate) {
+        return certificate.customer_id == customer_id && certificate.subject == taap_id &&
+               certificate.profile == "agent" && certificate.revoked_at.empty() &&
+               certificate.expires_at > at;
+    });
+}
+
 Result<AgentSession> InMemoryStore::create_agent_session(const NewAgentSession& input) {
     std::lock_guard lock(mutex_);
     const auto customer = std::ranges::find_if(
@@ -7606,29 +8147,54 @@ Result<IssuedSession> InMemoryStore::recover_with_code(const std::string& pool_i
                                                        const std::string& email,
                                                        const std::string& code,
                                                        const std::string& device_name) {
-    std::lock_guard lock(mutex_);
-    for (PasswordCredential& credential : passwords_) {
-        if (credential.pool_id != pool_id || lower(credential.email) != lower(email)) {
-            continue;
-        }
-        const auto recovery =
-            std::ranges::find_if(credential.recovery_hashes, [&](const std::string& hash) {
-                return identity_crypto::verify_secret(hash, code);
-            });
-        if (recovery == credential.recovery_hashes.end()) {
-            break;
-        }
-        credential.recovery_hashes.erase(recovery);
-        Device& device = add_device(devices_, credential.user_id, device_name);
-        IssuedSession issued = add_session(
-            sessions_, credential.user_id, pool_id, device.id, "browser", "", {"*"}, "", 86400);
-        if (issued.secret.empty()) {
-            return std::unexpected(StoreError{"store_error", "could not issue recovery session"});
-        }
-        issued.session.reason.clear();
-        return issued;
-    }
-    return std::unexpected(StoreError{"unauthorized", "invalid email or recovery code"});
+    return authentication_call(
+        *this, pool_id, email, "", [&](AuthenticationOutcome&) -> Result<IssuedSession> {
+            std::unique_lock lock(mutex_);
+            const auto candidate =
+                std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
+                    return value.pool_id == pool_id && lower(value.email) == lower(email);
+                });
+            if (candidate != passwords_.end()) {
+                const PasswordCredential credential = *candidate;
+
+                lock.unlock();
+                const auto recovery =
+                    credential.recovery_hashes.find(identity_crypto::recovery_selector(code));
+                if (recovery == credential.recovery_hashes.end() ||
+                    !identity_crypto::verify_secret(recovery->second, code)) {
+                    return std::unexpected(
+                        StoreError{"unauthorized", "invalid email or recovery code"});
+                }
+                lock.lock();
+                const auto current =
+                    std::ranges::find(passwords_, credential.user_id, &PasswordCredential::user_id);
+                if (current == passwords_.end() || current->password != credential.password ||
+                    current->totp_secret != credential.totp_secret ||
+                    current->recovery_hashes != credential.recovery_hashes)
+                    return std::unexpected(
+                        StoreError{"unauthorized", "authentication credentials changed; retry"});
+                if (auto active = active_delegator_locked(current->user_id); !active)
+                    return std::unexpected(active.error());
+                current->recovery_hashes.erase(recovery->first);
+                Device& device = add_device(devices_, current->user_id, device_name);
+                IssuedSession issued = add_session(sessions_,
+                                                   current->user_id,
+                                                   pool_id,
+                                                   device.id,
+                                                   "browser",
+                                                   "",
+                                                   {"*"},
+                                                   "",
+                                                   86400);
+                if (issued.secret.empty()) {
+                    return std::unexpected(
+                        StoreError{"store_error", "could not issue recovery session"});
+                }
+                issued.session.reason.clear();
+                return issued;
+            }
+            return std::unexpected(StoreError{"unauthorized", "invalid email or recovery code"});
+        });
 }
 
 namespace {
@@ -7650,26 +8216,65 @@ void add_recovery_notifications(std::vector<RecoveryNotification>& notifications
 
 Result<RecoveryAttempt> InMemoryStore::begin_email_recovery(const std::string& pool_id,
                                                             const std::string& email,
-                                                            int cooling_seconds) {
+                                                            int cooling_seconds,
+                                                            const std::string& client_address) {
     if (cooling_seconds < 3600) {
         return std::unexpected(
             StoreError{"invalid_input", "email recovery cooling period is too short"});
     }
-    std::lock_guard lock(mutex_);
-    const auto password = std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
-        return value.pool_id == pool_id && lower(value.email) == lower(email);
-    });
-    if (password == passwords_.end()) {
-        return std::unexpected(StoreError{"not_found", "account not found"});
-    }
-    const auto now = std::chrono::system_clock::now();
-    const auto ready = now + std::chrono::seconds(cooling_seconds);
-    const auto expires = ready + std::chrono::hours(24);
     const std::string token = identity_crypto::random_secret();
     const std::string token_hash = identity_crypto::hash_secret(token);
     if (token.empty() || token_hash.empty()) {
         return std::unexpected(StoreError{"store_error", "could not create recovery token"});
     }
+    std::lock_guard lock(mutex_);
+    const auto now = std::chrono::system_clock::now();
+    std::erase_if(recovery_budgets_, [&](const auto& entry) {
+        return entry.second.started_at + std::chrono::hours(1) <= now;
+    });
+    const auto spend = [&](const std::string& key, int limit) {
+        auto [it, inserted] = recovery_budgets_.try_emplace(key, RecoveryBudget{now, 0});
+        if (it->second.requests >= limit) {
+            return false;
+        }
+        ++it->second.requests;
+        return true;
+    };
+    // Empty attempts are accepted without disclosing whether an account or budget exists.
+    // The client's own budget is spent first, and the global budget only for a request the
+    // client's budget admits, so one client cannot spend the instance's hourly budget alone.
+    // While the global budget is spent, no client bucket is created, so varying addresses
+    // cannot grow the buckets past the global cap.
+    if (const auto global = recovery_budgets_.find("global");
+        global != recovery_budgets_.end() && global->second.requests >= 300) {
+        return RecoveryAttempt{};
+    }
+    if (!spend("client/" + identity_crypto::sha256_hex(client_address), 30) ||
+        !spend("global", 300)) {
+        return RecoveryAttempt{};
+    }
+    const auto password = std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
+        return value.pool_id == pool_id && lower(value.email) == lower(email);
+    });
+    // A disabled, deleted or suspended account (lake#948) gets no mail, the same empty answer.
+    if (password == passwords_.end() || !active_delegator_locked(password->user_id)) {
+        return RecoveryAttempt{};
+    }
+    for (const auto& record : recovery_attempts_) {
+        if (record.attempt.user_id == password->user_id && record.attempt.method == "email" &&
+            record.attempt.status == "cooling" && record.expires_at > now) {
+            return record.attempt;
+        }
+    }
+    if (std::ranges::any_of(recovery_attempts_, [&](const RecoveryRecord& record) {
+            return record.attempt.user_id == password->user_id &&
+                   record.attempt.method == "email" &&
+                   record.created_at + std::chrono::hours(24) > now;
+        })) {
+        return RecoveryAttempt{};
+    }
+    const auto ready = now + std::chrono::seconds(cooling_seconds);
+    const auto expires = ready + std::chrono::hours(24);
     RecoveryAttempt attempt{new_uuid_v4(),
                             password->user_id,
                             {},
@@ -7685,6 +8290,27 @@ Result<RecoveryAttempt> InMemoryStore::begin_email_recovery(const std::string& p
     add_recovery_notifications(
         recovery_notifications_, devices_, attempt, "email_recovery_started");
     return attempt;
+}
+
+Result<RecoveryAttempt> InMemoryStore::cancel_recovery(const std::string& user_id,
+                                                       const std::string& recovery_id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find_if(recovery_attempts_, [&](const RecoveryRecord& value) {
+        return value.attempt.id == recovery_id && value.attempt.user_id == user_id;
+    });
+    if (user_id.empty() || found == recovery_attempts_.end()) {
+        return std::unexpected(StoreError{"not_found", "recovery attempt not found"});
+    }
+    if (found->attempt.status == "completed" ||
+        found->expires_at <= std::chrono::system_clock::now()) {
+        return std::unexpected(StoreError{"conflict", "recovery is no longer pending"});
+    }
+    found->attempt.status = "cancelled";
+    found->token_hash.clear();
+    std::erase_if(recovery_deliveries_, [&](const RecoveryDelivery& delivery) {
+        return delivery.recovery_id == recovery_id && delivery.delivered_at.empty();
+    });
+    return found->attempt;
 }
 
 Result<RecoveryAttempt> InMemoryStore::begin_admin_recovery(const std::string& organization_id,
@@ -7759,6 +8385,9 @@ Result<RecoveryAttempt> InMemoryStore::approve_admin_recovery(const std::string&
     if (std::chrono::system_clock::now() >= found->expires_at) {
         return std::unexpected(StoreError{"conflict", "admin recovery has expired"});
     }
+    if (found->attempt.status != "pending_approval") {
+        return std::unexpected(StoreError{"conflict", "admin recovery is not pending"});
+    }
     found->approvals.push_back(approved_by);
     found->attempt.approval_count = static_cast<int>(found->approvals.size());
     if (found->approvals.size() == 2) {
@@ -7788,55 +8417,89 @@ Result<RecoveryAttempt> InMemoryStore::approve_admin_recovery(const std::string&
 Result<IssuedSession> InMemoryStore::complete_recovery(const std::string& recovery_id,
                                                        const std::string& token,
                                                        const std::string& device_name) {
-    std::lock_guard lock(mutex_);
-    const auto found = std::ranges::find_if(recovery_attempts_, [&](const RecoveryRecord& value) {
-        return value.attempt.id == recovery_id;
-    });
-    if (found == recovery_attempts_.end() || found->attempt.status == "completed" ||
-        found->token_hash.empty() || !identity_crypto::verify_secret(found->token_hash, token)) {
-        return std::unexpected(StoreError{"unauthorized", "invalid recovery token"});
-    }
-    const auto now = std::chrono::system_clock::now();
-    if (now < found->ready_at) {
-        return std::unexpected(StoreError{"conflict", "recovery cooling period has not ended"});
-    }
-    if (now >= found->expires_at) {
-        return std::unexpected(StoreError{"conflict", "recovery token has expired"});
-    }
-    if (found->attempt.method == "admin" && found->approvals.size() != 2) {
-        return std::unexpected(StoreError{"conflict", "two administrator approvals are required"});
-    }
-    const std::string revoked_at = now_iso8601();
-    for (Session& session : sessions_) {
-        if (session.user_id == found->attempt.user_id && session.revoked_at.empty()) {
-            session.revoked_at = revoked_at;
-        }
-    }
-    const auto password = std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
-        return value.user_id == found->attempt.user_id;
-    });
-    if (password == passwords_.end()) {
-        return std::unexpected(StoreError{"not_found", "password credential not found"});
-    }
-    found->attempt.status = "completed";
-    found->attempt.completed_at = revoked_at;
-    add_recovery_notifications(
-        recovery_notifications_, devices_, found->attempt, "account_recovery_completed");
-    Device& device = add_device(devices_, found->attempt.user_id, device_name);
-    IssuedSession issued = add_session(sessions_,
-                                       found->attempt.user_id,
-                                       password->pool_id,
-                                       device.id,
-                                       "browser",
-                                       "",
-                                       {"*"},
-                                       "",
-                                       86400);
-    if (issued.secret.empty()) {
-        return std::unexpected(StoreError{"store_error", "could not issue recovery session"});
-    }
-    issued.session.reason.clear();
-    return issued;
+    const auto attempt = get_recovery_attempt(recovery_id);
+    if (!attempt && attempt.error().code != "not_found")
+        return std::unexpected(attempt.error());
+
+    return authentication_call(
+        *this,
+        "",
+        attempt ? "" : recovery_id,
+        attempt ? attempt->user_id : "",
+        [&](AuthenticationOutcome&) -> Result<IssuedSession> {
+            std::unique_lock lock(mutex_);
+            auto found = std::ranges::find_if(recovery_attempts_, [&](const RecoveryRecord& value) {
+                return value.attempt.id == recovery_id;
+            });
+            // A cancelled, completed or unapproved attempt, or one whose token was cleared, is
+            // refused before any hash work; the check is repeated after the hash is verified
+            // (lake#968).
+            if (found == recovery_attempts_.end() ||
+                (found->attempt.status != "cooling" && found->attempt.status != "approved") ||
+                found->token_hash.empty())
+                return std::unexpected(StoreError{"unauthorized", "invalid recovery token"});
+
+            const auto token_hash = found->token_hash;
+            lock.unlock();
+            const bool valid =
+                !token_hash.empty() && identity_crypto::verify_secret(token_hash, token);
+            lock.lock();
+            found = std::ranges::find_if(recovery_attempts_, [&](const RecoveryRecord& value) {
+                return value.attempt.id == recovery_id;
+            });
+            if (found == recovery_attempts_.end() ||
+                (found->attempt.status != "cooling" && found->attempt.status != "approved") ||
+                found->token_hash != token_hash || !valid) {
+                return std::unexpected(StoreError{"unauthorized", "invalid recovery token"});
+            }
+            const auto now = std::chrono::system_clock::now();
+            if (now < found->ready_at) {
+                return std::unexpected(
+                    StoreError{"conflict", "recovery cooling period has not ended"});
+            }
+            if (now >= found->expires_at) {
+                return std::unexpected(StoreError{"conflict", "recovery token has expired"});
+            }
+            if (found->attempt.method == "admin" && found->approvals.size() != 2) {
+                return std::unexpected(
+                    StoreError{"conflict", "two administrator approvals are required"});
+            }
+            if (auto active = active_delegator_locked(found->attempt.user_id); !active)
+                return std::unexpected(active.error());
+            const std::string revoked_at = now_iso8601();
+            for (Session& session : sessions_) {
+                if (session.user_id == found->attempt.user_id && session.revoked_at.empty()) {
+                    session.revoked_at = revoked_at;
+                }
+            }
+            const auto password =
+                std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
+                    return value.user_id == found->attempt.user_id;
+                });
+            if (password == passwords_.end()) {
+                return std::unexpected(StoreError{"not_found", "password credential not found"});
+            }
+            found->attempt.status = "completed";
+            found->attempt.completed_at = revoked_at;
+            add_recovery_notifications(
+                recovery_notifications_, devices_, found->attempt, "account_recovery_completed");
+            Device& device = add_device(devices_, found->attempt.user_id, device_name);
+            IssuedSession issued = add_session(sessions_,
+                                               found->attempt.user_id,
+                                               password->pool_id,
+                                               device.id,
+                                               "browser",
+                                               "",
+                                               {"*"},
+                                               "",
+                                               86400);
+            if (issued.secret.empty()) {
+                return std::unexpected(
+                    StoreError{"store_error", "could not issue recovery session"});
+            }
+            issued.session.reason.clear();
+            return issued;
+        });
 }
 
 Result<std::vector<RecoveryDelivery>> InMemoryStore::claim_recovery_deliveries(int limit) {
@@ -8219,6 +8882,8 @@ Result<AccountDeletion> InMemoryStore::delete_account(const std::string& user_id
     user->updated_at = now;
     deleted_users_.insert(user_id);
     disabled_users_.insert(user_id);
+    user->disabled_at = now;
+    revoke_agent_delegations_locked(user_id);
     plan.deleted_at = now;
     return plan;
 }

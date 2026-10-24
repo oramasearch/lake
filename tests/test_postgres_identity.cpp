@@ -2,11 +2,14 @@
 #include <algorithm>
 #include <array>
 #include <barrier>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <optional>
 #include <string>
+#include <thread>
 
 #include <unistd.h>
 
@@ -26,6 +29,7 @@
 #include "lake/control/handles.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "lake/thread.hpp"
 #include "personal_customer_test_support.hpp"
 #include "repository_test_support.hpp"
 #include "stream_fixture.hpp"
@@ -107,6 +111,69 @@ protected:
     std::unique_ptr<lake::control::Store> store;
     lake::control::NewPasswordUser input;
 };
+
+TEST_F(PostgresProvisioning, MfaVerificationLocksTheAccountBeforeItsFactors) {
+    const auto signed_up = store->sign_up_password(input);
+    ASSERT_TRUE(signed_up) << signed_up.error().message;
+    const auto factor = store->enroll_mfa(
+        signed_up->session.user_id, "lake", {signed_up->session.id, input.password});
+    ASSERT_TRUE(factor) << factor.error().message;
+    auto authenticator = lake::control::make_postgres_store(uri, std::string(test_instance_kek));
+    std::optional<lake::control::Result<lake::control::IssuedSession>> authenticated;
+    pqxx::connection blocker(uri), observer(uri);
+    lake::Thread verifier;
+    bool waiting = false;
+    bool factor_available = false;
+    std::string factor_error;
+    {
+        // Account deletion holds this row before removing credentials. MFA must wait without
+        // holding a factor row which deletion would need in turn.
+        pqxx::work deleting(blocker);
+        ASSERT_EQ(deleting
+                      .exec_params("SELECT 1 FROM users WHERE id = $1::uuid FOR UPDATE",
+                                   signed_up->session.user_id)
+                      .size(),
+                  1u);
+        verifier = lake::Thread([&] {
+            authenticated = authenticator->sign_in_totp({"lake",
+                                                         input.email,
+                                                         input.password,
+                                                         factor->recovery_codes[0],
+                                                         "lock-order test"});
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        while (std::chrono::steady_clock::now() < deadline) {
+            {
+                pqxx::read_transaction read(observer);
+                waiting =
+                    read.exec("SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                              "WHERE datname = current_database() AND pid <> pg_backend_pid() "
+                              "AND wait_event_type = 'Lock')")[0][0]
+                        .as<bool>();
+            }
+            if (waiting)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        try {
+            factor_available =
+                !deleting
+                     .exec_params("SELECT 1 FROM credentials WHERE user_id = $1::uuid AND kind IN "
+                                  "('password', 'totp', 'recovery') "
+                                  "AND revoked_at IS NULL FOR UPDATE NOWAIT",
+                                  signed_up->session.user_id)
+                     .empty();
+        } catch (const pqxx::sql_error& error) {
+            factor_error = error.what();
+        }
+        deleting.abort();
+    }
+    verifier.join();
+    EXPECT_TRUE(waiting) << "authentication should wait for the account transaction";
+    EXPECT_TRUE(factor_available) << factor_error;
+    ASSERT_TRUE(authenticated.has_value());
+    ASSERT_TRUE(*authenticated) << authenticated->error().message;
+}
 
 TEST_F(PostgresProvisioning, OwnsOneCustomerAndCanCreateFirstRepository) {
     const auto signed_up = store->sign_up_password(input);
@@ -518,7 +585,8 @@ TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
     ASSERT_TRUE(token) << token.error().message;
     EXPECT_TRUE(store->context_for(token->secret));
 
-    const auto enrolled = store->enroll_mfa(context->user_id, "lake");
+    const auto enrolled = store->enroll_mfa(
+        context->user_id, "lake", {sign_up->session.id, "correct horse battery staple"});
     ASSERT_TRUE(enrolled) << enrolled.error().message;
     ASSERT_EQ(enrolled->recovery_codes.size(), 8);
     const auto mfa_required = store->sign_in_password(
@@ -563,13 +631,17 @@ TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
                                              "oidc-nonce",
                                              "integration browser",
                                              oauth_document.document,
-                                             oauth_document.proof});
+                                             oauth_document.proof,
+                                             "browser-binding"});
     ASSERT_TRUE(started) << started.error().message;
-    const auto flow = store->consume_oauth(provider_name, state);
+    EXPECT_FALSE(store->consume_oauth(provider_name, state, ""));
+    EXPECT_FALSE(store->consume_oauth(provider_name, state, "another-browser"));
+    EXPECT_FALSE(store->consume_oauth("another-provider", state, "browser-binding"));
+    const auto flow = store->consume_oauth(provider_name, state, "browser-binding");
     ASSERT_TRUE(flow) << flow.error().message;
     EXPECT_EQ(flow->code_verifier, "pkce-verifier");
     EXPECT_EQ(flow->nonce, "oidc-nonce");
-    EXPECT_FALSE(store->consume_oauth(provider_name, state));
+    EXPECT_FALSE(store->consume_oauth(provider_name, state, "browser-binding"));
     const auto oauth =
         store->sign_in_oauth({"lake",
                               provider_name,
@@ -842,7 +914,8 @@ TEST(PostgresOfflineRecovery, GrantsRecoveryPathsAndRepositoryKeyCustody) {
                           anonymous)
                     .ok);
 
-    const auto enrolled = store->enroll_mfa(target_principal->user_id, "lake");
+    const auto enrolled = store->enroll_mfa(
+        target_principal->user_id, "lake", {target->session.id, "correct horse battery staple"});
     ASSERT_TRUE(enrolled) << enrolled.error().message;
     const lake::api::ApiResult code = *liquid::runtime::block_on(
         registry.call_async("recover_with_code",

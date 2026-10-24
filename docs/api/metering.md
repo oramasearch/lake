@@ -173,7 +173,7 @@ for `engine_storage`).
 | `calls` | calls | `api`, `mcp`, `mcp_connection` (`object_id` the connection) | every capability call routed to the workspace, the same attribution as `lake_requests` ([telemetry](../serving/telemetry.md#the-workspace-request-series)), answered or refused; and each exchange of a workspace's MCP connection with its server, whose bytes are `transfer` with `kind` `mcp_out` and `mcp_in` ([MCP connections](mcp-connections.md#audit-and-usage)) |
 | `predictions` | calls | — (`object_id` is the model) | each answered `predict` of a model the workspace has |
 | `searches` | calls | — (`object_id` is the index) | each answered `search_index` of a published index (lake#658) |
-| `model_tokens` | tokens | `input`, `output` (also `agent`, `launch_id`, `model`) | every agent model call through the [model gateway](model-gateway.md) (`/openai/v1/*`, lake#248), counted from the provider's own `usage`; what an agent reports with `record_model_usage` for a call made outside Lake (below); and the tokens a speech-to-text model reports for a transcript (`model` only); never speech-to-text, which is `speech` (lake#658) |
+| `model_tokens` | tokens | `input`, `output` (also `agent`, `launch_id`, `model`, `class: <model>/input` or `<model>/output`) | every agent model call through the [model gateway](model-gateway.md) (`/openai/v1/*`, lake#248), counted from the provider's own `usage`; what an agent reports with `record_model_usage` for a call made outside Lake (below); and the tokens a speech-to-text model reports for a transcript (`model` only); never speech-to-text, which is `speech` (lake#658) |
 | `instances` | instance-seconds | the service kind (`zetta`, `postgres`, …) or `app` (`object_id` is the service or app) | the owner loop's sample of running services and apps; detail, never billed |
 | `volumes` | GiB-seconds | `service`, `store` (`object_id`) | the owner loop's sample of running services' and stores' volumes; the workspace engine is a service, and its volume is how its disk is billed (decision 61) |
 
@@ -375,7 +375,7 @@ The answer: `periods` (each period's start), and for each dimension `title`, `un
 period, added up across the workspaces; a reading's periods without data are `null`),
 `by_workspace` and `by_kind` (`key`, `total`, `points`, largest first), `by_agent`, `by_launch` and
 `by_model` for `model_tokens`, `by_object` for `instances`, `volumes`, `predictions`, `searches`,
-`cpu`, `ram`, `gpu` and `vram`, `by_class` for `gpu` and `vram`, and `billed`, whether the price list
+`cpu`, `ram`, `gpu` and `vram`, `by_class` for `gpu`, `vram` and `model_tokens`, and `billed`, whether the price list
 bills the dimension (false for the detail dimensions `instances`, `build_compute` and
 `run_compute`).
 `workspaces[]` says which workspaces were read and why one was not; a workspace that could not be
@@ -386,7 +386,9 @@ read never counts as zero. It needs `read` on the customer and is audited centra
 
 `set_usage_limit {customer_id, dimension, limit, warn_percent?}` (needs `admin` on the customer,
 audited as `metering.limit.set`) sets the account's limit on one dimension in its unit; `0` removes
-it. Limits are rows of `customer_usage_limits` (migration `0072_usage_limits`), content-free account
+it. The `storage` dimension requires the operator credential or the instance administrator,
+including when lowering or removing the limit. Account administrators can change other dimensions.
+Limits are rows of `customer_usage_limits` (migration `0072_usage_limits`), content-free account
 configuration like the storage quota. **Storage's limit is the repository storage quota**:
 `set_usage_limit` with `storage` sets `set_storage_quota`'s quota, still enforced on new repository
 writes (below), and keeps its warning percentage. **The `model_tokens` limit is enforced by the
@@ -408,7 +410,10 @@ tokens one of its turns or runs spent. Only an agent's own credential may call i
 launch (`lal.`) or schedule (`las.`) credential, or a library agent's bus credential naming its
 `task_id`. Lake adds both counts together to the usage of the workspace the task, launch or schedule
 runs in, labelled with the agent's name, the run's id (`launch_id`) and `model_name`, and audits it
-in that workspace. Anyone else is refused `unauthorized`.
+in that workspace. Anyone else is refused `unauthorized`. When billing is on, both exact
+`<model>/input` and `<model>/output` prices must be positive before a report is accepted; otherwise
+it returns `invalid_input` at `/model_name` without recording tokens. Reports do not grant gateway
+access, and billing-off reporting is unchanged.
 
 Agents do not report their own tokens: every model call they make goes through the
 [model gateway](model-gateway.md) (lake#248), which counts the provider's own `usage` for the run's
@@ -506,10 +511,25 @@ Fractional byte-based charges round up to one micro-unit. Arithmetic saturates a
 64-bit maximum rather than wrapping.
 
 `set_storage_quota` stores a customer-specific integer byte quota through the registry. It
-requires `admin` on that customer, is represented in OpenAPI and MCP with the same schema, and
-records `metering.quota.set` in the signed audit stream. Its value overrides
+requires the operator credential or the instance administrator, is represented in OpenAPI and MCP
+with the same schema, and records `metering.quota.set` in the signed audit stream. Its value overrides
 `LAKE_STORAGE_QUOTA_BYTES` for that customer; an explicit value of `0` disables the customer's
 quota. Customers without an override retain the process configuration.
+
+Account administrators cannot set, raise, lower or clear this override through either
+`set_storage_quota` or `set_usage_limit` with `dimension: "storage"`; these calls return
+`unauthorized` before changing the quota or warning settings. This keeps an account using the
+shared repository store within the operator's configured limit (lake#976, LSR-109). An operator
+must configure a finite process default or account override to bound that account's writes.
+
+`UsageLimits.SignedUpAccountAdminCannotChangeStorageThroughEitherSetter` proves a newly signed-up
+account administrator cannot clear, raise or lower the quota through either setter, through both
+registry entry points, and can still administer non-storage limits.
+`UsageLimits.OperatorAndInstanceAdministratorCanChangeBothStorageSetters` proves both privileged
+callers can set and clear the quota. Run `ctest --test-dir build -R 'UsageLimits|Metering' --timeout
+600 --output-on-failure` after building `lake-tests`. Change these authorization checks only with
+both setter paths and their tests together; the store methods themselves are internal persistence
+operations without caller identity.
 
 ## Quota behavior
 

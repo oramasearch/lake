@@ -931,6 +931,11 @@ public:
         return call("apply_cloud_order_payment",
                     [&] { return store_->apply_cloud_order_payment(payment); });
     }
+    control::Result<control::CloudOrderPaymentResult>
+    apply_cloud_order_subscription(const control::CloudOrderSubscriptionEvent& event) override {
+        return call("apply_cloud_order_subscription",
+                    [&] { return store_->apply_cloud_order_subscription(event); });
+    }
     control::Result<std::vector<control::CloudOrder>>
     claim_cloud_order_emails(int limit, int lease_seconds) override {
         return call("claim_cloud_order_emails",
@@ -988,6 +993,12 @@ public:
     control::Result<control::PkiCertificateRecord>
     revoke_pki_certificate(const std::string& id) override {
         return call("revoke_pki_certificate", [&] { return store_->revoke_pki_certificate(id); });
+    }
+    control::Result<bool> has_active_agent_certificate(const std::string& customer_id,
+                                                       const std::string& taap_id,
+                                                       const std::string& at) override {
+        return call("has_active_agent_certificate",
+                    [&] { return store_->has_active_agent_certificate(customer_id, taap_id, at); });
     }
     control::Result<control::AgentSession>
     create_agent_session(const control::NewAgentSession& value) override {
@@ -1334,6 +1345,20 @@ public:
         return call("begin_identity_proof",
                     [&] { return store_->begin_identity_proof(pool_id, document); });
     }
+    control::Result<control::AuthenticationAttempt>
+    authentication_attempt(const std::string& pool,
+                           const std::string& email,
+                           const std::string& user,
+                           const std::string& client) override {
+        return call("authentication_attempt",
+                    [&] { return store_->authentication_attempt(pool, email, user, client); });
+    }
+    control::Result<void>
+    authentication_attempt_finished(const control::AuthenticationAttempt& attempt,
+                                    control::AuthenticationOutcome outcome) override {
+        return call("authentication_attempt_finished",
+                    [&] { return store_->authentication_attempt_finished(attempt, outcome); });
+    }
     control::Result<control::IssuedSession>
     sign_in_password(const control::PasswordSignIn& value) override {
         return call("sign_in_password", [&] { return store_->sign_in_password(value); });
@@ -1342,9 +1367,11 @@ public:
     sign_in_taap(const control::TaapSignIn& value) override {
         return call("sign_in_taap", [&] { return store_->sign_in_taap(value); });
     }
-    control::Result<control::MfaEnrollment> enroll_mfa(const std::string& user_id,
-                                                       const std::string& pool_id) override {
-        return call("enroll_mfa", [&] { return store_->enroll_mfa(user_id, pool_id); });
+    control::Result<control::MfaEnrollment>
+    enroll_mfa(const std::string& user_id,
+               const std::string& pool_id,
+               const control::MfaEnrollmentProof& proof) override {
+        return call("enroll_mfa", [&] { return store_->enroll_mfa(user_id, pool_id, proof); });
     }
     control::Result<bool> mfa_enrolled(const std::string& user_id,
                                        const std::string& pool_id) override {
@@ -1397,6 +1424,15 @@ public:
     control::Result<control::ClerkUserProvisioned>
     provision_clerk_user(const control::ClerkIdentity& value) override {
         return call("provision_clerk_user", [&] { return store_->provision_clerk_user(value); });
+    }
+    control::Result<bool> apply_clerk_user_state(const control::ClerkUserState& value) override {
+        return call("apply_clerk_user_state",
+                    [&] { return store_->apply_clerk_user_state(value); });
+    }
+    control::Result<void> revoke_clerk_sessions(const std::string& subject,
+                                                std::int64_t revoked_at) override {
+        return call("revoke_clerk_sessions",
+                    [&] { return store_->revoke_clerk_sessions(subject, revoked_at); });
     }
     control::Result<std::string> update_clerk_user(const control::ClerkIdentity& value) override {
         return call("update_clerk_user", [&] { return store_->update_clerk_user(value); });
@@ -1452,8 +1488,10 @@ public:
         return call("begin_oauth", [&] { return store_->begin_oauth(value); });
     }
     control::Result<control::OAuthFlow> consume_oauth(const std::string& provider,
-                                                      const std::string& state) override {
-        return call("consume_oauth", [&] { return store_->consume_oauth(provider, state); });
+                                                      const std::string& state,
+                                                      const std::string& browser_binding) override {
+        return call("consume_oauth",
+                    [&] { return store_->consume_oauth(provider, state, browser_binding); });
     }
     control::Result<control::IssuedSession> create_token(const control::NewToken& value) override {
         return call("create_token", [&] { return store_->create_token(value); });
@@ -1501,11 +1539,19 @@ public:
         return call("recover_with_code",
                     [&] { return store_->recover_with_code(pool_id, email, code, device_name); });
     }
-    control::Result<control::RecoveryAttempt> begin_email_recovery(const std::string& pool_id,
-                                                                   const std::string& email,
-                                                                   int cooling_seconds) override {
-        return call("begin_email_recovery",
-                    [&] { return store_->begin_email_recovery(pool_id, email, cooling_seconds); });
+    control::Result<control::RecoveryAttempt>
+    begin_email_recovery(const std::string& pool_id,
+                         const std::string& email,
+                         int cooling_seconds,
+                         const std::string& client_address) override {
+        return call("begin_email_recovery", [&] {
+            return store_->begin_email_recovery(pool_id, email, cooling_seconds, client_address);
+        });
+    }
+    control::Result<control::RecoveryAttempt>
+    cancel_recovery(const std::string& user_id, const std::string& recovery_id) override {
+        return call("cancel_recovery",
+                    [&] { return store_->cancel_recovery(user_id, recovery_id); });
     }
     control::Result<control::RecoveryAttempt>
     begin_admin_recovery(const std::string& organization_id,

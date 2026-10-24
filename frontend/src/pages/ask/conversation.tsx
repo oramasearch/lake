@@ -15,13 +15,14 @@ import { ApiError, act, useRead, type Row } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { Badge, Button, ErrorBlock, Skeleton, cx } from "@/lib/ui";
 import { isWorkspacePath } from "@/routes";
-import { confirmOutcomes } from "./home";
+import { confirmOutcomes, proposalCall, shownValue, visibleText, type ProposalCall } from "./home";
 import { talkToAgents, type TalkToAgent } from "@/lib/agents";
 import { Markdown, qs, secondsSince, spokenDuration, useWorkspace, useWq } from "@/pages/train/workspace";
 
 export type AskKind = "ask" | "factory";
 
-export type AskMessage = { id: string; role: string; content: string; payload?: Row | null; created_at?: string };
+/** `proposal_calls` is Lake's statement of the exact call each of `payload.proposals` runs (lake#942). */
+export type AskMessage = { id: string; role: string; content: string; payload?: Row | null; proposal_calls?: (ProposalCall | null)[]; created_at?: string };
 export type AgentTask = { task_id?: string; agent?: string; status?: string; message?: string; attempts?: number; created_at?: string; answer?: unknown };
 
 const FINAL = (status: string | undefined) => !!status && status !== "pending" && status !== "running";
@@ -216,7 +217,7 @@ export function AskMessages({
   // the outcome Lake stored, and keeps a Try again button only when Lake says trying again could
   // work; otherwise its reason says to ask Ask Orama again.
   const { confirmed, refused } = useMemo(() => confirmOutcomes(list), [list]);
-  const confirm = async (messageId: string, index: number) => {
+  const confirm = async (messageId: string, index: number, call: ProposalCall) => {
     const key = `${messageId}/${index}`;
     setConfirming(key);
     setFailures((f) => ({ ...f, [key]: "" }));
@@ -227,6 +228,8 @@ export function AskMessages({
         conversation_id: conversationId,
         message_id: messageId,
         index,
+        // The call shown above the button; Lake runs nothing else (lake#942).
+        input_sha256: call.input_sha256,
       });
       if (answer.ok === false && answer.error) setFailures((f) => ({ ...f, [key]: answer.error! }));
     } catch (e) {
@@ -267,18 +270,28 @@ export function AskMessages({
             })}
             {proposals.map((proposal, index) => {
               const key = `${message.id}/${index}`;
+              const call = proposalCall(message, index);
+              const impact = String(proposal?.impact ?? "");
               return (
                 <div key={`p${index}`} className="panel ask-proposal">
-                  <p>
-                    <strong>Proposed:</strong> <code>{String(proposal?.capability ?? "")}</code>
-                  </p>
-                  <p>{String(proposal?.impact ?? "")}</p>
+                  {call ? <ProposalCallView call={call} /> : (
+                    <p className="error" role="alert">
+                      Lake cannot show exactly what <code>{String(proposal?.capability ?? "")}</code> would run, so it cannot be confirmed. Ask Orama again.
+                    </p>
+                  )}
+                  {impact && (
+                    <p className="ask-proposal-impact">
+                      <span className="eyebrow">Ask Orama's explanation, not checked by Lake</span>
+                      <br />
+                      {impact}
+                    </p>
+                  )}
                   {confirmed.has(key) ? (
                     <p>
                       <Badge>Confirmed</Badge>
                     </p>
-                  ) : refused[key] && !refused[key].retry ? null : (
-                    <Button variant="primary" loading={confirming === key} disabled={!!confirming} onClick={() => void confirm(message.id, index)}>
+                  ) : !call || (refused[key] && !refused[key].retry) ? null : (
+                    <Button variant="primary" loading={confirming === key} disabled={!!confirming} onClick={() => void confirm(message.id, index, call)}>
                       {refused[key] ? "Try again" : "Confirm"}
                     </Button>
                   )}
@@ -295,6 +308,37 @@ export function AskMessages({
       })}
       {working && <AskWorking task={task} fallbackAgent={agent} name={name} />}
     </section>
+  );
+}
+
+/** The exact call Confirm runs (lake#942), as Lake states it: the capability, then every input
+ * field with its schema description and value (shownValue and visibleText, so nothing can hide). The
+ * person reviews these, not the model's explanation, which the proposal shows apart from them. */
+function ProposalCallView({ call }: { call: ProposalCall }) {
+  return (
+    <div className="stack gap-1">
+      <p className="m-0">
+        <strong>Confirm runs</strong> <code>{call.capability}</code>
+        {call.title ? ` (${call.title}${call.kind === "action" ? ", a change" : ""})` : ""} with exactly:
+      </p>
+      {call.fields.length ? (
+        <dl>
+          {call.fields.map((field) => (
+            <div key={field.name} className="contents">
+              <dt>
+                <code>{visibleText(field.name)}</code>
+                {field.description ? <span className="muted"> {field.description}</span> : null}
+              </dt>
+              <dd>
+                <code className="whitespace-pre-wrap">{shownValue(field.value)}</code>
+              </dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <p className="muted m-0">no input</p>
+      )}
+    </div>
   );
 }
 

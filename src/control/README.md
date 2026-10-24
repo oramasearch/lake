@@ -1,6 +1,19 @@
 # Control stores
 
+Both stores reject disabled or missing users when resolving agent launch, schedule and task
+credentials (lake#951). Creation, claims and renewal serialize with offboarding on the user row
+(or the memory-store mutex), so a cached stream context cannot create fresh authority afterwards.
+Clerk disablement and account deletion withdraw the person's workloads and invalidate task leases;
+workload history remains. See [Clerk offboarding](../../docs/api/clerk.md#webhooks).
+`agents.cpp` checks the authenticated dispatcher and customer registration before generating or
+signing a session key. `has_active_agent_certificate` selects an unrevoked, unexpired `agent`
+certificate by customer and TAAP subject in memory and PostgreSQL. See
+[agent session keys](../../docs/api/agents.md).
+
 `pki.cpp` verifies tunnel CSRs, signs only the grant URI and bounds the client certificate's expiry.
+It encodes every DNS/URI SAN as a typed ASN.1 value, validates ACME DNS and X.509 SPIFFE
+identities, and rejects URI SAN delimiters before signing (lake#946). See
+[PKI](../../docs/api/pki.md#certificate-identities).
 `network_records.cpp` supplies empty session/activity pages explicitly pending zetta#1281.
 See [tunnel credentials](../../docs/api/tunnel-grants.md) and migration 0085 in [network.md](../../docs/control-plane/network.md).
 
@@ -33,7 +46,7 @@ step of deleting a mount ([deletion.md](../../docs/api/deletion.md)). Both imple
 or the account is an organization's only owner; removes the account's identity rows, memberships
 and grants and its space's billing contact, limits and policy objects, and marks the user and its
 space deleted, the email and name erased, so every read of users leaves it out; and
-`verify_mfa_code`, the step-up that changes nothing ([identity.md](../../docs/api/identity.md#deleting-an-account)).
+`verify_mfa_code`, the step-up that consumes its TOTP step or recovery code ([identity.md](../../docs/api/identity.md#deleting-an-account)).
 
 `WorkspaceService` caches deployment catalogues and project/pipeline definitions in memory for
 five seconds, scoped to the workspace and connection generation. Successful writes explicitly
@@ -311,3 +324,31 @@ reader (no DTDs or entities), Exclusive XML Canonicalization 1.0, XML Signature 
 the provider's registered certificate, and the response, assertion and condition checks, with no
 XML library. Both stores keep the outstanding AuthnRequests and the accepted assertion ids
 (`begin_saml`, `consume_saml`; migration `0092_saml_sign_in`), each accepted once.
+
+Ownership changes in both stores require a current organization-scope owner or the reserved
+operator (LSR-099, lake#965). The checks cover membership creation, invitation creation and
+acceptance, role changes and removal; PostgreSQL locks the organization before reading owner
+authority and counts. Self-service joins recheck the inviter. See the
+[ownership contract](../../docs/api/organizations.md#delegated-administration) and the shared
+regressions in `tests/test_deletions.cpp`.
+Authentication budgets are enforced in both stores against resolved user ids before hashing
+(lake#969). Recovery credentials select their single Argon2id hash by a versioned SHA-256
+selector in the existing unique subject index; legacy rows are never scanned. PostgreSQL uses
+private authentication transactions, with row locks for one-use recovery; memory verifies
+snapshots outside its shared mutex and rechecks them before committing.
+See [the contract and tests](../../docs/api/identity.md#authentication-attempt-limits).
+Clerk revocation (lake#948, migration `0094_clerk_revocation`) keeps user-state ordering and a
+separate account-wide revocation watermark in PostgreSQL and memory. Old template JWTs cannot
+re-exchange after a session event; account restrictions revoke all sessions, tokens and devices, and a newer
+unban/unlock permits only new credentials. See [the contract](../../docs/api/clerk.md#webhooks).
+
+Clerk suspension and permanent disablement use `User::may_act()` for bearer issuance,
+delegation and stream authority. Suspended users' agent credentials are withdrawn just as on
+offboarding; a later unban permits new work without restoring old credentials (lake#948).
+Email recovery (lake#968, LSR-102) reuses pending attempts and enforces account, client and global
+budgets inside both stores before queuing mail or device notices. PostgreSQL keeps atomic budgets
+in `offline_recovery_budgets` (migration `0096_email_recovery_limits`); cancellation clears the
+token and removes unclaimed deliveries. See [recovery.md](../../docs/api/recovery.md).
+`order_entitlements.cpp` (lake#972, LSR-105) is the shared subscription-event reducer and deadline evaluator. Both stores serialize subscription/customer/order matching and event deduplication, preserve canceled subscriptions and reject stale renewal snapshots. PostgreSQL exposes time-dependent desired state through `cloud_order_desired_state`; provisioning suspension remains an operator handoff. See [orders](../../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
+
+`authentication_attempt` commits per-account and per-client reservations before credential verification, independently of verification rollback; completion records failures or releases and clears successful account/client reservations. Both stores consume successful TOTP steps and recovery codes atomically; see [identity limits](../../docs/api/identity.md#authentication-attempt-limits) (lake#966).

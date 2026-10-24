@@ -1,3 +1,4 @@
+#include "../src/api/store_repository.hpp"
 #include "audit_test_support.hpp"
 #include "personal_customer_test_support.hpp"
 #include "postgres_fixture.hpp"
@@ -18,12 +19,13 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <regex>
 #include <set>
 #include <sstream>
 #include <string>
-#include <tuple>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include <arpa/inet.h>
@@ -31,6 +33,7 @@
 #include <netinet/in.h>
 #include <spawn.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -129,8 +132,13 @@ struct RepositoryFixtureStore final : SyncStore {
     bool restored = false;
     bool shared_folder_moved = false;
     std::optional<std::string> blob_contents;
+    std::optional<RepositoryArtifactSource> verified_source;
+    std::optional<SyncStoreError> artifact_error;
+    std::map<std::string, std::optional<RepositoryArtifactSource>> artifact_sources;
     std::string commit_message;
     std::vector<RepositoryWriteOperation> committed_operations;
+    std::optional<std::vector<RepositoryTreeEntry>> write_tree;
+    std::string conflict_path = "readme.md";
     std::string resolved_conflict;
     std::string conflict_resolution;
     std::vector<std::byte> conflict_blob;
@@ -237,6 +245,9 @@ struct RepositoryFixtureStore final : SyncStore {
     SyncStoreResult<RepositoryArtifact> repository_artifact(const std::string&,
                                                             const std::string&,
                                                             const std::string& result_id) override {
+        if (artifact_error) {
+            return std::unexpected(*artifact_error);
+        }
         return RepositoryArtifact{
             .id = result_id,
             .action = "action-1",
@@ -253,7 +264,9 @@ struct RepositoryFixtureStore final : SyncStore {
                   true,
                   ""},
                  {"attestation-2", "sbom/1", "subject-1", "taap:1:ed25519:builder", true, ""}},
-            .trace = RepositoryArtifactTrace{"trace-1", 12, 2, 1, 1, 1}};
+            .trace = RepositoryArtifactTrace{"trace-1", 12, 2, 1, 1, 1},
+            .verified_source = artifact_sources.contains(result_id) ? artifact_sources.at(result_id)
+                                                                    : verified_source};
     }
 
     SyncStoreResult<std::vector<RepositoryConflict>>
@@ -263,7 +276,7 @@ struct RepositoryFixtureStore final : SyncStore {
              .base = "blob-base",
              .left = "blob-1",
              .right = "blob-2",
-             .region = {.path = "readme.md", .bytes = RepositoryConflictByteRange{0, 3}},
+             .region = {.path = conflict_path, .bytes = RepositoryConflictByteRange{0, 3}},
              .kind = "suspicious-merge",
              .explanation = "Both sides changed the greeting.",
              .proposal = "blob-proposal",
@@ -276,7 +289,16 @@ struct RepositoryFixtureStore final : SyncStore {
                                 const std::string&,
                                 const std::string& conflict_id,
                                 const std::string& resolution,
-                                std::vector<std::byte> blob) override {
+                                std::vector<std::byte> blob,
+                                RepositoryWriteAuthorizer authorize) override {
+        if (authorize) {
+            const auto entries =
+                write_tree ? SyncStoreResult<std::vector<RepositoryTreeEntry>>(*write_tree)
+                           : repository_tree("", "", "main");
+            if (const auto allowed = authorize(*entries); !allowed) {
+                return std::unexpected(allowed.error());
+            }
+        }
         resolved_conflict = conflict_id;
         conflict_resolution = resolution;
         conflict_blob = std::move(blob);
@@ -288,16 +310,35 @@ struct RepositoryFixtureStore final : SyncStore {
                             const std::string&,
                             const std::string&,
                             const std::string& message,
-                            std::vector<RepositoryWriteOperation> operations) override {
+                            std::vector<RepositoryWriteOperation> operations,
+                            RepositoryWriteAuthorizer authorize) override {
+        if (authorize) {
+            const auto entries =
+                write_tree ? SyncStoreResult<std::vector<RepositoryTreeEntry>>(*write_tree)
+                           : repository_tree("", "", "main");
+            if (const auto allowed = authorize(*entries); !allowed) {
+                return std::unexpected(allowed.error());
+            }
+        }
         commit_message = message;
         committed_operations = std::move(operations);
         return "drive-change";
     }
 
-    SyncStoreResult<RepositoryChange> restore_repository_file(const std::string&,
-                                                              const std::string&,
-                                                              const std::string& change_id,
-                                                              const std::string& path) override {
+    SyncStoreResult<RepositoryChange>
+    restore_repository_file(const std::string&,
+                            const std::string&,
+                            const std::string& change_id,
+                            const std::string& path,
+                            RepositoryWriteAuthorizer authorize) override {
+        if (authorize) {
+            const auto entries =
+                write_tree ? SyncStoreResult<std::vector<RepositoryTreeEntry>>(*write_tree)
+                           : repository_tree("", "", "main");
+            if (const auto allowed = authorize(*entries); !allowed) {
+                return std::unexpected(allowed.error());
+            }
+        }
         restored = true;
         return RepositoryChange{"restored-change",
                                 {change_id},
@@ -316,7 +357,11 @@ struct RepositoryFixtureStore final : SyncStore {
                              {"author", "taap:1:ed25519:author"},
                              {"message", "initial"},
                              {"occurred_at", "2026-09-04T00:00:00Z"}}}}};
-        output.artifacts = {{{"id", "result-1"}, {"action", "action-1"}}};
+        output.artifacts = {
+            {{"id", "result-1"},
+             {"action", "action-1"},
+             {"verification", "verified"},
+             {"attestations", {{{"issuer", "taap:1:ed25519:builder"}, {"verified", true}}}}}};
         output.git = {{"requested", include_git}};
         return output;
     }
@@ -1112,7 +1157,8 @@ std::string http_request(
     std::string_view cookie = {},
     std::string_view authorization = {},
     std::string_view host = "localhost",
-    std::initializer_list<std::pair<std::string_view, std::string_view>> extra_headers = {}) {
+    std::initializer_list<std::pair<std::string_view, std::string_view>> extra_headers = {},
+    std::optional<std::size_t> declared_body_bytes = std::nullopt) {
     const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (socket_fd < 0)
         return {};
@@ -1124,10 +1170,16 @@ std::string http_request(
         ::close(socket_fd);
         return {};
     }
+    if (declared_body_bytes) {
+        timeval timeout{1, 0};
+        static_cast<void>(
+            ::setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)));
+    }
     std::string request = std::string(method) + " " + std::string(path) +
                           " HTTP/1.1\r\nHost: " + std::string(host) + "\r\nConnection: close\r\n";
     request += "Content-Type: " + std::string(content_type) + "\r\n";
-    request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+    request +=
+        "Content-Length: " + std::to_string(declared_body_bytes.value_or(body.size())) + "\r\n";
     if (!cookie.empty())
         request += "Cookie: " + std::string(cookie) + "\r\n";
     if (!authorization.empty())
@@ -1526,15 +1578,21 @@ TEST(HttpServer, NonRegistryJsonBodyLargerThan64MiBIsRejected) {
     options.instance_kek = "bounded-json-instance-kek";
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
-    std::string body = R"({"padding":")";
-    body.append(64 * 1024 * 1024, 'J');
-    body += R"("})";
-
-    const std::string refused = http_request(
-        server.port(), "POST", "/v1/create_customer", body, "application/json", {}, "Bearer admin");
+    // Reject a declared oversized body before the caller uploads it. An ordinary capability
+    // now uses the 1 MiB default, and the server may close as soon as it sends its refusal.
+    const std::string refused = http_request(server.port(),
+                                             "POST",
+                                             "/v1/create_customer",
+                                             {},
+                                             "application/json",
+                                             {},
+                                             "Bearer admin",
+                                             "localhost",
+                                             {},
+                                             64 * 1024 * 1024 + 14);
     EXPECT_NE(refused.find(" 413 "), std::string::npos) << refused;
     EXPECT_EQ(response_json(refused)["error"]["code"], "size_invalid");
-    EXPECT_NE(response_json(refused)["error"]["message"].get<std::string>().find("67108864"),
+    EXPECT_NE(response_json(refused)["error"]["message"].get<std::string>().find("1048576"),
               std::string::npos);
     server.stop();
 }
@@ -3190,7 +3248,7 @@ TEST(IdentityHttp, ApiSignUpIssuesAndResolvesHttpOnlySessions) {
     const std::string enrolled = http_request(server.port(),
                                               "POST",
                                               "/v1/enroll_mfa",
-                                              "{}",
+                                              R"({"password":"correct horse battery staple"})",
                                               "application/json",
                                               cookie,
                                               {},
@@ -4022,6 +4080,10 @@ TEST(Rest, OpenApiCoversEveryCapability) {
     EXPECT_EQ(inclusion_value["properties"]["checkpoint"]["type"], "object");
     EXPECT_TRUE(doc["paths"].contains("/mcp"));
     EXPECT_TRUE(doc["paths"]["/v1/server_info"]["get"]["security"].empty());
+    // Handler-owned authorization still requires a bearer before accepting an HTTP body.
+    const json& gateway = doc["paths"]["/v1/model_completion"]["post"];
+    EXPECT_FALSE(gateway.contains("security")); // inherits the document's bearer requirement
+    EXPECT_TRUE(gateway["responses"].contains("401"));
     const json& push = doc["paths"]["/v1/repositories/{repository_id}/sync/push"]["post"];
     const json& request_header = push["requestBody"]["content"]["application/vnd.liquid.sync-v1"]
                                      ["schema"]["x-liquid-sync-header-schema"];
@@ -4644,6 +4706,52 @@ TEST(Forge, PersistsIssueLifecycleAndMapsReviewCommentAnchors) {
     EXPECT_EQ(mapped.value["items"][0]["value"]["anchor"]["disposition"], "shifted");
 }
 
+TEST(Export, ManifestSignerMustBeNamedAfterItsSigningKey) {
+    lake::control::InMemoryStore source;
+    lake::control::InMemoryStore attacker;
+    const lake::audit::IdentityOptions options{.instance_kek = "export-binding-test"};
+    const json manifest = {{"format", "lake_export_manifest/1"}, {"entries", json::array()}};
+    const auto honest = lake::audit::sign_export_manifest(source, manifest, options);
+    const auto resigned = lake::audit::sign_export_manifest(attacker, manifest, options);
+    ASSERT_TRUE(honest);
+    ASSERT_TRUE(resigned);
+    ASSERT_NE((*honest)["identity"]["taap_id"], (*resigned)["identity"]["taap_id"]);
+    ASSERT_TRUE(lake::audit::verify_export_manifest(manifest, *honest));
+    ASSERT_TRUE(lake::audit::verify_export_manifest(manifest, *resigned));
+
+    json forged = *resigned;
+    forged["identity"]["taap_id"] = (*honest)["identity"]["taap_id"];
+    const auto refused = lake::audit::verify_export_manifest(manifest, forged);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "invalid_signature");
+
+    for (const json& bad_name : {json(""),
+                                 json("taap:1:ed25519:unknown"),
+                                 json((*honest)["identity"]["taap_id"].get<std::string>() + "="),
+                                 json(nullptr),
+                                 json(17)}) {
+        json malformed = *honest;
+        malformed["identity"]["taap_id"] = bad_name;
+        EXPECT_FALSE(lake::audit::verify_export_manifest(manifest, malformed));
+    }
+    json malformed = *honest;
+    malformed["identity"]["version"] = 1;
+    EXPECT_FALSE(lake::audit::verify_export_manifest(manifest, malformed));
+    malformed = *honest;
+    malformed["identity"]["public_key"] = "invalid-base64";
+    EXPECT_FALSE(lake::audit::verify_export_manifest(manifest, malformed));
+    malformed = *resigned;
+    malformed["signature"] = (*honest)["signature"];
+    EXPECT_FALSE(lake::audit::verify_export_manifest(manifest, malformed));
+
+    // Identity rotation mints another key-derived name, which must still verify portably.
+    ASSERT_TRUE(lake::audit::rotate_identity(source, options));
+    const auto rotated = lake::audit::sign_export_manifest(source, manifest, options);
+    ASSERT_TRUE(rotated);
+    EXPECT_NE((*rotated)["identity"]["taap_id"], (*honest)["identity"]["taap_id"]);
+    EXPECT_TRUE(lake::audit::verify_export_manifest(manifest, *rotated));
+}
+
 TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
     Surface source;
     RepositoryFixtureStore source_store;
@@ -4687,11 +4795,58 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
                     .ok);
     source.ctx.acting_identity = "admin";
     source.ctx.operator_credential = true;
+    ASSERT_TRUE(source
+                    .call("create_issue_comment",
+                          {{"repository_id", repository.value["id"]},
+                           {"issue_id",
+                            source.call("list_issues", {{"repository_id", repository.value["id"]}})
+                                .value["items"][0]["id"]},
+                           {"body", "An imported comment"}})
+                    .ok);
+    ASSERT_TRUE(source
+                    .call("create_release",
+                          {{"repository_id", repository.value["id"]},
+                           {"tag", "v1.0.0"},
+                           {"change_id", "change-1"},
+                           {"artifact_ids", json::array({"result-1"})}})
+                    .ok);
+    ASSERT_TRUE(source
+                    .call("set_branch_protection",
+                          {{"repository_id", repository.value["id"]},
+                           {"ref", "refs/heads/main"},
+                           {"required_verification", true}})
+                    .ok);
 
-    const ApiResult exported = source.call(
+    ApiResult exported = source.call(
         "export_repository", {{"repository_id", repository.value["id"]}, {"include_git", true}});
     ASSERT_TRUE(exported.ok) << exported.error.message;
     EXPECT_EQ(exported.value["archive"]["format"], "lake_export/1");
+    const auto resign_archive = [&](json archive) {
+        for (json& entry : archive["manifest"]["entries"]) {
+            entry["sha256"] = lake::control::identity_crypto::sha256_hex(
+                archive["payload"][entry.at("name").get<std::string>()].dump());
+        }
+        const auto signature = lake::audit::sign_export_manifest(
+            source.store, archive["manifest"], {.instance_kek = source.ctx.instance_kek});
+        EXPECT_TRUE(signature);
+        if (signature) {
+            archive["signature"] = *signature;
+        }
+        return archive;
+    };
+    // A valid source signature does not authenticate supplied metadata trust claims.
+    exported.value["archive"]["payload"]["forge"][0]["value"]["import_provenance"] = {
+        {"trust", "trusted"}};
+    exported.value["archive"]["payload"]["artifacts"][0]["import_provenance"] = {
+        {"trust", "trusted"}};
+    for (json& record : exported.value["archive"]["payload"]["forge"]) {
+        if (record["kind"] == "issue" || record["kind"] == "issue_comment") {
+            record["value"]["author"] = "taap:1:ed25519:claimed-author";
+        } else if (record["kind"] == "review") {
+            record["value"]["opened_by"] = "taap:1:ed25519:claimed-opener";
+        }
+    }
+    exported.value["archive"] = resign_archive(exported.value["archive"]);
 
     Surface destination;
     RepositoryFixtureStore destination_store;
@@ -4702,6 +4857,51 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
         "create_customer",
         {{"customer_type", "individual"}, {"user_id", target_user.value["id"]}, {"name", "grace"}});
     ASSERT_TRUE(target_customer.ok) << target_customer.error.message;
+    const auto customer_object =
+        destination.store.find_policy_object("customer", target_customer.value["id"]);
+    ASSERT_TRUE(customer_object);
+    ASSERT_TRUE(destination.store.create_grant({"taap:1:ed25519:importer",
+                                                customer_object->id,
+                                                "admin",
+                                                "importer-permission",
+                                                "admin",
+                                                "test"}));
+    destination.ctx.acting_identity = "taap:1:ed25519:importer";
+    destination.ctx.operator_credential = false;
+    json forged = exported.value["archive"];
+    lake::control::InMemoryStore attacker;
+    const auto resigned = lake::audit::sign_export_manifest(
+        attacker, forged["manifest"], {.instance_kek = "export-attacker-test"});
+    ASSERT_TRUE(resigned);
+    forged["signature"] = *resigned;
+    forged["signature"]["identity"]["taap_id"] =
+        exported.value["archive"]["signature"]["identity"]["taap_id"];
+    const ApiResult refused =
+        destination.call("import_repository",
+                         {{"customer_id", target_customer.value["id"]},
+                          {"workspace_id", destination.workspace(target_customer.value["id"])},
+                          {"name", "forged-copy"},
+                          {"archive", forged}});
+    ASSERT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "invalid_signature");
+    EXPECT_TRUE(destination_store.imported.empty());
+    const auto absent = destination.store.list_repositories(target_customer.value["id"], 100);
+    ASSERT_TRUE(absent);
+    EXPECT_TRUE(absent->empty());
+    for (const std::string member : {"artifacts", "forge", "grants"}) {
+        json malformed = exported.value["archive"];
+        malformed["payload"][member] = json::array({nullptr});
+        malformed = resign_archive(std::move(malformed));
+        const auto rejected =
+            destination.call("import_repository",
+                             {{"customer_id", target_customer.value["id"]},
+                              {"workspace_id", destination.workspace(target_customer.value["id"])},
+                              {"name", "malformed-" + member},
+                              {"archive", malformed}});
+        EXPECT_FALSE(rejected.ok);
+        EXPECT_EQ(rejected.error.code, "invalid_input");
+        EXPECT_TRUE(destination_store.imported.empty());
+    }
     const ApiResult imported = destination.call(
         "import_repository",
         {{"customer_id", target_customer.value["id"]},
@@ -4710,21 +4910,88 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
          {"name", "portable-copy"},
          {"archive", exported.value["archive"]}});
     ASSERT_TRUE(imported.ok) << imported.error.message;
+    const json import_audit = destination.ctx.audit_details;
     const auto portable =
         destination_store.imported.find(target_customer.value["id"].get<std::string>() + "/" +
                                         imported.value["id"].get<std::string>());
     ASSERT_NE(portable, destination_store.imported.end());
     EXPECT_EQ(portable->second.history, exported.value["archive"]["payload"]["history"]);
-    EXPECT_EQ(portable->second.artifacts, exported.value["archive"]["payload"]["artifacts"]);
-    EXPECT_EQ(destination.call("list_issues", {{"repository_id", imported.value["id"]}})
-                  .value["items"]
-                  .size(),
-              1);
+    ASSERT_EQ(portable->second.artifacts.size(),
+              exported.value["archive"]["payload"]["artifacts"].size());
+    EXPECT_EQ(portable->second.artifacts[0]["id"], "result-1");
+    EXPECT_EQ(portable->second.artifacts[0]["action"], "action-1");
+    EXPECT_EQ(portable->second.artifacts[0]["verification"], "untrusted");
+    EXPECT_EQ(portable->second.artifacts[0]["attestations"][0]["verified"], false);
+    EXPECT_EQ(portable->second.artifacts[0]["import_provenance"]["trust"], "untrusted");
+    const auto issues = destination.call("list_issues", {{"repository_id", imported.value["id"]}});
+    ASSERT_TRUE(issues.ok);
+    ASSERT_EQ(issues.value["items"].size(), 1);
+    EXPECT_EQ(issues.value["items"][0]["value"]["author"], destination.ctx.acting_identity);
+    EXPECT_EQ(issues.value["items"][0]["value"]["import_provenance"]["source_author"],
+              "taap:1:ed25519:claimed-author");
+    EXPECT_EQ(issues.value["items"][0]["value"]["import_provenance"]["trust"], "untrusted");
     const ApiResult reviews =
         destination.call("list_reviews", {{"repository_id", imported.value["id"]}});
     ASSERT_EQ(reviews.value["items"].size(), 1);
     EXPECT_EQ(reviews.value["items"][0]["value"]["state"], "approved");
     EXPECT_FALSE(reviews.value["items"][0]["value"].contains("approval"));
+    EXPECT_EQ(reviews.value["items"][0]["value"]["import_provenance"]["trust"], "untrusted");
+    EXPECT_EQ(reviews.value["items"][0]["value"]["opened_by"], destination.ctx.acting_identity);
+    EXPECT_EQ(reviews.value["items"][0]["value"]["import_provenance"]["source_opened_by"],
+              "taap:1:ed25519:claimed-opener");
+    const auto comments =
+        destination.call("list_issue_comments", {{"repository_id", imported.value["id"]}});
+    ASSERT_TRUE(comments.ok) << comments.error.message;
+    ASSERT_EQ(comments.value["items"].size(), 1);
+    EXPECT_EQ(comments.value["items"][0]["value"]["import_provenance"]["trust"], "untrusted");
+    EXPECT_EQ(comments.value["items"][0]["value"]["import_provenance"]["imported_by"],
+              destination.ctx.acting_identity);
+    EXPECT_EQ(comments.value["items"][0]["value"]["author"], destination.ctx.acting_identity);
+    EXPECT_EQ(comments.value["items"][0]["value"]["import_provenance"]["source_author"],
+              "taap:1:ed25519:claimed-author");
+    const auto releases =
+        destination.call("list_releases", {{"repository_id", imported.value["id"]}});
+    ASSERT_TRUE(releases.ok);
+    ASSERT_EQ(releases.value["items"].size(), 1);
+    EXPECT_TRUE(releases.value["items"][0]["value"]["artifacts"].empty());
+    EXPECT_EQ(releases.value["items"][0]["value"]["import_provenance"]["artifacts"][0]["id"],
+              "result-1");
+    const auto target_object =
+        destination.store.find_policy_object("repository", imported.value["id"]);
+    ASSERT_TRUE(target_object);
+    const auto grants = destination.store.list_grants({target_object->id}, std::nullopt, 100);
+    ASSERT_TRUE(grants);
+    ASSERT_EQ(grants->size(), 2);
+    for (const auto& grant : *grants) {
+        EXPECT_EQ(grant.granted_by_taap_id, destination.ctx.acting_identity);
+        EXPECT_FALSE(grant.attestation_digest.empty());
+        EXPECT_NE(grant.attestation_digest, "grant-proof");
+        EXPECT_NE(grant.attestation_digest, "reviewer-proof");
+    }
+    EXPECT_EQ(import_audit["source_signer"],
+              exported.value["archive"]["signature"]["identity"]["taap_id"]);
+    EXPECT_EQ(import_audit["source_trust"], "untrusted");
+    ASSERT_EQ(import_audit["grant_attestations"].size(), 2);
+    for (const auto& attestation : import_audit["grant_attestations"]) {
+        EXPECT_EQ(attestation["statement"]["granted_by"], destination.ctx.acting_identity);
+        EXPECT_EQ(attestation["statement"]["object_id"], target_object->id);
+        EXPECT_TRUE(std::ranges::any_of(*grants, [&](const auto& grant) {
+            return grant.attestation_digest == attestation["digest"].get<std::string>();
+        }));
+    }
+    const auto stored = destination.store.get_repository(imported.value["id"]);
+    ASSERT_TRUE(stored);
+    const auto protection =
+        liquid::runtime::block_on(load_branch_protection(destination.ctx, *stored));
+    ASSERT_TRUE(protection && *protection);
+    const auto publication = evaluate_branch_protection(
+        destination.store,
+        destination.ctx.acting_identity,
+        destination.ctx.authorization_cache,
+        **protection,
+        {.name = "refs/heads/main", .new_head = "change-1", .fast_forward = true});
+    ASSERT_FALSE(publication) << "imported release claims must not authorize publication";
+    EXPECT_EQ(publication.error().code, "conflict");
 
     json altered = exported.value["archive"];
     altered["payload"]["history"]["changes"][0]["message"] = "changed";
@@ -4918,6 +5185,137 @@ TEST(Forge, ReleaseRetainsVerifiedArtifactAttestations) {
     ASSERT_TRUE(release.ok) << release.error.message;
     EXPECT_EQ(release.value["value"]["artifacts"][0]["id"], "result-1");
     EXPECT_EQ(release.value["value"]["artifacts"][0]["attestations"][0]["id"], "attestation-1");
+}
+
+TEST(Forge, ReleaseRejectsArtifactsBoundToAnotherSource) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const auto user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok);
+    const auto customer = surface.call("create_customer",
+                                       {{"customer_type", "individual"},
+                                        {"user_id", user.value["id"]},
+                                        {"name", "release-binding"}});
+    ASSERT_TRUE(customer.ok);
+    const auto repository = surface.call("create_repository",
+                                         {{"customer_id", customer.value["id"]},
+                                          {"workspace_id", surface.workspace(customer.value["id"])},
+                                          {"name", "releases"}});
+    ASSERT_TRUE(repository.ok);
+    const std::string id = repository.value["id"];
+    const json input = {{"repository_id", id},
+                        {"tag", "v1"},
+                        {"change_id", "change-C"},
+                        {"artifact_ids", json::array({"result-B"})}};
+    repository_store.verified_source = RepositoryArtifactSource{id, "change-B"};
+    EXPECT_EQ(surface.call("create_release", input).error.code, "conflict");
+    repository_store.verified_source = RepositoryArtifactSource{"another-repository", "change-C"};
+    EXPECT_EQ(surface.call("create_release", input).error.code, "conflict");
+    EXPECT_TRUE(surface.call("list_releases", {{"repository_id", id}}).value["items"].empty());
+    repository_store.verified_source = RepositoryArtifactSource{id, "change-C"};
+    const auto bound = surface.call("create_release", input);
+    ASSERT_TRUE(bound.ok) << bound.error.message;
+    EXPECT_EQ(bound.value["value"]["artifacts"][0].value("source_binding", ""), "verified");
+    repository_store.verified_source.reset();
+    const auto legacy = surface.call("create_release", input);
+    ASSERT_TRUE(legacy.ok) << legacy.error.message;
+    EXPECT_EQ(legacy.value["value"]["artifacts"][0].value("source_binding", ""),
+              "source not bound");
+}
+
+TEST(Forge, RequiredVerificationRechecksEveryReleaseArtifactSource) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const auto user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok);
+    const auto customer = surface.call("create_customer",
+                                       {{"customer_type", "individual"},
+                                        {"user_id", user.value["id"]},
+                                        {"name", "verified-push"}});
+    ASSERT_TRUE(customer.ok);
+    const auto created = surface.call("create_repository",
+                                      {{"customer_id", customer.value["id"]},
+                                       {"workspace_id", surface.workspace(customer.value["id"])},
+                                       {"name", "protected"}});
+    ASSERT_TRUE(created.ok);
+    const auto repository = surface.store.get_repository(created.value["id"]);
+    ASSERT_TRUE(repository);
+    ASSERT_TRUE(surface
+                    .call("set_branch_protection",
+                          {{"repository_id", repository->id},
+                           {"ref", "main"},
+                           {"required_verification", true}})
+                    .ok);
+    // A legacy/imported record claims verified evidence, including forged source metadata.
+    surface.workspaces->forge(*repository,
+                              "release",
+                              {{"change_id", "change-C"},
+                               {"artifacts",
+                                json::array({{{"id", "result-B"},
+                                              {"source_binding", "verified"},
+                                              {"repository_id", repository->id},
+                                              {"change_id", "change-C"}}})}},
+                              surface.ctx.instance_kek);
+    const BranchRefUpdate update{.name = "main", .new_head = "change-C", .fast_forward = true};
+    const auto evaluate = [&] {
+        auto loaded = liquid::runtime::block_on(load_branch_protection(surface.ctx, *repository));
+        EXPECT_TRUE(loaded && *loaded);
+        if (!loaded || !*loaded) {
+            return false;
+        }
+        return evaluate_branch_protection(
+                   surface.store, "admin", surface.ctx.authorization_cache, **loaded, update)
+            .has_value();
+    };
+    EXPECT_FALSE(evaluate()) << "unbound snapshots cannot satisfy verification";
+    repository_store.verified_source = RepositoryArtifactSource{repository->id, "change-B"};
+    EXPECT_FALSE(evaluate());
+    repository_store.verified_source = RepositoryArtifactSource{"another-repository", "change-C"};
+    EXPECT_FALSE(evaluate());
+    repository_store.verified_source = RepositoryArtifactSource{repository->id, "change-C"};
+    EXPECT_TRUE(evaluate());
+    // Revalidate on the next push, even if the release snapshot previously passed.
+    repository_store.verified_source.reset();
+    EXPECT_FALSE(evaluate());
+    repository_store.artifact_error = SyncStoreError{"store_unavailable", "evidence unavailable"};
+    auto unavailable = liquid::runtime::block_on(load_branch_protection(surface.ctx, *repository));
+    ASSERT_TRUE(unavailable);
+    EXPECT_FALSE(*unavailable);
+    repository_store.artifact_error = SyncStoreError{"not_found", "evidence removed"};
+    EXPECT_FALSE(evaluate());
+    repository_store.artifact_error.reset();
+    // Every selected artifact must bind; a matching artifact never excuses an unbound one.
+    repository_store.verified_source = RepositoryArtifactSource{repository->id, "change-D"};
+    repository_store.artifact_sources["unbound"] = std::nullopt;
+    surface.workspaces->forge(
+        *repository,
+        "release",
+        {{"change_id", "change-D"},
+         {"artifacts", json::array({{{"id", "bound"}}, {{"id", "unbound"}}})}},
+        surface.ctx.instance_kek);
+    auto mixed = liquid::runtime::block_on(load_branch_protection(surface.ctx, *repository));
+    ASSERT_TRUE(mixed && *mixed);
+    EXPECT_FALSE(evaluate_branch_protection(
+        surface.store,
+        "admin",
+        surface.ctx.authorization_cache,
+        **mixed,
+        BranchRefUpdate{.name = "main", .new_head = "change-D", .fast_forward = true}));
+    // Malformed legacy evidence fails closed without throwing on a non-object item.
+    surface.workspaces->forge(*repository,
+                              "release",
+                              {{"change_id", "change-E"}, {"artifacts", json::array({17})}},
+                              surface.ctx.instance_kek);
+    auto loaded = liquid::runtime::block_on(load_branch_protection(surface.ctx, *repository));
+    ASSERT_TRUE(loaded && *loaded);
+    EXPECT_FALSE(evaluate_branch_protection(
+        surface.store,
+        "admin",
+        surface.ctx.authorization_cache,
+        **loaded,
+        BranchRefUpdate{.name = "main", .new_head = "change-E", .fast_forward = true}));
 }
 
 TEST(Forge, WebhookDeliveryRetriesAndRetainsAnEventLog) {
@@ -5875,6 +6273,214 @@ TEST(Drive, SharingByEmailOrHandleIsAttestedByLake) {
     EXPECT_EQ(with({{"role", "read"}}).error.code, "invalid_input");
 }
 
+// LSR-089: sharing must attenuate authority for both live grants and bearer links.
+TEST(Drive, SharingCannotGrantActionsTheCallerDoesNotHold) {
+    Surface surface;
+    DriveWorkspaces workspaces(surface);
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const auto organization = surface.call(
+        "create_organization", {{"taap_id", "taap:1:ed25519:studio"}, {"display_name", "Studio"}});
+    ASSERT_TRUE(organization.ok);
+    for (const std::string name : {"owner", "sharer", "member", "outsider"}) {
+        const auto user = surface.call("create_user",
+                                       {{"taap_id", "taap:1:ed25519:" + name},
+                                        {"email", name + "@example.com"},
+                                        {"display_name", name}});
+        ASSERT_TRUE(user.ok);
+        if (name != "outsider") {
+            ASSERT_TRUE(surface
+                            .call("create_membership",
+                                  {{"organization_id", organization.value["id"]},
+                                   {"principal_type", "user"},
+                                   {"principal_id", user.value["id"]},
+                                   {"principal_taap_id", user.value["taap_id"]},
+                                   {"role", "member"}})
+                            .ok);
+        }
+    }
+    const auto customer = surface.call("create_customer",
+                                       {{"customer_type", "organization"},
+                                        {"organization_id", organization.value["id"]},
+                                        {"name", "share-authority"}});
+    ASSERT_TRUE(customer.ok);
+    const auto repository = surface.call(
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"name", "drive"}});
+    ASSERT_TRUE(repository.ok);
+    const auto repository_object =
+        surface.store.find_policy_object("repository", repository.value["id"]);
+    ASSERT_TRUE(repository_object);
+    ASSERT_TRUE(surface.store.create_grant({"taap:1:ed25519:owner",
+                                            repository_object->id,
+                                            "admin",
+                                            "owner-grant",
+                                            "admin",
+                                            "owner-request"}));
+    const std::string workspace = workspaces.create(customer.value["id"], "home");
+    const json folder{
+        {"repository_id", repository.value["id"]}, {"ref", "main"}, {"path", "shared"}};
+    const auto share = [&](json extra) {
+        json input = folder;
+        input.update(extra);
+        return surface.call("share_drive_folder", input);
+    };
+    const auto link = [&](const std::string& role) {
+        json input = folder;
+        input.update(
+            {{"workspace_id", workspace}, {"role", role}, {"expires_at", "2099-01-01T00:00:00Z"}});
+        return surface.call("create_drive_share_link", input);
+    };
+    surface.ctx.operator_credential = false;
+    surface.ctx.acting_identity = "taap:1:ed25519:owner";
+    const auto delegated =
+        share({{"principal_taap_id", "taap:1:ed25519:sharer"}, {"role", "share"}});
+    ASSERT_TRUE(delegated.ok) << delegated.error.message;
+    const std::string object = delegated.value["object"]["id"];
+    surface.ctx.acting_identity = "taap:1:ed25519:sharer";
+
+    // Both recipient selectors must reject write before creating a grant.
+    for (const json target : {json{{"recipient", "MEMBER@example.com"}},
+                              json{{"principal_taap_id", "taap:1:ed25519:member"}}}) {
+        json input = target;
+        input["role"] = "write";
+        const auto refused = share(input);
+        EXPECT_FALSE(refused.ok);
+        EXPECT_EQ(refused.error.code, "unauthorized");
+        EXPECT_EQ(refused.error.path, "/role");
+    }
+    const auto refused_link = link("write");
+    EXPECT_FALSE(refused_link.ok);
+    EXPECT_EQ(refused_link.error.code, "unauthorized");
+    EXPECT_EQ(refused_link.error.path, "/role");
+    const auto grants = surface.store.list_grants({object}, std::nullopt, 100);
+    ASSERT_TRUE(grants);
+    EXPECT_EQ(grants->size(), 1u);
+    const auto links = surface.call("drive_effective_access",
+                                    {{"repository_id", repository.value["id"]},
+                                     {"workspace_id", workspace},
+                                     {"ref", "main"},
+                                     {"path", "shared"}});
+    ASSERT_TRUE(links.ok) << links.error.message;
+    EXPECT_TRUE(links.value["links"].empty());
+
+    for (const std::string role : {"read", "share"}) {
+        const auto allowed = share({{"recipient", "member@example.com"}, {"role", role}});
+        EXPECT_TRUE(allowed.ok) << allowed.error.message;
+        const auto again = share({{"principal_taap_id", "taap:1:ed25519:member"}, {"role", role}});
+        EXPECT_TRUE(again.ok) << again.error.message;
+        const auto outside =
+            share({{"principal_taap_id", "taap:1:ed25519:outsider"}, {"role", role}});
+        EXPECT_FALSE(outside.ok);
+        EXPECT_EQ(outside.error.code, "unauthorized");
+        EXPECT_EQ(outside.error.path, "/principal_taap_id");
+    }
+    EXPECT_TRUE(link("read").ok);
+
+    // An inherited write grant combines with folder share; write alone cannot re-share.
+    ASSERT_TRUE(surface.store.create_grant({"taap:1:ed25519:sharer",
+                                            repository_object->id,
+                                            "write",
+                                            "write-grant",
+                                            "admin",
+                                            "write-request"}));
+    const auto allowed_write =
+        share({{"principal_taap_id", "taap:1:ed25519:member"}, {"role", "write"}});
+    EXPECT_TRUE(allowed_write.ok) << allowed_write.error.message;
+    EXPECT_TRUE(link("write").ok);
+    EXPECT_FALSE(share({{"principal_taap_id", "taap:1:ed25519:outsider"}, {"role", "write"}}).ok);
+    const auto inherited =
+        surface.store.list_grants({repository_object->id}, "taap:1:ed25519:sharer", 100);
+    ASSERT_TRUE(inherited);
+    ASSERT_EQ(inherited->size(), 1u);
+    ASSERT_TRUE(surface.store.revoke_grant(inherited->front().id, false));
+    const auto retry = share({{"principal_taap_id", "taap:1:ed25519:member"}, {"role", "write"}});
+    EXPECT_FALSE(retry.ok);
+    EXPECT_EQ(retry.error.path, "/role");
+    EXPECT_FALSE(link("write").ok);
+
+    surface.ctx.acting_identity = "taap:1:ed25519:member";
+    // Remove the member's share role, leaving read and write only.
+    const auto member_grants = surface.store.list_grants({object}, "taap:1:ed25519:member", 100);
+    ASSERT_TRUE(member_grants);
+    for (const auto& grant : *member_grants) {
+        if (grant.role == "share") {
+            ASSERT_TRUE(surface.store.revoke_grant(grant.id, false));
+        }
+    }
+    EXPECT_FALSE(share({{"recipient", "owner@example.com"}, {"role", "read"}}).ok);
+    EXPECT_FALSE(link("read").ok);
+
+    surface.ctx.acting_identity = "taap:1:ed25519:owner";
+    EXPECT_TRUE(share({{"principal_taap_id", "taap:1:ed25519:outsider"}, {"role", "write"}}).ok);
+}
+
+TEST(Drive, MutationChecksTheLockedTreeAndRestoreChecksMain) {
+    Surface surface;
+    RepositoryFixtureStore repositories;
+    surface.ctx.sync_store = &repositories;
+    const auto owner = surface.call(
+        "create_user", {{"taap_id", "taap:1:ed25519:writer"}, {"display_name", "Writer"}});
+    ASSERT_TRUE(owner.ok);
+    const auto customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", owner.value["id"]}, {"name", "locked-tree"}});
+    ASSERT_TRUE(customer.ok);
+    const auto repository = surface.call("create_repository",
+                                         {{"customer_id", customer.value["id"]},
+                                          {"workspace_id", surface.workspace(customer.value["id"])},
+                                          {"name", "drive"}});
+    ASSERT_TRUE(repository.ok);
+    const auto object = surface.store.find_policy_object("repository", repository.value["id"]);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(surface.store.create_grant(
+        {"taap:1:ed25519:writer", object->id, "write", "test", "admin", "test"}));
+    // The ref moves after the registry reads it: main now contains a different, protected node.
+    repositories.write_tree = *repositories.repository_tree("", "", "main");
+    repositories.write_tree->back().node_id = "protected-file";
+    const auto protected_file = surface.store.create_policy_object(
+        {"path",
+         repository.value["id"].get<std::string>() + ":protected-file",
+         object->id,
+         "admin",
+         "test",
+         false});
+    ASSERT_TRUE(protected_file);
+    surface.ctx.operator_credential = false;
+    surface.ctx.acting_identity = "taap:1:ed25519:writer";
+    const json target{
+        {"repository_id", repository.value["id"]}, {"ref", "main"}, {"path", "shared"}};
+    json upload = target;
+    upload["files"] = json::array({{{"name", "readme.md"}, {"content", "bmV3"}}});
+    const auto denied = surface.call("upload_drive_files", upload);
+    EXPECT_EQ(denied.error.code, "unauthorized");
+    EXPECT_TRUE(repositories.committed_operations.empty());
+    json restore = target;
+    restore["path"] = "shared/readme.md";
+    restore["ref"] = "change-1"; // A historical ref cannot authorize writes into today's main.
+    restore["change_id"] = "change-1";
+    const auto denied_restore = surface.call("restore_drive_version", restore);
+    EXPECT_EQ(denied_restore.error.code, "unauthorized");
+    EXPECT_FALSE(repositories.restored);
+    repositories.conflict_path = "shared/readme.md";
+    json conflict = restore;
+    conflict.erase("change_id");
+    conflict["conflict_id"] = "conflict-1";
+    conflict["resolution"] = "left";
+    EXPECT_EQ(surface.call("resolve_conflict", conflict).error.code, "unauthorized");
+    EXPECT_TRUE(repositories.resolved_conflict.empty());
+
+    auto contents = repository_store_contents(
+        &repositories, customer.value["id"], repository.value["id"], "main", surface.ctx);
+    const auto store_write = lake::control::settled(
+        liquid::runtime::block_on(contents->write("shared/readme.md", "new", "text/plain")));
+    ASSERT_FALSE(store_write);
+    EXPECT_EQ(store_write.error().code, "unauthorized");
+    EXPECT_TRUE(repositories.committed_operations.empty());
+}
+
 TEST(Drive, ShareDownloadsEncodeAcrossBlockBoundaries) {
     Surface surface;
     DriveWorkspaces workspaces(surface);
@@ -6270,6 +6876,46 @@ TEST(Models, MetadataAndResolveUseRepositoryHistoryAndProvenance) {
         {{"id", repository.value["id"]}, {"revision", "main"}, {"path", "weights.bin"}});
     ASSERT_TRUE(file.ok) << file.error.message;
     EXPECT_EQ(file.value["contents"], "fixture weights");
+}
+
+TEST(Models, AnonymousDatasetAndModelRevisionsRequirePublicRepositories) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const auto user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok);
+    const auto customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok);
+    for (const std::string visibility : {"public", "private"}) {
+        surface.ctx.authorized = true;
+        surface.ctx.acting_identity = "admin";
+        const auto repository =
+            surface.call("create_repository",
+                         {{"customer_id", customer.value["id"]},
+                          {"workspace_id",
+                           lake::test::repository_workspace(surface.store, customer.value["id"])},
+                          {"name", visibility + "-metadata"},
+                          {"visibility", visibility}});
+        ASSERT_TRUE(repository.ok) << repository.error.message;
+        surface.ctx.authorized = false;
+        surface.ctx.acting_identity.clear();
+        for (const std::string name : {"get_dataset", "get_model"}) {
+            SCOPED_TRACE(name + "/" + visibility);
+            const json input{{"id", repository.value["id"]}, {"revision", "main"}};
+            const auto sync = surface.registry.call(name, input, surface.ctx);
+            const auto async =
+                liquid::runtime::block_on(surface.registry.call_async(name, input, surface.ctx));
+            ASSERT_TRUE(async);
+            for (const auto* result : {&sync, &*async}) {
+                EXPECT_EQ(result->ok, visibility == "public") << result->error.message;
+                if (visibility == "private") {
+                    EXPECT_EQ(result->error.code, "unauthenticated");
+                }
+            }
+        }
+    }
 }
 
 TEST(HuggingFaceHttp, CommonModelAndDatasetCallsUseRepositoryCapabilities) {
@@ -6788,11 +7434,14 @@ TEST(RepositoryHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidde
     const auto history = liquid::runtime::block_on(repository.log());
     ASSERT_TRUE(history) << history.error().message;
     ASSERT_FALSE(history->empty());
-    const liquid::action_input build_input{.command = {"remote-build"},
-                                           .outputs = {"build/app"},
-                                           .inputs = history->front().root,
-                                           .toolchain = history->front().root,
-                                           .platform = host_platform()};
+    const liquid::action_input build_input{
+        .command = {"remote-build"},
+        .env = {{"LAKE_SOURCE_REPOSITORY_ID", public_repository->id},
+                {"LAKE_SOURCE_CHANGE_ID", liquid::to_string(second_change->value)}},
+        .outputs = {"build/app"},
+        .inputs = history->front().root,
+        .toolchain = history->front().root,
+        .platform = host_platform()};
     auto first_result_value = liquid::action_result{
         .outputs = {{"build/app", 0100755, *artifact_record}},
         .stdout_output = *artifact_record,
@@ -6833,11 +7482,15 @@ TEST(RepositoryHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidde
         liquid::runtime::block_on(reformatting_source.cut("reformatting"));
     ASSERT_TRUE(formatting_change) << formatting_change.error().message;
 
+    lake::test::RecordWorkspaces release_workspaces(store);
+    release_workspaces.ready(public_repository->workspace_id);
     ServerOptions options;
     options.port = 0;
     options.node_name = "test-node";
     options.admin_token = "test-token";
     options.store = store;
+    options.workspaces = release_workspaces.service;
+    options.instance_kek = "6c616b652d666f7267652d7265636f7264732d746573742d696e7374616e6365";
     options.store_root = root.path().string();
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
@@ -6881,6 +7534,29 @@ TEST(RepositoryHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidde
     EXPECT_NE(artifact.find("build/app"), std::string::npos) << artifact;
     EXPECT_NE(artifact.find("slsa_provenance/1"), std::string::npos) << artifact;
     EXPECT_NE(artifact.find("sbom/1"), std::string::npos) << artifact;
+
+    // Real signed action provenance must bind the selected result to this exact source.
+    const auto release = [&](const std::string& change_id) {
+        return response_json(http_request(
+            server.port(),
+            "POST",
+            "/v1/create_release",
+            json{{"repository_id", public_repository->id},
+                 {"tag", "binding-proof"},
+                 {"change_id", change_id},
+                 {"artifact_ids", json::array({liquid::to_string(second_result->value)})}}
+                .dump(),
+            "application/json",
+            {},
+            "Bearer test-token"));
+    };
+    const auto bound_release = release(liquid::to_string(second_change->value));
+    ASSERT_TRUE(bound_release.value("ok", false)) << bound_release.dump();
+    EXPECT_EQ(bound_release["value"]["value"]["artifacts"][0].value("source_binding", ""),
+              "verified");
+    const auto mismatched_release = release(liquid::to_string(first_change->value));
+    EXPECT_FALSE(mismatched_release.value("ok", true)) << mismatched_release.dump();
+    EXPECT_EQ(mismatched_release["error"]["code"], "conflict");
 
     const std::string model_response =
         http_get(server.port(), "/api/models/" + public_repository->id);
@@ -8219,7 +8895,7 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
     user_context.credential_expires_at_unix = principal->expires_at_unix;
 
     const ApiResult enrollment = *liquid::runtime::block_on(
-        s.registry.call_async("enroll_mfa", json::object(), user_context));
+        s.registry.call_async("enroll_mfa", {{"password", "correct horse battery"}}, user_context));
     ASSERT_TRUE(enrollment.ok) << enrollment.error.message;
     const std::string uri = enrollment.value["otpauth_uri"];
     EXPECT_TRUE(uri.starts_with("otpauth://totp/lake:"));
@@ -8230,6 +8906,13 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
     ASSERT_FALSE(secret.empty());
     EXPECT_EQ(secret.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"), std::string::npos)
         << secret;
+    const auto refused = *liquid::runtime::block_on(
+        s.registry.call_async("enroll_mfa", json::object(), user_context));
+    EXPECT_FALSE(refused.ok);
+    const auto wrong_password = *liquid::runtime::block_on(
+        s.registry.call_async("enroll_mfa", {{"password", "wrong password"}}, user_context));
+    EXPECT_FALSE(wrong_password.ok);
+    // Refused replacements leave the original authenticator's seed usable.
     const ApiResult with_authenticator = s.call("verify_mfa",
                                                 {{"email", "ada@example.com"},
                                                  {"password", "correct horse battery"},
@@ -8258,7 +8941,8 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
 
     const ApiResult stale_disable = *liquid::runtime::block_on(
         s.registry.call_async("disable_mfa", {{"code", first_recovery}}, user_context));
-    EXPECT_EQ(stale_disable.error.code, "unauthorized");
+    // Credential failures share the generic 401 (lake#966).
+    EXPECT_EQ(stale_disable.error.code, "unauthenticated");
     const ApiResult disabled = *liquid::runtime::block_on(
         s.registry.call_async("disable_mfa", {{"code", second_recovery}}, user_context));
     ASSERT_TRUE(disabled.ok) << disabled.error.message;

@@ -20,11 +20,12 @@
 namespace lake::api {
 namespace {
 
-// Capabilities that wait on a repository store run off the server's thread (lake#380). Their
-// handlers reach shared state only through the control store, the repository store (one lane
-// per store), search (which reaches stores only through the repository store), and the
-// recorders, all of which lock.
-bool waits_on_repository_store(const Capability& capability) {
+// Capabilities that wait on a repository store run off the server's thread (lake#380), and so
+// does the anonymous identity scan, whose first call after a start verifies the whole
+// transparency log (lake#941). Their handlers reach shared state only through the control store,
+// the repository store (one lane per store), search (which reaches stores only through the
+// repository store), the transparency log and checkpoints, and the recorders, all of which lock.
+bool runs_off_server_thread(const Capability& capability) {
     const std::string_view object = capability.object;
     return object.starts_with("repository") || object.find("drive") != std::string_view::npos ||
            object == "model" ||
@@ -33,7 +34,8 @@ bool waits_on_repository_store(const Capability& capability) {
            object == "space store removal" ||
            capability.name == "replicate_repository" ||
            // Deleting a workspace closes its store, waiting on its lane.
-           capability.name == "delete_workspace";
+           capability.name == "delete_workspace" ||
+           capability.name == "transparency_identity_scan";
 }
 
 bool contains_database_diagnostic(std::string_view message) {
@@ -120,7 +122,7 @@ void log_database_diagnostic(std::string_view code, std::string_view message) {
     std::println(stderr, "{}", entry.dump());
 }
 
-constexpr std::array<ErrorCode, 34> documented_error_codes{{
+constexpr std::array<ErrorCode, 36> documented_error_codes{{
     {"invalid_input", 400, "The input is at fault; `path` points at the field."},
     {"secret_required",
      400,
@@ -163,6 +165,11 @@ constexpr std::array<ErrorCode, 34> documented_error_codes{{
      409,
      "The workspace action needs an approval it does not have yet: approve the plan or the "
      "decision first."},
+    {"safe_mode_warning",
+     409,
+     "The database's safe mode warns on what the call would run: `details` names the database or "
+     "connection, the level, the exact statements and a `confirmation`; repeat the same call with "
+     "`safe_mode_confirmation` set to it to run them."},
     {"gate_blocked", 409, "A pipeline gate refused the run; the message names the failing check."},
     {"sign_in_required",
      409,
@@ -189,8 +196,13 @@ constexpr std::array<ErrorCode, 34> documented_error_codes{{
      503,
      "The control-plane store, the workspace or another dependency is not reachable now."},
     {"workspace_not_ready", 503, "The workspace or service exists but is not ready yet."},
+    {"audit_queue_full",
+     503,
+     "The workspace audit queue is full; inspect operation_result before retrying."},
     {"busy", 503, "The resource is busy; retry."},
-    {"rate_limited", 429, "Too many requests from this caller, or in all, are waiting; retry."},
+    {"rate_limited",
+     429,
+     "A request limit was reached; retry when capacity or the authentication cooldown permits."},
     {"usage_limit_reached",
      429,
      "The account has used its monthly limit on this dimension (model tokens); an administrator "
@@ -373,8 +385,14 @@ nlohmann::json ApiResult::envelope() const {
         if (!error.help.empty()) {
             envelope["error"]["help"] = error.help;
         }
+        if (!error.details.is_null()) {
+            envelope["error"]["details"] = error.details;
+        }
     }
     envelope["duration_ms"] = duration_ms;
+    if (operation_result) {
+        envelope["operation_result"] = *operation_result;
+    }
     return envelope;
 }
 
@@ -383,31 +401,40 @@ nlohmann::json error_envelope_schema() {
     for (const ErrorCode& code : documented_error_codes) {
         codes.push_back(std::string(code.code));
     }
-    return {{"type", "object"},
+    return {
+        {"type", "object"},
+        {"properties",
+         {{"ok", {{"const", false}}},
+          {"error",
+           {{"type", "object"},
             {"properties",
-             {{"ok", {{"const", false}}},
-              {"error",
+             {{"code",
+               {{"type", "string"},
+                {"enum", std::move(codes)},
+                {"description", "what went wrong, one of the codes in docs/api/errors.md"}}},
+              {"message", {{"type", "string"}}},
+              {"path",
+               {{"type", "string"},
+                {"description",
+                 "JSON pointer to the input field at fault; empty when the input is not"}}},
+              {"reason",
+               {{"type", "string"},
+                {"enum", {"missing", "invalid", "expired"}},
+                {"description", "unauthenticated only: why no credential was accepted"}}},
+              {"help",
+               {{"type", "string"},
+                {"description", "unauthenticated only: where to make a new key"}}},
+              {"details",
                {{"type", "object"},
-                {"properties",
-                 {{"code",
-                   {{"type", "string"},
-                    {"enum", std::move(codes)},
-                    {"description", "what went wrong, one of the codes in docs/api/errors.md"}}},
-                  {"message", {{"type", "string"}}},
-                  {"path",
-                   {{"type", "string"},
-                    {"description",
-                     "JSON pointer to the input field at fault; empty when the input is not"}}},
-                  {"reason",
-                   {{"type", "string"},
-                    {"enum", {"missing", "invalid", "expired"}},
-                    {"description", "unauthenticated only: why no credential was accepted"}}},
-                  {"help",
-                   {{"type", "string"},
-                    {"description", "unauthenticated only: where to make a new key"}}}}},
-                {"required", nlohmann::json::array({"code", "message"})}}},
-              {"duration_ms", {{"type", "number"}}}}},
-            {"required", nlohmann::json::array({"ok", "error", "duration_ms"})}};
+                {"description",
+                 "safe_mode_warning only: {database or connection, mode, statements, "
+                 "confirmation}; repeat the call with safe_mode_confirmation to run them"}}}}},
+            {"required", nlohmann::json::array({"code", "message"})}}},
+          {"duration_ms", {{"type", "number"}}},
+          {"operation_result",
+           {{"type", "object"},
+            {"description", "Original operation envelope when its subsequent audit failed."}}}}},
+        {"required", nlohmann::json::array({"ok", "error", "duration_ms"})}};
 }
 
 nlohmann::json success_envelope_schema(const nlohmann::json& output_schema) {
@@ -553,6 +580,7 @@ struct CallState {
     std::shared_ptr<const Capability> capability;
     ApiResult result;
     bool proceed = true;
+    std::optional<control::AuthenticationAttempt> authentication;
 };
 
 ApiResult
@@ -791,10 +819,36 @@ void admit_application_session(const Capability& entry, ApiContext& context) {
     context.scopes = admitted ? session.scopes : std::vector<std::string>{};
 }
 
+std::optional<ApiResult> authentication_failure(const Capability& entry, ApiContext& context) {
+    admit_application_session(entry, context);
+    // A bearer key lake rejected (unknown, revoked, expired, mistyped) is refused on every
+    // capability a visitor may call: lake's own public reads (object `server`: `viewer`,
+    // `server_info`, the Docs; lake#594) and the public reads of repositories and their content
+    // (`allows_anonymous_public_read`, lake#775). A client whose key was revoked learns so instead
+    // of reading a visitor's answer, such as an empty repository list. A browser's stale session
+    // cookie is still a visitor, and the capabilities that verify their own bearer (SCIM
+    // providers, sign-in, the agents' calls) are left to do so.
+    const bool rejected_bearer = !context.authorized && !context.credential_rejection.empty() &&
+                                 context.authentication_method == "bearer" &&
+                                 (entry.object == "server" || entry.allows_anonymous_public_read);
+    if (context.application_session && !entry.serves_application_pools && entry.requires_auth &&
+        !entry.allows_anonymous_public_read) {
+        return ApiResult::failure(
+            "unauthorized",
+            "an identity application's session reaches only its own sign-in (sessions, devices, "
+            "tokens, MFA and passkeys); " +
+                entry.name + " needs a Lake account's credential");
+    } else if (((entry.requires_auth || entry.requires_credential) && !context.authorized &&
+                !entry.allows_anonymous_public_read) ||
+               rejected_bearer) {
+        return unauthenticated(context);
+    }
+    return std::nullopt;
+}
+
 CallState prepare_call(std::shared_ptr<const Capability> capability,
                        const nlohmann::json& input,
                        ApiContext& context) {
-    admit_application_session(*capability, context);
     if (context.request_id.empty()) {
         context.request_id = control::new_uuid_v4();
     }
@@ -816,32 +870,28 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         }
     }
     const Capability& entry = *state.capability;
+    if (context.store &&
+        (entry.name == "sign_up_password" || entry.name == "sign_in_password" ||
+         entry.name == "verify_mfa" || entry.name == "recover_with_code" ||
+         entry.name == "begin_email_recovery" || entry.name == "complete_recovery" ||
+         entry.name == "enroll_mfa" || entry.name == "disable_mfa" ||
+         (entry.name == "delete_account" && input.contains("code")))) {
+        const auto gate = context.store->authentication_attempt(
+            "", "", "", context.client_address.empty() ? "in-process" : context.client_address);
+        if (!gate) {
+            state.result = ApiResult::failure(gate.error().code, gate.error().message);
+            state.proceed = false;
+            return state;
+        }
+        state.authentication = *gate;
+    }
     if (input.contains("workspace_id")) {
         context.workspace_id = input.at("workspace_id").is_string()
-            ? input.at("workspace_id").get<std::string>() : std::string();
+                                   ? input.at("workspace_id").get<std::string>()
+                                   : std::string();
     }
-    // A bearer key lake rejected (unknown, revoked, expired, mistyped) is refused on every
-    // capability a visitor may call: lake's own public reads (object `server`: `viewer`,
-    // `server_info`, the Docs; lake#594) and the public reads of repositories and their content
-    // (`allows_anonymous_public_read`, lake#775). A client whose key was revoked learns so instead
-    // of reading a visitor's answer, such as an empty repository list. A browser's stale session
-    // cookie is still a visitor, and the capabilities that verify their own bearer (SCIM
-    // providers, sign-in, the agents' calls) are left to do so.
-    const bool rejected_bearer = !context.authorized && !context.credential_rejection.empty() &&
-                                 context.authentication_method == "bearer" &&
-                                 (entry.object == "server" || entry.allows_anonymous_public_read);
-    if (context.application_session && !entry.serves_application_pools && entry.requires_auth &&
-        !entry.allows_anonymous_public_read) {
-        state.result = ApiResult::failure(
-            "unauthorized",
-            "an identity application's session reaches only its own sign-in (sessions, devices, "
-            "tokens, MFA and passkeys); " +
-                entry.name + " needs a Lake account's credential");
-        state.proceed = false;
-    } else if ((entry.requires_auth && !context.authorized &&
-                !entry.allows_anonymous_public_read) ||
-               rejected_bearer) {
-        state.result = unauthenticated(context);
+    if (auto failure = authentication_failure(entry, context)) {
+        state.result = std::move(*failure);
         state.proceed = false;
     } else if (ApiResult validation = validate_input(entry, input); !validation.ok) {
         state.result = validation;
@@ -958,6 +1008,26 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         }
     }
     return state;
+}
+
+// Accepted email-recovery requests do not prove identity and cannot clear a guessing budget.
+void finish_authentication(CallState& state, const std::string& name, ApiContext& context) {
+    if (!state.authentication)
+        return;
+    auto outcome = control::AuthenticationOutcome::neutral;
+    if (state.proceed && name != "begin_email_recovery") {
+        if (state.result.ok && name != "sign_up_password")
+            outcome = control::AuthenticationOutcome::success;
+        else if (state.result.error.code == "unauthenticated" ||
+                 state.result.error.code == "unauthorized" ||
+                 state.result.error.code == "not_found" ||
+                 (name == "sign_up_password" && state.result.error.code == "conflict"))
+            outcome = control::AuthenticationOutcome::failure;
+    }
+    const auto finished =
+        context.store->authentication_attempt_finished(*state.authentication, outcome);
+    if (!finished)
+        state.result = ApiResult::failure(finished.error().code, finished.error().message);
 }
 
 // The agent a task, launch or schedule credential belongs to. Those credentials act as the person
@@ -1126,13 +1196,16 @@ ApiResult finish_call(const Capability* capability,
     const AuditRoute route = audit_route(name, acted, context);
     auto recorded = record_audit(context, event, route);
     if (!recorded) {
-        return ApiResult::failure("store_error",
-                                  "could not record audit event: " + recorded.error().message);
+        auto failure = ApiResult::failure(
+            recorded.error().code == "audit_queue_full" ? "audit_queue_full" : "store_error",
+            "could not record audit event: " + recorded.error().message);
+        failure.operation_result = result.envelope();
+        return failure;
     }
     if (!*recorded) {
         return result;
     }
-    if (kind == "dynamic_secret" && context.transparency_log) {
+    if (result.ok && kind == "dynamic_secret" && context.transparency_log) {
         auto appended = context.transparency_log->append_audit_event(**recorded);
         if (!appended) {
             return ApiResult::failure("store_error",
@@ -1202,7 +1275,8 @@ std::expected<nlohmann::json, ApiError> canonical_input(const Capability& capabi
 }
 
 bool Registry::add(Capability capability) {
-    if (capability.name.empty() || find(capability.name))
+    if (capability.name.empty() || find(capability.name) || capability.max_body_bytes == 0 ||
+        capability.max_body_bytes > maximum_capability_body_bytes)
         return false;
     // A deprecated alias is listed in the schema, so OpenAPI and MCP show it (docs/api/naming.md).
     for (const auto& [alias, name] : capability.input_aliases) {
@@ -1272,6 +1346,7 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
     nlohmann::json task_resolved_input;
     const nlohmann::json& call_input =
         agent_task_input(*capability, workspace_input, context, task_resolved_input);
+
     CallState state = prepare_call(capability, call_input, context);
     if (state.proceed) {
         const auto start = std::chrono::steady_clock::now();
@@ -1291,8 +1366,20 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
                 .count();
     }
+    finish_authentication(state, name, context);
     return finish_call(
         capability.get(), name, call_input, std::move(state.result), context, state.proceed);
+}
+
+ApiResult Registry::authenticate(const std::string& name, ApiContext& context) const {
+    const auto capability = find(name);
+    if (!capability) {
+        return ApiResult::failure("unknown_capability", "no capability named " + name);
+    }
+    if (auto failure = authentication_failure(*capability, context)) {
+        return refuse(name, std::move(*failure), {{"input", "unread"}, {"body_bytes", 0}}, context);
+    }
+    return ApiResult::success(nlohmann::json::object());
 }
 
 ApiResult Registry::refuse(const std::string& name,
@@ -1344,6 +1431,7 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
     nlohmann::json task_resolved_input;
     const nlohmann::json& call_input =
         agent_task_input(*capability, workspace_input, context, task_resolved_input);
+
     CallState state = prepare_call(capability, call_input, context);
     if (state.proceed) {
         // A long poll (`wait_ms`) parks on the bus: it gives its HTTP worker back so parked
@@ -1370,7 +1458,7 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
                 } else {
                     state.result = std::move(*completed);
                 }
-            } else if (capability->handler && waits_on_repository_store(*capability)) {
+            } else if (capability->handler && runs_off_server_thread(*capability)) {
                 const CapabilityHandler& handler = capability->handler;
                 auto completed = co_await run_blocking([&handler, &call_input, &context] {
                     const StoreRequestScope scope(context);
@@ -1393,6 +1481,7 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
                 .count();
     }
+    finish_authentication(state, name, context);
     co_return finish_call(
         capability.get(), name, call_input, std::move(state.result), context, state.proceed);
 }

@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "lake/api/drive.hpp"
 #include "lake/api/registry.hpp"
 #include <cstring>
 
@@ -266,17 +267,30 @@ std::shared_ptr<control::StoreContents> repository_store_contents(RepositoryBran
     return std::make_shared<RepositoryStoreContents>(std::move(branch));
 }
 
-std::shared_ptr<control::StoreContents>
-repository_store_contents(SyncStore* repositories, std::string customer_id,
-                          std::string repository_id, std::string branch) {
+std::shared_ptr<control::StoreContents> repository_store_contents(SyncStore* repositories,
+                                                                  std::string customer_id,
+                                                                  std::string repository_id,
+                                                                  std::string branch,
+                                                                  ApiContext& context) {
+    ApiContext* caller = &context;
     return repository_store_contents(RepositoryBranch{
         [=] { return repositories->repository_tree(customer_id, repository_id, branch); },
         [=](const std::string& path) {
             return repositories->repository_file(customer_id, repository_id, branch, path);
         },
         [=](const std::string& message, std::vector<RepositoryWriteOperation> operations) {
-            return repositories->commit_repository_files(
-                customer_id, repository_id, branch, message, std::move(operations));
+            const auto repository = caller->store->get_repository(repository_id);
+            if (!repository) {
+                return SyncStoreResult<std::string>(std::unexpected(
+                    SyncStoreError{repository.error().code, repository.error().message}));
+            }
+            auto authorize = repository_write_authorizer(*repository, operations, *caller);
+            return repositories->commit_repository_files(customer_id,
+                                                         repository_id,
+                                                         branch,
+                                                         message,
+                                                         std::move(operations),
+                                                         std::move(authorize));
         }});
 }
 

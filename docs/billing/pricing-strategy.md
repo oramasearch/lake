@@ -62,10 +62,20 @@ collects the payment.
 
 | Risk | Why it matters | Fix |
 |---|---|---|
-| Model tokens are one blended rate | $9.00 per million assumes 10 input tokens to each output token; output-heavy agents cost Orama more than they bill | Price input and output separately, each at provider cost plus 20% (the gateway already records them apart) |
 | Spending is capped for model tokens only | The monthly `model_tokens` limit is enforced at the gateway; other limits only warn, so a runaway workload bills at full rate before anyone acts | Hard spending limits per account, and a card before usage starts (open decision below) |
 | Invoices are issued by hand | No job issues each month's invoices yet | [lake#621](https://github.com/oramasearch/lake/issues/621): issue invoices after each month ends |
 | App ingress traffic is not yet counted | An app serving heavy traffic is billed for its compute but not its transfer | [lake#661](https://github.com/oramasearch/lake/issues/661) |
+
+The source implementation separates model pricing by exact model and input/output direction
+(LSR-095, lake#961); it is not deployed yet.
+The gateway accepts only configured models with positive published prices when billing is on;
+external reports also require prices before recording, so callers cannot insert unpriced classes
+that block invoicing. The price-list editor preserves published model rates. The operator must
+set rates for its provider costs; the old $9 blended example applies to historical unclassed usage.
+The default models are priced at OpenAI's published per-token price plus 30% (Steve, 2026-10-23),
+seeded by migration `0095_model_token_prices`; the rates and their source are in
+[billing.md](../api/billing.md#rates).
+See [the model gateway](../api/model-gateway.md#configuration).
 
 Fixed on 2026-10-11: compute was priced per job at an assumed 2 vCPU and 4 GiB; it is now metered as
 CPU, RAM, GPU and GPU memory (lake#643), and finished jobs, cron runs and methodology runs are

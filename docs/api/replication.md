@@ -66,21 +66,30 @@ The source action `POST /v1/export_transparency_replication_batch` accepts an
 - the source instance and current source tree size;
 - the Merkle root and size of the requested base prefix;
 - the Merkle root and size after the returned suffix; and
-- the current signed checkpoint, when one exists.
+- a required signed checkpoint covering the batch head; and
+- `checkpoint_consistency`, a compact Merkle consistency path from that head to the checkpoint.
 
-`POST /v1/replicate_transparency_log` accepts `source_url`. The destination requests a batch from
-its current tree size, verifies every TAAP attestation, and reconstructs the proposed Merkle head
-in memory. It publishes tiles and `tree.json` only when its current root exactly equals the
-source's base root and the reconstructed head exactly equals the declared head. A base mismatch,
-invalid attestation, modified entry, or false head is an `unrecoverable` failure and leaves the
-destination head unchanged.
+`POST /v1/replicate_transparency_log` accepts `source_url`. Before writing any tiles, the
+destination requires a checkpoint signed by a Lake identity already trusted in its control-plane
+identity history. A configured peer or a self-consistent Merkle root supplies no identity trust.
+The checkpoint must cover the entire batch head; an equal-size checkpoint must name that exact
+root, and an earlier partial head needs a valid `checkpoint_consistency` proof under libliquid's
+checkpoint-bound verifier. Missing checkpoints, unknown signers, invalid signatures, stale
+checkpoints and conflicting roots fail closed before the destination log advances (lake#974,
+LSR-107).
 
-When the batch includes a checkpoint at or below the applied head, Lake also:
+The destination then validates every entry and reconstructs the proposed Merkle head in memory.
+It publishes tiles and `tree.json` only when its current root exactly equals the source's base root
+and the reconstructed head exactly equals the authenticated head. Audit commitments contain no
+identities; legacy full audit events are refused rather than attributed from their self-digests.
+Merkle consistency and event authenticity remain separate checks.
 
-1. reconstructs the checkpoint's root from the local tiles;
-2. verifies the Lake identity signature against the control-plane identity record;
-3. verifies the configured witness quorum and anchoring shape; and
-4. adopts the immutable checkpoint sequence without allowing rollback or conflicting reuse.
+Once the signed checkpoint is reached locally, Lake checks its root against the local tiles,
+verifies the configured witness quorum and anchoring shape, and adopts the immutable sequence
+without rollback or conflicting reuse. Export requires a current checkpoint covering the source
+log; after appends, publish a checkpoint before exporting again. A concurrent append or checkpoint
+change can make export fail; retry after checkpoint publication. Older unsigned replication
+responses are no longer accepted.
 
 A source more than 100,000 entries ahead sets `caught_up` to false. The reconciler repeats the
 action until it is true; a later pass adopts the checkpoint once its committed tree size is local.
@@ -164,3 +173,15 @@ Peer URLs use HTTPS to public addresses. Plain HTTP and private addresses are ac
 
 The operator mapping, promotion rules, and two-region desired state are in
 [`../control-plane/replication.md`](../control-plane/replication.md).
+
+## Verification and maintenance
+
+`TransparencyRegistry.ReplicationAuthenticatesTheBatchHeadBeforeWriting` covers missing,
+malformed, unknown-key and invalid-signature checkpoints, stale and conflicting signed roots,
+invalid partial proofs, and honest partial catch-up. Each refusal leaves the log unchanged.
+`TransparencyLog.AuditLegacyForgedSignatureCannotClaimVerifiedIdentities` uses a forged signature
+with a valid self-digest and Merkle root, tests append and replication refusal, and models a
+historical tile to prove identity scans refuse it while tiles and inclusion proofs remain readable.
+Run these with the existing `TransparencyLog`, `TransparencyRegistry`, `TransparencyCheckpoint`
+and `IdentityExit` tests when changing replication. Keep checkpoint authentication before
+`apply_replication_batch`; a Merkle head supplied by the peer is not a trust anchor.

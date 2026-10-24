@@ -1,5 +1,27 @@
 # The `/v1` API and MCP
 
+lake#963: [OAuth and enterprise OIDC](identity.md) require the initiating browser's per-flow
+HttpOnly cookie at callback, in addition to state, PKCE and nonce.
+
+lake#951: [Clerk offboarding](clerk.md#webhooks) revokes delegated agent credentials and workloads.
+[Agent streams](agent-launches.md#stream-triggers) and [MCP streams](mcp-connections.md#a-connections-agent-and-streams)
+reject missing/disabled people immediately and retain workspace cleanup for the next worker pass.
+[models.md](models.md) specifies authenticated customer reads for workspace dataset and model
+metadata, while public repository revisions remain readable anonymously (lake#970, LSR-104).
+[PKI identities](pki.md#certificate-identities) defines strict ACME DNS and X.509 SPIFFE input
+validation and the single typed SAN each certificate receives (lake#946).
+Pipeline processing (lake#967) has shared step, edge and edit budgets and runs on the bounded
+blocking pool. See [pipeline work budgets](workspaces.md#pipeline-work-budgets).
+
+Capability request bodies use registered byte limits and the credential gate before reading
+(lake#944). Public identity bodies default to 1 MiB; anonymous MCP envelopes are capped at
+256 KiB. All share a single JSON parse with depth and element budgets. See
+[HTTP body admission](../serving/http.md#request-body-limits) and [MCP](mcp.md).
+[Secrets](secrets.md#dynamic-leases) and [transparency](transparency.md) document digest-only
+publication of successful dynamic-secret events (lake#953); denied and failed events stay private.
+
+Clerk and OIDC key fetching use a shared single-flight cache with a refresh cooldown; Clerk exchanges also enforce a per-client attempt limit keyed on the ingress-reported address ([contract](clerk.md#bounded-key-refresh-lake956-lsr-090), lake#956).
+
 lake#728/#730/#731: [network.md](network.md) documents the fourteen secure-networking capabilities
 for connections, scoped credential rotation, egress rules, tunnel grants, peers, effective rules,
 sessions and activity. One registry definition supplies their permission checks, REST/OpenAPI
@@ -33,6 +55,8 @@ every agent model call goes through Lake with Orama's own key and is counted as 
 hold no provider key. A `stream: true` call is relayed event by event as the provider sends it
 (lake#665, [Streaming](model-gateway.md#streaming)); a caller that drops the stream is still
 billed for the whole answer, and an answer without usage is counted by estimate (lake#939).
+The gateway permits only text and caller-executed function tools: endpoint and nested schemas
+refuse unmetered provider features, storage and references before forwarding (lake#960).
 
 lake#564 (decision 56, migration `0073_billing`): [billing.md](billing.md) documents billing, on only
 where `LAKE_BILLING` is (Orama Cloud): `price_list`, `set_price_list`, `billing_account`,
@@ -94,6 +118,10 @@ computed themselves (`viewer`, `my_permissions`, `list_packages`, `list_docs`, `
 [repositories.md](repositories.md) `repository_file`'s `units`; and
 [../serving/http.md](../serving/http.md#cross-site-requests) the refusal of cross-site requests that
 use the browser session.
+
+Remote [MCP connections](mcp-connections.md#the-client) reject response JSON deeper than 64
+containers before copies or serialization, including SSE notifications and OAuth responses
+(lake#958, LSR-092).
 
 lake#452: [services.md](services.md) documents `list_services`' shared `status` and
 `status_reason`; [web-apps.md](web-apps.md) the public acknowledgement `create_app` requires;
@@ -209,6 +237,8 @@ send its session cookie or redirect through another request, including a new cli
 Repository reads are the deliberate public-read exception: anonymous calls return only a public
 repository and its content; all other repository visibility levels remain protected.
 
+LSR-088 (lake#954): portable imports bind the source name to its embedded key, mark imported
+forge and artifact claims untrusted, and recreate grants as the importer with local evidence.
 [`export.md`](export.md) defines the signed `lake_export/1` portable repository archive and its
 import validation.
 
@@ -348,13 +378,13 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `find_missing`, `push`, `pull`, `upload_chunks`, `read_chunk` | binary read/action | repository id plus liquid sync body, digest, or range | binary liquid response; push reports every reference outcome and refusal reason | [sync.md](sync.md) |
 | `create_issue`, `update_issue`, `list_issues`, `create_issue_comment`, `list_issue_comments`, `issue_assignees` | read/action | repository id, issue fields, state, or issue id | durable Markdown issue and discussion records with their author; the people an issue can be assigned to | [forge.md](forge.md) |
 | `create_review`, `update_review`, `list_reviews`, `create_review_comment`, `list_review_comments`, `map_review_anchors` | read/action | repository id, liquid change, review state, anchor, or text hunks | change review and cursor-compatible anchored discussion records | [forge.md](forge.md) |
-| `create_release`, `list_releases` | read/action | repository id, tag, change, and build-result IDs | tag release retaining verified attestation evidence | [forge.md](forge.md) |
+| `create_release`, `list_releases` | read/action | repository id, tag, change, and build-result IDs | tag release retaining attestation evidence and source-binding status; protected pushes reverify every result | [forge.md](forge.md) |
 | `create_webhook`, `list_webhooks`, `deliver_webhook`, `retry_webhook_delivery`, `list_webhook_deliveries` | read/action | repository id, subscription, endpoint, event, payload, or delivery ID | signed delivery attempts and retained retry log | [forge.md](forge.md) |
 | `set_branch_protection`, `list_branch_protections` | read/action | repository id, ref pattern, review/verification/fast-forward requirements, and allowed pushers | ref policy records and policy-object binding; enforcement waits on liquid #177 | [forge.md](forge.md) |
 | `export_repository`, `import_repository`, `list_exports` | read/action | repository or destination customer and workspace, archive, and optional Git projection | signed portable archive, recreated repository, or prior export records | [export.md](export.md) |
 | `import_github_repository` | action | destination customer and workspace, local Git directory, and recorded GitHub responses | imported repository and durable fidelity report | [github-import.md](github-import.md) |
 | `list_teams`, `get_team`, `create_team` | read/action | organization or team identifiers and fields | team(s) | [organizations.md](organizations.md) |
-| `list_memberships`, `get_membership`, `create_membership`, `set_member_role`, `remove_member` | read/action | scope (omit for your own), membership id, principal, role; lake signs the evidence (lake#602) | membership(s) or removal confirmation | [organizations.md](organizations.md) |
+| `list_memberships`, `get_membership`, `create_membership`, `set_member_role`, `remove_member` | read/action | scope (omit for your own), membership id, principal, role; lake signs the evidence (lake#602) | membership(s) or removal confirmation; owner changes require an organization owner or operator (LSR-099) | [organizations.md](organizations.md) |
 | `list_invitations`, `create_invitation`, `accept_invitation` | read/action | scope (omit for your own), invitee, role, expiry or accepting principal | invitation or membership | [organizations.md](organizations.md) |
 | `create_organization_space`, `convert_personal_space`, `join_organization` | action | organization name and handle, your personal account, or an invitation addressed to you | organization account or membership | [organizations.md](organizations.md) |
 | `list_objects`, `get_object`, `create_object` | read/action | graph identifiers, type, parent, `inherit` | object(s) | [policy.md](policy.md) |
@@ -388,7 +418,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `set_agent_streams`, `list_agent_streams` | action / read | customer, workspace, agent, streams | the workspace streams whose new messages each start a job of a Python agent, as the person who set them (lake#677) | [agent-launches.md](agent-launches.md#stream-triggers) |
 | `agent_turn` | action | customer, agent, message, optional conversation/kind/context | one conversation turn with any agent: library, native or Python; a reused library-agent conversation includes its preceding same-agent, same-kind turn; Experiments Agent uses proposal, status and explanation kinds | [agent-launches.md](agent-launches.md) |
 | `receive_agent_tasks`, `claim_agent_task`, `publish_agent_event`, `receive_agent_events` | read / action | agent, task, sequence | renewable claims, bounded reclaim/retry, progress and first-terminal-write-wins results over workspace Zetta pub/sub; delegated turns reported on the asking turn | [agent-bus.md](agent-bus.md) |
-| `mint_agent_session_key` | action | customer, durable and dispatcher identities, scopes, lifetime | response-only private seed plus logged durable-identity delegation | [agents.md](agents.md) |
+| `mint_agent_session_key` | action | customer, durable identity with an active customer agent certificate, dispatcher matching the authenticated caller, scopes, lifetime | response-only private seed plus logged delegation | [agents.md](agents.md) |
 | `verify_agent_session_drip` | action | customer, session, canonical body and TAAP signature | verified durable attribution, scopes and log commitment | [agents.md](agents.md) |
 | `revoke_agent_session` | action | customer, agent session | the key with `revoked_at`; it never verifies again | [agents.md](agents.md) |
 | `set_customer_credential_policy` | action | customer, `allow_non_expiring_credentials` | the customer's opt-in to keys and tokens that never expire | [agents.md](agents.md) |
@@ -406,7 +436,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `list_application_users`, `suspend_application_user`, `delete_application_user`, `export_application_user` | read/action | application, its `workspace_id`, and user ids | pool profiles, suspension, deletion, or export, from the application's workspace Zetta (lake#353) | [apps.md](apps.md) |
 | `list_application_organizations`, `create_application_organization`, `update_application_organization`, `delete_application_organization` | read/action | application, its `workspace_id`, organization, TAAP identity, name, metadata | application organization lifecycle in the application's workspace Zetta (lake#354) | [apps.md](apps.md) |
 | `create_application_webhook`, `list_application_webhooks`, `list_application_webhook_events`, `retry_application_webhook` | action/read | application, endpoint, subscriptions, event and webhook ids | signed lifecycle delivery log | [apps.md](apps.md) |
-| `enroll_mfa`, `disable_mfa` | action | authenticated user; disable takes a fresh TOTP or recovery code | one-use setup URI and recovery codes, or confirmation | [identity.md](identity.md) |
+| `enroll_mfa`, `disable_mfa` | action | enrollment: interactive session and current password; disable: fresh TOTP or recovery code | one-use setup URI and recovery codes, or confirmation | [identity.md](identity.md) |
 | `begin_passkey_registration`, `register_passkey` | action | WebAuthn client data and attestation object | creation options, then confirmation with a lake-signed TAAP binding stored on the device | [identity.md](identity.md) |
 | `begin_passkey_sign_in`, `sign_in_passkey` | action, public entry | pool, then WebAuthn assertion | request options, then browser session + secret | [identity.md](identity.md) |
 | `register_oauth_provider` | action, operator | issuer, client id, secret, scopes | confirmation | [identity.md](identity.md) |
@@ -531,3 +561,32 @@ Personal-customer sign-up behavior, naming, quotas, metering, and atomic retry s
 
 [auth.md](auth.md) specifies indexed PostgreSQL session authentication, operator precedence and
 the `0022_session_lookup` rollout. Password hashing and live revocation guarantees are preserved.
+
+Folder sharing (lake#955) caps live grants and bearer-link roles at the caller's actions and
+limits non-admin recipients to the account's people; see [sharing.md](sharing.md).
+
+
+Repository mutations check every destination and affected descendant under the store mutation
+lock (lake#962, LSR-096), including uploads, recursive move/delete, restore, compatible commits and
+repository-backed stores. See [drive.md](drive.md#nested-mutation-permissions-lake962-lsr-096).
+Model entitlement and model/direction billing (LSR-095, lake#961) are documented in
+[`model-gateway.md`](model-gateway.md). The configured exact model/provider allowlist applies before dispatch on every transport;
+billing additionally requires positive model input and output rates. `model_tokens` classes
+preserve raw counts and bill each direction separately. `test_model_gateway.cpp` and
+`test_billing.cpp` cover provider-call refusal and invoice amounts, including a missing price.
+[Replication](replication.md) requires trusted signed checkpoints covering every batch head;
+[transparency](transparency.md) refuses legacy full-event identity scans (lake#974, LSR-107).
+[audit.md](audit.md#workspace-audit) documents per-customer and per-workspace queue limits,
+signed delivery failure evidence and `audit_queue_full` with the original operation result (LSR-098).
+Password, MFA and recovery entry points share bounded authentication work and account/client
+attempt budgets (lake#969); new recovery codes use a selector, and legacy codes require
+regeneration. See [authentication attempt limits](identity.md#authentication-attempt-limits).
+Storage quota overrides require the operator credential or instance administrator through both
+`set_storage_quota` and the `storage` dimension of `set_usage_limit` (lake#976, LSR-109).
+See [metering.md](metering.md#quota-behavior) for authorization and focused proof.
+LSR-102 (lake#968): [recovery.md](recovery.md#email-recovery-budgets) documents uniform accepted
+responses, durable client/global limits, account attempt reuse and owner-only `cancel_recovery`,
+linked in device notices. Migration `0096_email_recovery_limits` awaits operator vendoring.
+Recurring order entitlement (lake#972, LSR-105): [orders.md](orders.md#recurring-entitlement-lsr-105-lake972) describes signed renewal/end events, deadline-based grace and the required operator suspension contract.
+
+Password, MFA and recovery entry points share [authentication attempt limits](identity.md#authentication-attempt-limits) across REST, hosted forms and MCP (lake#966).

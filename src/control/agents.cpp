@@ -277,12 +277,18 @@ Result<std::string> encode_delegation(Store& store,
         return std::unexpected(liquid_error(encoded_signature.error()));
     }
     statement.signature = std::move(*encoded_signature);
-    auto verified = liquid::verify_attestation(
-        statement, {.now = issued, .status = liquid::attestation_status{false, issued}});
-    if (!verified || !verified->verified) {
+    // Lake's instance key is not a liquid identity chain, so liquid::verify_attestation would
+    // report an unknown signer (liquid#383). Check the profile schema and the signature against
+    // the instance key Lake holds instead.
+    if (auto valid = liquid::attestation_profile_registry::global().validate(statement); !valid) {
+        return std::unexpected(
+            Error{"crypto_error", "could not verify agent delegation: " + valid.error().message});
+    }
+    auto verified = liquid::verify_key_signature(statement.issuer, "attestation", *body, signature);
+    if (!verified || !*verified) {
         return std::unexpected(
             Error{"crypto_error",
-                  verified ? "could not verify agent delegation: " + verified->reason
+                  verified ? std::string{"could not verify agent delegation: unsigned"}
                            : "could not verify agent delegation: " + verified.error().message});
     }
     auto encoded = liquid::encode_attestation(statement);
@@ -327,12 +333,26 @@ Service::Service(Clock clock)
 
 Result<MintedSession> Service::mint(Store& store,
                                     const MintRequest& request,
+                                    const std::string& acting_identity,
                                     const audit::IdentityOptions& identity_options) const {
     auto valid = validate(request);
     if (!valid) {
         return std::unexpected(valid.error());
     }
+    if (!valid_taap_id(acting_identity) || request.dispatcher_taap_id != acting_identity) {
+        return std::unexpected(
+            Error{"unauthorized", "dispatcher must be the authenticated acting identity"});
+    }
     const auto issued = clock_();
+    const auto registered = store.has_active_agent_certificate(
+        request.customer_id, request.durable_agent_taap_id, std::format("{:%FT%TZ}", issued));
+    if (!registered) {
+        return std::unexpected(Error{registered.error().code, registered.error().message});
+    }
+    if (!*registered) {
+        return std::unexpected(
+            Error{"unauthorized", "durable agent needs an active certificate for this customer"});
+    }
     const auto expires = issued + std::chrono::seconds(request.lifetime_seconds);
     const std::string issued_at = std::format("{:%FT%TZ}", issued);
     const std::string expires_at =
@@ -411,7 +431,9 @@ Result<VerifiedDrip> Service::verify_drip(const AgentSession& session,
     if (!signature) {
         return std::unexpected(liquid_error(signature.error()));
     }
-    const auto verified = liquid::verify(actor, "drip", canonical_body, *signature);
+    // Lake minted this session key and stored its public half, so the key itself is the binding:
+    // check the signature against it directly (liquid#383 made liquid::verify require a chain).
+    const auto verified = liquid::verify_key_signature(actor, "drip", canonical_body, *signature);
     if (!verified || !*verified) {
         return std::unexpected(verified ? Error{"unauthorized", "agent drip is unsigned"}
                                         : Error{"unauthorized", verified.error().message});

@@ -136,3 +136,7 @@
   margin: 0 0 var(--lake-space-4);
   padding-left: var(--lake-space-5);
 }
+
+.recovery-codes code {
+  overflow-wrap: break-word;
+}

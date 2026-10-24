@@ -1,15 +1,15 @@
 /** Billing (lake#564, decision 56): the shapes the billing capabilities answer and the pure rules the
  * pages share — amounts in a currency from millionths, a rate in a person's units, a line as usage ×
  * rate = cost, the months a bill covers, the price list editor's rows, an invoice's state as a
- * chip, and the billing contact's countries and address (lake#857). Lake is priced by usage only (lake#635): one rate per usage dimension, no plans, no fee,
+ * chip, and the billing contact's countries and address (lake#857). Lake is priced by usage only (lake#635): rates per usage dimension and class, no plans, no fee,
  * nothing included. No React here, so `npm test` runs it (tests/billing.test.ts). Billing exists
  * only where the lake has it on (`viewer.billing`). */
 import { formatValue } from "../usage/usage.ts";
 
-/** One rate of the price list. `class` is a GPU class (`l4`, `a10g`, `a100`, `h100`) for GPU and GPU
- * memory: a rate for that class alone; empty, the dimension's rate for every other class (lake#643). */
+/** One price-list rate: `class` names a GPU class or exact model input/output class. Empty is the
+ * default rate, which covers historical unclassed model usage. */
 export type Price = { dimension: string; class?: string; title: string; unit: string; unit_micros: number; per: number; priced?: boolean };
-/** One publication of the price list: a rate per usage dimension, in force from `effective_from`. */
+/** One publication of dimension/class rates, in force from `effective_from`. */
 export type PriceList = { id: string; effective_from: string; published_at?: string; currency: string; prices: Price[] };
 /** What `price_list` answers: the list in force for `period`, one published for a later month, and
  * (for the operator, with `include_history`) every publication, newest first. */
@@ -199,26 +199,36 @@ export const LIST_RATES: { dimension: string; class?: string; unit_micros: numbe
   { dimension: "predictions", unit_micros: 10_000, per: 1000 },
   { dimension: "searches", unit_micros: 10_000, per: 1000 },
   { dimension: "model_tokens", unit_micros: 9_000_000, per: 1_000_000 },
+  // The default gateway models (migration 0095_model_token_prices, Steve 2026-10-23): OpenAI's
+  // published price per million tokens (https://developers.openai.com/api/docs/pricing, read
+  // 2026-10-23) plus 30%. An embedding reports no output tokens; the gateway needs both rates.
+  { dimension: "model_tokens", class: "gpt-5.5/input", unit_micros: 6_500_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-5.5/output", unit_micros: 39_000_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-5/input", unit_micros: 1_625_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-5/output", unit_micros: 13_000_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-4o/input", unit_micros: 3_250_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-4o/output", unit_micros: 13_000_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "text-embedding-3-small/input", unit_micros: 26_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "text-embedding-3-small/output", unit_micros: 26_000, per: 1_000_000 },
   { dimension: "volumes", unit_micros: 200_000, per: 2_628_000 },
 ];
 
 /** One row of the price list editor, in a person's numbers: the rate in the currency ("0.04") for
- * every `per` units; an empty rate leaves the dimension (or the class) uncharged. `class` is a GPU
- * class, empty for the dimension's own rate. */
+ * every `per` units; an empty rate leaves the dimension (or class) uncharged. `class` is a GPU
+ * or model/direction class, empty for the default rate. */
 export type RateRow = { dimension: string; class: string; rate: string; per: string };
 
 /** A rate row's name for a person: "CPU", "GPU (H100)", "GPU, other classes". */
 export function rowTitle(row: Pick<RateRow, "dimension" | "class">): string {
   const dimension = DIMENSIONS.find((d) => d.name === row.dimension);
   const title = dimension?.title ?? row.dimension;
-  if (row.class) return `${title} (${classTitle(row.class)})`;
+  if (row.class) return `${title} (${dimension?.classes ? classTitle(row.class) : row.class})`;
   return dimension?.classes ? `${title}, other classes` : title;
 }
 
-/** The editor's rows: one per dimension, and for GPU and GPU memory one more per GPU class (the
- * offered ones and any the list names), from a published list (or the list rates when there is
- * none). A dimension or class the list does not price starts empty. A rate for a dimension no
- * longer priced (instances, build or run time) is not carried over. */
+/** Rows from a published list, or the defaults when none exists. Preserve named model directions
+ * and GPU classes; only GPUs have offered default classes. Unpriced rows start empty, and retired
+ * dimensions are not carried over. */
 export function rateRows(prices: Pick<Price, "dimension" | "class" | "unit_micros" | "per">[] | null | undefined): RateRow[] {
   const from = prices ?? LIST_RATES;
   const rows: RateRow[] = [];
@@ -228,9 +238,10 @@ export function rateRows(prices: Pick<Price, "dimension" | "class" | "unit_micro
   };
   for (const d of DIMENSIONS) {
     rows.push(row(d.name, ""));
-    if (!d.classes) continue;
-    const named = from.filter((p) => p.dimension === d.name && p.class).map((p) => p.class as string);
-    for (const name of [...new Set([...GPU_CLASSES, ...named])]) rows.push(row(d.name, name));
+    if (!d.classes && d.name !== "model_tokens") continue;
+    const named = from.flatMap((p) => p.dimension === d.name && p.class ? [p.class] : []);
+    const offered = d.classes ? GPU_CLASSES : [];
+    for (const name of [...new Set([...offered, ...named])]) rows.push(row(d.name, name));
   }
   return rows;
 }

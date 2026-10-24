@@ -84,22 +84,29 @@ export function connectionsUsing(service: Row, connections: Row[]): Row[] {
 }
 
 /** The "Tables reachable" figure: the sum of each connection's tables, `+` when one listing was
- * cut short, `—` until every connection has answered, and the number of connections that failed. */
-export function tablesFigure(answers: ({ tables?: unknown[]; truncated?: boolean } | undefined | "failed")[]): { value: string; failed: number } {
+ * cut short, `—` until every connection has answered, the number of connections that failed, and
+ * the number whose safe mode asked first (`warned`, lake#906), which are neither counted nor
+ * failed. */
+export function tablesFigure(answers: ({ tables?: unknown[]; truncated?: boolean } | undefined | "failed" | "warned")[]): { value: string; failed: number; warned: number } {
   let total = 0;
   let cut = false;
   let failed = 0;
+  let warned = 0;
   for (const answer of answers) {
-    if (answer === undefined) return { value: "—", failed };
+    if (answer === undefined) return { value: "—", failed, warned };
     if (answer === "failed") {
       failed += 1;
+      continue;
+    }
+    if (answer === "warned") {
+      warned += 1;
       continue;
     }
     total += (answer.tables ?? []).length;
     cut ||= !!answer.truncated;
   }
-  if (failed === answers.length && answers.length > 0) return { value: "—", failed };
-  return { value: `${total.toLocaleString("en-US")}${cut ? "+" : ""}`, failed };
+  if (failed + warned === answers.length && answers.length > 0) return { value: "—", failed, warned };
+  return { value: `${total.toLocaleString("en-US")}${cut ? "+" : ""}`, failed, warned };
 }
 
 export const POSTGRES_FIELDS = ["host", "port", "user", "sslmode", "database", "schema", "token"] as const;

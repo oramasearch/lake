@@ -119,3 +119,5 @@ introduced; clone and push use the existing sync registry.
 
 A new flag or variable is added to `usage()` and the table above in the same change, with its
 default, and the page that owns the behavior links back here.
+
+`LAKE_ORDER_ENTITLEMENT_GRACE_SECONDS` (lake#972) sets the grace on signed order subscription events and initial paid Checkout: default `259200` (three days), integer `0` through `2592000` (30 days). Invalid values stop startup. The policy is captured while entitled or on positive entitlement evidence; a negative event cannot extend an expired order. See [orders](../api/orders.md#recurring-entitlement-lsr-105-lake972).

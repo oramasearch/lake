@@ -192,6 +192,96 @@ std::vector<std::pair<std::string, std::string>> billing_details(const PaymentAc
     return fields;
 }
 
+// Stripe may expand object references; tolerate both wire shapes without throwing on nulls.
+std::string stripe_text(const json& object, std::string_view key) {
+    const auto it = object.find(key);
+    return it != object.end() && it->is_string() ? it->get<std::string>() : std::string();
+}
+std::string stripe_id(const json& object, std::string_view key) {
+    const auto it = object.find(key);
+    if (it == object.end()) {
+        return {};
+    }
+    return it->is_object() ? stripe_text(*it, "id") : stripe_text(object, key);
+}
+std::int64_t stripe_epoch(const json& object, std::string_view key) {
+    const auto it = object.find(key);
+    if (it == object.end() || !it->is_number_integer()) {
+        return 0;
+    }
+    if (*it < 0 || *it > 253402300799LL) {
+        return 0;
+    }
+    return it->get<std::int64_t>();
+}
+const json& subscription_details(const json& object) {
+    static const json empty = json::object();
+    if (object.contains("parent") && object["parent"].is_object() &&
+        object["parent"].contains("subscription_details") &&
+        object["parent"]["subscription_details"].is_object()) {
+        return object["parent"]["subscription_details"];
+    }
+    return object.contains("subscription_details") && object["subscription_details"].is_object()
+               ? object["subscription_details"]
+               : empty;
+}
+const json& stripe_metadata(const json& object) {
+    static const json empty = json::object();
+    return object.contains("metadata") && object["metadata"].is_object() ? object["metadata"]
+                                                                         : empty;
+}
+// A subscription has one recurring item today. If there are several, the earliest expiry wins.
+std::int64_t subscription_period_end(const json& object) {
+    std::int64_t end = stripe_epoch(object, "current_period_end");
+    // In the pinned 2024 API this field is on the subscription, not each item.
+    if (end > 0) {
+        return end;
+    }
+    if (object.contains("items") && object["items"].is_object()) {
+        const auto& items = object["items"];
+        if ((!items.contains("has_more") || items["has_more"] != false) ||
+            !items.contains("data") || !items["data"].is_array()) {
+            return 0;
+        }
+        for (const auto& item : items["data"]) {
+            const auto item_end = stripe_epoch(item, "current_period_end");
+            if (item_end == 0) {
+                return 0;
+            }
+            end = end == 0 ? item_end : std::min(end, item_end);
+        }
+    }
+    return end;
+}
+std::int64_t invoice_subscription_period_end(const json& object) {
+    if (!object.contains("lines") || !object["lines"].is_object()) {
+        return 0;
+    }
+    const auto& lines = object["lines"];
+    if ((!lines.contains("has_more") || lines["has_more"] != false) || !lines.contains("data") ||
+        !lines["data"].is_array()) {
+        return 0;
+    }
+    std::int64_t end = 0;
+    for (const auto& line : lines["data"]) {
+        const bool recurring = stripe_text(line, "type") == "subscription" ||
+                               (line.contains("parent") && line["parent"].is_object() &&
+                                stripe_text(line["parent"], "type") == "subscription_item_details");
+        if (!recurring) {
+            continue;
+        }
+        if (!line.contains("period") || !line["period"].is_object()) {
+            return 0;
+        }
+        const auto line_end = stripe_epoch(line["period"], "end");
+        if (line_end == 0) {
+            return 0;
+        }
+        end = end == 0 ? line_end : std::min(end, line_end);
+    }
+    return end;
+}
+
 // Whether an event's invoice or Checkout Session is another app's or another Lake's (lake#855).
 // Lake's `owner` key marks it Lake's: lake_customer_id on an invoice Lake issued, lake_order_id on
 // an order sheet session. Stripe does not copy a subscription's metadata into the invoices it
@@ -210,8 +300,8 @@ bool foreign_object(const json& object, std::string_view owner, std::string_view
                                                          : std::string();
     };
     json tags = metadata(object);
-    if (text(tags, owner).empty() && object.contains("subscription_details")) {
-        tags = metadata(object["subscription_details"]);
+    if (text(tags, owner).empty()) {
+        tags = metadata(subscription_details(object));
         owner = "lake_order_id";
     }
     if (text(tags, owner).empty()) {
@@ -675,7 +765,7 @@ std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_vie
                                  event["data"]["object"].is_object()
                              ? event["data"]["object"]
                              : no_object;
-    notice.reference = object.value("id", "");
+    notice.reference = stripe_text(object, "id");
     if (notice.event_type.starts_with("checkout.session.")) {
         // The apex order sheet's Checkout (lake#831): the session is the reference, and its
         // client_reference_id is lake's order id. Paid once Stripe says the payment is in; a
@@ -688,8 +778,8 @@ std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_vie
         };
         notice.checkout_session = text("id");
         notice.order_id = text("client_reference_id");
-        notice.customer = text("customer");
-        notice.subscription = text("subscription");
+        notice.customer = stripe_id(object, "customer");
+        notice.subscription = stripe_id(object, "subscription");
         const std::string payment_status = text("payment_status");
         if (notice.event_type == "checkout.session.completed") {
             if (payment_status == "paid" || payment_status == "no_payment_required") {
@@ -704,6 +794,81 @@ std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_vie
             notice.order_state = "cancelled";
             notice.order_detail = "the checkout expired without payment";
         }
+        return notice;
+    }
+    const bool subscription_event = notice.event_type == "customer.subscription.created" ||
+                                    notice.event_type == "customer.subscription.updated" ||
+                                    notice.event_type == "customer.subscription.deleted" ||
+                                    notice.event_type == "customer.subscription.paused" ||
+                                    notice.event_type == "customer.subscription.resumed";
+    const bool invoice_event = notice.event_type == "invoice.paid" ||
+                               notice.event_type == "invoice.payment_failed" ||
+                               notice.event_type == "invoice.voided" ||
+                               notice.event_type == "invoice.marked_uncollectible" ||
+                               notice.event_type == "invoice.payment_action_required" ||
+                               notice.event_type == "invoice.updated";
+    if (subscription_event ||
+        (invoice_event &&
+         !stripe_text(stripe_metadata(subscription_details(object)), "lake_order_id").empty())) {
+        const json& holder = subscription_event ? object : subscription_details(object);
+        notice.foreign = foreign_object(holder, "lake_order_id", instance);
+        if (notice.foreign) {
+            return notice;
+        }
+        control::CloudOrderSubscriptionEvent update;
+        update.provider = "stripe";
+        update.event_id = notice.event_id;
+        update.event_type = notice.event_type;
+        update.order_id = stripe_text(stripe_metadata(holder), "lake_order_id");
+        update.customer_id = stripe_id(object, "customer");
+        update.subscription_id =
+            subscription_event ? notice.reference : stripe_id(holder, "subscription");
+        if (update.subscription_id.empty() && invoice_event) {
+            update.subscription_id = stripe_id(object, "subscription");
+        }
+        update.created = stripe_epoch(event, "created");
+        if (subscription_event) {
+            update.status = notice.event_type == "customer.subscription.deleted" ? "canceled"
+                            : notice.event_type == "customer.subscription.paused"
+                                ? "paused"
+                                : stripe_text(object, "status");
+            update.period_end = update.status == "trialing" ? stripe_epoch(object, "trial_end")
+                                                            : subscription_period_end(object);
+            update.ended_at = stripe_epoch(object, "ended_at");
+            const auto cancel_at = stripe_epoch(object, "cancel_at");
+            if (cancel_at > 0 && update.period_end > 0) {
+                update.period_end = std::min(update.period_end, cancel_at);
+            }
+        } else {
+            update.invoice_id = notice.reference;
+            update.status = notice.event_type == "invoice.paid" ? "active"
+                            : (notice.event_type == "invoice.payment_failed" ||
+                               notice.event_type == "invoice.payment_action_required")
+                                ? "past_due"
+                                : "unpaid";
+            if (notice.event_type == "invoice.updated") {
+                const auto status = stripe_text(object, "status");
+                if (status == "paid") {
+                    update.status = "active";
+                } else if (status == "void" || status == "uncollectible") {
+                    update.status = "unpaid";
+                } else if (status == "open" && object.contains("attempted") &&
+                           object["attempted"] == true) {
+                    update.status = "past_due";
+                } else {
+                    return notice;
+                }
+            }
+            update.period_end = invoice_subscription_period_end(object);
+            update.next_payment_attempt = stripe_epoch(object, "next_payment_attempt");
+        }
+        if (!control::valid_cloud_order_subscription_event(update) ||
+            ((update.status == "active" || update.status == "trialing") &&
+             update.period_end == 0)) {
+            return std::unexpected(
+                NoticeRejection{"invalid_input", "the order subscription event is incomplete"});
+        }
+        notice.order_subscription = std::move(update);
         return notice;
     }
     if (notice.event_type.starts_with("invoice.")) {

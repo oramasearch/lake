@@ -143,7 +143,7 @@ An identity can belong to one account only, and an identity you have already rot
 
 On a Lake with its own sign-in, open `/mfa` from **Settings → Profile**.
 
-1. Press **Enroll or replace MFA**.
+1. Enter your current password and press **Enroll or replace MFA**.
 2. Add the **Authenticator URI** to your authenticator app.
 3. Save the **Recovery codes** somewhere safe. Each works once, in place of a code. They are not
    shown again.
@@ -151,7 +151,8 @@ On a Lake with its own sign-in, open `/mfa` from **Settings → Profile**.
 Enrolling again replaces the old authenticator and codes. To turn it off, enter a **Current TOTP or
 recovery code** under **Disable MFA** and press **Disable MFA**.
 
-- REST: `POST /v1/enroll_mfa` with an empty body, `{}`. To disable, `POST /v1/disable_mfa` with
+- REST: `POST /v1/enroll_mfa` with `{"password":"<current password>"}` from an interactive
+  sign-in session. API tokens cannot enroll or replace MFA. To disable, `POST /v1/disable_mfa` with
   `{"code": "123456"}`.
 - MCP: `enroll_mfa` and `disable_mfa`.
 

@@ -20,6 +20,7 @@
 #include "lake/api/usage_recorder.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "personal_customer_test_support.hpp"
 #include "workspace_fixture.hpp"
 
 namespace {
@@ -485,6 +486,96 @@ TEST(UsageLimits, WarnFromTheirPercentageAndStorageIsTheEnforcedQuota) {
     EXPECT_FALSE(rig.call("set_usage_limit",
                           {{"customer_id", rig.customer}, {"dimension", "dollars"}, {"limit", 5}})
                      .ok);
+}
+
+TEST(UsageLimits, SignedUpAccountAdminCannotChangeStorageThroughEitherSetter) {
+    UsageRig rig;
+    const auto issued = rig.store->sign_up_password({"lake",
+                                                     "quota-owner@example.test",
+                                                     "correct horse battery staple",
+                                                     "Quota owner",
+                                                     "quota device",
+                                                     "{}"});
+    ASSERT_TRUE(issued) << issued.error().message;
+    const auto principal = rig.store->context_for(issued->secret);
+    ASSERT_TRUE(principal) << principal.error().message;
+    const auto customer = lake::test::personal_customer(*rig.store, principal->user_id);
+    ASSERT_TRUE(customer) << customer.error().message;
+    auto context = rig.context();
+    context.operator_credential = false;
+    context.session_credential = true;
+    context.acting_identity = principal->taap_id;
+    context.acting_user_id = principal->user_id;
+    context.scopes = principal->scopes;
+    ASSERT_TRUE(rig.store->set_storage_quota(customer->id, 4096));
+    ASSERT_TRUE(rig.store->set_usage_limit({customer->id, "storage", 4096, 75, {}}));
+
+    // Exercise both registry entry points: REST and MCP share these handlers.
+    for (const bool asynchronous : {false, true}) {
+        const auto call = [&](const std::string& name, const json& input) {
+            return asynchronous ? rig.call(name, input, context)
+                                : rig.registry.call(name, input, context);
+        };
+        // Clearing, raising and lowering the quota are all operator decisions.
+        for (const int bytes : {0, 8192, 1}) {
+            for (const std::string name : {"set_storage_quota", "set_usage_limit"}) {
+                SCOPED_TRACE(name + " bytes=" + std::to_string(bytes) +
+                             " async=" + std::to_string(asynchronous));
+                const json input = name == "set_storage_quota"
+                                       ? json{{"customer_id", customer->id}, {"quota_bytes", bytes}}
+                                       : json{{"customer_id", customer->id},
+                                              {"dimension", "storage"},
+                                              {"limit", bytes},
+                                              {"warn_percent", 90}};
+                const auto denied = call(name, input);
+                EXPECT_FALSE(denied.ok);
+                EXPECT_EQ(denied.error.code, "unauthorized");
+                const auto quota = rig.store->storage_quota(customer->id);
+                ASSERT_TRUE(quota && *quota);
+                EXPECT_EQ(**quota, 4096U);
+                const auto limits = rig.store->usage_limits(customer->id);
+                ASSERT_TRUE(limits);
+                ASSERT_EQ(limits->size(), 1U);
+                EXPECT_EQ(limits->front().limit, 4096U);
+                EXPECT_EQ(limits->front().warn_percent, 75);
+            }
+        }
+        // Sign-up still grants account administration for non-storage limits.
+        for (const int limit : {10, 0}) {
+            const auto changed =
+                call("set_usage_limit",
+                     {{"customer_id", customer->id}, {"dimension", "calls"}, {"limit", limit}});
+            ASSERT_TRUE(changed.ok) << changed.error.message;
+        }
+    }
+}
+
+TEST(UsageLimits, OperatorAndInstanceAdministratorCanChangeBothStorageSetters) {
+    UsageRig rig;
+    for (const bool operator_credential : {false, true}) {
+        for (const bool asynchronous : {false, true}) {
+            auto context = rig.context();
+            context.operator_credential = operator_credential;
+            for (const int bytes : {8192, 0}) {
+                for (const std::string name : {"set_storage_quota", "set_usage_limit"}) {
+                    SCOPED_TRACE(name + " operator=" + std::to_string(operator_credential) +
+                                 " async=" + std::to_string(asynchronous));
+                    const json input =
+                        name == "set_storage_quota"
+                            ? json{{"customer_id", rig.customer}, {"quota_bytes", bytes}}
+                            : json{{"customer_id", rig.customer},
+                                   {"dimension", "storage"},
+                                   {"limit", bytes}};
+                    const auto changed = asynchronous ? rig.call(name, input, context)
+                                                      : rig.registry.call(name, input, context);
+                    ASSERT_TRUE(changed.ok) << changed.error.message;
+                    const auto quota = rig.store->storage_quota(rig.customer);
+                    ASSERT_TRUE(quota && *quota);
+                    EXPECT_EQ(**quota, static_cast<std::uint64_t>(bytes));
+                }
+            }
+        }
+    }
 }
 
 TEST(RecordModelUsage, CountsAnAgentRunsTokensInItsWorkspace) {

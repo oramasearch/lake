@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -23,6 +24,7 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/api/datasets.hpp"
 #include "lake/api/mcp.hpp"
+#include "lake/api/pipeline.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
 #include "lake/api/web_ui.hpp"
@@ -30,10 +32,10 @@
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_library.hpp"
 #include "lake/control/agent_runs.hpp"
-#include "lake/control/methodologies.hpp"
 #include "lake/control/builds.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/methodologies.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
@@ -117,7 +119,8 @@ lake::control::ClerkIdentity minted(std::string subject) {
                                         "browser",
                                         identity->taap_id,
                                         identity->public_key,
-                                        identity->wrapped_seed};
+                                        identity->wrapped_seed,
+                                        static_cast<std::int64_t>(std::time(nullptr))};
 }
 
 // A store with one signed-in person and their personal customer, and the service over it.
@@ -1024,7 +1027,7 @@ TEST(Workspaces, EditPipelineReadsValidatesAndSavesTheWholeGraph) {
 
     lake::api::Registry registry;
     lake::api::register_core_capabilities(registry, "test");
-    const auto call = [&](json input) {
+    const auto call = [&](json input, const std::string& capability = "edit_pipeline") {
         lake::api::ApiContext context;
         context.store = &store;
         context.workspaces = w.service.get();
@@ -1036,8 +1039,7 @@ TEST(Workspaces, EditPipelineReadsValidatesAndSavesTheWholeGraph) {
         input["project"] = "retention";
         input["workspace_id"] = w.workspace_id();
         input["graph"] = "churn";
-        auto completed =
-            liquid::runtime::block_on(registry.call_async("edit_pipeline", input, context));
+        auto completed = liquid::runtime::block_on(registry.call_async(capability, input, context));
         EXPECT_TRUE(completed);
         return std::move(*completed);
     };
@@ -1085,6 +1087,69 @@ TEST(Workspaces, EditPipelineReadsValidatesAndSavesTheWholeGraph) {
     EXPECT_NE(half.error.message.find("edit 2"), std::string::npos);
     EXPECT_EQ(w.caller->calls.size(), saves + 1) << "read, refused, nothing saved";
     EXPECT_FALSE(call(json::object()).ok) << "an op or edits";
+    // A saturated bounded pool refuses graph work without running it on the caller's executor.
+    const int previous = lake::api::detail::blocking_task_limit().exchange(0);
+    const auto busy_edit = call({{"op", "rename"}, {"name", "renamed"}});
+    const auto busy_render = call(json::object(), "render_pipeline");
+    lake::api::detail::blocking_task_limit().store(previous);
+    EXPECT_EQ(busy_edit.error.code, "busy");
+    EXPECT_EQ(busy_render.error.code, "busy");
+
+    // Stored graphs can predate Lake's limits or arrive through a direct engine client.
+    const json original = w.caller->answers["get_graph"];
+    for (const auto& [field, limit] : {std::pair{"nodes", lake::api::pipeline::maximum_steps},
+                                       std::pair{"edges", lake::api::pipeline::maximum_edges}}) {
+        w.caller->answers["get_graph"] = original;
+        json& stored = w.caller->answers["get_graph"];
+        stored["nodes"] = json::array();
+        stored["edges"] = json::array();
+        if (std::string_view(field) == "nodes") {
+            for (std::size_t index = 0; index <= limit; ++index) {
+                stored["nodes"].push_back({{"id", std::to_string(index)}, {"kind", "connect"}});
+            }
+        } else {
+            // A valid acyclic dense graph, just beyond the edge budget.
+            for (std::size_t index = 0; index < 450; ++index) {
+                stored["nodes"].push_back({{"id", std::to_string(index)}, {"kind", "connect"}});
+                for (std::size_t to = index + 1; to < 450 && stored["edges"].size() <= limit;
+                     ++to) {
+                    stored["edges"].push_back({{"from", std::to_string(index)},
+                                               {"to", std::to_string(to)},
+                                               {"kind", "data_flow"}});
+                }
+            }
+        }
+        const auto calls_before = w.caller->calls.size();
+        const auto oversized = call({{"op", "rename"}, {"name", "renamed"}});
+        EXPECT_FALSE(oversized.ok);
+        EXPECT_EQ(oversized.error.code, "invalid_input");
+        EXPECT_EQ(w.caller->calls.size(), calls_before + 1) << "no save of an oversized graph";
+        const auto drawn = call(json::object(), "render_pipeline");
+        EXPECT_FALSE(drawn.ok);
+        EXPECT_EQ(drawn.error.code, "invalid_input");
+
+        // Both named save_pipeline and the generic engine spelling reach the same guard.
+        json arguments{{"project", "retention"},
+                       {"graph", "churn"},
+                       {"nodes", json::array()},
+                       {"edges", json::array()}};
+        arguments[field] = json::array_t(limit + 1, json::object());
+        const auto saves_before = w.caller->calls.size();
+        EXPECT_FALSE(call(arguments, "save_pipeline").ok);
+        EXPECT_FALSE(
+            call({{"capability", "save_graph"}, {"input", arguments}}, "workspace_act").ok);
+        EXPECT_EQ(w.caller->calls.size(), saves_before);
+        // Exercise the shared forwarding guard independently of registry/body schema budgets.
+        lake::api::ApiContext direct;
+        direct.workspaces = w.service.get();
+        direct.workspace_id = w.workspace_id();
+        const auto forwarded = liquid::runtime::block_on(
+            lake::api::call_workspace(direct, w.customer_id, "save_graph", false, arguments));
+        ASSERT_TRUE(forwarded);
+        ASSERT_FALSE(*forwarded);
+        EXPECT_EQ(forwarded->error().code, "invalid_input");
+        EXPECT_EQ(w.caller->calls.size(), saves_before);
+    }
 }
 
 TEST(Workspaces, SearchIndexAnswersOnlyForAPublishedIndex) {
@@ -1543,6 +1608,95 @@ TEST(Workspaces, WorkspaceSqlRunsOnlyOneReadOnlyQuery) {
         const auto ran = sql(refused);
         EXPECT_FALSE(ran.ok) << refused;
         EXPECT_EQ(w.caller->calls.size(), before) << refused << " never reaches the workspace";
+    }
+}
+
+TEST(Workspaces, DatasetAndModelMetadataRequireAuthenticatedCustomerRead) {
+    Workspaces w;
+    const auto requested = w.run(w.service->request(w.customer_id));
+    ASSERT_TRUE(requested);
+    const auto workspace = w.store->get_service(requested->service_id);
+    ASSERT_TRUE(workspace);
+    ASSERT_TRUE(w.store->set_service_status(workspace->id, "Ready", "", "http://ws:4800"));
+    w.deliver(*workspace, {{"kind", "zetta"}, {"token", "t"}});
+    w.caller->answers["get_dataset"] = {{"database", "datasets"}, {"name", "accounts"}};
+    w.caller->answers["get_model"] = {{"id", "m-1"}, {"feature_columns", {"private_feature"}}};
+    const auto outsider = w.store->sign_in_clerk(minted("outsider"));
+    ASSERT_TRUE(outsider);
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    for (const std::string name : {"get_dataset", "get_model"}) {
+        for (const bool mcp : {false, true}) {
+            for (const bool path_workspace : {false, true}) {
+                for (const std::string who :
+                     {"anonymous", "outsider", "owner", "scoped", "application"}) {
+                    SCOPED_TRACE(name + "/" + who + (mcp ? "/mcp" : "/rest") +
+                                 (path_workspace ? "/workspace-path" : "/workspace-input"));
+                    lake::api::ApiContext context;
+                    context.store = w.store.get();
+                    context.workspaces = w.service.get();
+                    if (who != "anonymous") {
+                        const auto principal =
+                            w.store->context_for(who == "outsider" ? outsider->secret : w.secret);
+                        ASSERT_TRUE(principal);
+                        context.authorized = true;
+                        context.acting_identity = principal->taap_id;
+                        context.acting_user_id = principal->user_id;
+                        context.session_credential = true;
+                        context.scopes = who == "scoped" ? std::vector<std::string>{"viewer"}
+                                                         : principal->scopes;
+                        if (who == "application") {
+                            // Even a pool session sharing the owner's identity is not a Lake login.
+                            context.application_session = *principal;
+                        }
+                    }
+                    json input{{"id", name == "get_dataset" ? "datasets/accounts" : "m-1"},
+                               {"customer_id", w.customer_id}};
+                    if (path_workspace) {
+                        context.workspace_id = w.workspace_id();
+                        context.path_workspace_id = context.workspace_id;
+                    } else {
+                        input["workspace_id"] = w.workspace_id();
+                    }
+                    const auto before = w.caller->calls.size();
+                    json envelope;
+                    if (mcp) {
+                        // The model_id alias must receive the same authorization as id.
+                        if (name == "get_model") {
+                            input["model_id"] = input["id"];
+                            input.erase("id");
+                        }
+                        auto reply = liquid::runtime::block_on(lake::api::mcp_dispatch_async(
+                            registry,
+                            {{"jsonrpc", "2.0"},
+                             {"id", 1},
+                             {"method", "tools/call"},
+                             {"params", {{"name", name}, {"arguments", input}}}},
+                            context,
+                            "test"));
+                        ASSERT_TRUE(reply);
+                        ASSERT_TRUE(*reply);
+                        envelope = json::parse(**reply).at("result").at("structuredContent");
+                    } else {
+                        auto result =
+                            liquid::runtime::block_on(registry.call_async(name, input, context));
+                        ASSERT_TRUE(result);
+                        envelope = lake::api::rest_envelope(*result);
+                    }
+                    if (who == "owner") {
+                        EXPECT_TRUE(envelope.at("ok")) << envelope;
+                        EXPECT_GT(w.caller->calls.size(), before);
+                    } else {
+                        EXPECT_FALSE(envelope.at("ok")) << envelope;
+                        EXPECT_EQ(envelope["error"]["code"],
+                                  who == "anonymous" ? "unauthenticated" : "unauthorized")
+                            << envelope;
+                        EXPECT_EQ(w.caller->calls.size(), before)
+                            << "denial must precede every workspace exchange";
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -5333,4 +5487,182 @@ TEST(EngineCapabilities, ANamedCallReachesTheWorkspaceEngineAsWorkspaceActDoes) 
     EXPECT_EQ(refused.error.code, "unauthorized");
     scopes = {"workspace_act"};
     EXPECT_TRUE(call("delete_connection", {{"name", "warehouse"}}).ok);
+}
+
+// A database's safe mode (lake#906, docs/api/safe-mode.md): the level is the workspace Zetta's,
+// read and set through it by name; Lake keeps no copy.
+TEST(SafeMode, TheLevelIsReadAndSetInTheWorkspace) {
+    ReadyWorkspace r;
+    const auto get = r.registry.find("get_safe_mode");
+    const auto set = r.registry.find("set_safe_mode");
+    ASSERT_TRUE(get);
+    ASSERT_TRUE(set);
+    EXPECT_EQ(get->action, "read");
+    EXPECT_EQ(set->action, "write");
+    EXPECT_EQ(lake::api::engine_capability_group("set_safe_mode"), "Connections");
+    EXPECT_EQ(set->input_schema["properties"]["mode"]["enum"],
+              json::array({"off", "warn_writes", "warn_all"}));
+    EXPECT_EQ(set->input_schema["additionalProperties"], false);
+    EXPECT_FALSE(set->input_schema["properties"].contains("safe_mode_confirmation"));
+
+    r.w.caller->answers["get_safe_mode"] = {{"mode", "warn_writes"}};
+    const auto read = r.call("get_safe_mode", {{"database", "datasets"}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["mode"], "warn_writes");
+    EXPECT_EQ(r.w.caller->capability, "get_safe_mode");
+    EXPECT_TRUE(r.w.caller->read);
+    EXPECT_EQ(r.w.caller->input, (json{{"database", "datasets"}}));
+
+    r.w.caller->answers["set_safe_mode"] = {{"mode", "warn_all"}};
+    const auto changed =
+        r.call("set_safe_mode", {{"connection", "warehouse"}, {"mode", "warn_all"}});
+    ASSERT_TRUE(changed.ok) << changed.error.message;
+    EXPECT_EQ(r.w.caller->capability, "set_safe_mode");
+    EXPECT_FALSE(r.w.caller->read);
+    EXPECT_EQ(r.w.caller->input, (json{{"connection", "warehouse"}, {"mode", "warn_all"}}));
+
+    // The same through workspace_query and workspace_act.
+    EXPECT_TRUE(r.call("workspace_query",
+                       {{"capability", "get_safe_mode"}, {"input", {{"connection", "warehouse"}}}})
+                    .ok);
+    EXPECT_TRUE(r.call("workspace_act",
+                       {{"capability", "set_safe_mode"},
+                        {"input", {{"database", "datasets"}, {"mode", "off"}}}})
+                    .ok);
+    EXPECT_EQ(r.sent("set_safe_mode"), (json{{"database", "datasets"}, {"mode", "off"}}));
+
+    // A level that does not exist never reaches the workspace.
+    const std::size_t before = r.w.caller->calls.size();
+    const auto loud = r.call("set_safe_mode", {{"database", "datasets"}, {"mode", "loud"}});
+    ASSERT_FALSE(loud.ok);
+    EXPECT_EQ(loud.error.code, "invalid_input");
+    EXPECT_EQ(loud.error.path, "/mode");
+    EXPECT_EQ(r.w.caller->calls.size(), before);
+}
+
+// The workspace's safe_mode_warning reaches REST and MCP unchanged, details included, and the
+// same call with the confirmation runs (lake#906).
+TEST(SafeMode, AWarningCarriesItsStatementsAndTheConfirmationRunsTheCall) {
+    ReadyWorkspace r;
+    const json details{{"connection", "warehouse"},
+                       {"mode", "warn_all"},
+                       {"statements", json::array({"SELECT * FROM accounts"})},
+                       {"confirmation", "9f3a1c"}};
+    const auto warn = [&](const std::string& capability) {
+        r.w.caller->failure = lake::control::ZettaControlError{
+            "safe_mode_warning", "safe mode warn_all: confirm the statement first", "", details};
+        r.w.caller->failure_for = capability;
+    };
+    const auto settle = [&] {
+        r.w.caller->failure.reset();
+        r.w.caller->failure_for.clear();
+    };
+    const auto status = lake::api::find_error_code("safe_mode_warning");
+    ASSERT_NE(status, nullptr);
+    EXPECT_EQ(status->status, 409);
+
+    // A named engine capability that runs a statement on a connection.
+    warn("list_source_tables");
+    const auto tables = r.call("list_source_tables", {{"connection", "warehouse"}});
+    ASSERT_FALSE(tables.ok);
+    EXPECT_EQ(tables.error.code, "safe_mode_warning");
+    EXPECT_EQ(tables.error.path, "") << "no field is at fault, though the message quotes none";
+    EXPECT_EQ(tables.error.details, details);
+    EXPECT_EQ(tables.envelope()["error"]["details"], details);
+    EXPECT_EQ(lake::api::rest_status(tables), 409);
+    EXPECT_EQ(lake::api::rest_envelope(tables)["error"]["details"]["confirmation"], "9f3a1c");
+    settle();
+    EXPECT_TRUE(r.registry.find("list_source_tables")
+                    ->input_schema["properties"]
+                    .contains("safe_mode_confirmation"));
+    const auto listed = r.call("list_source_tables",
+                               {{"connection", "warehouse"}, {"safe_mode_confirmation", "9f3a1c"}});
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    EXPECT_EQ(r.sent("list_source_tables")["safe_mode_confirmation"], "9f3a1c");
+
+    // workspace_act passes the confirmation inside `input`.
+    warn("create_dataset_from_query");
+    const json pull{{"connection", "warehouse"},
+                    {"query", "SELECT * FROM accounts"},
+                    {"table_name", "accounts"}};
+    const auto refused =
+        r.call("workspace_act", {{"capability", "create_dataset_from_query"}, {"input", pull}});
+    ASSERT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "safe_mode_warning");
+    EXPECT_EQ(refused.error.details, details);
+    settle();
+    json confirmed = pull;
+    confirmed["safe_mode_confirmation"] = "9f3a1c";
+    const auto pulled = r.call("workspace_act",
+                               {{"capability", "create_dataset_from_query"}, {"input", confirmed}});
+    ASSERT_TRUE(pulled.ok) << pulled.error.message;
+    EXPECT_EQ(r.sent("create_dataset_from_query")["safe_mode_confirmation"], "9f3a1c");
+    EXPECT_TRUE(r.registry.find("create_dataset_from_query")
+                    ->input_schema["properties"]
+                    .contains("safe_mode_confirmation"));
+
+    // workspace_sql under Warn All, and the read the confirmation runs.
+    const json sql_details{{"database", "datasets"},
+                           {"mode", "warn_all"},
+                           {"statements", json::array({"SELECT * FROM datasets.accounts"})},
+                           {"confirmation", "77aa"}};
+    r.w.caller->failure = lake::control::ZettaControlError{
+        "safe_mode_warning", "safe mode warn_all", "", sql_details};
+    r.w.caller->failure_for = "sql";
+    const auto query =
+        r.call("workspace_sql",
+               {{"statement", "SELECT * FROM datasets.accounts"}, {"database", "datasets"}});
+    ASSERT_FALSE(query.ok);
+    EXPECT_EQ(query.error.code, "safe_mode_warning");
+    EXPECT_EQ(query.error.details, sql_details);
+    EXPECT_FALSE(r.sent("sql").contains("safe_mode_confirmation"));
+    settle();
+    const auto ran = r.call("workspace_sql",
+                            {{"statement", "SELECT * FROM datasets.accounts"},
+                             {"database", "datasets"},
+                             {"safe_mode_confirmation", "77aa"}});
+    ASSERT_TRUE(ran.ok) << ran.error.message;
+    EXPECT_EQ(r.sent("sql")["safe_mode_confirmation"], "77aa");
+    // A confirmation is the warning's text; the workspace checks that it matches.
+    const auto odd =
+        r.call("workspace_sql", {{"statement", "SELECT 1"}, {"safe_mode_confirmation", 7}});
+    ASSERT_FALSE(odd.ok);
+    EXPECT_EQ(odd.error.path, "/safe_mode_confirmation");
+
+    // MCP answers the same envelope.
+    warn("list_source_tables");
+    lake::api::ApiContext context;
+    context.store = r.w.store.get();
+    context.workspaces = r.w.service.get();
+    context.authorized = true;
+    context.acting_identity = "admin";
+    context.operator_credential = true;
+    context.request_id = lake::control::new_uuid_v4();
+    const json request{{"jsonrpc", "2.0"},
+                       {"id", 1},
+                       {"method", "tools/call"},
+                       {"params",
+                        {{"name", "list_source_tables"},
+                         {"arguments",
+                          {{"customer_id", r.w.customer_id},
+                           {"workspace_id", r.w.workspace_id()},
+                           {"connection", "warehouse"}}}}}};
+    const auto answered =
+        liquid::runtime::block_on(lake::api::mcp_dispatch_async(r.registry, request, context, "t"));
+    ASSERT_TRUE(answered);
+    ASSERT_TRUE(*answered);
+    const json reply = json::parse(**answered);
+    EXPECT_EQ(reply["result"]["isError"], true);
+    EXPECT_EQ(reply["result"]["structuredContent"]["error"]["code"], "safe_mode_warning");
+    EXPECT_EQ(reply["result"]["structuredContent"]["error"]["details"], details);
+    settle();
+
+    // Any other refusal carries no details.
+    r.w.caller->failure =
+        lake::control::ZettaControlError{"engine_error", "no table", "", {{"revision", 3}}};
+    r.w.caller->failure_for = "list_source_tables";
+    const auto other = r.call("list_source_tables", {{"connection", "warehouse"}});
+    ASSERT_FALSE(other.ok);
+    EXPECT_TRUE(other.error.details.is_null());
+    EXPECT_FALSE(other.envelope()["error"].contains("details"));
 }

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -119,7 +120,8 @@ lake::control::ClerkIdentity person(std::string subject) {
             "browser",
             identity->taap_id,
             identity->public_key,
-            identity->wrapped_seed};
+            identity->wrapped_seed,
+            static_cast<std::int64_t>(std::time(nullptr))};
 }
 
 // Two spaces with one Ready workspace each (and a second one in the first space), every workspace
@@ -1099,15 +1101,17 @@ struct Lake {
         url = "http://127.0.0.1:" + std::to_string(server->port());
     }
 
-    std::pair<unsigned, std::string>
-    request(const std::string& method, const std::string& path, const std::string& body = {}) {
+    std::pair<unsigned, std::string> request(const std::string& method,
+                                             const std::string& path,
+                                             const std::string& body = {},
+                                             const std::string& bearer = "drives-test") {
         std::vector<std::byte> bytes(body.size());
         std::memcpy(bytes.data(), body.data(), body.size());
         const auto response =
             lake::test::http_request({.url = url,
                                       .method = method,
                                       .suffix = path,
-                                      .headers = {{"Authorization", "Bearer drives-test"},
+                                      .headers = {{"Authorization", "Bearer " + bearer},
                                                   {"Content-Type", "application/json"}},
                                       .body = std::move(bytes)});
         EXPECT_TRUE(response) << path;
@@ -1263,6 +1267,123 @@ TEST(DrivesHttp, TheFirstUploadCreatesMainAndAMissingFolder) {
             return lake.request(std::string(method), path, body);
         },
         bare["value"]["id"]);
+}
+
+// A writable parent must not authorize nested writes or recursive changes to a policy cut.
+TEST(DrivesHttp, NestedMutationsRefuseProtectedDescendantsBeforeChangingMain) {
+    Lake lake;
+    const auto repository = lake.call("create_repository", {{"name", "nested-permissions"}});
+    ASSERT_TRUE(repository.value("ok", false)) << repository.dump();
+    const std::string repository_id = repository["value"]["id"];
+    const json target{{"repository_id", repository_id}, {"ref", "main"}, {"path", "team"}};
+    json initial = target;
+    initial["files"] = json::array({{{"path", "protected/secret.txt"}, {"content", "b2xk"}},
+                                    {{"path", "allowed/file.txt"}, {"content", "b2xk"}},
+                                    {{"path", "single.txt"}, {"content", "b2xk"}}});
+    const auto seeded = lake.call("upload_drive_files", initial, false);
+    ASSERT_TRUE(seeded.value("ok", false)) << seeded.dump();
+    const auto root_object = lake.spaces.store->find_policy_object("repository", repository_id);
+    ASSERT_TRUE(root_object);
+    auto policy = [&](const std::string& path, const std::string& parent, bool inherit) {
+        const auto slash = path.find_last_of('/');
+        const std::string above = slash == std::string::npos ? "" : path.substr(0, slash);
+        const auto browse = lake.read(
+            "drive_browse", {{"repository_id", repository_id}, {"ref", "main"}, {"path", above}});
+        EXPECT_TRUE(browse.value("ok", false)) << browse.dump();
+        std::string node;
+        for (const auto& item : browse["value"]["items"]) {
+            if (item["path"] == path) {
+                node = item["node_id"];
+            }
+        }
+        EXPECT_FALSE(node.empty());
+        return lake.spaces.store->create_policy_object(
+            {"path", repository_id + ":" + node, parent, "admin", "test", inherit});
+    };
+    const auto team = policy("team", root_object->id, true);
+    ASSERT_TRUE(team);
+    const auto protected_folder = policy("team/protected", team->id, false);
+    ASSERT_TRUE(protected_folder);
+    // A separate cut on a file covers overwriting an existing node as well as new paths.
+    const auto listing = lake.read("drive_browse", target);
+    ASSERT_TRUE(listing.value("ok", false)) << listing.dump();
+    std::string single_node;
+    for (const auto& item : listing["value"]["items"]) {
+        if (item["path"] == "team/single.txt") {
+            single_node = item["node_id"];
+        }
+    }
+    ASSERT_FALSE(single_node.empty());
+    const auto single = lake.spaces.store->create_policy_object(
+        {"path", repository_id + ":" + single_node, team->id, "admin", "test", false});
+    ASSERT_TRUE(single);
+    const auto session = lake.spaces.store->sign_in_clerk(person("folder-writer"));
+    ASSERT_TRUE(session);
+    const auto writer = lake.spaces.store->context_for(session->secret);
+    ASSERT_TRUE(writer);
+    ASSERT_TRUE(lake.spaces.store->create_grant(
+        {writer->taap_id, team->id, "write", "test", "admin", "test"}));
+    const auto customer_object =
+        lake.spaces.store->find_policy_object("customer", lake.spaces.spaces[0].customer_id);
+    ASSERT_TRUE(customer_object);
+    ASSERT_TRUE(lake.spaces.store->create_grant(
+        {writer->taap_id, customer_object->id, "read", "test", "admin", "test"}));
+    auto main = [&] {
+        const auto result = lake.read("refs", {{"repository_id", repository_id}});
+        EXPECT_TRUE(result.value("ok", false)) << result.dump();
+        return result.value("value", json::object());
+    };
+    const json before = main();
+    ASSERT_TRUE(before.contains("items")) << before.dump();
+    auto refused = [&](const std::string& capability, json input) {
+        const auto [status, body] =
+            lake.request("POST", "/v1/" + capability, input.dump(), session->secret);
+        const auto answer = json::parse(body);
+        EXPECT_EQ(answer.value("error", json::object()).value("code", ""), "unauthorized")
+            << capability << " " << answer.dump();
+        EXPECT_EQ(main(), before) << capability << " must leave main unchanged";
+    };
+    for (const std::string path : {"team", "team/protected", "team/protected/missing"}) {
+        json upload = target;
+        upload["path"] = path;
+        upload["files"] = json::array({{{"name", "new.txt"}, {"content", "bmV3"}}});
+        if (path == "team") {
+            upload["files"] =
+                json::array({{{"path", "allowed/new.txt"}, {"content", "bmV3"}},
+                             {{"path", "protected/deep/new.txt"}, {"content", "bmV3"}}});
+        }
+        refused("upload_drive_files", upload);
+    }
+    for (const std::string path : {"single.txt", "protected/secret.txt", "protected"}) {
+        json upload = target;
+        upload["files"] = json::array({{{"path", path}, {"content", "bmV3"}}});
+        refused("upload_drive_files", upload);
+    }
+    refused("delete_drive_path", target);
+    json move = target;
+    move["destination"] = "renamed";
+    // The writer needs destination access too; granting repository write still cannot cross cuts.
+    ASSERT_TRUE(lake.spaces.store->create_grant(
+        {writer->taap_id, root_object->id, "write", "test", "admin", "test"}));
+    refused("move_drive_path", move);
+    refused(
+        "commit_repository_files",
+        {{"id", repository_id},
+         {"revision", "main"},
+         {"operations",
+          json::array({{{"type", "file"}, {"path", "team/allowed/raw.txt"}, {"content", "bmV3"}},
+                       {{"type", "deletedFolder"}, {"path", "team"}}})}});
+    EXPECT_EQ(lake.spaces.store->get_policy_object(protected_folder->id)->parent_id, team->id);
+    json allowed = target;
+    allowed["files"] = json::array({{{"path", "allowed/new.txt"}, {"content", "bmV3"}}});
+    const auto [status, body] =
+        lake.request("POST", "/v1/upload_drive_files", allowed.dump(), session->secret);
+    EXPECT_TRUE(json::parse(body).value("ok", false)) << body;
+    EXPECT_NE(main(), before);
+    const auto protected_file = lake.read(
+        "download_drive_file",
+        {{"repository_id", repository_id}, {"ref", "main"}, {"path", "team/protected/secret.txt"}});
+    EXPECT_EQ(protected_file.value("value", json::object()).value("content_base64", ""), "b2xk");
 }
 
 TEST(DrivesHttp, AWorkspaceFileDownloadStreamsItsBytes) {

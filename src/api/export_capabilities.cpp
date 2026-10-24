@@ -1,5 +1,6 @@
 #include "lake/api/capabilities.hpp"
 
+#include <algorithm>
 #include <array>
 #include <expected>
 #include <format>
@@ -11,12 +12,13 @@
 #include <openssl/evp.h>
 
 #include "forge_records_api.hpp"
-#include "repository_records_api.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
+#include "lake_attestation.hpp"
+#include "repository_records_api.hpp"
 
 namespace lake::api {
 namespace {
@@ -83,10 +85,10 @@ json manifest_for(const json& payload) {
 }
 
 ApiResult verify_archive(const json& archive) {
-    if (!archive.is_object() || archive.value("format", "") != "lake_export/1" ||
-        !archive.contains("payload") || !archive.at("payload").is_object() ||
-        !archive.contains("manifest") || !archive.at("manifest").is_object() ||
-        !archive.contains("signature")) {
+    if (!archive.is_object() || !archive.contains("format") ||
+        archive.at("format") != "lake_export/1" || !archive.contains("payload") ||
+        !archive.at("payload").is_object() || !archive.contains("manifest") ||
+        !archive.at("manifest").is_object() || !archive.contains("signature")) {
         return ApiResult::failure(
             "invalid_input", "archive is not a lake_export/1 document", "/archive");
     }
@@ -108,7 +110,84 @@ ApiResult verify_archive(const json& archive) {
         return ApiResult::failure(
             signature.error().code, signature.error().message, "/archive/signature");
     }
+    // These values become local records. Validate their containers before creating anything;
+    // scalar values cannot carry the mandatory untrusted-provenance marker.
+    if (!payload.at("repository").is_object() || !payload.at("artifacts").is_array() ||
+        !payload.at("forge").is_array() || !payload.at("grants").is_array()) {
+        return ApiResult::failure(
+            "invalid_input", "archive metadata is malformed", "/archive/payload");
+    }
+    for (const json& artifact : payload.at("artifacts")) {
+        if (!artifact.is_object() ||
+            (artifact.contains("attestations") &&
+             (!artifact.at("attestations").is_array() ||
+              !std::ranges::all_of(artifact.at("attestations"),
+                                   [](const json& value) { return value.is_object(); })))) {
+            return ApiResult::failure("invalid_input",
+                                      "archive artifact evidence is malformed",
+                                      "/archive/payload/artifacts");
+        }
+    }
+    for (const json& record : payload.at("forge")) {
+        if (!record.is_object() || !record.contains("kind") || !record.at("kind").is_string() ||
+            !record.contains("value") || !record.at("value").is_object()) {
+            return ApiResult::failure(
+                "invalid_input", "archive forge record is malformed", "/archive/payload/forge");
+        }
+    }
+    for (const json& grant : payload.at("grants")) {
+        if (!grant.is_object() || !grant.contains("principal_taap_id") ||
+            !grant.at("principal_taap_id").is_string() || !grant.contains("role") ||
+            !grant.at("role").is_string()) {
+            return ApiResult::failure(
+                "invalid_input", "archive grant is malformed", "/archive/payload/grants");
+        }
+    }
     return ApiResult::success(nullptr);
+}
+
+// Archive signatures bind content to a key-derived name. They confer no local trust in
+// historical authors, approvals or build evidence, even when the archive claims otherwise.
+json imported_forge_value(const json& record, const json& provenance) {
+    json value = record.at("value");
+    const std::string kind = record.at("kind");
+    value["import_provenance"] = provenance;
+    for (const std::string field : {"author", "opened_by"}) {
+        if (value.contains(field)) {
+            value["import_provenance"]["source_" + field] = value.at(field);
+            value.erase(field);
+        }
+    }
+    // The console presents these fields as local people. The importer recreates the records;
+    // the archive's historical authors remain available only as explicitly untrusted claims.
+    if (kind == "issue" || kind == "issue_comment") {
+        value["author"] = provenance.at("imported_by");
+    } else if (kind == "review") {
+        value["opened_by"] = provenance.at("imported_by");
+    }
+    if (kind == "review") {
+        value.erase("approval");
+    }
+    if (kind == "release" && value.contains("artifacts")) {
+        // Only locally verified artifacts can satisfy a protected branch's verified-release rule.
+        value["import_provenance"]["artifacts"] = value.at("artifacts");
+        value["artifacts"] = json::array();
+    }
+    return value;
+}
+
+json imported_artifacts(json artifacts, const json& provenance) {
+    for (json& artifact : artifacts) {
+        artifact["import_provenance"] = provenance;
+        artifact["verification"] = "untrusted";
+        if (artifact.contains("attestations")) {
+            for (json& attestation : artifact["attestations"]) {
+                attestation["verified"] = false;
+                attestation["reason"] = "untrusted archive evidence";
+            }
+        }
+    }
+    return artifacts;
 }
 
 // A forge record as an archive carries it. A webhook's signing secret never leaves lake, as
@@ -223,6 +302,10 @@ liquid::runtime::task<ApiResult> import_repository(const json& input, ApiContext
     }
     const json& payload = archive.at("payload");
     const json& source = payload.at("repository");
+    const json provenance = {
+        {"source_signer", archive.at("signature").at("identity").at("taap_id")},
+        {"trust", "untrusted"},
+        {"imported_by", context.acting_identity}};
     // The archive's own workspace_id is where it came from; the caller names where it goes.
     const auto workspace = repository_workspace(context, input);
     if (!workspace) {
@@ -238,8 +321,9 @@ liquid::runtime::task<ApiResult> import_repository(const json& input, ApiContext
     if (!created) {
         co_return created.error();
     }
-    const RepositoryPortableData portable{
-        payload.at("history"), payload.at("artifacts"), payload.at("git")};
+    const RepositoryPortableData portable{payload.at("history"),
+                                          imported_artifacts(payload.at("artifacts"), provenance),
+                                          payload.at("git")};
     const auto imported = co_await blocking_call(
         [&] { return context.sync_store->import_portable(created->customer_id, created->id, portable); },
         [](std::string message) -> SyncStoreResult<void> {
@@ -252,21 +336,35 @@ liquid::runtime::task<ApiResult> import_repository(const json& input, ApiContext
     if (!target_object) {
         co_return store_error(target_object.error());
     }
+    json grant_attestations = json::array();
     for (const json& grant : payload.at("grants")) {
         // lake#872: an imported grant names a TAAP identity; `admin` and lake's own synthetic
         // principals (a share link's `share-link:<id>`, meaningless on this instance) are skipped.
         if (!control::valid_principal_id(grant.value("principal_taap_id", ""))) {
             continue;
         }
+        const auto attestation =
+            sign_lake_attestation(context,
+                                  {{"type", "lake.grant/1"},
+                                   {"object_id", target_object->id},
+                                   {"principal_taap_id", grant.at("principal_taap_id")},
+                                   {"role", grant.at("role")},
+                                   {"granted_by", context.acting_identity}},
+                                  "grant",
+                                  "the imported grant");
+        if (!attestation) {
+            co_return ApiResult::failure(attestation.error().code, attestation.error().message);
+        }
         const auto written = context.store->create_grant({grant.value("principal_taap_id", ""),
                                                           target_object->id,
                                                           grant.value("role", ""),
-                                                          grant.value("attestation_digest", ""),
-                                                          grant.value("granted_by_taap_id", ""),
+                                                          attestation->digest,
+                                                          context.acting_identity,
                                                           context.request_id});
         if (!written) {
             co_return store_error(written.error());
         }
+        grant_attestations.push_back(attestation->to_json());
     }
     // The archive's forge records go to the new repository's workspace (lake#341).
     auto forge = RepositoryForge::open(context, *created);
@@ -280,12 +378,7 @@ liquid::runtime::task<ApiResult> import_repository(const json& input, ApiContext
         if (kind == "issue_comment" || kind == "review_comment" || kind == "webhook_delivery") {
             continue;
         }
-        json value = record.value("value", json::object());
-        // An approval is lake's record of who approved in this repository (LSR-077); one carried
-        // in an archive is not, so an imported review never satisfies a required review.
-        if (kind == "review" && value.is_object()) {
-            value.erase("approval");
-        }
+        json value = imported_forge_value(record, provenance);
         if (kind == "webhook") {
             // An archive carries no webhook secret (LSR-024), so the imported webhook signs with a
             // new one nobody holds, never an empty or guessable key; its owner creates the webhook
@@ -328,7 +421,7 @@ liquid::runtime::task<ApiResult> import_repository(const json& input, ApiContext
         if (kind != "issue_comment" && kind != "review_comment" && kind != "webhook_delivery") {
             continue;
         }
-        json value = record.value("value", json::object());
+        json value = imported_forge_value(record, provenance);
         const std::string key = kind == "issue_comment"    ? "issue_id"
                                 : kind == "review_comment" ? "review_id"
                                                            : "webhook_id";
@@ -343,7 +436,9 @@ liquid::runtime::task<ApiResult> import_repository(const json& input, ApiContext
     context.audit_customer_id = created->customer_id;
     context.audit_object = "repository/" + created->id;
     context.audit_details = {{"forge_kind", "import"},
-                             {"source_signer", archive["signature"]["identity"]["taap_id"]}};
+                             {"source_signer", provenance.at("source_signer")},
+                             {"source_trust", "untrusted"},
+                             {"grant_attestations", std::move(grant_attestations)}};
     co_return ApiResult::success(control::to_json(*created));
 }
 

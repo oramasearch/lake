@@ -23,6 +23,12 @@ The forms are shared: `connections/forms.tsx` holds Add connection and the pull 
 Datasets' **Load data → From a connection** also uses. That tab picks from the existing
 connections, and with none it links to Connections to add one.
 
+## Safe mode
+
+Each connection has a safe mode (lake#906, [safe-mode.md](safe-mode.md)): a **Safe mode** column on
+the list and a control in the connection's card. When it warns, listing the tables, and pulling one
+into a dataset, open a dialog showing the exact query with Run and Cancel.
+
 ## Old links
 
 `DataPage.tsx` sends an old Datasets link on with `replace` (`movedFromDatasets` in

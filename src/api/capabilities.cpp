@@ -1,5 +1,6 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/api/agent_stream_triggers.hpp"
+#include "lake/api/authentication_work.hpp"
 #include "lake/api/mcp_connections.hpp"
 
 #include "audit_logs.hpp"
@@ -2046,27 +2047,32 @@ json account_deletion_json(const control::AccountDeletion& plan,
 // A person deleting their own account proves it is them now: a sign-in session started in the
 // last fifteen minutes, or a fresh TOTP or recovery code when MFA is enrolled. A token, however
 // new, is not a sign-in.
-ApiResult account_deletion_step_up(const json& in, ApiContext& ctx) {
+liquid::runtime::task<ApiResult> account_deletion_step_up(const json& in, ApiContext& ctx) {
     const std::string pool = ctx.pool_id.empty() ? "lake" : ctx.pool_id;
     const auto sessions = ctx.store->list_sessions(ctx.acting_user_id, pool);
     if (!sessions) {
-        return from_store_error(sessions.error());
+        co_return from_store_error(sessions.error());
     }
     const auto session =
         std::ranges::find(*sessions, ctx.credential_session_id, &control::Session::id);
     if (session == sessions->end()) {
-        return ApiResult::failure("unauthorized",
-                                  "an account is deleted by a person signed in to it");
+        co_return ApiResult::failure("unauthorized",
+                                     "an account is deleted by a person signed in to it");
     }
     if (in.contains("code")) {
         const auto verified =
-            ctx.store->verify_mfa_code(ctx.acting_user_id, pool, in.at("code").get<std::string>());
+            co_await authentication_work([store = ctx.store,
+                                          user_id = ctx.acting_user_id,
+                                          pool,
+                                          code = in.at("code").get<std::string>()] {
+                return store->verify_mfa_code(user_id, pool, code);
+            });
         if (!verified) {
             auto failed = from_store_error(verified.error());
             failed.error.path = "/code";
-            return failed;
+            co_return failed;
         }
-        return ApiResult::success(nullptr);
+        co_return ApiResult::success(nullptr);
     }
     if (session->kind == "browser" || session->kind == "taap") {
         const auto started = timestamp_seconds(session->created_at);
@@ -2074,12 +2080,12 @@ ApiResult account_deletion_step_up(const json& in, ApiContext& ctx) {
                              std::chrono::system_clock::now().time_since_epoch())
                              .count();
         if (started && now - *started <= account_deletion_sign_in_seconds) {
-            return ApiResult::success(nullptr);
+            co_return ApiResult::success(nullptr);
         }
     }
-    return ApiResult::failure("unauthorized",
-                              "sign in again (within the last 15 minutes), or give a fresh MFA "
-                              "code, to delete your account");
+    co_return ApiResult::failure("unauthorized",
+                                 "sign in again (within the last 15 minutes), or give a fresh MFA "
+                                 "code, to delete your account");
 }
 
 // What another capability, called as the same caller on a copy of the context (so this call's
@@ -2152,7 +2158,8 @@ liquid::runtime::task<ApiResult> delete_account(const json& in, ApiContext& ctx)
             "/delete_organizations");
     }
     if (!operator_call) {
-        if (const ApiResult proved = account_deletion_step_up(in, ctx); !proved.ok) {
+        if (const ApiResult proved = completed_call(co_await account_deletion_step_up(in, ctx));
+            !proved.ok) {
             co_return proved;
         }
     }
@@ -3276,11 +3283,14 @@ void register_identity_capabilities(Registry& registry) {
                            co_return origin;
                        }
                        co_return session_answer(co_await issued_result(
-                           context.store->sign_in_password({pool_id,
-                                                            input.value("email", ""),
-                                                            input.value("password", ""),
-                                                            "",
-                                                            input.value("device_name", "browser")}),
+                           co_await authentication_work([store = context.store, input, pool_id] {
+                               return store->sign_in_password(
+                                   {pool_id,
+                                    input.value("email", ""),
+                                    input.value("password", ""),
+                                    "",
+                                    input.value("device_name", "browser")});
+                           }),
                            context));
                    }});
     registry.add(Capability{
@@ -3384,19 +3394,23 @@ void register_identity_capabilities(Registry& registry) {
                            co_return origin;
                        }
                        co_return session_answer(co_await issued_result(
-                           context.store->sign_in_totp({pool_id,
-                                                        input.value("email", ""),
-                                                        input.value("password", ""),
-                                                        input.value("code", ""),
-                                                        input.value("device_name", "browser")}),
+                           co_await authentication_work([store = context.store, input, pool_id] {
+                               return store->sign_in_totp({pool_id,
+                                                           input.value("email", ""),
+                                                           input.value("password", ""),
+                                                           input.value("code", ""),
+                                                           input.value("device_name", "browser")});
+                           }),
                            context));
                    }});
     registry.add(Capability{
         .name = "enroll_mfa",
         .title = "Enroll TOTP",
-        .description = "Enroll TOTP MFA and return its otpauth URI and recovery codes once.",
+        .description = "Enroll or replace TOTP MFA after verifying the current password in an "
+                       "interactive sign-in session; return its URI and recovery codes once.",
         .input_schema = {{"type", "object"},
-                         {"properties", json::object()},
+                         {"properties", {{"password", {{"type", "string"}, {"minLength", 1}}}}},
+                         {"required", json::array({"password"})},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"},
                           {"properties",
@@ -3407,10 +3421,21 @@ void register_identity_capabilities(Registry& registry) {
         .object = "principal",
         .action = "write",
         .resolve_object = self_object,
-        .async_handler = [](const json&, ApiContext& context) -> liquid::runtime::task<ApiResult> {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store)
                 co_return no_store();
-            auto result = context.store->enroll_mfa(context.acting_user_id, context.pool_id);
+            auto result = co_await authentication_work(
+                [store = context.store,
+                 input,
+                 acting_user_id = context.acting_user_id,
+                 pool_id = context.pool_id,
+                 credential_session_id = context.credential_session_id] {
+                    return store->enroll_mfa(
+                        acting_user_id,
+                        pool_id,
+                        {credential_session_id, input.at("password").get<std::string>()});
+                });
             if (!result)
                 co_return from_store_error(result.error());
             const ApiResult event = session_answer(
@@ -3443,8 +3468,13 @@ void register_identity_capabilities(Registry& registry) {
             if (!context.store) {
                 co_return no_store();
             }
-            const auto result = context.store->disable_mfa(
-                context.acting_user_id, context.pool_id, input.value("code", ""));
+            const auto result =
+                co_await authentication_work([store = context.store,
+                                              input,
+                                              acting_user_id = context.acting_user_id,
+                                              pool_id = context.pool_id] {
+                    return store->disable_mfa(acting_user_id, pool_id, input.value("code", ""));
+                });
             if (!result) {
                 co_return from_store_error(result.error());
             }
@@ -3681,7 +3711,8 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "start_oauth",
         .title = "Start OAuth sign-in",
-        .description = "Create a one-use OAuth authorization flow with PKCE and state. A first "
+        .description = "Create a one-use OAuth authorization flow with PKCE and state. The browser "
+                       "must retain the HTTP response cookie for the callback. A first "
                        "sign-in's identity_document needs identity_proof: a signature by its key "
                        "over begin_identity_proof's challenge.",
         .input_schema = {{"type", "object"},
@@ -3736,13 +3767,17 @@ void register_identity_capabilities(Registry& registry) {
                                     input.value("device_name", "browser"),
                                     input.value("identity_document", ""),
                                     identity_proof_input(input)};
-            if (flow.state.empty() || flow.code_verifier.empty() || flow.nonce.empty()) {
+            flow.browser_binding = control::identity_crypto::random_secret();
+            if (flow.state.empty() || flow.code_verifier.empty() || flow.nonce.empty() ||
+                flow.browser_binding.empty()) {
                 co_return ApiResult::failure("store_error", "could not generate OAuth flow material");
             }
             const auto started = context.store->begin_oauth(flow);
             if (!started) {
                 co_return from_store_error(started.error());
             }
+            context.oauth_state = flow.state;
+            context.oauth_browser_binding = flow.browser_binding;
             co_return ApiResult::success(
                 {{"authorization_url",
                   oauth_authorization_url(*provider, endpoints.value, flow, context.public_host)}});
@@ -3750,7 +3785,8 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "start_sso_oidc",
         .title = "Start enterprise OIDC sign-in",
-        .description = "Create a one-use enterprise OIDC authorization-code flow with PKCE.",
+        .description = "Create a one-use enterprise OIDC authorization-code flow with PKCE. The "
+                       "browser must retain the HTTP response cookie for the callback.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"provider_id", {{"type", "string"}}},
@@ -3791,13 +3827,17 @@ void register_identity_capabilities(Registry& registry) {
                                     control::identity_crypto::random_secret(),
                                     input.value("device_name", "browser"),
                                     input.value("taap_id", "")};
-            if (flow.state.empty() || flow.code_verifier.empty() || flow.nonce.empty()) {
+            flow.browser_binding = control::identity_crypto::random_secret();
+            if (flow.state.empty() || flow.code_verifier.empty() || flow.nonce.empty() ||
+                flow.browser_binding.empty()) {
                 co_return ApiResult::failure("store_error",
                                              "could not generate OIDC flow material");
             }
             const auto started = context.store->begin_oauth(flow);
             if (!started)
                 co_return from_store_error(started.error());
+            context.oauth_state = flow.state;
+            context.oauth_browser_binding = flow.browser_binding;
             co_return ApiResult::success(
                 {{"authorization_url",
                   oauth_authorization_url(*provider, endpoints.value, flow, context.public_host)}});

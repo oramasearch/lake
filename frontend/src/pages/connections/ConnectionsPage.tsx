@@ -13,6 +13,8 @@ import { useTrail } from "@/lib/trail";
 import { Button, Card, Chip, DataTable, Empty, ErrorBlock, Mono, Query, SearchInput, Stat, StatRow, Status, Toolbar } from "@/lib/ui";
 import { WorkspaceFrame, qs, text, timeAgo, useAsync, useSpaceRead, useWorkspace, useWorkspaceReady, useWq, useWsPath, wa, wq } from "@/pages/train/workspace";
 import { AddConnection } from "./forms";
+import { SafeModeControl } from "./SafeMode";
+import { safeModeWarning } from "@/lib/safeMode";
 import { connectionHost, connectionKind, connectionPath, connectionStatus, kindLabel, serviceFor, tablesFigure } from "./connections";
 
 export default function ConnectionsPage() {
@@ -56,7 +58,9 @@ function ConnectionsContent({ onAdd }: { onAdd: () => void }) {
       retry: false,
     })),
   });
-  const reachable = tablesFigure(tables.map((t) => (t.isError ? "failed" : t.data)));
+  // A connection whose safe mode asks before every query (Warn All, lake#906) is not counted, and
+  // not called failed: its page lists the tables once the person confirms.
+  const reachable = tablesFigure(tables.map((t) => (t.isError ? (safeModeWarning(t.error) ? "warned" : "failed") : t.data)));
   const kinds = new Set(list.map(connectionKind).filter(Boolean));
   const needle = search.trim().toLowerCase();
   const shown = list.filter((c) => !needle || `${text(c, "name")} ${connectionKind(c)} ${connectionHost(c)}`.toLowerCase().includes(needle));
@@ -70,7 +74,13 @@ function ConnectionsContent({ onAdd }: { onAdd: () => void }) {
           label="Tables reachable"
           icon={Table2}
           value={connections.data ? (list.length ? reachable.value : 0) : "—"}
-          sub={reachable.failed ? `${reachable.failed} connection${reachable.failed === 1 ? "" : "s"} did not answer` : "across every connection"}
+          sub={
+            reachable.failed
+              ? `${reachable.failed} connection${reachable.failed === 1 ? "" : "s"} did not answer`
+              : reachable.warned
+                ? `${reachable.warned} connection${reachable.warned === 1 ? " asks" : "s ask"} first (safe mode)`
+                : "across every connection"
+          }
           tone={reachable.failed ? "bad" : undefined}
         />
       </StatRow>
@@ -132,6 +142,11 @@ function ConnectionsContent({ onAdd }: { onAdd: () => void }) {
                 </span>
               );
             },
+          },
+          {
+            key: "safe_mode",
+            label: "Safe mode",
+            render: (c) => <SafeModeControl variant="status" target={{ connection: text(c, "name") }} />,
           },
           {
             key: "created",

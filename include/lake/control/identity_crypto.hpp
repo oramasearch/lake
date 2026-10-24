@@ -15,8 +15,12 @@ namespace lake::control::identity_crypto {
 std::string random_secret();
 std::string hash_secret(std::string_view secret);
 bool verify_secret(std::string_view encoded, std::string_view secret);
+// New recovery codes are 128 random bits with a version prefix; legacy codes are refused.
+std::string new_recovery_code();
+std::string recovery_selector(std::string_view code);
 std::string new_totp_secret();
 bool verify_totp(std::string_view secret, std::string_view code);
+std::optional<std::int64_t> totp_step(std::string_view secret, std::string_view code);
 std::string sha256_hex(std::string_view value);
 std::string sha256_base64url(std::string_view value);
 std::string base64url_encode(std::string_view value);
@@ -58,6 +62,7 @@ struct OidcClaims {
     std::string subject;
     std::string email;
     std::string display_name;
+    std::int64_t issued_at = 0; // Clerk rejects templates predating an upstream revocation
 };
 
 std::optional<OidcClaims> verify_oidc_id_token(std::string_view token,

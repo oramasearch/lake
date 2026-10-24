@@ -34,9 +34,10 @@ struct PendingWorkspaceEvent {
 // events in order and appends them to that workspace's chain, one conditional write per event.
 // Nothing here touches lake's PostgreSQL except to read lake's identity and a workspace's row.
 //
-// Bounded: at most `max_pending` events are held. An event beyond the bound is dropped and counted
-// (`dropped`), never blocked on. A failed write keeps the workspace's events, in order, for the
-// next flush; the events of a deleted workspace are dropped and counted (`dropped_gone`).
+// Bounded, including events being flushed: at most `max_pending` (minimum two) events in all,
+// half that per customer and a quarter per workspace (each at least one). A rejected event is
+// counted (`dropped`); record_audit reports the failure and signs content-free delivery evidence
+// centrally. Failed writes keep accepted events in order; deleted workspaces release their events.
 //
 // Loss on a crash: the events queued since the last successful flush (the flush interval, one
 // second by default, plus any write that kept failing). A drain flushes before the process exits.
@@ -77,6 +78,10 @@ private:
         std::string customer_id;
         std::vector<audit::PendingEvent> events;
     };
+    struct Allocation {
+        std::string customer_id;
+        std::size_t held = 0;
+    };
     bool workspace_gone(const std::string& customer_id, const std::string& workspace_id) const;
 
     control::Store* store_;
@@ -87,6 +92,8 @@ private:
     mutable std::mutex mutex_;
     std::map<std::string, Queue> queues_; // by workspace
     std::size_t held_ = 0;
+    std::map<std::string, std::size_t> customer_held_;
+    std::map<std::string, Allocation> workspace_held_;
     // The last place this process knows taken in each workspace's chain. Only a hint: a place
     // another replica took is found by the conflict on writing it.
     std::map<std::string, control::WorkspaceAuditTail> tails_;

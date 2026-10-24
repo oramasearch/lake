@@ -1,3 +1,4 @@
+#include <ctime>
 #include <memory>
 #include <string>
 #include <vector>
@@ -26,7 +27,8 @@ lake::control::ClerkIdentity build_identity(std::string subject) {
                                         "browser",
                                         identity->taap_id,
                                         identity->public_key,
-                                        identity->wrapped_seed};
+                                        identity->wrapped_seed,
+                                        static_cast<std::int64_t>(std::time(nullptr))};
 }
 
 struct Builds {

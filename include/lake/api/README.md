@@ -1,5 +1,15 @@
 # Public API types
 
+`pipeline.hpp` defines shared limits of 50,000 steps, 100,000 edges and 256 edits per batch,
+including a JSON shape/count guard used before graph copies and engine saves (lake#967).
+
+`Capability::max_body_bytes` declares the JSON wire allowance (1 MiB default, 64 MiB ceiling).
+`Registry::authenticate` applies the shared credential gate before an HTTP body is read, auditing
+only refusals; the full registry call still validates and authorizes the operation.
+`requires_credential` retains that early gate for handlers that own their authorization. Anonymous
+MCP envelopes have a separate 256 KiB cap. See [body admission](../../../docs/serving/http.md#request-body-limits).
+`oidc_jwks.hpp` declares the shared Clerk/OIDC key cache with injectable fetch and monotonic clock. `ServerOptions.oidc_jwks_fetch` replaces its transport in HTTP tests. See [bounded refresh](../../../docs/api/clerk.md#bounded-key-refresh-lake956-lsr-090).
+
 `tunnel_clients.hpp` declares the tunnel client downloads (lake#745): the platform allow-list,
 `read_tunnel_clients`, the signed-link helpers (`signed_link_signature`, `signed_link_matches`) and
 the link check. `ApiContext.tunnel_clients_dir` and `ServerOptions.tunnel_clients_dir` name the folder
@@ -93,6 +103,9 @@ and `metering_max_pending` configure it. A null recorder (no workspaces) records
 every registered capability, `audit_route` for one call and `workspace_audit_route` for an event
 recorded outside the registry, and `record_audit`. `audit_recorder.hpp` declares `AuditRecorder`,
 the bounded queue of workspace audit events on their way to each workspace's chain;
+Customer and workspace queue allocations include in-flight writes; `record_audit` returns
+`audit_queue_full` with signed central delivery failure evidence on overflow, and `ApiResult`
+preserves the completed operation envelope in `operation_result`.
 `ApiContext::audit_recorder` points at the server's (null: no workspaces, every event central),
 `ApiContext::audit_workspace_id` carries the workspace a call acted on, and
 `ServerOptions::audit_flush_interval` (one second) and `audit_max_pending` (65,536) configure it.
@@ -147,7 +160,11 @@ instance KEK.
 
 `forge.hpp` declares `BranchProtectionRecords` and `load_branch_protection`: the rules, reviews and
 releases a push needs, read from the repository's workspace before the push (lake#341), and
-`evaluate_branch_protection` over that snapshot.
+`evaluate_branch_protection` over that snapshot. `verified_release_changes` contains only changes
+whose selected results were freshly verified in that repository during the load (LSR-106).
+`RepositoryArtifact::verified_source` is populated only by result-bound SLSA verification of
+`LAKE_SOURCE_REPOSITORY_ID` and `LAKE_SOURCE_CHANGE_ID`, never from generic signature checks.
+See [source binding](../../../docs/api/forge.md#source-binding-lsr-106).
 
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.
@@ -219,3 +236,30 @@ move (`transfer_to_workspace_store`, `switch_workspace_store`, `create_repositor
 `MethodologyServer` (`registry.hpp`, `ServerOptions::methodology_server`, lake#690) sends one
 prediction request to a served methodology model's Service; the HTTP server injects one over its
 outbound client (plain http to `*.svc.cluster.local` only), tests inject a fake.
+
+`mcp_client.hpp` declares `mcp_max_json_depth` (64 nested containers) and `mcp_parse_json` for
+remote MCP and OAuth response bodies. Invalid or over-depth JSON returns a discarded value.
+See [MCP connection limits](../../../docs/api/mcp-connections.md#the-client) (lake#958, LSR-092).
+
+`sync_store.hpp` defines `RepositoryWriteAuthorizer` (lake#962, LSR-096), invoked before mutation
+under the repository lock with the immutable tree being committed to main. `drive.hpp` declares
+`repository_write_authorizer` for destination and recursive descendant checks; its context must
+outlive the synchronous store call. See [drive.md](../../../docs/api/drive.md).
+Model entitlement and model/direction billing (LSR-095, lake#961) are documented in
+[`model-gateway.md`](../../../docs/api/model-gateway.md). The configured exact model/provider allowlist applies before dispatch on every transport;
+billing additionally requires positive model input and output rates. `model_tokens` classes
+preserve raw counts and bill each direction separately. `test_model_gateway.cpp` and
+`test_billing.cpp` cover provider-call refusal and invoice amounts, including a missing price.
+`authentication_work.hpp` limits authentication to two queued/running blocking jobs; its permit
+outlives the callable, so disconnects cannot release capacity early (lake#969).
+`ApiContext::client_address` is the address the trusted ingress hop decided (the HTTP server's
+`order_client_address`, `direct` without one), and the registry shares
+its client attempt table across transports. See [the contract](../../../docs/api/identity.md#authentication-attempt-limits).
+`ApiContext::recovery_client_address` carries ingress-derived transport metadata for anonymous
+recovery limits. It is never capability input; empty addresses share a bucket. See
+[recovery.md](../../../docs/api/recovery.md#email-recovery-budgets).
+`PaymentNotice::order_subscription` (lake#972) routes verified recurring order events separately from ordinary usage invoices. `ApiContext` and `ServerOptions` carry `order_entitlement_grace_seconds`, default three days. See [orders](../../../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
+`ApiContext::client_address` carries the trusted ingress-derived address (`order_client_address`)
+to the shared Store-backed registry reservations across REST, MCP and hosted forms. Non-HTTP
+calls share an in-process client bucket. See [the contract](../../../docs/api/identity.md#authentication-attempt-limits)
+(lake#966).

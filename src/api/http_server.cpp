@@ -1,6 +1,6 @@
 // lake — the HTTP adapter. Beast2 (HTTP/1) on Capy + Corosio, the same stack
 // Zetta serves with (zetta/src/core/api/http_server.cpp). This is the ONE
-// translation unit that knows about beast2 / boost::http / Boost.JSON. It
+// translation unit that knows about beast2 / boost::http. It
 // serves the hello page, the registry's JSON and binary HTTP renderings, the
 // OpenAPI document and MCP (POST /mcp). Every capability call goes through
 // Registry::call so authorization, validation and audit remain centralized.
@@ -80,14 +80,12 @@
 #include <boost/corosio/tls_context.hpp>
 #include <boost/corosio/tls_stream.hpp>
 #include <boost/http/field.hpp>
-#include <boost/http/json/json_sink.hpp>
 #include <boost/http/request.hpp>
 #include <boost/http/request_parser.hpp>
 #include <boost/http/response_parser.hpp>
 #include <boost/http/serializer.hpp>
 #include <boost/http/server/cors.hpp>
 #include <boost/http/server/router.hpp>
-#include <boost/json.hpp>
 #include <boost/url.hpp>
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
@@ -466,8 +464,13 @@ SyncStoreResult<liquid::sync_item> sync_item_from_json(const nlohmann::json& val
     }
     liquid::sync_item output;
     const unsigned kind = value.value("kind", 0U);
-    if (kind < static_cast<unsigned>(liquid::sync_item_kind::drip) ||
-        kind > static_cast<unsigned>(liquid::sync_item_kind::reference)) {
+    // An archive carries what liquid persists: drips, changes, directories, references and the
+    // identity chains that attribute them. Presence is live state and never persists.
+    const bool persisted =
+        (kind >= static_cast<unsigned>(liquid::sync_item_kind::drip) &&
+         kind <= static_cast<unsigned>(liquid::sync_item_kind::reference)) ||
+        kind == static_cast<unsigned>(liquid::sync_item_kind::identity);
+    if (!persisted) {
         return std::unexpected(SyncStoreError{"invalid_input", "invalid sync item kind", "export"});
     }
     output.kind = static_cast<liquid::sync_item_kind>(kind);
@@ -668,18 +671,29 @@ std::string server_timing_of(const boost::http::route_params& route) {
     return server_timing;
 }
 
-boost::http::route_task send_text(boost::http::route_params& route,
-                                  boost::http::status status,
-                                  std::string body,
-                                  std::string_view content_type,
-                                  std::string_view cache_control) {
+// Every page lake answers: only lake frames it (the Ask Orama panel, lake#258), so no clickjacking,
+// and it shows images only from lake itself and `data:` URLs (lake#943), so no Markdown an agent or
+// another person wrote can make the browser send anything to another server by naming an image
+// (docs/serving/http.md#images).
+constexpr std::string_view page_content_security_policy =
+    "frame-ancestors 'self'; img-src 'self' data:";
+// The web app's pages with Clerk on, whose sign-in shows images from Clerk's image host.
+constexpr std::string_view clerk_page_content_security_policy =
+    "frame-ancestors 'self'; img-src 'self' data: https://img.clerk.com";
+
+boost::http::route_task
+send_text(boost::http::route_params& route,
+          boost::http::status status,
+          std::string body,
+          std::string_view content_type,
+          std::string_view cache_control,
+          std::string_view content_security_policy = page_content_security_policy) {
     namespace http = boost::http;
     route.status(status);
     route.res.set(http::field::content_type, content_type);
     route.res.set(http::field::cache_control, cache_control);
     if (content_type.starts_with("text/html")) {
-        // Only lake frames lake's pages (the Ask Orama panel, lake#258): no clickjacking.
-        route.res.set("Content-Security-Policy", "frame-ancestors 'self'");
+        route.res.set("Content-Security-Policy", content_security_policy);
     }
     route.res.set("Server-Timing", server_timing_of(route));
     stamp_response_headers(route, body);
@@ -928,8 +942,7 @@ bool constant_time_equal(std::string_view a, std::string_view b) {
 }
 
 // A capy WriteSink that collects a request body into a std::string — for the
-// form-urlencoded bodies the sign-in and hosted-page forms post (json_sink parses
-// JSON, which form bodies are not).
+// form-urlencoded bodies the sign-in and hosted-page forms post.
 struct StringBodySink {
     std::string data;
     std::size_t limit = maximum_sync_body_size;
@@ -957,35 +970,63 @@ struct StringBodySink {
     }
 };
 
-struct JsonBodySink {
-    boost::http::json_sink parser;
-    std::size_t size = 0;
-    std::size_t limit = maximum_sync_body_size;
+// Buffer bounded bytes, then build the registry's document directly. Parser callbacks abort
+// before another container, key or value can exceed the structural budget (including duplicate
+// object keys). Returning false would merely discard a subtree and keep parsing it.
+struct JsonBodySink : StringBodySink {
+    bool structure_too_large = false;
+    nlohmann::json document;
 
-    template <boost::capy::ConstBufferSequence CB>
-    boost::capy::immediate<boost::capy::io_result<std::size_t>> write_some(const CB& buffers) {
-        return write(buffers);
+    explicit JsonBodySink(std::size_t max_bytes = default_capability_body_bytes) {
+        limit = max_bytes;
     }
 
-    template <boost::capy::ConstBufferSequence CB>
-    boost::capy::immediate<boost::capy::io_result<std::size_t>> write(const CB& buffers) {
-        const std::size_t incoming = boost::capy::buffer_size(buffers);
-        if (size > limit || incoming > limit - size) {
-            return {{std::make_error_code(std::errc::file_too_large), 0}};
+    std::error_code parse() {
+        if (data.empty()) {
+            return {};
         }
-        auto [error, written] = parser.write(buffers).await_resume();
-        size += written;
-        return {{error, written}};
+        struct LimitExceeded {};
+        std::size_t elements = 0;
+        const auto budget = [&](int depth, nlohmann::json::parse_event_t event, nlohmann::json&) {
+            using Event = nlohmann::json::parse_event_t;
+            const bool container = event == Event::object_start || event == Event::array_start;
+            if ((container && depth >= 64) ||
+                ((container || event == Event::key || event == Event::value) &&
+                 ++elements > 65536)) {
+                throw LimitExceeded{};
+            }
+            return true;
+        };
+        try {
+            document = nlohmann::json::parse(data, budget, false);
+        } catch (const LimitExceeded&) {
+            structure_too_large = true;
+            return std::make_error_code(std::errc::file_too_large);
+        }
+        return {};
     }
 
-    boost::capy::immediate<boost::capy::io_result<>> write_eof() {
-        return parser.write_eof();
-    }
-
-    boost::json::value release() {
-        return parser.release();
+    nlohmann::json release() {
+        std::string().swap(data);
+        return std::move(document);
     }
 };
+
+bool declared_body_exceeds(const boost::http::route_params& route, std::size_t limit) {
+    const std::string_view value = route.req.value_or(boost::http::field::content_length, "");
+    std::uint64_t length = 0;
+    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), length);
+    return parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size() && length > limit;
+}
+
+boost::capy::io_task<std::size_t> read_json_body(boost::http::route_params& route,
+                                                 JsonBodySink& sink) {
+    if (declared_body_exceeds(route, sink.limit)) {
+        co_return {std::make_error_code(std::errc::file_too_large), 0};
+    }
+    auto [error, bytes] = co_await boost::capy::push_to(route.req_body, sink);
+    co_return {error ? error : sink.parse(), bytes};
+}
 
 bool body_is_too_large(const std::error_code& error) {
     return error == std::errc::file_too_large || error.message() == "body too large";
@@ -2470,19 +2511,9 @@ std::string browser_session_cookie(const boost::http::route_params& route,
     return cookie;
 }
 
-nlohmann::json to_nlohmann(const boost::json::value& value) {
-    return nlohmann::json::parse(boost::json::serialize(value), nullptr, false);
-};
-
-// A request body as JSON, or a discarded value when it is not JSON: the parser throws on a body
-// that ends inside a value (`{"name":"x`), which must be the caller's 400, not lake's 500
-// (lake#18).
+// Invalid JSON is discarded; structural budget failures are returned by read_json_body.
 nlohmann::json body_json(JsonBodySink& sink) {
-    try {
-        return to_nlohmann(sink.release());
-    } catch (const std::exception&) {
-        return nlohmann::json(nlohmann::json::value_t::discarded);
-    }
+    return sink.release();
 }
 
 // RFC 6750's challenge for a refused bearer, naming why and where a new key is made (lake#450).
@@ -3389,8 +3420,10 @@ public:
                                 const std::string& repository_id,
                                 const std::string& conflict_id,
                                 const std::string& resolution,
-                                std::vector<std::byte> blob) override {
-                auto entered_repository = enter_repository(customer_id, repository_id);        auto& repository = entered_repository.state;
+                                std::vector<std::byte> blob,
+                                RepositoryWriteAuthorizer authorize) override {
+        auto entered_repository = enter_repository(customer_id, repository_id);
+        auto& repository = entered_repository.state;
         if (!repository) {
             return std::unexpected(repository.error());
         }
@@ -3410,6 +3443,16 @@ public:
             request.blob = std::move(blob);
         } else {
             return std::unexpected(SyncStoreError{"invalid_input", "unknown conflict resolution"});
+        }
+        if (authorize) {
+            const auto entries =
+                current_write_tree(*(*repository)->subject, *(*repository)->objects);
+            if (!entries) {
+                return std::unexpected(entries.error());
+            }
+            if (const auto allowed = authorize(*entries); !allowed) {
+                return std::unexpected(allowed.error());
+            }
         }
         const auto resolved = liquid::runtime::block_on(
             (*repository)->subject->resolve_conflict(*parsed, std::move(request)));
@@ -3520,8 +3563,10 @@ public:
                             const std::string& repository_id,
                             const std::string& revision,
                             const std::string& message,
-                            std::vector<RepositoryWriteOperation> operations) override {
-                auto entered_repository = enter_repository(customer_id, repository_id);        auto& state = entered_repository.state;
+                            std::vector<RepositoryWriteOperation> operations,
+                            RepositoryWriteAuthorizer authorize) override {
+        auto entered_repository = enter_repository(customer_id, repository_id);
+        auto& state = entered_repository.state;
         if (!state) {
             return std::unexpected(state.error());
         }
@@ -3570,6 +3615,15 @@ public:
             if (staged->size() != operation.size) {
                 return std::unexpected(
                     SyncStoreError{"invalid_input", "staged LFS size does not match commit"});
+            }
+        }
+        if (authorize) {
+            const auto entries = current_write_tree(*(*state)->subject, *(*state)->objects);
+            if (!entries) {
+                return std::unexpected(entries.error());
+            }
+            if (const auto allowed = authorize(*entries); !allowed) {
+                return std::unexpected(allowed.error());
             }
         }
         for (RepositoryWriteOperation& operation : operations) {
@@ -3744,11 +3798,14 @@ public:
                               run_page->records.front().value)};
     }
 
-    SyncStoreResult<RepositoryChange> restore_repository_file(const std::string& customer_id,
-                                                              const std::string& repository_id,
-                                                              const std::string& change_id,
-                                                              const std::string& path) override {
-                auto entered_repository = enter_repository(customer_id, repository_id);        auto& repository = entered_repository.state;
+    SyncStoreResult<RepositoryChange>
+    restore_repository_file(const std::string& customer_id,
+                            const std::string& repository_id,
+                            const std::string& change_id,
+                            const std::string& path,
+                            RepositoryWriteAuthorizer authorize) override {
+        auto entered_repository = enter_repository(customer_id, repository_id);
+        auto& repository = entered_repository.state;
         if (!repository) {
             return std::unexpected(repository.error());
         }
@@ -3772,6 +3829,16 @@ public:
         const auto parent = liquid::runtime::block_on((*repository)->subject->head());
         if (!parent) {
             return std::unexpected(error_of(parent.error()));
+        }
+        if (authorize) {
+            const auto entries =
+                current_write_tree(*(*repository)->subject, *(*repository)->objects);
+            if (!entries) {
+                return std::unexpected(entries.error());
+            }
+            if (const auto allowed = authorize(*entries); !allowed) {
+                return std::unexpected(allowed.error());
+            }
         }
         const auto written = liquid::runtime::block_on(
             (*repository)->subject->write(path, *contents, {.mode = entry->mode}));
@@ -4609,6 +4676,19 @@ private:
             if (!provenance) {
                 return std::unexpected(error_of(provenance.error()));
             }
+            // These environment claims are covered by both the action/result binding and the
+            // SLSA signature. Generic signed statements do not establish source provenance.
+            if (provenance->verified && provenance->statement.slsa_provenance) {
+                const auto& environment = provenance->statement.slsa_provenance->build_definition
+                                              .external_parameters.environment;
+                const auto repository_id = environment.find("LAKE_SOURCE_REPOSITORY_ID");
+                const auto change_id = environment.find("LAKE_SOURCE_CHANGE_ID");
+                if (repository_id != environment.end() && change_id != environment.end() &&
+                    !repository_id->second.empty() && !change_id->second.empty()) {
+                    artifact.verified_source =
+                        RepositoryArtifactSource{repository_id->second, change_id->second};
+                }
+            }
             append_attestation(artifact,
                                provenance->attestation,
                                provenance->statement,
@@ -4972,6 +5052,21 @@ private:
         output.builder = predicate.run_details.builder.id;
         output.invocation_id = predicate.run_details.metadata.invocation_id;
         return output;
+    }
+
+    // Called only while enter_repository holds the lane that serializes repository mutations.
+    static SyncStoreResult<std::vector<RepositoryTreeEntry>>
+    current_write_tree(liquid::repository& repository, liquid::store& objects) {
+        // Capture the working root that cut() will publish, including staged state.
+        const auto tree = liquid::runtime::block_on(repository.root());
+        if (!tree) {
+            return std::unexpected(error_of(tree.error()));
+        }
+        std::vector<RepositoryTreeEntry> entries;
+        if (const auto walked = walk_tree(repository, objects, *tree, "", entries); !walked) {
+            return std::unexpected(walked.error());
+        }
+        return entries;
     }
 
     static SyncStoreResult<liquid::tree> tree_at_ref(liquid::repository& repository,
@@ -7813,7 +7908,7 @@ struct ApiServer::Impl {
     std::string mcp_tool_digest;
     // What each MCP session last listed (lake#684).
     McpSessionLists mcp_session_lists;
-    mutable OutboundHttpClient outbound_http;
+    std::shared_ptr<OutboundHttpClient> outbound_http = std::make_shared<OutboundHttpClient>();
     // How invoices are paid where billing is on (docs/api/billing.md#payment-providers).
     std::shared_ptr<PaymentProviders> payments;
     // The apex order sheet (lake#831, docs/api/orders.md): the anonymous form's limit, the key its
@@ -7843,11 +7938,12 @@ struct ApiServer::Impl {
     // The workspace Zettas' object transport (configure_workspace_stores), for workspace files;
     // null without workspaces.
     std::shared_ptr<control::ObjectTransport> object_transport;
-    struct CachedJwks {
-        std::string document;
-        std::chrono::steady_clock::time_point fetched_at;
+    std::shared_ptr<OidcJwks> oidc_jwks = std::make_shared<OidcJwks>();
+    struct ClerkAttempts {
+        std::chrono::steady_clock::time_point started;
+        unsigned count = 0;
     };
-    std::map<std::string, CachedJwks> jwks_cache;
+    std::map<std::string, ClerkAttempts> clerk_attempts;
     std::optional<ClerkConfig> clerk;
     boost::corosio::io_context io_context;
     // Lake#534: connections apart from the request workers (src/api/http_connections.hpp).
@@ -8677,7 +8773,7 @@ struct ApiServer::Impl {
                        std::string body,
                        std::vector<std::pair<std::string, std::string>> headers,
                        std::chrono::seconds timeout) {
-                    OutboundResponse response = outbound_http.request(
+                    OutboundResponse response = outbound_http->request(
                         {"POST", url, std::move(body), std::move(headers), timeout});
                     return TranscriptPostResponse{
                         response.status, std::move(response.body), std::move(response.error)};
@@ -8697,7 +8793,7 @@ struct ApiServer::Impl {
                     oidc_timeout};
                 request.body_limit = 256 * 1024;
                 request.public_only = !options.oidc_allow_private_addresses;
-                OutboundResponse response = outbound_http.request(request);
+                OutboundResponse response = outbound_http->request(request);
                 return OidcFetchResponse{
                     response.status, std::move(response.body), std::move(response.error)};
             },
@@ -8764,7 +8860,7 @@ struct ApiServer::Impl {
                             return true;
                         };
                     }
-                    OutboundResponse response = outbound_http.request(std::move(request));
+                    OutboundResponse response = outbound_http->request(std::move(request));
                     if (on_body && (response.status < 200 || response.status >= 300)) {
                         response.body = std::move(*refusal);
                     }
@@ -8788,7 +8884,7 @@ struct ApiServer::Impl {
                             keys,
                             options.public_host,
                             [this](const StripeRequest& request) {
-                                OutboundResponse response = outbound_http.request(
+                                OutboundResponse response = outbound_http->request(
                                     {request.method, request.url, request.body, request.headers});
                                 return StripeResponse{response.status,
                                                       std::move(response.body),
@@ -8838,12 +8934,12 @@ struct ApiServer::Impl {
     transparency::Result<nlohmann::json> submit_transparency(const std::string& endpoint,
                                                              const nlohmann::json& request) const {
         const OutboundResponse response =
-            outbound_http.request({"POST",
-                                   endpoint,
-                                   request.dump(),
-                                   {{"Accept", "application/json"},
-                                    {"Content-Type", "application/json"},
-                                    {"User-Agent", "lake-transparency/1"}}});
+            outbound_http->request({"POST",
+                                    endpoint,
+                                    request.dump(),
+                                    {{"Accept", "application/json"},
+                                     {"Content-Type", "application/json"},
+                                     {"User-Agent", "lake-transparency/1"}}});
         if (!response.error.empty()) {
             return std::unexpected(transparency::Error{
                 "store_unavailable", "transparency endpoint request failed: " + response.error});
@@ -8864,11 +8960,11 @@ struct ApiServer::Impl {
     transparency::TsaReply send_timestamp_request(std::string_view endpoint,
                                                   std::string_view request_der) const {
         const OutboundResponse response =
-            outbound_http.request({"POST",
-                                   std::string(endpoint),
-                                   std::string(request_der),
-                                   {{"Content-Type", "application/timestamp-query"},
-                                    {"Accept", "application/timestamp-reply"}}});
+            outbound_http->request({"POST",
+                                    std::string(endpoint),
+                                    std::string(request_der),
+                                    {{"Content-Type", "application/timestamp-query"},
+                                     {"Accept", "application/timestamp-reply"}}});
         return transparency::TsaReply{response.status, response.body, response.error};
     }
 
@@ -8950,7 +9046,7 @@ struct ApiServer::Impl {
         request.timeout =
             std::min<std::chrono::seconds>(options.replication_timeout, std::chrono::seconds(60));
         request.public_only = !options.replication_allow_private_addresses;
-        const OutboundResponse response = outbound_http.request(std::move(request));
+        const OutboundResponse response = outbound_http->request(std::move(request));
         if (!response.error.empty()) {
             return std::unexpected(ApiError{
                 "store_unavailable", "replication peer request failed: " + response.error, {}});
@@ -9272,6 +9368,8 @@ struct ApiServer::Impl {
             return *timing->context;
         }
         ApiContext ctx;
+        // Authentication budgets count the address the trusted ingress hop decided (LSR-103).
+        ctx.client_address = order_client_address(route);
         // A capability that long-polls gives its HTTP worker back (lake#534).
         if (server) {
             ctx.leave_worker = [connections = server.get(), token = server->request_token(route)](
@@ -9279,6 +9377,7 @@ struct ApiServer::Impl {
                 return connections->leave_worker(token, principal);
             };
         }
+        ctx.recovery_client_address = order_client_address(route);
         ctx.request_path = std::string(route.url.path());
         ctx.request_query = std::string(route.url.encoded_query());
         ctx.path_workspace_id = workspace_path_id(ctx.request_path);
@@ -9345,7 +9444,9 @@ struct ApiServer::Impl {
         ctx.oidc_discovery = oidc_discovery;
         ctx.store_browser = store_browser;
         ctx.model_provider = model_provider;
+        ctx.model_gateway_models = options.model_gateway_models;
         ctx.payments = payments;
+        ctx.order_entitlement_grace_seconds = options.order_entitlement_grace_seconds;
         ctx.object_transport = object_transport;
         ctx.artifact_catalog = [this] {
             nlohmann::json catalog = artifacts.catalog();
@@ -9371,7 +9472,7 @@ struct ApiServer::Impl {
             OutboundRequest request{"POST", url, payload, std::move(outbound_headers)};
             request.timeout = std::chrono::seconds(10);
             request.public_only = !options.webhook_allow_private_addresses;
-            const OutboundResponse response = outbound_http.request(std::move(request));
+            const OutboundResponse response = outbound_http->request(std::move(request));
             return WebhookDeliveryResult{response.status, response.error};
         };
         if (route.req.count(boost::http::field::user_agent) != 0) {
@@ -10261,15 +10362,28 @@ struct ApiServer::Impl {
         nlohmann::json input = {{"pool_id", application->pool_id}};
         if (capability == "sign_in_passkey") {
             JsonBodySink sink;
-            auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+            auto [read_error, bytes_read] = co_await read_json_body(route, sink);
             if (read_error || bytes_read == 0) {
+                co_return co_await send_text(
+                    route,
+                    body_is_too_large(read_error) ? http::status::payload_too_large
+                                                  : http::status::bad_request,
+                    error_body(body_is_too_large(read_error) ? "size_invalid" : "invalid_input",
+                               "JSON body is required within its byte and structure limits"),
+                    "application/json; charset=utf-8",
+                    "no-store");
+            }
+            const auto document = body_json(sink);
+            if (!document.is_object()) {
                 co_return co_await send_text(route,
-                                             http::status::bad_request,
-                                             error_body("invalid_input", "JSON body is required"),
+                                             sink.structure_too_large
+                                                 ? http::status::payload_too_large
+                                                 : http::status::bad_request,
+                                             error_body("invalid_input", "JSON object is required"),
                                              "application/json; charset=utf-8",
                                              "no-store");
             }
-            input.update(to_nlohmann(sink.release()));
+            input.update(document);
             input["pool_id"] = application->pool_id;
         }
         ApiContext context = context_for(route);
@@ -10341,7 +10455,8 @@ struct ApiServer::Impl {
         }
         co_return co_await redirect(
             route,
-            result.value.value("authorization_url", "/apps/" + application->id + "/sign-in"));
+            result.value.value("authorization_url", "/apps/" + application->id + "/sign-in"),
+            oauth_browser_cookie(route, context));
     }
 
     // The public keys are read from the application's workspace Zetta (lake#352).
@@ -10411,32 +10526,54 @@ struct ApiServer::Impl {
                          "public, max-age=300");
     }
 
-    // `public_only` for an identity provider's keys (lake#837): HTTPS to public addresses only,
-    // unless LAKE_OIDC_ALLOW_PRIVATE_ADDRESSES is set. Clerk's, which the operator configures, is
-    // not limited.
-    std::optional<std::string>
-    jwks_for(const std::string& url, bool refresh, bool public_only = false) {
-        const auto found = jwks_cache.find(url);
-        if (!refresh && found != jwks_cache.end() &&
-            std::chrono::steady_clock::now() - found->second.fetched_at < std::chrono::hours(1)) {
-            return found->second.document;
+    // The offloaded task owns its cache and transport even if shutdown abandons its response.
+    OidcJwks::Fetch jwks_fetch() const {
+        if (options.oidc_jwks_fetch) {
+            return options.oidc_jwks_fetch;
         }
-        OutboundRequest request{
-            "GET", url, "", {{"Accept", "application/json"}, {"User-Agent", "lake-oauth/1"}}};
-        if (public_only) {
+        return [client = outbound_http,
+                clerk_http = options.clerk_http,
+                clerk_url = clerk ? clerk->jwks_url : std::string()](
+                   const std::string& endpoint, bool restricted) -> std::optional<std::string> {
+            OutboundRequest request{
+                "GET",
+                endpoint,
+                "",
+                {{"Accept", "application/json"}, {"User-Agent", "lake-oauth/1"}}};
             request.timeout = oidc_timeout;
-            request.public_only = true;
+            request.public_only = restricted;
+            if (clerk_http && endpoint == clerk_url) {
+                const auto response = clerk_http(endpoint, request.headers);
+                return response.error.empty() && response.status >= 200 && response.status < 300
+                           ? std::optional(response.body)
+                           : std::nullopt;
+            }
+            const auto response = client->request(std::move(request));
+            if (!response.error.empty() || response.status < 200 || response.status >= 300) {
+                return std::nullopt;
+            }
+            return response.body;
+        };
+    }
+
+    // IO-thread-only, bounded address state. Never evict an active bucket to admit a new client.
+    // Keyed on the address the trusted ingress hop reports (order_client_address): the socket peer
+    // is the ingress pod, which every user shares. Direct clients share the "direct" bucket.
+    bool allow_clerk_exchange(const boost::http::route_params& route) {
+        const auto now = std::chrono::steady_clock::now();
+        std::erase_if(clerk_attempts, [&](const auto& item) {
+            return now - item.second.started >= std::chrono::minutes(1);
+        });
+        const auto client = order_client_address(route);
+        if (!clerk_attempts.contains(client) && clerk_attempts.size() >= 4096) {
+            return false;
         }
-        OutboundResponse response = outbound_http.request(request);
-        if (!response.error.empty() || response.status < 200 || response.status >= 300) {
-            return std::nullopt;
+        const auto entry = clerk_attempts.try_emplace(client, ClerkAttempts{now}).first;
+        if (entry->second.count >= 60) {
+            return false;
         }
-        const nlohmann::json document = nlohmann::json::parse(response.body, nullptr, false);
-        if (document.is_discarded() || !document.contains("keys") || !document["keys"].is_array()) {
-            return std::nullopt;
-        }
-        jwks_cache[url] = {response.body, std::chrono::steady_clock::now()};
-        return response.body;
+        ++entry->second.count;
+        return true;
     }
 
     boost::http::route_task oauth_error(boost::http::route_params& route,
@@ -10571,6 +10708,15 @@ struct ApiServer::Impl {
                                          "application/json; charset=utf-8",
                                          "no-store");
         }
+        if (!allow_clerk_exchange(route)) {
+            route.res.set("Retry-After", "60");
+            co_return co_await send_text(
+                route,
+                http::status::too_many_requests,
+                error_body("rate_limited", "Too many sign-in attempts. Please try again."),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
         auto [read_error, body] = co_await read_string_body(route);
         if (read_error) {
             co_return http::route_error(read_error);
@@ -10583,19 +10729,18 @@ struct ApiServer::Impl {
         const std::string audience(clerk_token_template);
         std::optional<control::identity_crypto::OidcClaims> claims;
         if (!token.empty()) {
-            for (const bool refresh : {false, true}) {
-                const std::optional<std::string> jwks = jwks_for(clerk->jwks_url, refresh);
-                claims = jwks ? control::identity_crypto::verify_oidc_id_token(
-                                    token, *jwks, clerk->issuer, audience, "")
-                              : std::nullopt;
-                if (claims) {
-                    break;
-                }
+            auto ran = co_await run_blocking(
+                [cache = oidc_jwks, fetch = jwks_fetch(), token, config = *clerk, audience] {
+                    return cache->verify(
+                        token, config.jwks_url, config.issuer, audience, "", false, fetch, true);
+                });
+            if (ran) {
+                claims = std::move(*ran);
             }
         }
         ApiContext context = context_for(route);
         context.authentication_method = "clerk";
-        if (!claims) {
+        if (!claims || claims->issued_at <= 0) {
             (void)record_direct_event(context,
                                       audit::EventDraft{
                                           .kind = "authentication",
@@ -10607,6 +10752,47 @@ struct ApiServer::Impl {
                                       });
             co_return co_await back("Your sign-in could not be verified. Please try again.");
         }
+        const auto denied = [&](std::string_view message) {
+            (void)record_direct_event(context,
+                                      audit::EventDraft{.kind = "authentication",
+                                                        .object = "clerk",
+                                                        .action = "sign_in",
+                                                        .outcome = "denied",
+                                                        .method = "clerk",
+                                                        .device = device_name});
+            return back(message);
+        };
+        const ClerkGet get =
+            options.clerk_http
+                ? options.clerk_http
+                : ClerkGet{[client = outbound_http](
+                               const std::string& url,
+                               const std::vector<std::pair<std::string, std::string>>& headers) {
+                      OutboundRequest request{"GET", url, "", headers};
+                      request.timeout = std::chrono::seconds(10);
+                      request.public_only = true;
+                      const auto response = client->request(request);
+                      return ClerkResponse{response.status, response.body, response.error};
+                  }};
+        auto checked =
+            co_await run_blocking([get, subject = claims->subject, key = options.clerk_secret_key] {
+                return clerk_user_status(subject, key, get);
+            });
+        if (!checked) {
+            co_return co_await denied("Lake cannot verify the Clerk account status right now.");
+        }
+        const auto upstream = std::move(*checked);
+        if (!upstream)
+            co_return co_await denied(upstream.error());
+        const auto state = options.store->apply_clerk_user_state(
+            {claims->subject,
+             upstream->updated_at,
+             upstream->banned || upstream->locked || upstream->deprovisioned,
+             false});
+        if (!state)
+            co_return co_await denied("Lake cannot record the Clerk account status right now.");
+        if (upstream->banned || upstream->locked || upstream->deprovisioned)
+            co_return co_await denied("This Clerk account is suspended.");
         const auto minted = audit::mint_custodial_identity(options.instance_kek);
         if (!minted) {
             co_return co_await back("Lake cannot create an identity right now: " +
@@ -10619,9 +10805,10 @@ struct ApiServer::Impl {
                                           device_name,
                                           minted->taap_id,
                                           minted->public_key,
-                                          minted->wrapped_seed});
+                                          minted->wrapped_seed,
+                                          claims->issued_at});
         if (!issued) {
-            co_return co_await back(issued.error().message);
+            co_return co_await denied(issued.error().message);
         }
         if (const auto principal = options.store->context_for(issued->secret)) {
             context.authorized = true;
@@ -10658,6 +10845,26 @@ struct ApiServer::Impl {
             route, destination.empty() ? std::string(account_landing) : destination, cookie);
     }
 
+    static std::string oauth_cookie_name(const boost::http::route_params& route,
+                                         const std::string& state) {
+        return std::string(request_is_https(route) ? "__Host-lake_oauth_" : "lake_oauth_") +
+               control::identity_crypto::sha256_hex(state);
+    }
+
+    static std::string oauth_browser_cookie(const boost::http::route_params& route,
+                                            const ApiContext& context) {
+        if (context.oauth_state.empty() || context.oauth_browser_binding.empty()) {
+            return {};
+        }
+        std::string cookie = oauth_cookie_name(route, context.oauth_state) + "=" +
+                             context.oauth_browser_binding +
+                             "; HttpOnly; SameSite=Lax; Path=/; Max-Age=300";
+        if (request_is_https(route)) {
+            cookie += "; Secure";
+        }
+        return cookie;
+    }
+
     boost::http::route_task serve_oauth_callback(boost::http::route_params& route) {
         namespace http = boost::http;
         std::string provider_name;
@@ -10672,7 +10879,8 @@ struct ApiServer::Impl {
             co_return co_await oauth_error(
                 route, http::status::bad_request, "OAuth callback is incomplete");
         }
-        const auto flow = options.store->consume_oauth(provider_name, state);
+        const std::string binding = cookie_value(route, oauth_cookie_name(route, state));
+        const auto flow = options.store->consume_oauth(provider_name, state, binding);
         if (!flow) {
             co_return co_await oauth_error(
                 route, http::status::forbidden, "OAuth state is invalid or expired");
@@ -10717,7 +10925,7 @@ struct ApiServer::Impl {
                                        {"User-Agent", "lake-oauth/1"}},
                                       oidc_timeout};
         token_request.public_only = public_only;
-        const OutboundResponse token_response = outbound_http.request(token_request);
+        const OutboundResponse token_response = outbound_http->request(token_request);
         if (!token_response.error.empty() || token_response.status < 200 ||
             token_response.status >= 300) {
             co_return co_await oauth_error(
@@ -10742,12 +10950,12 @@ struct ApiServer::Impl {
                                                "GitHub did not return an access token");
             }
             const OutboundResponse user_response =
-                outbound_http.request({"GET",
-                                       endpoints.user,
-                                       "",
-                                       {{"Accept", "application/vnd.github+json"},
-                                        {"Authorization", "Bearer " + access_token},
-                                        {"User-Agent", "lake-oauth/1"}}});
+                outbound_http->request({"GET",
+                                        endpoints.user,
+                                        "",
+                                        {{"Accept", "application/vnd.github+json"},
+                                         {"Authorization", "Bearer " + access_token},
+                                         {"User-Agent", "lake-oauth/1"}}});
             const nlohmann::json user = nlohmann::json::parse(user_response.body, nullptr, false);
             if (!user_response.error.empty() || user_response.status < 200 ||
                 user_response.status >= 300 || user.is_discarded() || !user.contains("id")) {
@@ -10760,18 +10968,17 @@ struct ApiServer::Impl {
             identity.display_name = user.value("name", user.value("login", std::string()));
         } else {
             const std::string id_token = token.value("id_token", "");
-            std::optional<std::string> jwks = jwks_for(endpoints.jwks, false, public_only);
-            auto claims =
-                jwks ? control::identity_crypto::verify_oidc_id_token(
-                           id_token, *jwks, provider->issuer, provider->client_id, flow->nonce)
-                     : std::nullopt;
-            if (!claims) {
-                jwks = jwks_for(endpoints.jwks, true, public_only);
-                claims =
-                    jwks ? control::identity_crypto::verify_oidc_id_token(
-                               id_token, *jwks, provider->issuer, provider->client_id, flow->nonce)
-                         : std::nullopt;
-            }
+            auto ran = co_await run_blocking([cache = oidc_jwks,
+                                              fetch = jwks_fetch(),
+                                              id_token,
+                                              url = endpoints.jwks,
+                                              issuer = provider->issuer,
+                                              audience = provider->client_id,
+                                              nonce = flow->nonce,
+                                              public_only] {
+                return cache->verify(id_token, url, issuer, audience, nonce, public_only, fetch);
+            });
+            const auto claims = ran ? std::move(*ran) : std::nullopt;
             if (!claims) {
                 co_return co_await oauth_error(
                     route, http::status::forbidden, "OpenID Connect id token verification failed");
@@ -13305,10 +13512,10 @@ struct ApiServer::Impl {
             route, status, std::move(html), "text/html; charset=utf-8", "no-store");
     }
 
-    // The address an anonymous order is counted against (lake#838): X-Real-IP, which the ingress
-    // (ingress-nginx) always sets itself, overwriting any the sender sent; else the last
-    // X-Forwarded-For hop, the one the nearest proxy appended; else one bucket for every direct
-    // client. Never CF-Connecting-IP or the first X-Forwarded-For hop: a sender that reaches the
+    // The address an anonymous order and an authentication attempt are counted against (lake#838,
+    // LSR-103): X-Real-IP, which the ingress (ingress-nginx) always sets itself, overwriting any
+    // the sender sent; else the last X-Forwarded-For hop, the one the nearest proxy appended; else
+    // one bucket for every direct client. Never CF-Connecting-IP or the first X-Forwarded-For hop: a sender that reaches the
     // ingress without passing Cloudflare can write either, and would land in a fresh bucket with
     // each request. The ingress decides which client address to trust (Cloudflare's ranges), and
     // lake counts what it decided.
@@ -13614,7 +13821,7 @@ struct ApiServer::Impl {
             options.resend_http
                 ? options.resend_http
                 : ResendHttp([this](const ResendRequest& request) {
-                      OutboundResponse response = outbound_http.request(
+                      OutboundResponse response = outbound_http->request(
                           {request.method, request.url, request.body, request.headers});
                       return ResendResponse{
                           response.status, std::move(response.body), std::move(response.error)};
@@ -13696,7 +13903,8 @@ struct ApiServer::Impl {
                          boost::http::status::ok,
                          std::move(html),
                          "text/html; charset=utf-8",
-                         "private, no-store");
+                         "private, no-store",
+                         clerk ? clerk_page_content_security_policy : page_content_security_policy);
     }
 
     boost::http::route_task serve_web_app_file(boost::http::route_params& route, std::string path) {
@@ -14379,14 +14587,18 @@ struct ApiServer::Impl {
             capability = users ? "scim_upsert_user" : "scim_upsert_group";
             success_status = http::status::created;
             JsonBodySink sink;
-            auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+            auto [read_error, bytes_read] = co_await read_json_body(route, sink);
             if (read_error || bytes_read == 0) {
                 co_return co_await send_scim(
                     route,
                     refuse_unread_body(
                         route,
                         capability,
-                        ApiResult::failure("invalid_input", "SCIM resource body is required"),
+                        ApiResult::failure(body_is_too_large(read_error) ? "size_invalid"
+                                                                         : "invalid_input",
+                                           body_is_too_large(read_error)
+                                               ? "JSON exceeds its byte or structure limit"
+                                               : "SCIM resource body is required"),
                         read_error ? "unreadable" : "empty",
                         bytes_read),
                     success_status);
@@ -14431,14 +14643,18 @@ struct ApiServer::Impl {
         } else {
             capability = users ? "scim_patch_user" : "scim_patch_group";
             JsonBodySink sink;
-            auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+            auto [read_error, bytes_read] = co_await read_json_body(route, sink);
             if (read_error || bytes_read == 0) {
                 co_return co_await send_scim(
                     route,
                     refuse_unread_body(
                         route,
                         capability,
-                        ApiResult::failure("invalid_input", "SCIM PATCH body is required"),
+                        ApiResult::failure(body_is_too_large(read_error) ? "size_invalid"
+                                                                         : "invalid_input",
+                                           body_is_too_large(read_error)
+                                               ? "JSON exceeds its byte or structure limit"
+                                               : "SCIM PATCH body is required"),
                         read_error ? "unreadable" : "empty",
                         bytes_read),
                     success_status);
@@ -14567,13 +14783,23 @@ struct ApiServer::Impl {
                     input[std::string(parameter.key)] = std::string(parameter.value);
                 }
             } else {
-                JsonBodySink sink;
-                auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+                const ApiResult admitted =
+                    registry.authenticate(read ? "workspace_query" : "workspace_act", context);
+                if (!admitted.ok) {
+                    co_return co_await send_authentication_failure(route, admitted);
+                }
+                const auto named = registry.find(capability);
+                const auto target =
+                    named ? named : registry.find(read ? "workspace_query" : "workspace_act");
+                JsonBodySink sink(capability_body_limit(*target, context));
+                auto [read_error, bytes_read] = co_await read_json_body(route, sink);
                 std::string reason;
                 std::string message;
                 if (read_error) {
-                    reason = "unreadable";
-                    message = "could not read the request body as JSON";
+                    reason = body_is_too_large(read_error) ? "too_large" : "unreadable";
+                    message = body_is_too_large(read_error)
+                                  ? "JSON exceeds its byte or structure limit"
+                                  : "could not read the request body as JSON";
                 } else if (bytes_read > 0) {
                     input = body_json(sink);
                     if (input.is_discarded() || !input.is_object()) {
@@ -14584,21 +14810,27 @@ struct ApiServer::Impl {
                 if (!reason.empty()) {
                     // Audited as the workspace action it was meant to be (lake#18): the reason
                     // and the body's size, never its contents.
-                    status = http::status::bad_request;
+                    status = body_is_too_large(read_error) ? http::status::payload_too_large
+                                                           : http::status::bad_request;
+                    const std::string code =
+                        body_is_too_large(read_error) ? "size_invalid" : "invalid_input";
                     const ApiResult refused =
                         registry.refuse(read ? "workspace_query" : "workspace_act",
-                                        ApiResult::failure("invalid_input", message),
+                                        ApiResult::failure(code, message),
                                         {{"capability", capability},
                                          {"input", reason},
                                          {"body_bytes", static_cast<std::uint64_t>(bytes_read)}},
                                         context);
-                    if (refused.error.code != "invalid_input") {
+                    if (refused.error.code != code) {
                         status = http::int_to_status(static_cast<unsigned>(rest_status(refused)));
                     }
                     body = error_body(refused.error.code, refused.error.message);
                 }
             }
             if (body.empty()) {
+                if (!get) {
+                    context = context_for(route);
+                }
                 scoped_input["capability"] = capability;
                 scoped_input["input"] = input;
                 auto completed = co_await registry.call_async(
@@ -14737,9 +14969,22 @@ struct ApiServer::Impl {
                                                       : nlohmann::json(result.error.path)}}}}
                 .dump();
         };
+        ApiContext ctx = context_for(route);
+        const ApiResult admitted = registry.authenticate("model_completion", ctx);
+        if (!admitted.ok) {
+            if (admitted.error.code == "unauthenticated") {
+                route.res.set(http::field::www_authenticate, bearer_challenge(admitted));
+            }
+            co_return co_await send_text(
+                route,
+                http::int_to_status(static_cast<unsigned>(rest_status(admitted))),
+                openai_error(admitted),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
         nlohmann::json request;
-        JsonBodySink sink;
-        auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+        JsonBodySink sink(capability_body_limit(*registry.find("model_completion"), ctx));
+        auto [read_error, bytes_read] = co_await read_json_body(route, sink);
         // A body lake cannot read is audited as a failed model_completion (lake#18).
         const auto refused = [&](ApiResult failure, std::string_view reason) {
             const ApiResult result = refuse_unread_body(
@@ -14769,7 +15014,7 @@ struct ApiServer::Impl {
             }
         }
         if (body.empty()) {
-            ApiContext ctx = context_for(route);
+            ctx = context_for(route);
             const auto stream_field = request.find("stream");
             const bool streamed = stream_field != request.end() && stream_field->is_boolean() &&
                                   stream_field->get<bool>();
@@ -14860,9 +15105,33 @@ struct ApiServer::Impl {
             ctx);
     }
 
+    boost::http::route_task send_authentication_failure(boost::http::route_params& route,
+                                                        const ApiResult& result) {
+        if (result.error.code == "unauthenticated") {
+            route.res.set(boost::http::field::www_authenticate, bearer_challenge(result));
+        }
+        return send_text(route,
+                         boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
+                         rest_envelope(result).dump(),
+                         "application/json; charset=utf-8",
+                         "no-store");
+    }
+
+    std::size_t capability_body_limit(const Capability& capability,
+                                      const ApiContext& context) const {
+        return std::min(capability.max_body_bytes,
+                        context.authorized ? maximum_sync_body_size : std::size_t{1024 * 1024});
+    }
+
     boost::http::route_task serve_capability(boost::http::route_params& route,
                                              std::shared_ptr<const Capability> capability) {
         namespace http = boost::http;
+        ApiContext ctx = context_for(route);
+        const ApiResult admitted = registry.authenticate(capability->name, ctx);
+        if (!admitted.ok) {
+            co_return co_await send_authentication_failure(route, admitted);
+        }
+        const std::size_t limit = capability_body_limit(*capability, ctx);
         nlohmann::json input = nlohmann::json::object();
         std::string body;
         std::string set_cookie;
@@ -14875,8 +15144,8 @@ struct ApiServer::Impl {
                 query.emplace_back(parameter.key, parameter.value);
             input = rest_input_from_query(*capability, query);
         } else {
-            JsonBodySink sink;
-            auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+            JsonBodySink sink(limit);
+            auto [read_error, bytes_read] = co_await read_json_body(route, sink);
             std::optional<ApiResult> unread;
             std::string reason;
             if (read_error) {
@@ -14885,7 +15154,10 @@ struct ApiServer::Impl {
                 reason = body_is_too_large(read_error) ? "too_large" : "unreadable";
                 unread = body_is_too_large(read_error)
                              ? ApiResult::failure("size_invalid",
-                                                  "request body exceeds the 67108864 byte limit")
+                                                  sink.structure_too_large
+                                                      ? "JSON exceeds the depth or element limit"
+                                                      : "request body exceeds the " +
+                                                            std::to_string(limit) + " byte limit")
                              : ApiResult::failure("invalid_input",
                                                   "could not read the request body as JSON: " +
                                                       read_error.message());
@@ -14900,7 +15172,10 @@ struct ApiServer::Impl {
             }
             if (unread) {
                 const ApiResult refused =
-                    refuse_unread_body(route, capability->name, *unread, reason, bytes_read);
+                    registry.refuse(capability->name,
+                                    *unread,
+                                    {{"input", reason}, {"body_bytes", bytes_read}},
+                                    ctx);
                 if (refused.error.code != unread->error.code) {
                     status = http::int_to_status(static_cast<unsigned>(rest_status(refused)));
                 }
@@ -14908,7 +15183,9 @@ struct ApiServer::Impl {
             }
         }
         if (body.empty()) {
-            ApiContext ctx = context_for(route);
+            if (route.req.method() != http::method::get) {
+                ctx = context_for(route);
+            }
             auto completed = co_await registry.call_async(capability->name, input, ctx);
             const ApiResult result =
                 completed ? std::move(*completed)
@@ -14917,6 +15194,10 @@ struct ApiServer::Impl {
             body = rest_envelope(result).dump();
             if (!result.ok && result.error.code == "unauthenticated") {
                 www_authenticate = bearer_challenge(result);
+            }
+            if (result.ok &&
+                (capability->name == "start_oauth" || capability->name == "start_sso_oidc")) {
+                set_cookie = oauth_browser_cookie(route, ctx);
             }
             const bool browser_sign_in =
                 capability->name == "sign_up_password" || capability->name == "sign_in_password" ||
@@ -14978,25 +15259,65 @@ struct ApiServer::Impl {
         std::string content_type = "application/json; charset=utf-8";
         std::string session_id;
         http::status status = http::status::ok;
-        JsonBodySink sink;
-        auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+        ApiContext ctx = context_for(route);
+        // The tool name is in the envelope: anonymous discovery and identity calls may read
+        // only this small budget before their capability gate can be selected.
+        std::size_t limit = 256 * 1024;
+        if (ctx.authorized) {
+            for (const auto& capability : registry.list()) {
+                limit = std::max(limit, capability_body_limit(*capability, ctx));
+            }
+        }
+        JsonBodySink sink(limit);
+        auto [read_error, bytes_read] = co_await read_json_body(route, sink);
         nlohmann::json request;
         if (body_is_too_large(read_error)) {
             status = http::status::payload_too_large;
-            body = nlohmann::json{{"jsonrpc", "2.0"},
-                                  {"id", nullptr},
-                                  {"error",
-                                   {{"code", -32700},
-                                    {"message", "request body exceeds the 67108864 byte limit"}}}}
-                       .dump();
+            body =
+                nlohmann::json{
+                    {"jsonrpc", "2.0"},
+                    {"id", nullptr},
+                    {"error",
+                     {{"code", -32700},
+                      {"message",
+                       sink.structure_too_large
+                           ? "JSON exceeds the depth or element limit"
+                           : "request body exceeds the " + std::to_string(limit) + " byte limit"}}}}
+                    .dump();
         } else if (read_error || bytes_read == 0 || (request = body_json(sink)).is_discarded()) {
-            status = http::status::bad_request;
+            status = sink.structure_too_large ? http::status::payload_too_large
+                                              : http::status::bad_request;
             body = nlohmann::json{{"jsonrpc", "2.0"},
                                   {"id", nullptr},
                                   {"error", {{"code", -32700}, {"message", "parse error"}}}}
                        .dump();
         } else {
-            ApiContext ctx = context_for(route);
+            ctx = context_for(route);
+            // Each tool keeps its own input allowance even on the authenticated endpoint.
+            // Budget the entire wire envelope, including whitespace and unknown fields, so
+            // padding or duplicate keys cannot bypass the registered limit.
+            std::size_t dispatch_limit = default_capability_body_bytes;
+            if (request.is_object() && request.value("method", nlohmann::json()) == "tools/call" &&
+                request.contains("params") && request["params"].is_object() &&
+                request["params"].contains("name") && request["params"]["name"].is_string()) {
+                const auto capability = registry.find(request["params"]["name"].get<std::string>());
+                if (capability) {
+                    dispatch_limit = capability_body_limit(*capability, ctx);
+                }
+            }
+            if (bytes_read > dispatch_limit) {
+                co_return co_await send_text(
+                    route,
+                    http::status::payload_too_large,
+                    nlohmann::json{
+                        {"jsonrpc", "2.0"},
+                        {"id", nullptr},
+                        {"error",
+                         {{"code", -32602}, {"message", "MCP input exceeds its body limit"}}}}
+                        .dump(),
+                    "application/json; charset=utf-8",
+                    "no-store");
+            }
             auto completed = co_await mcp_dispatch_async(registry, request, ctx, version_string());
             if (!completed) {
                 status = http::status::internal_server_error;

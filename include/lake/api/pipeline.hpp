@@ -14,6 +14,13 @@
 // and produce what save_graph takes. No I/O; the HTTP layer calls Zetta.
 namespace lake::api::pipeline {
 
+inline constexpr std::size_t maximum_steps = 50'000;
+inline constexpr std::size_t maximum_edges = 100'000;
+inline constexpr std::size_t maximum_edits = 256;
+
+// Check counts and array shapes before copying any engine or client graph data.
+std::string check_size(const nlohmann::json& value);
+
 // Zetta's step kinds in canonical pipeline order (zetta include/zetta/ir/step_kind.hpp).
 inline constexpr std::string_view step_kinds[] = {
     "connect", "clean", "model", "index", "serve", "act"};
@@ -59,7 +66,8 @@ struct Edit {
 std::expected<Graph, std::string> apply(Graph graph, const Edit& edit);
 // An edit from its JSON form ({op, step, kind, name, from, to, value}).
 Edit edit_from_json(const nlohmann::json& value);
-// Several edits in order, all or nothing: the first that fails names its position and reason.
+// At most maximum_edits edits in order, all or nothing. Validate the resulting graph once;
+// an operation that fails names its position and reason.
 std::expected<Graph, std::string> apply_all(Graph graph, const nlohmann::json& edits);
 
 // The steps in dependency order (a step after every step with an edge into it); ties keep the

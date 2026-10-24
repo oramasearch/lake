@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -18,6 +19,7 @@
 #include <openssl/evp.h>
 #include <pqxx/pqxx>
 
+#include "api/agent_stream_runs.hpp"
 #include "api/forge_records_api.hpp"
 #include "api/mcp_connection_internal.hpp"
 #include "api/secret_records_api.hpp"
@@ -40,6 +42,7 @@
 #include "lake/api/usage_recorder.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/agent_runs.hpp"
+#include "lake/control/agent_stream_triggers.hpp"
 #include "lake/control/agent_task_records.hpp"
 #include "lake/control/application_authorization_codes.hpp"
 #include "lake/control/application_credential_records.hpp"
@@ -361,8 +364,14 @@ namespace {
 
 lake::control::ClerkIdentity person(std::string subject) {
     const auto identity = lake::audit::mint_custodial_identity(std::string(kek));
-    return {subject, subject + "@example.test", "", "browser", identity->taap_id,
-            identity->public_key, identity->wrapped_seed};
+    return {subject,
+            subject + "@example.test",
+            "",
+            "browser",
+            identity->taap_id,
+            identity->public_key,
+            identity->wrapped_seed,
+            static_cast<std::int64_t>(std::time(nullptr))};
 }
 
 // Two spaces, two workspaces each, every workspace Ready at its own endpoint, over one store.
@@ -568,6 +577,8 @@ protected:
         database_uri_ = uri;
         return lake::control::make_postgres_store(database_uri_, std::string(kek));
     }
+    void check_delegation_offboarding(bool suspended);
+    void check_stream_offboarding(bool suspended);
     std::string database_uri_;
 };
 
@@ -1894,20 +1905,26 @@ TEST_P(WorkspaceRecordStores, AuditEventsAboutAWorkspaceLiveInItsOwnChain) {
     EXPECT_EQ(recorder.pending(), 0U) << "a call naming a deleted workspace is refused centrally";
     EXPECT_EQ(central(after_delete).size(), 1U);
 
-    // Bounded: an event beyond the bound is dropped and counted, never written centrally.
+    // Bounded: rejection is explicit and signs only delivery failure evidence centrally.
     lake::api::AuditRecorder bounded(t.store.get(), t.service.get(), std::string(kek), "", 1);
     const std::string kept = lake::control::new_uuid_v4();
     const std::string dropped = lake::control::new_uuid_v4();
     for (const auto& request_id : {kept, dropped}) {
-        call_with(t.context(first), &bounded, "get_ask_conversation",
-                  {{"customer_id", first.customer_id},
-                   {"workspace_id", home},
-                   {"conversation_id", lake::control::new_uuid_v4()}},
-                  request_id);
+        const auto result = call_with(t.context(first),
+                                      &bounded,
+                                      "get_ask_conversation",
+                                      {{"customer_id", first.customer_id},
+                                       {"workspace_id", home},
+                                       {"conversation_id", lake::control::new_uuid_v4()}},
+                                      request_id);
+        if (request_id == dropped) {
+            EXPECT_EQ(result.error.code, "audit_queue_full");
+        }
     }
     EXPECT_EQ(bounded.pending(), 1U);
     EXPECT_EQ(bounded.totals().dropped, 1U);
-    EXPECT_TRUE(central(dropped).empty());
+    ASSERT_EQ(central(dropped).size(), 1U);
+    EXPECT_EQ(central(dropped).front().draft.action, "audit_delivery_failed");
 
     // Without a workspace audit (no AuditRecorder: a lake with no workspace Zettas), every
     // event is central.
@@ -1918,6 +1935,157 @@ TEST_P(WorkspaceRecordStores, AuditEventsAboutAWorkspaceLiveInItsOwnChain) {
                {"conversation_id", lake::control::new_uuid_v4()}},
               single_store);
     EXPECT_EQ(central(single_store).size(), 1U);
+}
+
+TEST(AuditRecorder, OverflowReportsWhenDeliveryEvidenceCannotBeRecorded) {
+    lake::api::AuditRecorder recorder(nullptr, nullptr, "", "", 2);
+    ASSERT_TRUE(recorder.add("customer", "workspace", lake::audit::pending({.action = "kept"})));
+    lake::api::ApiContext context;
+    context.audit_recorder = &recorder;
+    const auto rejected =
+        lake::api::record_audit(context,
+                                {.action = "workspace_query"},
+                                {lake::api::AuditLog::Workspace, "customer", "workspace"});
+    ASSERT_FALSE(rejected);
+    EXPECT_EQ(rejected.error().code, "audit_queue_full");
+    EXPECT_NE(rejected.error().message.find("evidence could not be recorded"), std::string::npos);
+    EXPECT_TRUE(recorder.add(
+        "other-customer", "other-workspace", lake::audit::pending({.action = "retained"})));
+}
+
+// LSR-098: an unavailable customer's workspaces cannot consume another customer's share,
+// including while a flush has detached the queues and new requests arrive.
+TEST_P(WorkspaceRecordStores, AuditQueueIsolatesUnavailableCustomersDuringFlush) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const auto& second = t.spaces[1];
+    lake::api::AuditRecorder recorder(t.store.get(), t.service.get(), std::string(kek), "", 8);
+    const auto event = [] {
+        return lake::audit::pending({.kind = "capability",
+                                     .principal = "test",
+                                     .action = "workspace_query",
+                                     .outcome = "failure"});
+    };
+    for (const auto& workspace : first.workspaces) {
+        const auto row = t.store->get_workspace(workspace);
+        ASSERT_TRUE(row);
+        t.status(row->zetta_service_id, "Pending", "http://" + workspace + ".test");
+        EXPECT_TRUE(recorder.add(first.customer_id, workspace, event()));
+        EXPECT_TRUE(recorder.add(first.customer_id, workspace, event()));
+        EXPECT_FALSE(recorder.add(first.customer_id, workspace, event()));
+    }
+    EXPECT_FALSE(recorder.add(first.customer_id, lake::control::new_uuid_v4(), event()))
+        << "more workspaces do not bypass the customer allocation";
+    const auto workspace = second.workspaces[0];
+    ASSERT_TRUE(recorder.add(second.customer_id, workspace, event()));
+    auto context = t.context(second);
+    auto records = lake::api::workspace_records(context, second.customer_id, workspace);
+    ASSERT_TRUE(records);
+    auto& tables = t.zetta->records["http://" + workspace + ".test"];
+    const auto key =
+        records->index_of(lake::control::WorkspaceAuditCodec::collection, "sequence:1");
+    bool during_flush = false;
+    tables.before_put[key] = [&](lake::test::RecordTables&) {
+        during_flush = true;
+        EXPECT_EQ(recorder.pending(), 5U);
+        EXPECT_FALSE(recorder.add(first.customer_id, first.workspaces[0], event()));
+        EXPECT_TRUE(recorder.add(second.customer_id, workspace, event()));
+        EXPECT_FALSE(recorder.add(second.customer_id, workspace, event()));
+    };
+    liquid::runtime::block_on(recorder.flush());
+    EXPECT_TRUE(during_flush);
+    EXPECT_EQ(tables.rows("audit_events").size(), 1U);
+    EXPECT_EQ(recorder.pending(), 5U);
+    EXPECT_EQ(recorder.totals().dropped, 5U);
+    liquid::runtime::block_on(recorder.flush());
+    EXPECT_EQ(tables.rows("audit_events").size(), 2U);
+    EXPECT_EQ(recorder.pending(), 4U);
+    EXPECT_EQ(recorder.totals().dropped, 5U) << "accepted retries are never evicted";
+    for (const auto& stopped : first.workspaces) {
+        t.ready(stopped);
+    }
+    liquid::runtime::block_on(recorder.flush());
+    EXPECT_EQ(recorder.pending(), 0U);
+    EXPECT_EQ(recorder.totals().written, 6U);
+    EXPECT_TRUE(recorder.add(first.customer_id, first.workspaces[0], event()))
+        << "successful writes release the customer's allocation";
+}
+
+TEST_P(WorkspaceRecordStores, AuditQueueOverflowPreservesResultsAndSignedDeliveryEvidence) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const auto workspace = first.workspaces[0];
+    lake::api::AuditRecorder recorder(t.store.get(), t.service.get(), std::string(kek), "", 2);
+    ASSERT_TRUE(
+        recorder.add(first.customer_id, workspace, lake::audit::pending({.action = "kept"})));
+    auto context = t.context(first);
+    context.audit_recorder = &recorder;
+    context.request_id = lake::control::new_uuid_v4();
+    const auto completed =
+        liquid::runtime::block_on(t.registry.call_async("create_transcript",
+                                                        {{"customer_id", first.customer_id},
+                                                         {"workspace_id", workspace},
+                                                         {"title", "Private title"},
+                                                         {"source", "text"},
+                                                         {"text", "Private workspace content"}},
+                                                        context));
+    ASSERT_TRUE(completed);
+    EXPECT_FALSE(completed->ok);
+    EXPECT_EQ(completed->error.code, "audit_queue_full");
+    const auto envelope = completed->envelope();
+    ASSERT_TRUE(envelope.contains("operation_result"));
+    EXPECT_EQ(envelope["operation_result"]["ok"], true);
+    const auto id = envelope["operation_result"]["value"]["id"];
+    const auto read =
+        t.call(first,
+               "get_transcript",
+               {{"customer_id", first.customer_id}, {"workspace_id", workspace}, {"id", id}});
+    EXPECT_TRUE(read.ok) << read.error.message;
+    const auto evidence = lake::test::audit_events(*t.store, {.request_id = context.request_id});
+    ASSERT_TRUE(evidence);
+    ASSERT_EQ(evidence->size(), 1U);
+    const auto& entry = evidence->front();
+    EXPECT_EQ(entry.draft.action, "audit_delivery_failed");
+    EXPECT_EQ(entry.draft.details["operation_outcome"], "success");
+    EXPECT_EQ(entry.draft.details["workspace_id"], workspace);
+    EXPECT_FALSE(entry.draft.details["event_id"].get<std::string>().empty());
+    EXPECT_EQ(entry.draft.details.size(), 4U);
+    EXPECT_EQ(lake::audit::to_json(entry).dump().find("Private"), std::string::npos);
+    EXPECT_TRUE(lake::audit::verify_event(*t.store, entry));
+
+    const auto row = t.store->get_workspace(workspace);
+    t.status(row->zetta_service_id, "Pending", "http://" + workspace + ".test");
+    context.request_id = lake::control::new_uuid_v4();
+    const auto failed = liquid::runtime::block_on(t.registry.call_async(
+        "get_transcript",
+        {{"customer_id", first.customer_id}, {"workspace_id", workspace}, {"id", id}},
+        context));
+    ASSERT_TRUE(failed);
+    EXPECT_EQ(failed->error.code, "audit_queue_full");
+    EXPECT_EQ(failed->envelope()["operation_result"]["error"]["code"], "workspace_not_ready");
+
+    // Direct push/reference callers use the same record_audit path and receive the failure too.
+    const auto direct =
+        lake::api::record_audit(context,
+                                {.customer_id = first.customer_id,
+                                 .principal = context.acting_identity,
+                                 .object = "private-reference",
+                                 .action = "reference_update",
+                                 .outcome = "success",
+                                 .request_id = lake::control::new_uuid_v4(),
+                                 .details = {{"private", "payload"}}},
+                                lake::api::workspace_audit_route(context, workspace));
+    EXPECT_FALSE(direct);
+    EXPECT_EQ(direct.error().code, "audit_queue_full");
+    EXPECT_EQ(recorder.pending(), 1U);
 }
 
 // lake#317, migration 0063: the central events recorded before the split that are about a
@@ -3460,8 +3628,8 @@ TEST_P(WorkspaceRecordStores, DynamicLeasesLiveInTheirMountsWorkspace) {
 // leaf a relying party expects for each dynamic-secret lease, renewal and revocation (the
 // identity-exit scenario), even though the lease itself is a record of its mount's workspace and a
 // workspace audit route is available. The three capabilities stay in the central chain, so
-// finish_call appends the recorded central event as the leaf; the leaf carries routing ids only,
-// never the credential, the role or the mount's name.
+// finish_call appends only the recorded central event's digest commitment. Complete events and
+// routing identifiers stay in private audit (lake#953, LSR-087).
 TEST_P(WorkspaceRecordStores, DynamicSecretsInAWorkspaceKeepTheirInstanceLogLeaf) {
     auto store = make_store();
     if (!store) {
@@ -3510,7 +3678,7 @@ TEST_P(WorkspaceRecordStores, DynamicSecretsInAWorkspaceKeepTheirInstanceLogLeaf
     ASSERT_TRUE(admin("revoke_dynamic_secret", {{"lease_id", lease_id}}).ok);
     EXPECT_EQ(recorder.pending(), queued) << "no dynamic-secret event is queued for the workspace";
 
-    // Each leaf is exactly the central event's body, in order: lease, renew, revoke.
+    // Each leaf commits to the private central event, in order: lease, renew, revoke.
     const auto events =
         lake::test::audit_events(*t.store, {.object = "dynamic_secret/" + lease_id, .limit = 10});
     ASSERT_TRUE(events) << events.error().message;
@@ -3527,27 +3695,48 @@ TEST_P(WorkspaceRecordStores, DynamicSecretsInAWorkspaceKeepTheirInstanceLogLeaf
         encoded.push_back('=');
     }
     std::string leaves((encoded.size() / 4) * 3, '\0');
-    ASSERT_GE(EVP_DecodeBlock(reinterpret_cast<unsigned char*>(leaves.data()),
-                              reinterpret_cast<const unsigned char*>(encoded.data()),
-                              static_cast<int>(encoded.size())),
-              0);
-    std::size_t previous = 0;
+    const int decoded_size = EVP_DecodeBlock(reinterpret_cast<unsigned char*>(leaves.data()),
+                                             reinterpret_cast<const unsigned char*>(encoded.data()),
+                                             static_cast<int>(encoded.size()));
+    ASSERT_GE(decoded_size, 0);
+    leaves.resize(static_cast<std::size_t>(decoded_size) - (encoded.ends_with("==")  ? 2U
+                                                            : encoded.ends_with('=') ? 1U
+                                                                                     : 0U));
+    constexpr std::string_view tile_header = "LAKE-TILE-1\n";
+    ASSERT_TRUE(leaves.starts_with(tile_header));
+    std::size_t offset = tile_header.size();
     std::set<std::string> operations;
     for (const auto& event : *events) {
         EXPECT_EQ(event.draft.kind, "dynamic_secret");
+        EXPECT_EQ(event.draft.customer_id, space.customer_id);
+        EXPECT_EQ(event.draft.object, "dynamic_secret/" + lease_id);
+        EXPECT_EQ(event.draft.details.at("workspace_id"), workspace);
         operations.insert(event.draft.details.value("operation", ""));
-        const std::vector<std::uint8_t> body = json::to_cbor(lake::audit::to_json(event));
-        const auto at = leaves.find(std::string(body.begin(), body.end()));
-        ASSERT_NE(at, std::string::npos) << event.draft.action << " has no instance log leaf";
-        EXPECT_GE(at, previous);
-        previous = at;
+        ASSERT_GE(leaves.size() - offset, 4U);
+        std::size_t size = 0;
+        for (int part = 0; part < 4; ++part) {
+            size = (size << 8) | static_cast<unsigned char>(leaves[offset++]);
+        }
+        ASSERT_GE(leaves.size() - offset, size);
+        const std::string_view entry(leaves.data() + offset, size);
+        constexpr std::string_view header = "LAKE-AUDIT-COMMITMENT-1\n";
+        ASSERT_TRUE(entry.starts_with(header));
+        EXPECT_EQ(json::from_cbor(entry.begin() + header.size(), entry.end()),
+                  (json{{"digest", event.digest}}));
+        offset += size;
     }
+    EXPECT_EQ(offset, leaves.size());
     EXPECT_EQ(operations, (std::set<std::string>{"lease", "renew", "revoke"}));
-    // Content-free: the lease id names the event; the credential, role and mount name never
-    // reach the public log.
-    EXPECT_NE(leaves.find(lease_id), std::string::npos);
-    for (const std::string& secret : {username, password, role, mount_name}) {
-        EXPECT_EQ(leaves.find(secret), std::string::npos) << secret;
+    // Neither credentials nor tenant and routing identifiers reach the public log.
+    for (const std::string& private_value : {username,
+                                             password,
+                                             role,
+                                             mount_name,
+                                             lease_id,
+                                             space.customer_id,
+                                             workspace,
+                                             mount.value.at("id").get<std::string>()}) {
+        EXPECT_EQ(leaves.find(private_value), std::string::npos);
     }
 }
 
@@ -3926,6 +4115,112 @@ TEST_P(WorkspaceRecordStores, McpConnectionsLiveInTheirWorkspaceAndKeepTheirToke
 
 // OAuth 2.1 (lake#652): discovery, dynamic client registration, PKCE S256, the refresh token as
 // a workspace secret written as the person, a state taken once, and refresh with rotation.
+TEST_P(WorkspaceRecordStores, McpOAuthRejectsDeepMetadataRegistrationAndTokens) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    class DeepOAuthHttp : public lake::api::McpHttp {
+    public:
+        std::string path;
+        std::shared_ptr<lake::api::McpHttp> transport = lake::api::make_mcp_http(true);
+        lake::api::McpHttpResponse exchange(const lake::api::McpHttpRequest& request,
+                                            const lake::api::McpEnough& enough) override {
+            auto forwarded = request;
+            if (path == "/.well-known/openid-configuration") {
+                if (request.url.ends_with("/.well-known/oauth-authorization-server")) {
+                    lake::api::McpHttpResponse missing;
+                    missing.status = 404;
+                    return missing;
+                }
+                if (request.url.ends_with(path)) {
+                    forwarded.url = request.url.substr(0, request.url.size() - path.size()) +
+                                    "/.well-known/oauth-authorization-server";
+                }
+            }
+            auto response = transport->exchange(forwarded, enough);
+            if (!path.empty() && request.url.ends_with(path) && !response.body.empty() &&
+                response.body.back() == '}') {
+                response.body.pop_back();
+                response.body +=
+                    ",\"ignored\":" + std::string(128, '[') + "0" + std::string(128, ']') + "}";
+            }
+            return response;
+        }
+        std::unique_ptr<lake::api::McpEventStream>
+        open(const lake::api::McpHttpRequest& request) override {
+            return transport->open(request);
+        }
+    };
+    TwoSpaces t(store, database_uri_);
+    lake::test::McpTestServer server;
+    server.required_bearer = "not-signed-in";
+    auto http = std::make_shared<DeepOAuthHttp>();
+    t.mcp_http = http;
+    const auto& first = t.spaces[0];
+    const auto in = [&](json input) {
+        input["customer_id"] = first.customer_id;
+        input["workspace_id"] = first.workspaces[0];
+        return input;
+    };
+    const auto mount = t.call(first, "create_secret_mount", in({{"name", "depth-oauth"}}));
+    ASSERT_TRUE(mount.ok) << mount.error.message;
+    const auto created =
+        t.call(first,
+               "create_mcp_connection",
+               in({{"name", "Depth"}, {"url", server.url()}, {"auth", {{"kind", "oauth"}}}}));
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string id = created.value.at("id");
+    const auto begin = [&] {
+        return t.call(first,
+                      "begin_mcp_connection_sign_in",
+                      in({{"id", id}, {"mount_id", mount.value.at("id")}}));
+    };
+    for (const std::string path : {"/.well-known/oauth-protected-resource/mcp",
+                                   "/.well-known/oauth-authorization-server",
+                                   "/.well-known/openid-configuration",
+                                   "/register"}) {
+        SCOPED_TRACE(path);
+        http->path = path;
+        EXPECT_FALSE(begin().ok) << "unused fields must also obey the depth limit";
+    }
+    http->path.clear();
+    auto begun = begin();
+    ASSERT_TRUE(begun.ok) << begun.error.message;
+    const auto complete = [&](const lake::api::ApiResult& pending) {
+        const std::string url = pending.value.at("authorization_url");
+        const auto query = lake::test::McpTestServer::form(url.substr(url.find('?') + 1));
+        const auto code = server.issue_code(query.at("client_id"),
+                                            query.at("redirect_uri"),
+                                            query.at("code_challenge"),
+                                            query.at("resource"));
+        return t.call(first,
+                      "complete_mcp_connection_sign_in",
+                      in({{"state", pending.value.at("state")}, {"code", code}}));
+    };
+    http->path = "/token";
+    EXPECT_FALSE(complete(begun).ok);
+    http->path.clear();
+    begun = begin();
+    ASSERT_TRUE(begun.ok) << begun.error.message;
+    const auto done = complete(begun);
+    ASSERT_TRUE(done.ok) << done.error.message;
+    EXPECT_EQ(done.value.at("status"), "connected") << "a later sign-in still works";
+
+    ASSERT_TRUE(t.call(first,
+                       "update_mcp_connection",
+                       in({{"id", id}, {"tools", {{"echo", {{"allowed", true}}}}}}))
+                    .ok);
+    server.required_bearer = "revoked";
+    http->path = "/token";
+    EXPECT_FALSE(
+        t.call(first,
+               "read_mcp_tool",
+               in({{"connection_id", id}, {"tool", "echo"}, {"arguments", {{"text", "refresh"}}}}))
+            .ok);
+    EXPECT_EQ(server.token_grants().back(), "refresh_token");
+}
+
 TEST_P(WorkspaceRecordStores, McpConnectionsSignInWithOAuthAndKeepOnlyARefreshToken) {
     auto store = make_store();
     if (!store) {
@@ -4547,6 +4842,285 @@ TEST_P(WorkspaceRecordStores, AStreamStartsItsAgentOncePerMessageAsThePersonWhoS
 // against an agent that is gone. Another agent's, another workspace's and a finished launch are
 // left as they are. A launch whose agent was deleted outside lake is withdrawn the first time it
 // reads its agent and the workspace answers not_found.
+// LSR-086: disabling a person ends their delegated authority, including a context already
+// reconstructed by a stream worker. Another person's automation keeps running.
+void WorkspaceRecordStores::check_delegation_offboarding(bool suspended) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const auto& second = t.spaces[1];
+    auto linked = person("offboard");
+    linked.email = store->get_user(first.principal.user_id)->email;
+    ASSERT_TRUE(store->sign_in_clerk(linked));
+    const lake::control::NewAgentLaunch input{.customer_id = first.customer_id,
+                                              .agent_id = "agent-7",
+                                              .mode = "service",
+                                              .scopes = lake::control::agent_launch_scopes,
+                                              .created_by_user_id = first.principal.user_id,
+                                              .created_by_taap_id = first.principal.taap_id,
+                                              .workspace_id = first.workspaces[0]};
+    const lake::control::NewAgentCronSchedule cron{.customer_id = first.customer_id,
+                                                   .agent_id = "agent-7",
+                                                   .cron = "0 9 * * 1",
+                                                   .scopes = input.scopes,
+                                                   .created_by_user_id = input.created_by_user_id,
+                                                   .created_by_taap_id = input.created_by_taap_id,
+                                                   .workspace_id = input.workspace_id};
+    const lake::control::AgentTask task_input{.customer_id = first.customer_id,
+                                              .agent = "agent-ask-orama",
+                                              .workspace_id = first.workspaces[0],
+                                              .scopes = {"list_datasets"},
+                                              .requested_by_user_id = first.principal.user_id,
+                                              .requested_by_taap_id = first.principal.taap_id};
+    const auto launch = store->create_agent_launch(input);
+    const auto schedule = store->create_agent_cron_schedule(cron);
+    const auto task = store->create_agent_task(task_input);
+    const auto waiting = store->create_agent_task(task_input);
+    ASSERT_TRUE(launch);
+    ASSERT_TRUE(schedule);
+    ASSERT_TRUE(task);
+    ASSERT_TRUE(waiting);
+    auto other_input = input;
+    other_input.created_by_user_id = second.principal.user_id;
+    other_input.created_by_taap_id = second.principal.taap_id;
+    const auto bystander = store->create_agent_launch(other_input);
+    ASSERT_TRUE(bystander);
+    const std::string launch_key = "lal." + launch->id + ".0123456789abcdef0123456789abcdef";
+    const std::string schedule_key = "las." + schedule->id + ".0123456789abcdef0123456789abcdef";
+    const std::string task_key = "lat." + task->id + ".0123456789abcdef0123456789abcdef";
+    const auto digest = lake::control::identity_crypto::sha256_hex;
+    if (auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store.get())) {
+        ASSERT_TRUE(
+            memory->set_agent_launch_status(launch->id, "Running", "", "", digest(launch_key)));
+        ASSERT_TRUE(memory->set_agent_cron_schedule_status(
+            schedule->id, "Ready", "", digest(schedule_key)));
+    } else {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO agent_launch_status (launch_id, phase, credential_sha256) "
+                       "VALUES ($1::uuid, 'Running', $2)",
+                       launch->id,
+                       digest(launch_key));
+        tx.exec_params(
+            "INSERT INTO agent_cron_schedule_status (schedule_id, phase, credential_sha256) "
+            "VALUES ($1::uuid, 'Ready', $2)",
+            schedule->id,
+            digest(schedule_key));
+        tx.commit();
+    }
+    ASSERT_TRUE(store->claim_agent_task(task->id, task_input.agent, digest(task_key)));
+    ASSERT_TRUE(store->renew_agent_task_lease(task->id, digest(task_key)));
+    for (const auto& key : {launch_key, schedule_key, task_key}) {
+        ASSERT_TRUE(store->context_for(key));
+    }
+    // Already-disabled rows from before this fix must fail even without workload withdrawal.
+    if (!database_uri_.empty()) {
+        const auto set_disabled = [&](bool disabled) {
+            pqxx::connection connection(database_uri_);
+            pqxx::work tx(connection);
+            tx.exec_params("UPDATE users SET disabled_at = CASE WHEN $2 THEN now() ELSE NULL END "
+                           "WHERE id = $1::uuid",
+                           first.principal.user_id,
+                           disabled);
+            tx.commit();
+        };
+        set_disabled(true);
+        for (const auto& key : {launch_key, schedule_key, task_key}) {
+            EXPECT_FALSE(store->context_for(key));
+        }
+        EXPECT_FALSE(store->renew_agent_task_lease(task->id, digest(task_key)));
+        EXPECT_FALSE(store->claim_agent_task(waiting->id, task_input.agent, "late-claim"));
+        EXPECT_FALSE(store->create_agent_launch(input));
+        EXPECT_FALSE(store->create_agent_cron_schedule(cron));
+        EXPECT_FALSE(store->create_agent_task(task_input));
+        set_disabled(false);
+    }
+    if (suspended) {
+        ASSERT_TRUE(store->apply_clerk_user_state({linked.subject, 2000, true, false}));
+        EXPECT_FALSE(store->get_user(first.principal.user_id)->may_act());
+    } else {
+        ASSERT_TRUE(store->disable_clerk_user(linked.subject));
+    }
+    for (const auto& key : {launch_key, schedule_key, task_key}) {
+        const auto principal = store->context_for(key);
+        EXPECT_FALSE(principal) << "disabled user retained delegated access";
+        if (!principal) {
+            EXPECT_TRUE(principal.error().code == "not_found" ||
+                        principal.error().code == "unauthorized");
+        }
+    }
+    EXPECT_EQ(store->get_agent_launch(launch->id)->desired, "absent");
+    EXPECT_FALSE(store->get_agent_launch(launch->id)->stop_reason.empty());
+    EXPECT_EQ(store->get_agent_cron_schedule(schedule->id)->desired, "absent");
+    EXPECT_EQ(store->get_agent_task(task->id)->desired, "absent");
+    EXPECT_EQ(store->get_agent_task(task->id)->phase, "Failed");
+    EXPECT_EQ(store->get_agent_task(waiting->id)->phase, "Failed");
+    EXPECT_TRUE(store->get_agent_task(task->id)->credential_sha256.empty());
+    EXPECT_FALSE(store->renew_agent_task_lease(task->id, digest(task_key))) << "cached context";
+    EXPECT_FALSE(store->claim_agent_task(waiting->id, task_input.agent, "late-claim"));
+    EXPECT_FALSE(store->create_agent_launch(input))
+        << "stream context reconstructed before disable";
+    EXPECT_FALSE(store->create_agent_cron_schedule(cron));
+    EXPECT_FALSE(store->create_agent_task(task_input));
+    EXPECT_EQ(store->get_agent_launch(bystander->id)->desired, "present");
+    const auto generation = store->get_agent_launch(launch->id)->generation;
+    if (suspended) {
+        ASSERT_TRUE(store->apply_clerk_user_state({linked.subject, 2000, true, false}));
+        EXPECT_FALSE(store->get_user(first.principal.user_id)->may_act());
+    } else {
+        ASSERT_TRUE(store->disable_clerk_user(linked.subject));
+    }
+    EXPECT_EQ(store->get_agent_launch(launch->id)->generation, generation) << "idempotent disable";
+    if (suspended) {
+        ASSERT_TRUE(store->apply_clerk_user_state({linked.subject, 3000, false, false}));
+        EXPECT_TRUE(store->get_user(first.principal.user_id)->may_act());
+        for (const auto& key : {launch_key, schedule_key, task_key})
+            EXPECT_FALSE(store->context_for(key)) << "unban must not restore old delegation";
+        EXPECT_TRUE(store->create_agent_launch(input));
+    }
+}
+
+void WorkspaceRecordStores::check_stream_offboarding(bool suspended) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const std::string home = first.workspaces[0];
+    auto linked = person("stream-offboard");
+    linked.email = store->get_user(first.principal.user_id)->email;
+    ASSERT_TRUE(store->sign_in_clerk(linked));
+    auto context = t.context(first);
+    auto records = lake::api::workspace_records(context, first.customer_id, home);
+    ASSERT_TRUE(records);
+    lake::api::WorkspaceApiBus bus(context, first.customer_id, home);
+    ASSERT_TRUE(run(bus.create_topic("offboard-in")));
+    t.zetta->answers["get_agent"] = {{"id", "agent-7"}, {"runtime", "python"}};
+    const auto trigger = run(
+        lake::control::record_agent_stream_trigger(*records,
+                                                   {.customer_id = first.customer_id,
+                                                    .agent_id = "agent-7",
+                                                    .topic = "offboard-in",
+                                                    .set_by = first.principal.user_id,
+                                                    .set_by_identity = first.principal.taap_id}));
+    ASSERT_TRUE(trigger);
+    const auto connection =
+        run(lake::control::record_mcp_connection(*records,
+                                                 {.customer_id = first.customer_id,
+                                                  .name = "Offboarding",
+                                                  .prefix = "offboarding",
+                                                  .url = "https://mcp.example.test",
+                                                  .agent_id = "agent-7",
+                                                  .input_topic = "offboard-in",
+                                                  .output_topic = "offboard-out",
+                                                  .notifications_topic = "offboard-notices",
+                                                  .streams_set_by = first.principal.user_id}));
+    ASSERT_TRUE(connection);
+    const auto dispatch_error =
+        lake::api::record_mcp_connection_dispatch(context, home, *connection);
+    ASSERT_FALSE(dispatch_error) << dispatch_error.value_or("");
+    lake::api::ApiContext owner;
+    owner.store = store.get();
+    owner.workspaces = t.service.get();
+    owner.registry = &t.registry;
+    owner.instance_kek = std::string(kek);
+    auto cached = lake::api::stream_person(owner, first.principal.user_id, "agent_stream_trigger");
+    ASSERT_TRUE(cached);
+    ASSERT_TRUE(run(bus.publish("offboard-in", {{"ticket", "before"}}, "before")));
+    lake::api::AgentStreamWorker agent_worker;
+    lake::api::McpStreamWorker mcp_worker;
+    EXPECT_EQ(agent_worker.pass(owner).runs, 1U);
+    EXPECT_EQ(mcp_worker.pass(owner).turns, 1U);
+    const auto before_disable =
+        run(lake::control::list_mcp_connections(*records, first.customer_id));
+    ASSERT_TRUE(before_disable);
+    ASSERT_EQ(before_disable->size(), 1U);
+    ASSERT_EQ(before_disable->front().pending_launches.size(), 1U);
+    const auto pending = before_disable->front().pending_launches.front();
+    if (auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store.get())) {
+        ASSERT_TRUE(memory->set_agent_launch_status(pending, "Succeeded", "done", "", ""));
+    } else {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec_params(
+            "INSERT INTO agent_launch_status (launch_id, phase) VALUES ($1::uuid, 'Succeeded')",
+            pending);
+        tx.commit();
+    }
+    if (suspended) {
+        ASSERT_TRUE(store->apply_clerk_user_state({linked.subject, 2000, true, false}));
+        EXPECT_FALSE(store->get_user(first.principal.user_id)->may_act());
+    } else {
+        ASSERT_TRUE(store->disable_clerk_user(linked.subject));
+    }
+    EXPECT_FALSE(lake::api::stream_person(owner, first.principal.user_id, "agent_stream_trigger"));
+    EXPECT_FALSE(
+        lake::api::stream_person(owner, lake::control::new_uuid_v4(), "mcp_connection_stream"));
+    ASSERT_TRUE(run(bus.publish("offboard-in", {{"ticket", "after"}}, "after")));
+    // The records still exist before cleanup, but even an already-reconstructed context cannot
+    // launch from the new event. The records themselves durably retain pending cleanup.
+    const auto gap = lake::api::start_stream_runs(
+        owner,
+        *cached,
+        bus,
+        first.customer_id,
+        home,
+        "agent-7",
+        "offboard-in",
+        1,
+        20,
+        [](const lake::control::BusEvent& event) { return event.payload; });
+    EXPECT_TRUE(gap.launched.empty());
+    const auto retained =
+        run(lake::control::list_agent_stream_triggers(*records, first.customer_id));
+    ASSERT_TRUE(retained);
+    ASSERT_EQ(retained->size(), 1U);
+    EXPECT_EQ(store->mcp_stream_dispatch(100)->size(), 1U);
+    lake::api::AgentStreamWorker restarted_agent_worker;
+    lake::api::McpStreamWorker restarted_mcp_worker;
+    const auto stopped = restarted_agent_worker.pass(owner);
+    EXPECT_EQ(stopped.runs, 0U);
+    EXPECT_EQ(stopped.removed, 1U);
+    const auto mcp_stopped = restarted_mcp_worker.pass(owner);
+    EXPECT_EQ(mcp_stopped.turns, 0U);
+    EXPECT_EQ(mcp_stopped.notifications, 0U);
+    EXPECT_EQ(mcp_stopped.results, 0U);
+    ASSERT_TRUE(t.zetta->topics.contains("offboard-out"));
+    EXPECT_TRUE(t.zetta->topics.at("offboard-out").events.empty()) << "no late result publication";
+    const auto triggers =
+        run(lake::control::list_agent_stream_triggers(*records, first.customer_id));
+    ASSERT_TRUE(triggers);
+    EXPECT_TRUE(triggers->empty());
+    const auto connections = run(lake::control::list_mcp_connections(*records, first.customer_id));
+    ASSERT_TRUE(connections);
+    ASSERT_EQ(connections->size(), 1U);
+    EXPECT_TRUE(connections->front().streams_set_by.empty());
+    EXPECT_TRUE(connections->front().input_topic.empty());
+    EXPECT_TRUE(connections->front().pending_launches.empty());
+    const auto dispatch = store->mcp_stream_dispatch(100);
+    ASSERT_TRUE(dispatch);
+    EXPECT_TRUE(dispatch->empty());
+    EXPECT_EQ(restarted_agent_worker.pass(owner).removed, 0U);
+    EXPECT_EQ(restarted_mcp_worker.pass(owner).connections, 0U);
+}
+
+TEST_P(WorkspaceRecordStores, DisablingAUserRevokesAgentDelegation) {
+    check_delegation_offboarding(false);
+}
+TEST_P(WorkspaceRecordStores, SuspendedUsersLoseAgentDelegation) {
+    check_delegation_offboarding(true);
+}
+TEST_P(WorkspaceRecordStores, DisabledUsersCannotDriveAgentOrMcpStreams) {
+    check_stream_offboarding(false);
+}
+TEST_P(WorkspaceRecordStores, SuspendedUsersCannotDriveAgentOrMcpStreams) {
+    check_stream_offboarding(true);
+}
+
 TEST_P(WorkspaceRecordStores, DeletingAnAgentStopsItsLaunchesAndSchedules) {
     auto store = make_store();
     if (!store) {

@@ -6,6 +6,8 @@
 #include <vector>
 
 #include "lake/api/billing.hpp"
+#include "lake/api/clerk.hpp"
+#include "lake/api/oidc_jwks.hpp"
 #include "lake/api/orders.hpp"
 #include "lake/api/regions.hpp"
 #include "lake/api/registry.hpp"
@@ -145,6 +147,7 @@ struct ServerOptions {
     // The apex order sheet (LAKE_ORDER_SHEET, lake#831, docs/api/orders.md): its offers, prices and
     // limits. Shown on the apex host in place of the plain picker while `enabled`.
     OrderSheet order_sheet = *order_sheet_from_environment("");
+    int order_entitlement_grace_seconds = 3 * 86400;
     // Email through Resend (LAKE_RESEND_API_KEY, LAKE_RESEND_FROM, LAKE_SUPPORT_EMAIL): Orama's
     // platform credentials. Without the key, orders are still recorded and their email waits.
     // `resend_http` replaces the outbound client (tests); `resend_api_base` is Resend's origin.
@@ -183,6 +186,13 @@ struct ServerOptions {
     // and sign-up are Clerk's and lake's own identity pages leave the navigation; empty or `xxx`
     // keeps lake's own sign-in, as an on-prem install uses. See docs/api/clerk.md.
     std::string clerk_publishable_key;
+    // LAKE_CLERK_SECRET_KEY: checks current ban/lock state at every template exchange.
+    // Missing key or an unavailable Backend API refuses exchange. Never returned or logged.
+    std::string clerk_secret_key;
+    ClerkGet clerk_http; // injected HTTP responses for isolated tests
+
+    // Optional JWKS transport for tests; empty uses the bounded outbound HTTP client.
+    OidcJwks::Fetch oidc_jwks_fetch;
     // Clerk webhook signing secret (LAKE_CLERK_WEBHOOK_SECRET, `whsec_…`), an Orama platform key
     // the operator injects from the instance's Clerk configuration. Empty: POST
     // /identity/clerk-webhook answers 404. See docs/api/clerk.md#webhooks (lake#765).
@@ -226,6 +236,8 @@ struct ServerOptions {
     // not_supported.
     std::string model_provider_url;
     ModelProvider model_provider;
+    // Exact model/provider allowlist (LAKE_MODEL_GATEWAY_MODELS); empty disables model calls.
+    std::vector<GatewayModel> model_gateway_models = default_gateway_models();
     // An injected client for served methodology models (tests, lake#690); empty: the server's
     // outbound client, plain http to the serve Service inside the cluster.
     MethodologyServer methodology_server;

@@ -3,10 +3,11 @@
 #include <algorithm>
 #include <cstdint>
 #include <expected>
-#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <liquid/transparency.hpp>
 
 #include "lake/api/mcp_client.hpp"
 #include "lake/audit/audit.hpp"
@@ -95,10 +96,31 @@ std::expected<transparency::LogReplicationBatch, ApiError> batch_from_json(const
     };
 }
 
-std::expected<std::optional<json>, ApiError> checkpoint_from_response(
+std::expected<liquid::transparency::hash, ApiError> replication_hash(const json& value) {
+    if (!value.is_string()) {
+        return std::unexpected(ApiError{"unrecoverable", "replication hash is malformed", {}});
+    }
+    const auto& text = value.get_ref<const std::string&>();
+    if (text.size() != 64 || !std::ranges::all_of(text, [](char digit) {
+            return (digit >= '0' && digit <= '9') || (digit >= 'a' && digit <= 'f');
+        })) {
+        return std::unexpected(ApiError{"unrecoverable", "replication hash is malformed", {}});
+    }
+    const auto nibble = [](char digit) { return digit <= '9' ? digit - '0' : digit - 'a' + 10; };
+    liquid::transparency::hash hash{};
+    for (std::size_t index = 0; index < hash.size(); ++index) {
+        hash[index] = std::byte((nibble(text[2 * index]) << 4) | nibble(text[2 * index + 1]));
+    }
+    return hash;
+}
+
+// Authenticate the checkpoint independently of the batch's self-consistent Merkle roots.
+// A partial batch must prove its head is a prefix of that signed checkpoint before any write.
+std::expected<json, ApiError> checkpoint_from_response(
     const json& response, const transparency::LogReplicationBatch& batch, ApiContext& context) {
     if (!response.contains("checkpoint")) {
-        return std::nullopt;
+        return std::unexpected(
+            ApiError{"unrecoverable", "replication requires an authenticated checkpoint", {}});
     }
     if (!context.store || !context.checkpoints) {
         return std::unexpected(
@@ -108,32 +130,64 @@ std::expected<std::optional<json>, ApiError> checkpoint_from_response(
     if (!record.is_object() || !record.contains("checkpoint") ||
         !record.at("checkpoint").is_object() || !record.at("checkpoint").contains("tree_size") ||
         !record.at("checkpoint").at("tree_size").is_number_unsigned() ||
-        !record.at("checkpoint").contains("root_hash") ||
-        !record.at("checkpoint").at("root_hash").is_string() || !record.contains("signature")) {
+        !record.at("checkpoint").contains("root_hash") || !record.contains("signature")) {
         return std::unexpected(
             ApiError{"unrecoverable", "replication peer returned a malformed checkpoint", {}});
     }
     const json& checkpoint = record.at("checkpoint");
-    if (checkpoint.at("tree_size").get<std::uint64_t>() > batch.source_tree_size) {
-        return std::unexpected(ApiError{
-            "unrecoverable", "replicated checkpoint is beyond the declared source log", {}});
+    const auto size = checkpoint.at("tree_size").get<std::uint64_t>();
+    if (size > batch.source_tree_size || size < batch.head.tree_size) {
+        return std::unexpected(
+            ApiError{"unrecoverable", "replicated checkpoint does not cover the batch head", {}});
     }
     const auto verified =
         audit::verify_transparency_checkpoint(*context.store, checkpoint, record.at("signature"));
     if (!verified) {
         return std::unexpected(ApiError{verified.error().code, verified.error().message, {}});
     }
-    return std::optional<json>{record};
+    const auto head_hash = replication_hash(batch.head.root_hash);
+    const auto checkpoint_hash = replication_hash(checkpoint.at("root_hash"));
+    if (!head_hash || !checkpoint_hash) {
+        return std::unexpected(head_hash ? checkpoint_hash.error() : head_hash.error());
+    }
+    liquid::transparency::consistency_proof proof{
+        .old_tree_size = batch.head.tree_size,
+        .new_tree_size = size,
+        .old_root_hash = *head_hash,
+        .new_root_hash = *checkpoint_hash,
+    };
+    if (size != batch.head.tree_size) {
+        if (!response.contains("checkpoint_consistency") ||
+            !response.at("checkpoint_consistency").is_array() ||
+            response.at("checkpoint_consistency").size() > 64) {
+            return std::unexpected(
+                ApiError{"unrecoverable",
+                         "partial replication requires a checkpoint consistency proof",
+                         {}});
+        }
+        for (const auto& item : response.at("checkpoint_consistency")) {
+            const auto hash = replication_hash(item);
+            if (!hash) {
+                return std::unexpected(hash.error());
+            }
+            proof.audit_path.push_back(*hash);
+        }
+    }
+    const liquid::transparency::checkpoint head{.tree_size = batch.head.tree_size,
+                                                .root_hash = *head_hash};
+    const liquid::transparency::checkpoint signed_head{.tree_size = size,
+                                                       .root_hash = *checkpoint_hash};
+    proof.bound_checkpoint = signed_head;
+    if (const auto consistent = proof.verify(head, signed_head); !consistent) {
+        return std::unexpected(ApiError{
+            "unrecoverable", "replication head is not committed by the signed checkpoint", {}});
+    }
+    return record;
 }
 
-std::expected<std::uint64_t, ApiError>
-adopt_reached_checkpoint(const std::optional<json>& record,
-                         const transparency::AppendResult& applied,
-                         ApiContext& context) {
-    if (!record) {
-        return 0;
-    }
-    const json& checkpoint = record->at("checkpoint");
+std::expected<std::uint64_t, ApiError> adopt_reached_checkpoint(
+    const json& record, const transparency::AppendResult& applied, ApiContext& context) {
+    const json& checkpoint = record.at("checkpoint");
     const std::uint64_t checkpoint_size = checkpoint.at("tree_size").get<std::uint64_t>();
     if (checkpoint_size > applied.tree_size) {
         return 0;
@@ -143,7 +197,7 @@ adopt_reached_checkpoint(const std::optional<json>& record,
         return std::unexpected(
             ApiError{"unrecoverable", "replicated checkpoint does not commit to local tiles", {}});
     }
-    const auto adopted = context.checkpoints->adopt(*record);
+    const auto adopted = context.checkpoints->adopt(record);
     if (!adopted) {
         return std::unexpected(ApiError{adopted.error().code, adopted.error().message, {}});
     }
@@ -263,12 +317,29 @@ void register_replication_capabilities(Registry& registry) {
                                   {"source_instance", context.node_name},
                                   {"source_tree_size", batch->source_tree_size},
                                   {"version", "lake_log_replication/1"}};
-                       if (context.checkpoints) {
-                           const auto checkpoint = context.checkpoints->current();
-                           if (checkpoint) {
-                               value["checkpoint"] = *checkpoint;
-                           }
+                       if (!context.checkpoints) {
+                           return ApiResult::failure("store_unavailable",
+                                                     "checkpoint replication is not configured");
                        }
+                       const auto checkpoint = context.checkpoints->current();
+                       if (!checkpoint) {
+                           return from_transparency_error(checkpoint.error());
+                       }
+                       const auto& body = checkpoint->at("checkpoint");
+                       if (body.at("tree_size") != batch->source_tree_size) {
+                           return ApiResult::failure(
+                               "conflict", "publish a checkpoint covering the source log");
+                       }
+                       const auto checkpoint_root = body.at("root_hash").get<std::string>();
+                       const auto proof = context.transparency_log->consistency_proof(
+                           batch->head.tree_size, body.at("tree_size").get<std::uint64_t>());
+                       if (!proof || proof->new_root_hash != checkpoint_root ||
+                           proof->old_root_hash != batch->head.root_hash) {
+                           return ApiResult::failure("unrecoverable",
+                                                     "checkpoint does not commit to the batch");
+                       }
+                       value["checkpoint"] = *checkpoint;
+                       value["checkpoint_consistency"] = proof->audit_path;
                        context.audit_details = {{"after_tree_size", *after},
                                                 {"entries", batch->attestations.size()},
                                                 {"head_tree_size", batch->head.tree_size}};

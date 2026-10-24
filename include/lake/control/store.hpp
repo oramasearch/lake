@@ -37,8 +37,20 @@ struct StoreError {
 };
 template <class T> using Result = std::expected<T, StoreError>;
 
+enum class AuthenticationOutcome { failure, success, neutral };
+struct AuthenticationAttempt {
+    std::string key, window_id;
+};
+
 struct User {
     std::string id, taap_id, email, display_name, created_at, updated_at;
+    // Retained for administration; a disabled user cannot supply delegated authority.
+    std::string disabled_at;
+    bool clerk_suspended = false;
+
+    bool may_act() const {
+        return disabled_at.empty() && !clerk_suspended;
+    }
 };
 struct Organization {
     std::string id, taap_id, display_name, created_at, updated_at;
@@ -290,6 +302,9 @@ struct MfaEnrollment {
     std::string secret;
     std::vector<std::string> recovery_codes;
 };
+struct MfaEnrollmentProof {
+    std::string session_id, password;
+};
 struct NewToken {
     std::string user_id, pool_id, name, reason;
     std::vector<std::string> scopes;
@@ -316,6 +331,14 @@ struct OAuthIdentity {
 struct ClerkIdentity {
     std::string subject, email, display_name, device_name;
     std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
+    std::int64_t issued_at = 0; // verified Clerk JWT iat; required only for exchange
+};
+// Upstream account state, ordered by Clerk's user updated_at (milliseconds).
+struct ClerkUserState {
+    std::string subject;
+    std::int64_t updated_at = 0;
+    bool suspended = false;
+    bool deleted = false;
 };
 // What a Clerk user event did to Lake (lake#765, docs/api/clerk.md#webhooks).
 struct ClerkUserProvisioned {
@@ -449,6 +472,27 @@ inline std::string utf8_prefix(std::string_view text, std::size_t bytes) {
     }
     return std::string(text.substr(0, end));
 }
+// Subscription accounting stays in the control plane; deadlines are UTC Unix seconds.
+// access_until and grace_seconds define entitlement; paid_through advances on signed paid invoices.
+struct CloudOrderEntitlement {
+    std::string subscription_status = "pending";
+    std::int64_t paid_through = 0, access_until = 0, event_created = 0;
+    int grace_seconds = 3 * 86400;
+    std::string retry_invoice_id;
+};
+struct CloudOrderSubscriptionEvent {
+    std::string provider, event_id, event_type, order_id, customer_id, subscription_id, status;
+    std::int64_t created = 0, period_end = 0, next_payment_attempt = 0, ended_at = 0;
+    int grace_seconds = 3 * 86400;
+    std::string invoice_id;
+};
+// Evaluate at the reader's clock: expiry does not depend on another webhook or maintenance pass.
+std::string cloud_order_entitlement_state(const CloudOrderEntitlement& entitlement,
+                                          std::int64_t now);
+bool apply_cloud_order_entitlement(CloudOrderEntitlement& entitlement,
+                                   const CloudOrderSubscriptionEvent& event);
+bool valid_cloud_order_subscription_event(const CloudOrderSubscriptionEvent& event);
+
 // An order from the apex order sheet (lake#831, migration 0089, docs/api/orders.md): what a person
 // asked for, how it is paid, and where it stands. Orders are multitenancy and billing, so they live
 // in the control plane; the operator reads `paid` rows and writes `state`, `host`,
@@ -473,6 +517,7 @@ struct CloudOrder {
     std::string support_emailed_state, customer_emailed_state;
     int email_attempts = 0;
     std::string email_error, email_retry_at;
+    CloudOrderEntitlement entitlement;
 };
 // A new order: `path` checkout starts it in `pending_payment`, order_form in `submitted`.
 struct NewCloudOrder {
@@ -496,11 +541,12 @@ struct CloudOrderTransition {
 struct CloudOrderPayment {
     std::string provider, event_id, event_type, checkout_session_id, order_id, state;
     std::string customer_id, subscription_id, detail;
+    int grace_seconds = 3 * 86400;
 };
 struct CloudOrderPaymentResult {
     bool duplicate = false; // the event id was applied before; nothing changed
-    bool matched = false;   // an order has this Checkout Session
-    bool changed = false;   // the order moved
+    bool matched = false;   // an order has this session or subscription and customer
+    bool changed = false;   // the order or its entitlement changed
     CloudOrder order;       // the order after the notice, when matched
 };
 // One row of cloud_order_events: the order's history, written by lake, Stripe's notices and the
@@ -1292,6 +1338,8 @@ struct OAuthFlow {
     // Required with an identity_document outside enterprise (`sso-`) flows (lake#931); never
     // stored with the flow.
     IdentityProof identity_proof;
+    // Independent of URL state and OIDC nonce; delivered only as an HttpOnly browser cookie.
+    std::string browser_binding;
 };
 struct SsoProvider {
     std::string id;
@@ -2150,6 +2198,8 @@ public:
     virtual Result<CloudOrder> transition_cloud_order(const CloudOrderTransition& change) = 0;
     virtual Result<CloudOrderPaymentResult>
     apply_cloud_order_payment(const CloudOrderPayment& payment) = 0;
+    virtual Result<CloudOrderPaymentResult>
+    apply_cloud_order_subscription(const CloudOrderSubscriptionEvent& event) = 0;
     // Orders with an email due (a recipient not yet told about the order's state), at most `limit`,
     // each held for `lease_seconds` so another pass does not send it twice.
     virtual Result<std::vector<CloudOrder>> claim_cloud_order_emails(int limit,
@@ -2170,6 +2220,10 @@ public:
     create_pki_certificate(const NewPkiCertificateRecord& value) = 0;
     virtual Result<PkiCertificateRecord> get_pki_certificate(const std::string& id) = 0;
     virtual Result<PkiCertificateRecord> revoke_pki_certificate(const std::string& id) = 0;
+    // Customer-admin-issued agent certificates register a durable TAAP identity for delegation.
+    virtual Result<bool> has_active_agent_certificate(const std::string& customer_id,
+                                                      const std::string& taap_id,
+                                                      const std::string& at) = 0;
     virtual Result<AgentSession> create_agent_session(const NewAgentSession& value) = 0;
     // Marks one agent session key revoked; a revoked key never verifies again (lake#234).
     virtual Result<AgentSession> revoke_agent_session(const std::string& customer_id,
@@ -2270,19 +2324,30 @@ public:
     // OAuth sign-in in `pool_id` binds that document to a new account (lake#931).
     virtual Result<IdentityProofChallenge>
     begin_identity_proof(const std::string& pool_id, const std::string& identity_document) = 0;
+    // Reserve capacity before verification; settle once after the result is known.
+    // Empty client_address selects the account; otherwise it selects trusted ingress metadata.
+    virtual Result<AuthenticationAttempt>
+    authentication_attempt(const std::string& pool_id,
+                           const std::string& email,
+                           const std::string& user_id,
+                           const std::string& client_address) = 0;
+    virtual Result<void> authentication_attempt_finished(const AuthenticationAttempt&,
+                                                         AuthenticationOutcome) = 0;
     virtual Result<IssuedSession> sign_in_password(const PasswordSignIn&) = 0;
     virtual Result<IssuedSession> sign_in_taap(const TaapSignIn&) = 0;
+    // Verify an active full-authority interactive session and the current password before
+    // issuing a factor or recovery codes. Failed proof leaves the existing enrollment intact.
     virtual Result<MfaEnrollment> enroll_mfa(const std::string& user_id,
-                                             const std::string& pool_id) = 0;
+                                             const std::string& pool_id,
+                                             const MfaEnrollmentProof& proof) = 0;
     virtual Result<void> disable_mfa(const std::string& user_id,
                                      const std::string& pool_id,
                                      const std::string& code) = 0;
     // Whether the user has an active TOTP enrollment in the pool (the web app's `viewer`,
     // lake#561).
     virtual Result<bool> mfa_enrolled(const std::string& user_id, const std::string& pool_id) = 0;
-    // Checks a fresh TOTP code (or an unused recovery code) of an enrolled user and changes
-    // nothing: the step-up a destructive action asks for (delete_account, lake#810). `unauthorized`
-    // when it does not verify, `not_found` when MFA is not enrolled.
+    // Consumes a fresh TOTP step or an unused recovery code for a destructive action
+    // (delete_account, lake#810). Replays are unauthorized; missing enrollment is not_found.
     virtual Result<void> verify_mfa_code(const std::string& user_id,
                                          const std::string& pool_id,
                                          const std::string& code) = 0;
@@ -2305,11 +2370,21 @@ public:
     // user.created: what a first sign_in_clerk does to the account, without a session. Repeating
     // it finds the same account.
     virtual Result<ClerkUserProvisioned> provision_clerk_user(const ClerkIdentity&) = 0;
+    // Retain state even before provisioning. Only a newer update can lift suspension;
+    // deletion is permanent. Suspension revokes all sessions and devices atomically. A current
+    // identical state returns true so retries can finish profile/provisioning work; false is stale.
+    virtual Result<bool> apply_clerk_user_state(const ClerkUserState&) = 0;
+    // Retain a millisecond revocation watermark before exchange too; revoke all account
+    // credentials.
+    virtual Result<void> revoke_clerk_sessions(const std::string& subject,
+                                               std::int64_t revoked_at) = 0;
     // user.updated: the email (when non-empty) and display name of the account linked to the
     // subject; not_found when none is linked, conflict when another account has the email.
     virtual Result<std::string> update_clerk_user(const ClerkIdentity&) = 0;
     // user.deleted: disables the account linked to the subject and revokes every session, token
-    // and device of it. Nothing is erased. Answers the account's user id.
+    // and device of it. Withdraws its launches/schedules and invalidates tasks and leases in
+    // the same operation (lake#951); stream workers refuse the disabled user before cleanup.
+    // Account and workspace data remain. Answers the account's user id.
     virtual Result<std::string> disable_clerk_user(const std::string& subject) = 0;
     // Whether a webhook delivery (its svix-id) was already applied, and recording that it was.
     virtual Result<bool> clerk_webhook_applied(const std::string& delivery_id) = 0;
@@ -2335,9 +2410,11 @@ public:
     virtual Result<void> register_oauth_provider(const OAuthProvider&) = 0;
     virtual Result<OAuthProvider> get_oauth_provider(const std::string& pool_id,
                                                      const std::string& provider) = 0;
+    // Both operations require a browser binding; consumption verifies it before spending state.
     virtual Result<void> begin_oauth(const OAuthFlow&) = 0;
     virtual Result<OAuthFlow> consume_oauth(const std::string& provider,
-                                            const std::string& state) = 0;
+                                            const std::string& state,
+                                            const std::string& browser_binding) = 0;
     virtual Result<IssuedSession> create_token(const NewToken&) = 0;
     virtual Result<std::vector<Session>> list_sessions(const std::string& user_id,
                                                        const std::string& pool_id) = 0;
@@ -2358,9 +2435,16 @@ public:
                                                     const std::string& email,
                                                     const std::string& code,
                                                     const std::string& device_name) = 0;
-    virtual Result<RecoveryAttempt> begin_email_recovery(const std::string& pool_id,
-                                                         const std::string& email,
-                                                         int cooling_seconds) = 0;
+    // Reuses an open attempt. Unknown accounts and exhausted budgets return an empty attempt;
+    // public callers must always receive the same accepted response. Client address is trusted
+    // transport metadata; direct callers without it share a single bucket.
+    virtual Result<RecoveryAttempt>
+    begin_email_recovery(const std::string& pool_id,
+                         const std::string& email,
+                         int cooling_seconds,
+                         const std::string& client_address = {}) = 0;
+    virtual Result<RecoveryAttempt> cancel_recovery(const std::string& user_id,
+                                                    const std::string& recovery_id) = 0;
     virtual Result<RecoveryAttempt> begin_admin_recovery(const std::string& organization_id,
                                                          const std::string& user_id,
                                                          const std::string& requested_by) = 0;

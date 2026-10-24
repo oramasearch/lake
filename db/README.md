@@ -1,5 +1,26 @@
 # Database schema
 
+Migration `0095_model_token_prices` (LSR-095, lake#961) permits exact `<model>/input` and
+`<model>/output` classes for `model_tokens` prices and frozen invoice lines. Existing GPU-style
+classes retain their constraints. It seeds the default gateway models' input and output prices
+once (OpenAI's published price plus 30%) as a new publication for the current month, on a fresh and
+an existing instance. The operator must vendor this schema and select
+`model_token_prices_guard` before the new binary is deployed; the operator is not changed here.
+See [model-gateway.md](../docs/api/model-gateway.md#configuration).
+Migration `0094_clerk_revocation` (lake#948, LSR-085) adds `clerk_user_states` (ordered upstream
+account state and an independent revocation watermark), `users.clerk_suspended`, and the guard
+`clerk_revocation_guard`. It revokes Clerk-linked accounts' existing sessions, tokens and devices
+once and rejects pre-migration template JWTs, requiring a fresh sign-in. Reapplication preserves
+credentials issued afterward. The operator must vendor the schema and select this guard before
+rollout, inject `LAKE_CLERK_SECRET_KEY`, and subscribe to Clerk session end/revocation events. See
+[Clerk](../docs/api/clerk.md#webhooks) and [schema.md](../docs/control-plane/schema.md).
+Migration `0097_cloud_order_entitlements` (lake#972, LSR-105) adds subscription status,
+paid-through/access deadlines, event ordering and grace to cloud orders. A unique index binds each
+subscription to one order; `cloud_order_desired_state` evaluates entitlement at read time.
+Apply before the new binary. The operator must vendor the schema, select
+`cloud_order_entitlements_guard`, register the new events and implement suspension before order
+provisioning is enabled. See [orders](../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
+
 Migration `0091_account_deletion` (lake#810) adds `users.deleted_at`, set by `delete_account` when
 an account is deleted (its email and display name are erased in the same statement), and the guard
 `account_deletion_guard`. Additive; apply before the new binary, and have the operator vendor the
@@ -454,3 +475,9 @@ must vendor this schema and select that guard before rollout. See
 Every `workload_resources` kind check (the table's own and those of `0077`, `0078` and `0083`) lists
 every kind, so applying the schema again over rows of a later kind (`methodology_run`,
 `methodology_deployment`) does not fail at an earlier migration's check.
+
+Migration `0096_email_recovery_limits` (lake#968, LSR-102) adds `cancelled` recovery state and
+`offline_recovery_budgets` for atomic hourly client/global admission. The operator must vendor
+this schema and select `email_recovery_limits_guard` before rollout. See
+[recovery.md](../docs/api/recovery.md#email-recovery-budgets).
+Migration `0098_authentication_attempts` adds hashed per-account and per-client failure budgets and pending reservations and `authentication_attempts_guard` (lake#966). Apply before the binary; the operator must vendor this schema and select the guard.

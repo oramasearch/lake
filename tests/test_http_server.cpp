@@ -319,6 +319,163 @@ private:
     int descriptor_;
 };
 
+// Send headers alone: a refusal must arrive before the caller supplies any JSON bytes.
+TEST(HttpServer, CapabilityAdmissionPrecedesTheBody) {
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const auto user = store->create_user({"taap:body-admission", "", "Body admission"});
+    ASSERT_TRUE(user);
+    const auto customer = store->create_customer({"individual", user->id, "", "body-admission"});
+    ASSERT_TRUE(customer);
+    const auto workspace = store->create_workspace({customer->id, "body", "dev", user->taap_id});
+    ASSERT_TRUE(workspace);
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.store = store;
+    options.admin_token = "body-operator";
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    for (const std::string prefix : {std::string(), "/w/" + workspace->id}) {
+        for (const auto& [path, status] : std::vector<std::pair<std::string, std::string>>{
+                 {"/v1/sign_in_password", "413"},
+                 {"/v1/create_repository", "401"},
+                 {"/v1/model_completion", "401"},
+                 {"/openai/v1/responses", "401"},
+                 {"/workspaces/" + customer->id + "/zetta/v1/create_project", "401"},
+                 {"/mcp", "413"}}) {
+            for (const std::string credential :
+                 {std::string(), std::string("Authorization: Bearer rejected\r\n")}) {
+                const int fd = connect_loopback(server.port());
+                ASSERT_GE(fd, 0);
+                timeval timeout{1, 0};
+                ASSERT_EQ(::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)), 0);
+                ASSERT_TRUE(send_all(fd,
+                                     "POST " + prefix + path + " HTTP/1.1\r\nHost: localhost\r\n" +
+                                         credential +
+                                         "Content-Type: application/json\r\n"
+                                         "Content-Length: 2097152\r\n\r\n"));
+                const std::string response = read_response(fd, false);
+                ::close(fd);
+                EXPECT_TRUE(response.starts_with("HTTP/1.1 " + status)) << prefix + path << '\n'
+                                                                        << response;
+                if (status == "401") {
+                    EXPECT_NE(response_header(response, "www-authenticate").find("Bearer"),
+                              std::string::npos);
+                }
+            }
+        }
+    }
+}
+
+TEST(HttpServer, JsonStructureLimitsApplyToRestAndMcp) {
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.admin_token = "structure-operator";
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string deep = std::string(80, '[') + "0" + std::string(80, ']');
+    std::string wide = "[";
+    for (int i = 0; i < 70000; ++i) {
+        wide += "0,";
+    }
+    wide.back() = ']';
+    std::string duplicates = "{";
+    for (int i = 0; i < 40000; ++i) {
+        duplicates += "\"a\":0,";
+    }
+    duplicates.back() = '}';
+    for (const std::string& input : {deep, wide, duplicates}) {
+        for (const std::string path : {"/v1/sign_in_password", "/mcp"}) {
+            HttpConnection connection(server.port());
+            const std::string response = connection.request(
+                "POST", path, "{\"unused\":" + input + "}", {}, "HTTP/1.1", {}, "application/json");
+            EXPECT_TRUE(response.starts_with("HTTP/1.1 413")) << path << '\n' << response;
+        }
+    }
+}
+
+TEST(HttpServer, ChunkedJsonCannotBypassBodyBudgets) {
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    for (const auto& [path, limit] : std::vector<std::pair<std::string, std::size_t>>{
+             {"/mcp", 256 * 1024}, {"/v1/sign_in_password", 1024 * 1024}}) {
+        const int fd = connect_loopback(server.port());
+        ASSERT_GE(fd, 0);
+        timeval timeout{1, 0};
+        ASSERT_EQ(::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)), 0);
+        ASSERT_TRUE(send_all(fd,
+                             "POST " + path +
+                                 " HTTP/1.1\r\nHost: localhost\r\n"
+                                 "Content-Type: application/json\r\n"
+                                 "Transfer-Encoding: chunked\r\n\r\n" +
+                                 std::format("{:x}\r\n", limit + 100)));
+        // An unfinished chunk of whitespace is still bounded. There is no JSON document to parse.
+        ASSERT_TRUE(send_all(fd, std::string(limit + 1, ' ')));
+        const std::string response = read_response(fd, false);
+        ::close(fd);
+        EXPECT_TRUE(response.starts_with("HTTP/1.1 413")) << path << '\n' << response;
+    }
+}
+
+TEST(HttpServer, McpAnonymousBudgetPreservesDiscoveryAndBulkInputsRequireCredentials) {
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.admin_token = "bulk-operator";
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    HttpConnection connection(server.port());
+    const auto post = [&](const std::string& path,
+                          const std::string& body,
+                          std::string_view token = {}) {
+        return connection.request("POST", path, body, {}, "HTTP/1.1", token, "application/json");
+    };
+    const std::string initialized =
+        post("/mcp", R"({"jsonrpc":"2.0","id":1,"method":"initialize"})");
+    ASSERT_TRUE(initialized.starts_with("HTTP/1.1 200")) << initialized;
+    const std::string nested = std::string(63, '[') + "0" + std::string(63, ']');
+    const std::string bounded =
+        post("/mcp", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"extra\":" + nested + "}");
+    EXPECT_TRUE(bounded.starts_with("HTTP/1.1 200")) << bounded;
+    const std::string protected_tool = post(
+        "/mcp",
+        R"({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_repository","arguments":{}}})");
+    ASSERT_TRUE(protected_tool.starts_with("HTTP/1.1 200")) << protected_tool;
+    EXPECT_EQ(nlohmann::json::parse(
+                  response_body(protected_tool))["result"]["structuredContent"]["error"]["code"],
+              "unauthenticated");
+
+    // A registered audio input may exceed the default; validation still runs after parsing.
+    const std::string bulk =
+        nlohmann::json{{"audio_base64", std::string(2 * 1024 * 1024, 'A')}}.dump();
+    const std::string admitted = post("/v1/transcribe", bulk, "bulk-operator");
+    EXPECT_TRUE(admitted.starts_with("HTTP/1.1 400")) << admitted.substr(0, 400);
+    const std::string tool =
+        nlohmann::json{{"jsonrpc", "2.0"},
+                       {"id", 3},
+                       {"method", "tools/call"},
+                       {"params",
+                        {{"name", "transcribe"},
+                         {"arguments", {{"audio_base64", std::string(2 * 1024 * 1024, 'A')}}}}}}
+            .dump();
+    const std::string mcp_admitted = post("/mcp", tool, "bulk-operator");
+    EXPECT_TRUE(mcp_admitted.starts_with("HTTP/1.1 200")) << mcp_admitted.substr(0, 400);
+    const std::string small_tool =
+        nlohmann::json{{"jsonrpc", "2.0"},
+                       {"id", 4},
+                       {"method", "tools/call"},
+                       {"params",
+                        {{"name", "sign_in_password"},
+                         {"arguments", {{"padding", std::string(2 * 1024 * 1024, 'A')}}}}}}
+            .dump();
+    const std::string refused = post("/mcp", small_tool, "bulk-operator");
+    EXPECT_TRUE(refused.starts_with("HTTP/1.1 413")) << refused.substr(0, 400);
+}
+
 // The web app owns every page (docs/ui/web-app.md, lake#561): a browser opening a former server
 // page gets the app's index.html, anything else the 404; a retired form is gone; /w/<workspace>/ is
 // checked only where the API and a workspace's Zetta are reached; and an identity application's
@@ -367,7 +524,10 @@ TEST(WebAppHttp, BrowsersGetTheAppAndCustomDomainsTheirHostedSignIn) {
         const std::string page = get(connection, path, true);
         ASSERT_TRUE(page.starts_with("HTTP/1.1 200")) << path << "\n" << page.substr(0, 300);
         EXPECT_EQ(response_header(page, "content-type"), "text/html; charset=utf-8") << path;
-        EXPECT_EQ(response_header(page, "content-security-policy"), "frame-ancestors 'self'")
+        // Framed only by lake, and images only from lake (lake#943): Markdown an agent wrote can
+        // make the browser contact no other server.
+        EXPECT_EQ(response_header(page, "content-security-policy"),
+                  "frame-ancestors 'self'; img-src 'self' data:")
             << path;
         // The page carries this request's viewer, so it is personal and never stored by a cache.
         EXPECT_EQ(response_header(page, "cache-control"), "private, no-store") << path;
@@ -435,7 +595,8 @@ TEST(WebAppHttp, BrowsersGetTheAppAndCustomDomainsTheirHostedSignIn) {
             EXPECT_NE(page.find("Client one"), std::string::npos) << path;
             EXPECT_NE(page.find("--accent:#123456"), std::string::npos) << path;
             EXPECT_EQ(page.find("<div id=\"root\">"), std::string::npos) << path;
-            EXPECT_EQ(response_header(page, "content-security-policy"), "frame-ancestors 'self'");
+            EXPECT_EQ(response_header(page, "content-security-policy"),
+                      "frame-ancestors 'self'; img-src 'self' data:");
         }
     }
     EXPECT_NE(get(hosted, "/repositories", true).find("<div id=\"root\">"), std::string::npos)
@@ -1212,7 +1373,7 @@ TEST_P(HttpResponseIsolation, AMalformedBodyIsAuditedLikeAnyFailedCall) {
     EXPECT_EQ(malformed->front().draft.details.value("body_bytes", 0),
               static_cast<int>(std::string("{\"name\":\"").size() + secret.size()));
 
-    // An unauthenticated caller's malformed body is recorded too, as anonymous.
+    // An unauthenticated caller is refused and audited before its malformed body is read.
     const std::string anonymous_id = "anonymous-malformed-" + suffix;
     const std::string anonymous = connection->request("POST",
                                                       "/v1/create_token",
@@ -1222,11 +1383,14 @@ TEST_P(HttpResponseIsolation, AMalformedBodyIsAuditedLikeAnyFailedCall) {
                                                       {},
                                                       "application/json",
                                                       {{"X-Request-Id", anonymous_id}});
-    EXPECT_TRUE(anonymous.starts_with("HTTP/1.1 400")) << anonymous.substr(0, 300);
+    EXPECT_TRUE(anonymous.starts_with("HTTP/1.1 401")) << anonymous.substr(0, 300);
     const auto anonymous_events = store_->list_audit_events({.request_id = anonymous_id});
     ASSERT_TRUE(anonymous_events);
     ASSERT_EQ(anonymous_events->size(), 1U);
     EXPECT_EQ(anonymous_events->front().draft.principal, "anonymous");
+    EXPECT_EQ(anonymous_events->front().draft.details.value("error_code", ""), "unauthenticated");
+    EXPECT_EQ(anonymous_events->front().draft.details.value("input", ""), "unread");
+    EXPECT_EQ(anonymous_events->front().draft.details.value("body_bytes", -1), 0);
 
     // Audit verification still holds after the refusals were signed in.
     const auto all = lake::test::audit_events(*store_);
@@ -2597,10 +2761,13 @@ TEST_P(HttpResponseIsolation, TheWebAppTalksToAskOramaThroughCapabilities) {
     EXPECT_EQ(messages[1]["content"], "You have no repositories yet. I can create one.");
     EXPECT_EQ(messages[1]["payload"]["task_id"], task);
     const std::string message_id = messages[1]["id"];
+    const std::string input_sha256 = messages[1]["proposal_calls"][0]["input_sha256"];
 
-    const auto [forged_response, forged] =
-        call("confirm_ask_proposal",
-             {{"conversation_id", conversation}, {"message_id", message_id}, {"index", 7}});
+    const auto [forged_response, forged] = call("confirm_ask_proposal",
+                                                {{"conversation_id", conversation},
+                                                 {"message_id", message_id},
+                                                 {"index", 7},
+                                                 {"input_sha256", input_sha256}});
     EXPECT_TRUE(forged_response.starts_with("HTTP/1.1 404")) << forged_response;
     EXPECT_EQ(forged["error"]["message"], "That proposal is not in this conversation.");
     EXPECT_TRUE(store_->list_repositories(customer_id, 10)->empty());
@@ -2610,7 +2777,8 @@ TEST_P(HttpResponseIsolation, TheWebAppTalksToAskOramaThroughCapabilities) {
                                  {"workspace_id", workspace_id},
                                  {"conversation_id", conversation},
                                  {"message_id", message_id},
-                                 {"index", 0}};
+                                 {"index", 0},
+                                 {"input_sha256", input_sha256}};
     const std::vector<std::vector<std::pair<std::string, std::string>>> foreign{
         {{"Origin", "https://reports.example.test"}},
         {{"Origin", "null"}},
@@ -2666,9 +2834,11 @@ TEST_P(HttpResponseIsolation, TheWebAppTalksToAskOramaThroughCapabilities) {
                             {{"Origin", "https://reports.example.test"}});
     EXPECT_TRUE(bearer_listed.starts_with("HTTP/1.1 200")) << bearer_listed.substr(0, 300);
 
-    const auto [confirmed_response, confirmed] =
-        call("confirm_ask_proposal",
-             {{"conversation_id", conversation}, {"message_id", message_id}, {"index", 0}});
+    const auto [confirmed_response, confirmed] = call("confirm_ask_proposal",
+                                                      {{"conversation_id", conversation},
+                                                       {"message_id", message_id},
+                                                       {"index", 0},
+                                                       {"input_sha256", input_sha256}});
     ASSERT_TRUE(confirmed_response.starts_with("HTTP/1.1 200")) << confirmed_response;
     EXPECT_EQ(confirmed["value"]["ok"], true) << confirmed_response;
     EXPECT_EQ(confirmed["value"]["capability"], "create_repository");
@@ -2696,6 +2866,127 @@ TEST_P(HttpResponseIsolation, TheWebAppTalksToAskOramaThroughCapabilities) {
     ASSERT_TRUE(none.starts_with("HTTP/1.1 200")) << none;
     EXPECT_TRUE(nlohmann::json::parse(response_body(none))["value"]["task"].is_null());
     EXPECT_TRUE(latest("churn").starts_with("HTTP/1.1 400"));
+}
+
+// lake#942: an Ask Orama proposal's `impact` is the model's writing and can hide who an action
+// reaches. The conversation answers Lake's own statement of the exact call each proposal runs
+// (`proposal_calls`), and confirm runs only the call whose digest the person sends back.
+TEST_P(HttpResponseIsolation, AskOramaConfirmShowsAndRunsOnlyTheExactCall) {
+    auto connection = connect();
+    const std::string cookie = sign_in(*connection);
+    const std::string customer_id =
+        nlohmann::json::parse(
+            response_body(connection->request("GET", "/v1/list_customers", "", cookie)))
+            .at("value")
+            .at("items")
+            .at(0)
+            .at("id");
+    const auto [org_response, org] =
+        post_v1(*connection,
+                cookie,
+                "create_organization_space",
+                {{"display_name", "Acme Research"},
+                 {"name", "acme-" + lake::control::new_uuid_v4().substr(0, 8)}});
+    ASSERT_TRUE(org.value("ok", false)) << org_response;
+    const std::string organization_id = org["value"]["organization"]["id"];
+    select_workspace(*connection, customer_id);
+    const std::string workspace_id = connection->workspace_id;
+    const auto call = [&](const std::string& name, nlohmann::json input) {
+        input["customer_id"] = customer_id;
+        input["workspace_id"] = workspace_id;
+        return post_v1(*connection, cookie, name, input);
+    };
+    const auto conversation_messages = [&](const std::string& conversation) {
+        return nlohmann::json::parse(response_body(connection->request(
+            "GET",
+            "/v1/get_ask_conversation?customer_id=" + customer_id +
+                "&workspace_id=" + workspace_id + "&conversation_id=" + conversation,
+            "",
+            cookie)))["value"]["messages"];
+    };
+
+    // Content read during the turn steered the model: it invites an outsider as an owner and
+    // calls it a sharing fix.
+    const nlohmann::json invitation{{"organization_id", organization_id},
+                                    {"invitee_type", "email"},
+                                    {"invitee", "outsider@evil.test"},
+                                    {"role", "owner"},
+                                    {"expires_at", "2099-01-01T00:00:00Z"}};
+    const std::string impact = "Fixes sharing for your team; nothing else changes.";
+    agents_->answer = {
+        {"ok", true},
+        {"reply", "I found the sharing problem."},
+        {"proposals",
+         nlohmann::json::array(
+             {{{"capability", "create_invitation"}, {"input", invitation}, {"impact", impact}}})},
+        {"reads", nlohmann::json::array()},
+        {"delegations", nlohmann::json::array()}};
+    const auto [sent_response, sent] = call("send_ask_message", {{"message", "Fix sharing."}});
+    ASSERT_TRUE(sent_response.starts_with("HTTP/1.1 200")) << sent_response;
+    const std::string conversation = sent["value"]["conversation_id"];
+    const std::string task = sent["value"]["task_id"];
+    run_agent_task(*connection, task);
+    ASSERT_TRUE(call("settle_ask_turn",
+                     {{"conversation_id", conversation}, {"task_id", task}, {"kind", "ask"}})
+                    .first.starts_with("HTTP/1.1 200"));
+    const auto messages = conversation_messages(conversation);
+    ASSERT_EQ(messages.size(), 2U) << messages.dump();
+    const nlohmann::json& reply = messages[1];
+    const std::string message_id = reply["id"];
+
+    // What Confirm shows: the recipient, role and organization the handler uses, apart from the
+    // model's words.
+    ASSERT_TRUE(reply.contains("proposal_calls")) << reply.dump();
+    ASSERT_TRUE(reply["proposal_calls"].is_array()) << reply.dump();
+    ASSERT_EQ(reply["proposal_calls"].size(), 1U) << reply.dump();
+    const nlohmann::json& shown = reply["proposal_calls"][0];
+    EXPECT_EQ(shown["capability"], "create_invitation");
+    EXPECT_EQ(shown["title"], "Create invitation");
+    EXPECT_EQ(shown["kind"], "action");
+    EXPECT_EQ(shown["input"], invitation);
+    nlohmann::json fields = nlohmann::json::object();
+    for (const auto& field : shown["fields"]) {
+        fields[field["name"].get<std::string>()] = field["value"];
+    }
+    EXPECT_EQ(fields, invitation) << "every field is shown, with its exact value";
+    EXPECT_EQ(shown.dump().find("Fixes sharing"), std::string::npos)
+        << "the model's impact is no part of the call";
+    const std::string digest = shown["input_sha256"];
+    EXPECT_EQ(digest.size(), 64U);
+    const auto invitations = [&] {
+        return store_->list_invitations(organization_id, "", 10).value();
+    };
+    ASSERT_TRUE(invitations().empty());
+
+    // A confirm that names no call, or another call, runs nothing and stores nothing.
+    const auto [unnamed_response, unnamed] =
+        call("confirm_ask_proposal",
+             {{"conversation_id", conversation}, {"message_id", message_id}, {"index", 0}});
+    EXPECT_TRUE(unnamed_response.starts_with("HTTP/1.1 400")) << unnamed_response;
+    const auto [other_response, other] = call("confirm_ask_proposal",
+                                              {{"conversation_id", conversation},
+                                               {"message_id", message_id},
+                                               {"index", 0},
+                                               {"input_sha256", std::string(64, '0')}});
+    EXPECT_TRUE(other_response.starts_with("HTTP/1.1 409")) << other_response;
+    EXPECT_EQ(other["error"]["path"], "/input_sha256") << other_response;
+    EXPECT_TRUE(invitations().empty()) << "nothing ran";
+    EXPECT_EQ(conversation_messages(conversation).size(), 2U) << "no outcome is stored";
+
+    // The call shown is the call that runs.
+    const auto [confirmed_response, confirmed] = call("confirm_ask_proposal",
+                                                      {{"conversation_id", conversation},
+                                                       {"message_id", message_id},
+                                                       {"index", 0},
+                                                       {"input_sha256", digest}});
+    ASSERT_TRUE(confirmed_response.starts_with("HTTP/1.1 200")) << confirmed_response;
+    EXPECT_EQ(confirmed["value"]["ok"], true) << confirmed_response;
+    const auto created = invitations();
+    ASSERT_EQ(created.size(), 1U);
+    EXPECT_EQ(created[0].invitee, fields["invitee"].get<std::string>());
+    EXPECT_EQ(created[0].invitee_type, fields["invitee_type"].get<std::string>());
+    EXPECT_EQ(created[0].role, fields["role"].get<std::string>());
+    EXPECT_EQ(created[0].organization_id, fields["organization_id"].get<std::string>());
 }
 
 // lake#794: a proposal whose input the capability's schema refuses is never offered. The reply
@@ -2797,7 +3088,10 @@ TEST_P(HttpResponseIsolation, AskOramaOffersOnlyProposalsTheCapabilitySchemaAcce
     const std::string message_id = reply["id"];
     const auto [refused_response, refused] =
         call("confirm_ask_proposal",
-             {{"conversation_id", conversation}, {"message_id", message_id}, {"index", 0}});
+             {{"conversation_id", conversation},
+              {"message_id", message_id},
+              {"index", 0},
+              {"input_sha256", reply["proposal_calls"][0]["input_sha256"]}});
     ASSERT_TRUE(refused_response.starts_with("HTTP/1.1 200")) << refused_response;
     EXPECT_EQ(refused["value"]["ok"], false) << refused_response;
     // The refusal fails the same way every time, so the person is told to ask again, the stored
@@ -2818,7 +3112,10 @@ TEST_P(HttpResponseIsolation, AskOramaOffersOnlyProposalsTheCapabilitySchemaAcce
     // Input the capability itself refuses is said plainly, naming the field.
     const auto [topic_response, topic] =
         call("confirm_ask_proposal",
-             {{"conversation_id", conversation}, {"message_id", message_id}, {"index", 1}});
+             {{"conversation_id", conversation},
+              {"message_id", message_id},
+              {"index", 1},
+              {"input_sha256", reply["proposal_calls"][1]["input_sha256"]}});
     ASSERT_TRUE(topic_response.starts_with("HTTP/1.1 200")) << topic_response;
     EXPECT_EQ(topic["value"]["ok"], false);
     EXPECT_EQ(topic["value"]["error"],
@@ -2931,9 +3228,12 @@ TEST_P(HttpResponseIsolation, AskOramaKeepsTheTurnWhenAProposalIsMalformed) {
     expect_turn(messages[1], "I can do that.");
 
     // Confirming the valid proposal fills customer_id and workspace_id from the conversation.
-    const auto [confirmed_response, confirmed] = call(
-        "confirm_ask_proposal",
-        {{"conversation_id", conversation}, {"message_id", messages[1]["id"]}, {"index", 0}});
+    const auto [confirmed_response, confirmed] =
+        call("confirm_ask_proposal",
+             {{"conversation_id", conversation},
+              {"message_id", messages[1]["id"]},
+              {"index", 0},
+              {"input_sha256", messages[1]["proposal_calls"][0]["input_sha256"]}});
     ASSERT_TRUE(confirmed_response.starts_with("HTTP/1.1 200")) << confirmed_response;
     EXPECT_EQ(confirmed["value"]["ok"], true) << confirmed_response;
     const auto repositories = store_->list_repositories(customer_id, 10);
@@ -3029,9 +3329,12 @@ TEST_P(HttpResponseIsolation, AskOramaOffersTryAgainOnlyForATransientRefusal) {
         return lake::control::ZettaControlResult<nlohmann::json>(std::unexpected(
             lake::control::ZettaControlError{"store_unavailable", "the workspace is not reachable"}));
     };
-    const auto [refused_response, refused] = call(
-        "confirm_ask_proposal",
-        {{"conversation_id", conversation}, {"message_id", messages[1]["id"]}, {"index", 0}});
+    const auto [refused_response, refused] =
+        call("confirm_ask_proposal",
+             {{"conversation_id", conversation},
+              {"message_id", messages[1]["id"]},
+              {"index", 0},
+              {"input_sha256", messages[1]["proposal_calls"][0]["input_sha256"]}});
     ASSERT_TRUE(refused_response.starts_with("HTTP/1.1 200")) << refused_response;
     EXPECT_EQ(refused["value"]["ok"], false) << refused_response;
     EXPECT_EQ(refused["value"]["code"], "store_unavailable") << refused_response;
@@ -3198,8 +3501,13 @@ TEST_P(HttpResponseIsolation, TheViewerSaysWhoIsSignedInAndWhereTheyAre) {
     const auto chosen = viewer("?workspace_id=" + workspace_id);
     EXPECT_EQ(chosen["workspace_id"], workspace_id);
 
-    const std::string enrolled = connection->request(
-        "POST", "/v1/enroll_mfa", "{}", cookie, "HTTP/1.1", {}, "application/json");
+    const std::string enrolled = connection->request("POST",
+                                                     "/v1/enroll_mfa",
+                                                     nlohmann::json{{"password", password_}}.dump(),
+                                                     cookie,
+                                                     "HTTP/1.1",
+                                                     {},
+                                                     "application/json");
     ASSERT_TRUE(enrolled.starts_with("HTTP/1.1 200")) << enrolled;
     EXPECT_EQ(viewer("")["mfa_enrolled"], true);
 
@@ -3400,6 +3708,191 @@ INSTANTIATE_TEST_SUITE_P(HttpServer,
                                     (std::get<1>(info.param) ? "FreshConnection"
                                                              : "ReusedConnection");
                          });
+
+TEST(HttpServer, AuthenticationClientBudgetFollowsTheIngressAddressAcrossRestAndMcp) {
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    lake::api::ApiServer server({.port = 0, .store = store});
+    ASSERT_TRUE(server.start()) << server.reason();
+    // Every request comes from the same socket peer, as it would through one ingress pod.
+    int attempt = 0;
+    auto authenticate = [&](std::vector<std::pair<std::string, std::string>> headers) {
+        HttpConnection connection(server.port());
+        const nlohmann::json arguments{{"email", std::to_string(attempt) + "@example.test"},
+                                       {"code", "wrong"}};
+        const bool mcp = attempt++ % 2 != 0;
+        const auto payload =
+            mcp ? nlohmann::json{{"jsonrpc", "2.0"},
+                                 {"id", attempt},
+                                 {"method", "tools/call"},
+                                 {"params",
+                                  {{"name", "recover_with_code"}, {"arguments", arguments}}}}
+                : arguments;
+        const auto response = connection.request("POST",
+                                                 mcp ? "/mcp" : "/v1/recover_with_code",
+                                                 payload.dump(),
+                                                 "",
+                                                 "HTTP/1.1",
+                                                 "",
+                                                 "application/json",
+                                                 std::move(headers));
+        EXPECT_FALSE(response.empty());
+        return response.find("rate_limited") != std::string::npos;
+    };
+    for (int i = 0; i < 100; ++i) {
+        EXPECT_FALSE(authenticate({{"X-Real-IP", "192.0.2.1"}})) << i;
+    }
+    EXPECT_TRUE(authenticate({{"X-Real-IP", "192.0.2.1"}}));
+    // A second client behind the same proxy peer keeps its own budget, whether the ingress names
+    // it in X-Real-IP or as the last X-Forwarded-For hop (the first hop is the sender's to write).
+    EXPECT_FALSE(authenticate({{"X-Real-IP", "192.0.2.2"}}));
+    EXPECT_FALSE(authenticate({{"X-Forwarded-For", "192.0.2.1, 192.0.2.3"}}));
+    // A direct connection, with neither header, still has a budget.
+    for (int i = 0; i < 100; ++i) {
+        EXPECT_FALSE(authenticate({})) << i;
+    }
+    EXPECT_TRUE(authenticate({}));
+    HttpConnection probe(server.port());
+    EXPECT_NE(probe.request("GET", "/healthz").find("200 OK"), std::string::npos);
+}
+
+TEST(HttpServer, RecoveryWorkCannotBlockHealthOrTheSharedStoreConnection) {
+    const auto uri = lake::test::postgres_uri();
+    if (!uri)
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    constexpr auto instance_kek =
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    auto store = std::shared_ptr<lake::control::Store>(
+        lake::control::make_postgres_store(uri, instance_kek));
+    auto identity = lake::test::test_identity("recovery-http-worker");
+    lake::control::NewPasswordUser input{"lake",
+                                         "recovery-probe@example.test",
+                                         "a long test password",
+                                         "Recovery",
+                                         "test",
+                                         identity.document};
+    input.identity_proof = lake::test::prove_identity(*store, "lake", identity);
+    const auto signed_up = store->sign_up_password(input);
+    ASSERT_TRUE(signed_up) << signed_up.error().message;
+    const auto enrolled = store->enroll_mfa(
+        signed_up->session.user_id, "lake", {signed_up->session.id, input.password});
+    ASSERT_TRUE(enrolled) << enrolled.error().message;
+    const std::string wrong_code = "rc1_00000000000000000000000000000000";
+    // Make a known selector point at a different code's valid hash: this wrong attempt reaches
+    // the expensive verifier after the row lock is released, without knowing a recovery code.
+    pqxx::connection lock_connection(uri);
+    {
+        pqxx::work setup(lock_connection);
+        setup.exec_params(
+            "UPDATE credentials SET subject = $2 WHERE kind = 'recovery' AND subject = $1",
+            lake::control::identity_crypto::recovery_selector(enrolled->recovery_codes[0]),
+            lake::control::identity_crypto::recovery_selector(wrong_code));
+        setup.commit();
+    }
+    pqxx::work held(lock_connection);
+    held.exec_params(
+        "SELECT id FROM credentials WHERE kind = 'recovery' AND subject = $1 FOR UPDATE",
+        lake::control::identity_crypto::recovery_selector(wrong_code));
+    lake::api::ApiServer server({.port = 0, .store = store, .instance_kek = instance_kek});
+    ASSERT_TRUE(server.start()) << server.reason();
+    auto wrong = std::async(std::launch::async, [&] {
+        HttpConnection connection(server.port());
+        return connection.request(
+            "POST",
+            "/v1/recover_with_code",
+            nlohmann::json{{"email", input.email}, {"code", wrong_code}}.dump(),
+            "",
+            "HTTP/1.1",
+            "",
+            "application/json");
+    });
+    bool waiting = false;
+    pqxx::connection observer(uri);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!waiting && std::chrono::steady_clock::now() < deadline) {
+        pqxx::read_transaction query(observer);
+        waiting =
+            query
+                .exec("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = "
+                      "current_database() "
+                      "AND wait_event_type = 'Lock' AND cardinality(pg_blocking_pids(pid)) > 0)")[0]
+                                                                                                 [0]
+                .as<bool>();
+        if (!waiting)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    auto health = std::async(std::launch::async, [&] {
+        HttpConnection connection(server.port());
+        return connection.request("GET", "/healthz");
+    });
+    auto store_read =
+        std::async(std::launch::async, [&] { return store->get_user(signed_up->session.user_id); });
+    const bool health_ready =
+        health.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready;
+    const bool store_ready =
+        store_read.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready;
+    // Always release the lock before assertions so the unfixed implementation fails promptly.
+    held.abort();
+    EXPECT_TRUE(waiting) << "recovery request never reached its locked credential";
+    EXPECT_TRUE(health_ready) << "recovery blocked the HTTP executor";
+    EXPECT_TRUE(store_ready) << "recovery held the shared store mutex";
+    EXPECT_NE(health.get().find("200 OK"), std::string::npos);
+    EXPECT_TRUE(store_read.get());
+    EXPECT_NE(wrong.get().find("unauthenticated"), std::string::npos);
+    // A loop of wrong codes now reaches the account budget instead of rehashing eight codes.
+    for (int i = 0; i < 9; ++i) {
+        HttpConnection attempt(server.port());
+        const auto response =
+            attempt.request("POST",
+                            "/v1/recover_with_code",
+                            nlohmann::json{{"email", input.email}, {"code", wrong_code}}.dump(),
+                            "",
+                            "HTTP/1.1",
+                            "",
+                            "application/json");
+        EXPECT_NE(response.find("unauthenticated"), std::string::npos);
+        HttpConnection probe(server.port());
+        EXPECT_NE(probe.request("GET", "/healthz").find("200 OK"), std::string::npos);
+    }
+    // A correct unused code proves the account is cooling down; wrong and blocked guesses
+    // deliberately have the same public response.
+    HttpConnection correct(server.port());
+    const auto blocked = correct.request(
+        "POST",
+        "/v1/recover_with_code",
+        nlohmann::json{{"email", input.email}, {"code", enrolled->recovery_codes[1]}}.dump(),
+        "",
+        "HTTP/1.1",
+        "",
+        "application/json");
+    EXPECT_NE(blocked.find("401"), std::string::npos);
+    EXPECT_NE(blocked.find("unauthenticated"), std::string::npos);
+    EXPECT_NE(blocked.find("invalid credentials"), std::string::npos);
+    auto recovery_acknowledgement = [&](const std::string& email) {
+        HttpConnection connection(server.port());
+        const auto response = connection.request("POST",
+                                                 "/v1/begin_email_recovery",
+                                                 nlohmann::json{{"email", email}}.dump(),
+                                                 "",
+                                                 "HTTP/1.1",
+                                                 "",
+                                                 "application/json");
+        return nlohmann::json::parse(response_body(response));
+    };
+    const auto known = recovery_acknowledgement(input.email);
+    const auto unknown = recovery_acknowledgement("missing@example.test");
+    EXPECT_TRUE(known.at("ok"));
+    EXPECT_TRUE(unknown.at("ok"));
+    EXPECT_EQ(known.at("value"), unknown.at("value"))
+        << "account throttling must not reveal registered email";
+    pqxx::read_transaction queued(observer);
+    EXPECT_EQ(queued
+                  .exec_params("SELECT count(*) FROM offline_recovery_attempts WHERE "
+                               "user_id = $1::uuid AND method = 'email'",
+                               signed_up->session.user_id)[0][0]
+                  .as<int>(),
+              1)
+        << "verification lockout must still allow the account to begin email recovery";
+}
 
 } // namespace
 
@@ -3749,9 +4242,11 @@ TEST(HttpServer, ClerkExchangeRefusesAForgedTokenAndSignOutEndsClerkToo) {
     options.worker_coroutines = 1;
     options.instance_kek = "clerk-http-test-kek";
     options.store = std::make_shared<lake::control::InMemoryStore>();
-    // base64("127.0.0.1$"): a Frontend API host that refuses connections, so the JWKS fetch fails
-    // fast and every token is refused.
+    // base64("127.0.0.1$"); the isolated JWKS response trusts no signing keys.
     options.clerk_publishable_key = "pk_test_MTI3LjAuMC4xJA";
+    options.clerk_http = [](const auto&, const auto&) {
+        return lake::api::ClerkResponse{200, R"({"keys":[]})", ""};
+    };
     lake::api::ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
     HttpConnection connection(server.port());
@@ -3761,6 +4256,12 @@ TEST(HttpServer, ClerkExchangeRefusesAForgedTokenAndSignOutEndsClerkToo) {
     EXPECT_EQ(viewer["clerk"]["enabled"], true);
     EXPECT_EQ(viewer["clerk"]["publishable_key"], "pk_test_MTI3LjAuMC4xJA");
     EXPECT_EQ(viewer["password_sign_up"], false);
+    // Clerk's sign-in shows its images from Clerk's image host, and from nowhere else (lake#943).
+    const std::string page = connection.request(
+        "GET", "/sign-in", {}, {}, "HTTP/1.1", {}, "text/plain", {{"Accept", "text/html"}});
+    ASSERT_TRUE(page.starts_with("HTTP/1.1 200")) << page.substr(0, 300);
+    EXPECT_EQ(response_header(page, "content-security-policy"),
+              "frame-ancestors 'self'; img-src 'self' data: https://img.clerk.com");
 
     const std::string refused =
         connection.request("POST", "/identity/clerk-session", "token=not.a.jwt&device_name=b");
@@ -3770,6 +4271,92 @@ TEST(HttpServer, ClerkExchangeRefusesAForgedTokenAndSignOutEndsClerkToo) {
 
     const std::string signed_out = connection.request("POST", "/logout");
     EXPECT_EQ(response_header(signed_out, "location"), "/sign-in?signed_out=1");
+}
+
+// Every request arrives from the same socket peer, as it does behind the ingress: each address the
+// ingress reports gets its own 60 attempts, and clients without one share the direct bucket.
+TEST(HttpServer, ClerkInvalidTokensNeverFetchAndEachIngressClientHasItsOwnLimit) {
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    options.clerk_publishable_key = "pk_test_MTI3LjAuMC4xJA";
+    std::atomic<unsigned> fetches = 0;
+    options.oidc_jwks_fetch = [&](const auto&, bool) -> std::optional<std::string> {
+        ++fetches;
+        return R"({"keys":[]})";
+    };
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const auto attempt = [&](std::vector<std::pair<std::string, std::string>> headers) {
+        HttpConnection connection(server.port());
+        return connection.request("POST",
+                                  "/identity/clerk-session",
+                                  "token=not.a.jwt",
+                                  {},
+                                  "HTTP/1.1",
+                                  {},
+                                  "application/x-www-form-urlencoded",
+                                  std::move(headers));
+    };
+    const std::vector<std::vector<std::pair<std::string, std::string>>> clients = {
+        {{"X-Real-IP", "192.0.2.1"}, {"X-Forwarded-For", "198.51.100.1, 192.0.2.1"}},
+        {{"X-Real-IP", "192.0.2.2"}},
+        {},
+    };
+    for (const auto& headers : clients) {
+        for (unsigned i = 0; i < 61; ++i) {
+            const auto response = attempt(headers);
+            EXPECT_TRUE(response.starts_with(i < 60 ? "HTTP/1.1 302" : "HTTP/1.1 429")) << response;
+            EXPECT_TRUE(response_header(response, "set-cookie").empty());
+        }
+    }
+    EXPECT_EQ(fetches, 0U);
+}
+
+TEST(HttpServer, ClerkJwksFetchDoesNotBlockOtherRequests) {
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.worker_coroutines = 2;
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    options.clerk_publishable_key = "pk_test_MTI3LjAuMC4xJA";
+    std::promise<void> entered;
+    auto entered_future = entered.get_future();
+    std::promise<void> release;
+    auto released = release.get_future();
+    options.oidc_jwks_fetch = [&](const auto&, bool) -> std::optional<std::string> {
+        entered.set_value();
+        released.wait();
+        return std::nullopt;
+    };
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    const auto encode = lake::control::identity_crypto::base64url_encode;
+    const auto token = encode(R"({"alg":"RS256","kid":"unknown"})") + "." +
+                       encode(nlohmann::json{{"iss", "https://127.0.0.1"},
+                                             {"aud", "lake"},
+                                             {"sub", "user"},
+                                             {"iat", now},
+                                             {"exp", now + 300}}
+                                  .dump()) +
+                       ".AA";
+    auto exchange = std::async(std::launch::async, [&] {
+        HttpConnection client(server.port());
+        return client.request("POST", "/identity/clerk-session", "token=" + token);
+    });
+    const auto started = entered_future.wait_for(std::chrono::seconds(5));
+    EXPECT_EQ(started, std::future_status::ready);
+    auto probe = std::async(std::launch::async, [&] {
+        HttpConnection client(server.port());
+        return client.request("GET", "/healthz");
+    });
+    const auto responsive = probe.wait_for(std::chrono::seconds(2));
+    release.set_value();
+    EXPECT_EQ(responsive, std::future_status::ready);
+    EXPECT_TRUE(probe.get().starts_with("HTTP/1.1 200"));
+    EXPECT_TRUE(exchange.get().starts_with("HTTP/1.1 302"));
 }
 
 TEST(HttpServer, ClerkSessionExchangeIsAbsentWithoutClerk) {
@@ -3791,7 +4378,7 @@ TEST(HttpServer, ClerkSessionExchangeIsAbsentWithoutClerk) {
 TEST(HttpServer, ClerkWebhookIsSignedAndAbsentWithoutItsSecret) {
     const std::string secret = "whsec_bGFrZSBjbGVyayB3ZWJob29rIHRlc3Qgc2VjcmV0ISE=";
     const std::string body =
-        R"({"type":"user.created","object":"event","data":{"id":"user_http","first_name":"H",)"
+        R"({"type":"user.created","timestamp":1,"object":"event","data":{"banned":false,"locked":false,"id":"user_http","first_name":"H",)"
         R"("primary_email_address_id":"idn_1","email_addresses":[{"id":"idn_1",)"
         R"("email_address":"http-hook@example.test","verification":{"status":"verified"}}]}})";
     const std::string timestamp =

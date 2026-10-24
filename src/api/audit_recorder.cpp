@@ -15,13 +15,21 @@ AuditRecorder::AuditRecorder(control::Store* store,
                              std::size_t max_pending)
     : store_(store), workspaces_(workspaces), instance_kek_(std::move(instance_kek)),
       identity_seed_(std::move(identity_seed)),
-      max_pending_(std::max<std::size_t>(max_pending, 1)) {}
+      max_pending_(std::max<std::size_t>(max_pending, 2)) {}
 
 bool AuditRecorder::add(std::string customer_id,
                         std::string workspace_id,
                         audit::PendingEvent event) {
     std::lock_guard lock(mutex_);
-    if (held_ >= max_pending_) {
+    const auto count = [](const auto& counts, const std::string& id) {
+        const auto found = counts.find(id);
+        return found == counts.end() ? 0U : found->second;
+    };
+    const auto allocation = workspace_held_.find(workspace_id);
+    if (held_ >= max_pending_ || count(customer_held_, customer_id) >= max_pending_ / 2 ||
+        (allocation != workspace_held_.end() &&
+         (allocation->second.customer_id != customer_id ||
+          allocation->second.held >= std::max<std::size_t>(max_pending_ / 4, 1)))) {
         ++totals_.dropped;
         return false;
     }
@@ -31,6 +39,10 @@ bool AuditRecorder::add(std::string customer_id,
     }
     queue.events.push_back(std::move(event));
     ++held_;
+    ++customer_held_[queue.customer_id];
+    auto& allocated = workspace_held_[workspace_id];
+    allocated.customer_id = queue.customer_id;
+    ++allocated.held;
     return true;
 }
 
@@ -81,7 +93,6 @@ liquid::runtime::task<void> AuditRecorder::flush() {
     {
         std::lock_guard lock(mutex_);
         queues.swap(queues_);
-        held_ = 0;
         tails = tails_;
     }
     ApiContext context;
@@ -155,19 +166,28 @@ liquid::runtime::task<void> AuditRecorder::flush() {
         totals_.conflicts += done.conflicts;
         totals_.dropped_gone += done.dropped_gone;
         tails_ = std::move(tails);
-        // Kept events go back in front of what arrived meanwhile, so each workspace keeps its
-        // order; whatever no longer fits under the bound is dropped and counted.
+        // In-flight events still own their capacity. Release only written/deleted events;
+        // accepted retries cannot be displaced by arrivals during the flush.
+        for (const auto& [workspace_id, queue] : queues) {
+            const auto kept = retry.find(workspace_id);
+            const std::size_t released =
+                queue.events.size() - (kept == retry.end() ? 0 : kept->second.events.size());
+            held_ -= released;
+            auto customer = customer_held_.find(queue.customer_id);
+            if ((customer->second -= released) == 0) {
+                customer_held_.erase(customer);
+            }
+            auto workspace = workspace_held_.find(workspace_id);
+            if ((workspace->second.held -= released) == 0) {
+                workspace_held_.erase(workspace);
+            }
+        }
+        // Retry the older events first within each workspace.
         for (auto& [workspace_id, kept] : retry) {
             Queue& queue = queues_[workspace_id];
             if (queue.customer_id.empty()) {
                 queue.customer_id = kept.customer_id;
             }
-            std::size_t room = max_pending_ > held_ ? max_pending_ - held_ : 0;
-            if (kept.events.size() > room) {
-                totals_.dropped += kept.events.size() - room;
-                kept.events.resize(room);
-            }
-            held_ += kept.events.size();
             queue.events.insert(queue.events.begin(), std::make_move_iterator(kept.events.begin()),
                                 std::make_move_iterator(kept.events.end()));
         }

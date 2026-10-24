@@ -2,9 +2,9 @@
 // billing_account, set_billing_contact, bill_preview, issue_invoice, resend_invoice,
 // list_invoices, get_invoice, record_invoice_payment and void_invoice, with the manual payment
 // provider. Registered only where LAKE_BILLING is on.
-// Lake is priced by usage only (lake#635): one list rate per usage dimension, no plans, no fee and
-// nothing included, so every account is billed on the price list without choosing anything. The
-// records are control-plane rows (each publication of the price list, stored as a billing_plans
+// Lake is priced by usage only (lake#635): list rates per usage dimension and class, no plans, no
+// fee and nothing included, so every account is billed on the price list without choosing anything.
+// The records are control-plane rows (each publication of the price list, stored as a billing_plans
 // row, and invoices with their lines); the usage a bill prices is read from each workspace Zetta
 // through usage_over_time, and only the quantity billed per dimension is kept, on the invoice's
 // lines. Every call is
@@ -366,8 +366,9 @@ liquid::runtime::task<Measured> measure(ApiContext& context,
             dimensions.push_back(price.dimension);
         }
     }
-    if (dimensions.empty()) {
-        co_return measured;
+    // Always inspect model classes: removing every model price must not hide already used tokens.
+    if (asked.insert("model_tokens").second) {
+        dimensions.push_back("model_tokens");
     }
     if (context.registry == nullptr) {
         measured.failure =
@@ -419,6 +420,19 @@ liquid::runtime::task<Measured> measure(ApiContext& context,
         for (const json& row : entry.value("by_class", json::array())) {
             measured.quantities.by_class[name][row.value("key", "")] +=
                 whole(row.value("total", 0.0));
+            if (name == "model_tokens" && !row.value("key", "").empty() &&
+                row.value("total", 0.0) > 0) {
+                const auto key = row.at("key").get<std::string>();
+                const auto priced = std::ranges::count_if(list.prices, [&](const auto& price) {
+                    return price.dimension == name && price.class_name == key &&
+                           price.unit_micros > 0 && price.per > 0;
+                });
+                if (priced != 1) {
+                    measured.failure = ApiResult::failure(
+                        "conflict", "model token usage has no positive exact price: " + key);
+                    co_return measured;
+                }
+            }
         }
     }
     co_return measured;
@@ -1057,6 +1071,32 @@ liquid::runtime::task<NoticeOutcome> receive_payment_notice(PaymentProviders& pr
         // neither a payment event row nor an audit event.
         co_return NoticeOutcome{200, {{"received", true}, {"ignored", true}}};
     }
+    if (notice->order_subscription) {
+        notice->order_subscription->grace_seconds = context.order_entitlement_grace_seconds;
+        const auto applied =
+            context.store->apply_cloud_order_subscription(*notice->order_subscription);
+        if (!applied) {
+            co_return answer(applied.error().code == "invalid_input" ? 400 : 503,
+                             applied.error().code,
+                             applied.error().message);
+        }
+        if (applied->duplicate) {
+            co_return NoticeOutcome{200, {{"received", true}, {"duplicate", true}}};
+        }
+        if (!applied->matched) {
+            co_return NoticeOutcome{200, {{"received", true}, {"matched", false}}};
+        }
+        const auto seconds =
+            std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+        co_return NoticeOutcome{
+            200,
+            {{"received", true},
+             {"order_id", applied->order.id},
+             {"state", applied->order.state},
+             {"changed", applied->changed},
+             {"entitlement_state",
+              control::cloud_order_entitlement_state(applied->order.entitlement, seconds)}}};
+    }
     if (!notice->order_state.empty()) {
         // An order of the apex order sheet (lake#831, docs/api/orders.md#paying): applied once per
         // event id, from pending_payment only. The order's event row is what reaches the central
@@ -1070,7 +1110,8 @@ liquid::runtime::task<NoticeOutcome> receive_payment_notice(PaymentProviders& pr
                                        notice->order_state,
                                        notice->customer,
                                        notice->subscription,
-                                       notice->order_detail});
+                                       notice->order_detail,
+                                       context.order_entitlement_grace_seconds});
         if (!applied) {
             co_return answer(applied.error().code == "invalid_input" ? 400 : 503,
                              applied.error().code,
@@ -1171,7 +1212,8 @@ void register_billing_capabilities(Registry& registry,
         .description =
             "Orama Cloud's price list: one rate per usage dimension, `unit_micros` (millionths of "
             "the currency) for every `per` units of the dimension's unit; GPU and GPU memory may "
-            "carry a rate per GPU `class` beside their default. Compute is priced as CPU "
+            "carry a rate per GPU `class` beside their default; model tokens have exact "
+            "<model>/input and <model>/output class rates. Compute is priced as CPU "
             "(vCPU-minutes), RAM, GPU and GPU memory (GiB-minutes and GPU-minutes) of what each "
             "workload is scheduled with. Lake is priced by usage "
             "only: no plans, no monthly fee, nothing included; every account is billed at this "
@@ -1233,10 +1275,10 @@ void register_billing_capabilities(Registry& registry,
         {{"dimension", {{"type", "string"}, {"enum", dimension_names}}},
          {"class",
           {{"type", "string"},
-           {"pattern", "^([a-z0-9][a-z0-9-]{0,31})?$"},
+           {"pattern", "^([a-z0-9][a-z0-9-]{0,31}|[!-~]{1,128}/(input|output))?$"},
            {"description",
-            "a GPU class (l4, a10g, a100, h100) for gpu and vram: a rate for that class alone; "
-            "left out or empty, the dimension's rate for every other class"}}},
+            "a GPU class for gpu/vram, or <model>/input and <model>/output for model_tokens; "
+            "empty is the default rate (historical unclassed usage for model_tokens)"}}},
          {"unit_micros", integer_schema()},
          {"per", integer_schema(1)}},
         json::array({"dimension", "unit_micros"}));
@@ -1247,7 +1289,9 @@ void register_billing_capabilities(Registry& registry,
             "Operator or instance administrator only. Publishes the price list: one rate per "
             "usage dimension (`unit_micros` for every `per` units of the dimension's unit; a "
             "dimension without a rate is not charged), and for gpu and vram optionally one rate "
-            "per GPU `class` (the dimension's rate without a class bills every other class). "
+            "per GPU `class` (the dimension's rate without a class bills every other GPU class). "
+            "model_tokens uses <model>/input and <model>/output class rates; gateway calls require "
+            "both to be positive, and a used model class without its exact rate refuses billing. "
             "build_compute, run_compute and instances are no longer priced (lake#643). In "
             "`currency` (USD by default), in force "
             "from the first day of `effective_from` (YYYY-MM; this month when left out). A month "
@@ -1301,6 +1345,19 @@ void register_billing_capabilities(Registry& registry,
                 if (!class_name.empty() && (known == nullptr || !known->classes)) {
                     return ApiResult::failure(
                         "invalid_input", dimension + " has no classes to rate", at + "/class");
+                }
+                if (dimension == "model_tokens" && !class_name.empty() &&
+                    !class_name.ends_with("/input") && !class_name.ends_with("/output")) {
+                    return ApiResult::failure("invalid_input",
+                                              "model token classes end in /input or /output",
+                                              at + "/class");
+                }
+                if ((dimension == "gpu" || dimension == "vram") && !class_name.empty() &&
+                    (class_name.size() > 32 || class_name.front() == '-' ||
+                     !std::ranges::all_of(class_name, [](unsigned char c) {
+                         return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+                     }))) {
+                    return ApiResult::failure("invalid_input", "invalid GPU class", at + "/class");
                 }
                 if (!seen.insert({dimension, class_name}).second) {
                     return ApiResult::failure("invalid_input",

@@ -8,7 +8,7 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
-Status: 2026-10-21. The current release is **v0.4.0** ([`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md): the security release from the multi-tenant audit and the pre-launch review, SAML sign-in, OpenID Connect discovery and `delete_account`); before it **v0.3.1** (billing through a shared Stripe account); before that **v0.3.0**
+Status: 2026-10-22. The current release is **v0.4.0** ([`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md): the security release from the multi-tenant audit and the pre-launch review, SAML sign-in, OpenID Connect discovery and `delete_account`); before it **v0.3.1** (billing through a shared Stripe account); before that **v0.3.0**
 ([`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md): the lake.live order sheet and the 2026-10-18
 UX review's fixes, with its known issues); v0.2.0 ([`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md))
 added secure networking, regions, the managed key and own identity, Clerk webhooks, the agents'
@@ -25,7 +25,12 @@ The apex order sheet is in the source tree, not deployed (lake#831, migration `0
 [`docs/api/orders.md`](docs/api/orders.md)): lake.live's picker shows four offers with USD prices
 from `LAKE_ORDER_SHEET`, Stripe Checkout or an order form that skips payment, orders in
 `cloud_orders`, email through Resend (`LAKE_RESEND_API_KEY`). The operator provisions paid orders
-(orama-operator#634); the credit on the monthly bill and the 5-minute promise's test are not built.
+(orama-operator#634); recurring entitlement now has signed subscription events, paid-through/access
+deadlines and a clock-evaluated desired-state view (lake#972, migration `0097_cloud_order_entitlements`).
+The operator must vendor the schema, select `cloud_order_entitlements_guard`, register the new events
+and suspend expired orders before automatic provisioning is enabled; this paired work is not implemented
+in Lake. The credit on the monthly bill and the 5-minute promise's test are not built. See
+[`docs/api/orders.md`](docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
 
 Secure-networking desired state is implemented in the source tree (lake#727, `0084_network`):
 four desired/status pairs, scoped stores, signed atomic audit and app-to-service rollout rows.
@@ -64,12 +69,25 @@ grants, audit and repositories stay; `sign_in_taap` with the own key reaches it,
 vendor the schema and select `identity_links_guard`. See
 [`docs/api/identity.md#your-own-identity`](docs/api/identity.md#your-own-identity).
 
+Password, MFA and recovery verification share per-account and per-client failure budgets (no instance-wide ceiling) with concurrent reservations (lake#966, LSR-100,
+`0098_authentication_attempts`); successful TOTP steps and recovery codes are consumed across
+sign-in and step-up. Not deployed; operator schema vendoring and `authentication_attempts_guard`
+are required. See [`docs/api/identity.md#authentication-attempt-limits`](docs/api/identity.md#authentication-attempt-limits).
+
 Clerk webhooks follow (lake#765, migration `0087_clerk_webhooks`): `POST /identity/clerk-webhook`,
 verified with Lake's own Svix HMAC and `LAKE_CLERK_WEBHOOK_SECRET` (404 without it), applies each
 `svix-id` once: `user.created` provisions the account as a first Clerk sign-in does, `user.updated`
-sets its verified email and name, `user.deleted` disables it (`users.disabled_at`) and revokes its
-sessions without erasing anything; every delivery is audited centrally. Not deployed; the operator
-must vendor the schema, select `clerk_webhooks_guard` and configure the endpoint and secret
+sets its verified email and name, `user.deleted` disables it (`users.disabled_at`), revokes its
+sessions and delegated agent credentials, and withdraws its agent workloads without erasing its
+account or workspaces (lake#951); every delivery is audited centrally. Migration
+`0094_clerk_revocation` (lake#948) adds ordered ban/lock/deprovisioning suspension and account-wide
+revocation on Clerk session events, including old-template re-exchange prevention. Suspended
+accounts also lose delegated agent and stream authority. Every template exchange checks Clerk's
+Backend API without caching and requires `LAKE_CLERK_SECRET_KEY`; a newer unban/unlock permits
+only new credentials. Applying 0094 revokes legacy Clerk-linked credentials and rejects
+pre-migration template JWTs once; later schema applications preserve new credentials. Not
+deployed; the operator must vendor the schema, select `clerk_revocation_guard`, subscribe to
+session end/revocation and configure the endpoint, webhook secret and Clerk server key
 (orama-operator#541). See [`docs/api/clerk.md#webhooks`](docs/api/clerk.md#webhooks).
 
 SAML sign-in has an Assertion Consumer Service (lake#836, migration `0092_saml_sign_in`):
@@ -96,6 +114,12 @@ repository is reported (`unresolved_repository`, `platform_unresolved_repositori
 the `lake_platform_unresolved_repositories` gauge, one log line per change), never skipped quietly.
 Not deployed; the operator must vendor the schema and select `repository_liquid_ids_guard`. See
 [`docs/api/platform.md#which-repository-a-row-names`](docs/api/platform.md#which-repository-a-row-names).
+
+Email recovery abuse protections (lake#968, LSR-102, migration `0096_email_recovery_limits`):
+starts reuse a pending attempt, with account and durable client/global budgets; a signed-in holder
+can cancel their pending recovery from its device notice, invalidating the token. Not deployed;
+the operator must vendor the schema and select `email_recovery_limits_guard`. See
+[`docs/api/recovery.md`](docs/api/recovery.md#email-recovery-budgets).
 
 Root recovery separates its participants (lake#934, migration `0093_root_recovery_participants`):
 `begin_root_recovery` names distinct TAAP identities holding admin on the customer and answers no
@@ -234,6 +258,12 @@ capability that already covered it. Each runs the `workspace_query`/`workspace_a
 where the engine's name collides or says too little (`gate` is `check_pipeline`, `run` is
 `start_run`, `search` is `search_workspace_index`). Those two stay, with an `enum` on `capability`.
 Not deployed. See `docs/api/engine-capabilities.md`.
+Each database and connection has a safe mode (lake#906, no migration): `get_safe_mode` and
+`set_safe_mode` (Off, Warn Writes by default, Warn All) pass through to the workspace Zetta, which
+keeps the level; its `safe_mode_warning` reaches REST (409) and MCP with `error.details` (database
+or connection, mode, statements, confirmation), and the same call with `safe_mode_confirmation` runs
+it. The web app has the control in Data → Query's status bar and on each connection, and a dialog
+with the statements, Run and Cancel. Needs zetta#1373. Not deployed. See `docs/api/safe-mode.md`.
 Agents are designed in Design → Agents and trained in Train → Agents (lake#653, no migration):
 Design → Agents (was Agent Library; `/design/agent-library` and `/train/agents/new` redirect) lists
 Orama's agents read-only beside the workspace's own, with New agent, Duplicate, Edit and the Agent
@@ -363,12 +393,23 @@ month with breakdowns by workspace and kind; `usage_limits` and `set_usage_limit
 per-dimension limits in `customer_usage_limits` (storage's stays the enforced quota; the others
 warn); `record_model_usage` takes an agent's own credential. Usage is a dashboard in the web app. No
 billing here. See `docs/api/metering.md#usage-over-time`.
+
+The model gateway restricts calls to exact models in `LAKE_MODEL_GATEWAY_MODELS` (LSR-095,
+lake#961), including with billing off. Billing-on additionally requires positive published rates
+for each model's input and output tokens; usage keeps raw counts under model/direction classes,
+while provider snapshot names remain audit detail. Missing used-class rates refuse a bill.
+Migration `0095_model_token_prices` permits model/direction classes in prices and invoice lines,
+and seeds the default models' rates once (OpenAI's published price plus 30%, Steve 2026-10-23) as a
+new publication for the current month on a fresh and an existing instance.
+Not deployed; the operator must vendor the schema and select `model_token_prices_guard`.
+See [`docs/api/model-gateway.md`](docs/api/model-gateway.md).
+
 Billing follows, for Orama Cloud only (lake#564, decision 56, migration `0073_billing`): billing
 records live in PostgreSQL as multitenancy (`billing_plans`, `billing_plan_prices`,
 `billing_invoices`, `billing_invoice_lines`) and usage stays in each workspace Zetta, read through
 `usage_over_time`; an invoice freezes only the quantity and rate billed per dimension. Lake is
-priced by usage only (lake#635, no migration): one price list, one rate per usage dimension, no
-plans, no fee, nothing included, every account billed at it; each publication is a `billing_plans`
+priced by usage only (lake#635, no migration): one price list with dimension, GPU-class and
+model-direction rates, no plans, no fee, nothing included, every account billed at it; each publication is a `billing_plans`
 row, a month is billed at the list in force at its end, `billing_subscriptions` is unused, and Metis
 is priced by sales, not here. Time is priced and billed per minute on the month's summed seconds
 (lake#637). Nine capabilities (`price_list`, `set_price_list`, `billing_account`, `bill_preview`,
@@ -440,7 +481,9 @@ Dynamic-secret leases follow (lake#362, migration `0058`): each lease is a seale
 mount's workspace, and PostgreSQL keeps only `secret_lease_routes` (lease → mount, workspace, and
 `due_at`), the content-free route and due index. Renew, revoke and the owner loop's expiry pass
 rewrite a lease at the revision read, so a renewal never revives a revoked or expired lease; the
-pass claims due routes and reads only the workspaces that hold them. See
+pass claims due routes and reads only the workspaces that hold them. Successful lifecycle events
+publish only their digest commitments in the transparency log (lake#953); complete events, denials
+and failures remain in private central audit. See
 `docs/api/secrets.md#dynamic-leases`.
 Forge records follow (lake#341, migration `0054`): issues, reviews, comments, releases, webhooks,
 exports and branch protection rules live in the workspace Zetta of their repository's workspace,
@@ -673,7 +716,8 @@ encrypt/decrypt/rewrap, Ed25519 signing, HMAC-SHA-256 and stored child derivatio
 rotation that rewraps data keys without rewriting secret ciphertext. The mount, secret and key
 pages render metadata only. Every operation uses policy authorization and the signed registry
 audit path, including denials. Renewable and revocable dynamic-secret leases encrypt the generated
-credential and mirror their signed lifecycle audit rows into the transparency log.
+credential and publish only their successful lifecycle events' digest commitments in the transparency
+log (lake#953); complete events, denials and failures remain in private audit.
 Customer PKI adds persisted private roots and online intermediates, SPIFFE X.509 and JWT SVIDs,
 client, device, OpenSSH user and OpenSSH host certificates, and a customer-scoped RFC 8555 ACME
 HTTP-01 flow. Migration `0013_pki` holds the durable state. ACME consumes one-use nonces, verifies
@@ -786,6 +830,9 @@ delegated to a durable agent by a canonical `delegation/1` attestation. The atte
 to the tiled transparency log before public session metadata is persisted; the private seed is
 returned once and never stored. Drip verification binds the session signature back to the durable
 agent and rejects the key at expiry. Its contract is `docs/api/agents.md`.
+New delegations require the dispatcher to equal the authenticated acting TAAP identity and the
+durable agent to have an active customer-issued agent certificate (lake#957, no migration).
+Existing agents need an administrator to issue that certificate before minting another session.
 
 ## Creating users
 
@@ -836,8 +883,8 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   placeholders until lake has a node to marshal onto.
 - **The console is the web app** in `frontend/` (React, Vite, Tailwind, TypeScript), built and
   embedded by CMake and served by the `web_app` middleware: a browser's GET of any page path gets
-  its `index.html` (`Content-Security-Policy: frame-ancestors 'self'`), anything else the route or
-  the 404. It calls **only `/v1` capabilities**, so it can never do what the API cannot; do not add
+  its `index.html` (`Content-Security-Policy: frame-ancestors 'self'; img-src 'self' data:`), anything
+  else the route or the 404. Markdown never loads an image (`docs/serving/http.md#images`, lake#943). It calls **only `/v1` capabilities**, so it can never do what the API cannot; do not add
   a server page or an HTML form handler. Build, page rules and checks: `docs/ui/web-app.md`. The
   server routes the app relies on (the cookie-setting sign-in routes and the download routes) are
   listed there and in `docs/serving/http.md`.
@@ -895,7 +942,8 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `network_guard` in the source tree, versioned by content hash).
+  `cloud_order_entitlements_guard` in the source tree, versioned by content hash).
+  `authentication_attempts_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means
@@ -1005,8 +1053,11 @@ cluster runs that image. `v0.1.0` is `oramasearch/lake:20261012a`, also tagged `
 
 ## Open decisions
 
-- **Blocking store calls run inline on the io thread** (one statement each). Offload to a
-  pool, as Zetta does, when latency shows; not before.
+- **Blocking store calls generally run inline on the io thread** (one statement each).
+  Password/MFA/recovery verification and MFA enrollment run on the bounded blocking pool with
+  two authentication jobs at most (lake#969); PostgreSQL uses private authentication transactions
+  so hashing cannot hold the shared store mutex. Other store calls remain inline until measured.
+  See [authentication limits](docs/api/identity.md#authentication-attempt-limits).
 - **Broader Zetta linkage.** The operator-control and Loki HTTP clients link the client-only
   transport from the authorized bridge source path. Any further Zetta target remains a separate
   decision and must preserve one copy of the networking stack.

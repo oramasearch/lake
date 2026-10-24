@@ -187,6 +187,14 @@ ForgeTask<ApiResult> list_records(std::string kind, const json& input, ApiContex
         if (record.kind == "webhook") {
             output["value"].erase("secret");
         }
+        if (record.kind == "release" && output["value"].contains("artifacts") &&
+            output["value"]["artifacts"].is_array()) {
+            for (auto& artifact : output["value"]["artifacts"]) {
+                if (artifact.is_object() && !artifact.contains("source_binding")) {
+                    artifact["source_binding"] = "source not bound";
+                }
+            }
+        }
         items.push_back(std::move(output));
     }
     co_return ApiResult::success({{"items", std::move(items)}});
@@ -393,6 +401,13 @@ ForgeTask<ApiResult> create_release(const json& input, ApiContext& context) {
         if (!artifact) {
             co_return ApiResult::failure(artifact.error().code, artifact.error().message);
         }
+        if (artifact->verified_source &&
+            (artifact->verified_source->repository_id != repository.id ||
+             artifact->verified_source->change_id != input.at("change_id").get<std::string>())) {
+            co_return ApiResult::failure("conflict",
+                                         "release artifact provenance names a different source",
+                                         "/artifact_ids");
+        }
         json attestations = json::array();
         for (const RepositoryArtifactAttestation& attestation : artifact->attestations) {
             if (!attestation.verified) {
@@ -407,10 +422,12 @@ ForgeTask<ApiResult> create_release(const json& input, ApiContext& context) {
             co_return ApiResult::failure(
                 "conflict", "release artifact has no verified attestation", "/artifact_ids");
         }
-        artifacts.push_back({{"id", artifact->id},
-                             {"action", artifact->action},
-                             {"outputs", artifact->outputs.size()},
-                             {"attestations", std::move(attestations)}});
+        artifacts.push_back(
+            {{"id", artifact->id},
+             {"action", artifact->action},
+             {"outputs", artifact->outputs.size()},
+             {"source_binding", artifact->verified_source ? "verified" : "source not bound"},
+             {"attestations", std::move(attestations)}});
     }
     json value = input;
     value.erase("repository_id");
@@ -803,13 +820,37 @@ control::Result<bool> approved_review(control::Store& store,
     return false;
 }
 
-bool verified_release(const std::vector<control::ForgeRecord>& records,
-                      const std::string& change_id) {
-    return std::ranges::any_of(records, [&change_id](const control::ForgeRecord& release) {
-        return release.value.value("change_id", "") == change_id &&
-               release.value.contains("artifacts") && release.value["artifacts"].is_array() &&
-               !release.value["artifacts"].empty();
-    });
+// Reopen every artifact in this repository. Stored snapshots (including imported releases)
+// are display evidence only, and cannot supply the source claims used by a protected push.
+SyncStoreResult<bool> verified_release(SyncStore& store,
+                                       const control::Repository& repository,
+                                       const control::ForgeRecord& release) {
+    const json& value = release.value;
+    const std::string change_id = string_member(value, "change_id");
+    if (release.repository_id != repository.id || change_id.empty() ||
+        !value.contains("artifacts") || !value["artifacts"].is_array() ||
+        value["artifacts"].empty()) {
+        return false;
+    }
+    for (const json& selected : value["artifacts"]) {
+        const std::string id = string_member(selected, "id");
+        if (id.empty()) {
+            return false;
+        }
+        const auto artifact = store.repository_artifact(repository.customer_id, repository.id, id);
+        if (!artifact) {
+            if (artifact.error().code == "not_found") {
+                return false;
+            }
+            return std::unexpected(artifact.error());
+        }
+        if (artifact->id != id || !artifact->verified_source ||
+            artifact->verified_source->repository_id != repository.id ||
+            artifact->verified_source->change_id != change_id) {
+            return false;
+        }
+    }
+    return true;
 }
 
 ForgeTask<ApiResult> set_branch_protection(const json& input, ApiContext& context) {
@@ -874,7 +915,7 @@ load_branch_protection(ApiContext& context, control::Repository repository) {
     if (!context.workspaces) {
         co_return Result(BranchProtectionRecords{});
     }
-    auto forge = RepositoryForge::open(context, std::move(repository));
+    auto forge = RepositoryForge::open(context, repository);
     if (!forge) {
         co_return refused(forge.error().code, forge.error().message);
     }
@@ -903,6 +944,23 @@ load_branch_protection(ApiContext& context, control::Repository repository) {
             co_return refused(releases.error().code, releases.error().message);
         }
         records.releases = std::move(*releases);
+        if (!context.sync_store) {
+            co_return refused("store_unavailable", "no repository store is configured");
+        }
+        for (const auto& release : records.releases) {
+            const auto verified = co_await blocking_call(
+                [&] { return verified_release(*context.sync_store, repository, release); },
+                [](std::string message) -> SyncStoreResult<bool> {
+                    return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
+                });
+            if (!verified) {
+                co_return refused(verified.error().code, verified.error().message);
+            }
+            if (*verified) {
+                records.verified_release_changes.push_back(
+                    string_member(release.value, "change_id"));
+            }
+        }
     }
     co_return Result(std::move(records));
 }
@@ -986,7 +1044,7 @@ evaluate_branch_protection(control::Store& store,
             }
         }
         if (rule.value.value("required_verification", false) &&
-            !verified_release(records.releases, update.new_head)) {
+            !std::ranges::contains(records.verified_release_changes, update.new_head)) {
             return std::unexpected(SyncStoreError{"conflict",
                                                   "branch protection rejects " + update.name +
                                                       ": verified build evidence is required",

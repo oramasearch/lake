@@ -10,6 +10,16 @@ across sessions. A session identity limits the useful life of secret key materia
 running agent. The dispatcher identity records which trusted dispatcher requested the session;
 both identities remain visible in the stored record and signed audit trail.
 
+`dispatcher_taap_id` must exactly equal the authenticated caller's acting TAAP identity.
+The signing service refuses any other dispatcher, including operator calls whose acting identity
+is `admin`. Customer write access alone does not authorize attribution to another dispatcher.
+
+A customer administrator registers the durable identity through `issue_agent_certificate`.
+Minting requires an unrevoked, unexpired `agent` certificate whose customer and subject match
+`customer_id` and `durable_agent_taap_id`. A certificate belonging to another customer or another
+profile does not qualify. Existing agents without such a certificate cannot receive new session
+keys until an administrator issues one. These checks also apply to keys that never expire.
+
 ## Capabilities
 
 | Capability | Authorization | Input | Result |
@@ -22,6 +32,13 @@ before signature verification. A signature made with the session key is accepted
 TAAP purpose is `drip`, its signing key identifier is the session TAAP identity, and its Ed25519
 signature covers the supplied canonical body under the `TAAP/1 drip` domain. Callers apply the
 returned scopes to the drip operation they intend to perform.
+
+The session key has no identity document chain: Lake minted it and stored its public half, and that
+stored key is the binding. The check therefore uses `liquid::verify_key_signature` against the
+stored key, not `liquid::verify`, which since liquid#383 attributes a signature only through an
+identity chain and would report an unknown signer. The `delegation/1` attestation is signed by
+Lake's instance key, which is not a liquid identity chain either; mint checks its profile schema and
+its signature against that key the same way.
 
 The input and output binary values use unpadded base64url. The returned private value is the
 32-byte Ed25519 seed. It is deliberately absent from later reads, audit details, and the
@@ -60,13 +77,19 @@ subject is that session key. It uses liquid's current attenuation fields:
 | `may_publish` | `false`; Lake authorizes each operation from the retained scopes |
 | `may_lease` | `false`; Lake authorizes each operation from the retained scopes |
 | `depth_remaining` | `0`; the session cannot delegate again |
-| `dispatcher` | Dispatcher TAAP identity |
+| `dispatcher` | Authenticated caller's acting TAAP identity |
 
 Lake verifies the completed attestation with libliquid before returning it. The capability then
 appends it to the instance tiled transparency log and persists its entry index and resulting
 Merkle root. Persistence happens after append; if persistence fails, the capability returns no
 private seed. This can leave a harmless public delegation entry that no caller received a secret
 for, but it cannot create an unlogged usable session.
+
+Dispatcher and durable-agent registration checks run in `control::agents::Service::mint` before
+key generation or signing. The capability supplies the acting identity from its authenticated
+context, independently of the JSON request. Registration is checked at issuance against the
+customer's certificate records; revoking that certificate prevents subsequent mints. Existing
+session keys keep their own expiry and revocation lifecycle.
 
 The public `transparency_identity_scan` capability finds the delegation by dispatcher identity.
 Clients combine that public statement with the durable-to-session binding retained in the session
@@ -93,3 +116,12 @@ transparency scanning, a valid signed drip, a modified body, expiry, and the sig
 `PostgresAgentSessions.PersistsLoggedSessionAndDurableAttribution` runs the same flow through the
 production Postgres store. Keep the private seed response-only and preserve the append-before-
 persistence order when changing this contract.
+
+`AgentSessions.RefusesUnprovenDispatcherAndUnregisteredDurableAgent` and its Postgres twin refuse
+another dispatcher's identity, operator attribution, missing or foreign registration, a non-agent
+certificate, revocation and expiry at the issuance instant. They assert that refusals return no
+private key and append no delegation, exercise direct service calls and non-expiring keys, and
+allow minting after a new active certificate registers the identity. Run them with
+`ctest --test-dir build --timeout 600 -R 'AgentSessions' --output-on-failure`, with
+`LAKE_TEST_DB_URI` set for the Postgres cases. Keep the scoped lookup and both identity checks
+inside the signing service when changing the mint entry points.

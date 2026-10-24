@@ -9,7 +9,20 @@
 
 #include "lake/api/sync_store.hpp"
 
+namespace lake::control {
+struct Repository;
+}
+
 namespace lake::api {
+
+struct ApiContext;
+
+// Capture destinations for authorization under SyncStore's mutation lock. The context must
+// outlive the synchronous commit call; no repository reads are made by the callback.
+[[nodiscard]] RepositoryWriteAuthorizer
+repository_write_authorizer(const control::Repository& repository,
+                            const std::vector<RepositoryWriteOperation>& operations,
+                            ApiContext& context);
 
 struct DrivePreview {
     std::string format;

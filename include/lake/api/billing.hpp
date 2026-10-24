@@ -2,10 +2,11 @@
 
 // Billing (lake#564, decision 56, docs/api/billing.md): Orama Cloud's price list, the bill for a
 // month worked out from an account's metered usage, and the invoices lake issues. Lake is priced
-// by usage only (lake#635): one list rate per usage dimension, no plans, no fee, nothing included.
-// Billing records live in lake's control Postgres (migration 0073); usage stays in each workspace
-// Zetta and is read through usage_over_time. Off unless LAKE_BILLING turns it on: an enterprise
-// install has no billing capability, page or Docs guide, and keeps every usage capability.
+// by usage only (lake#635): list rates per usage dimension and class, no plans, no fee, nothing
+// included. Billing records live in lake's control Postgres (migration 0073); usage stays in each
+// workspace Zetta and is read through usage_over_time. Off unless LAKE_BILLING turns it on: an
+// enterprise install has no billing capability, page or Docs guide, and keeps every usage
+// capability.
 
 #include <chrono>
 #include <cstdint>
@@ -76,6 +77,8 @@ struct PaymentNotice {
     // The object is another app's or another Lake's in a shared Stripe account (lake#855): it is
     // acknowledged and nothing is recorded.
     bool foreign = false;
+    // A verified recurring order event, handled separately from usage invoices and Checkout.
+    std::optional<control::CloudOrderSubscriptionEvent> order_subscription;
 };
 
 // A subscription to pay for an order through the provider's hosted checkout (lake#831): one line,
@@ -294,7 +297,7 @@ std::optional<PriceList> price_list_for(const std::vector<PriceList>& lists,
 std::uint64_t billable_quantity(std::string_view unit, std::uint64_t quantity);
 
 // A month's measured usage: each dimension's total, and for a dimension with classes (GPU and GPU
-// memory) its total per class ("" for usage of no known class).
+// memory and model input/output) its total per class ("" for usage of no known class).
 struct UsageQuantities {
     std::map<std::string, std::uint64_t> totals;
     std::map<std::string, std::map<std::string, std::uint64_t>> by_class;

@@ -25,7 +25,7 @@ tick.
 |---|---|
 | any request whose `Host` is `LAKE_APEX_HOST`, apart from the stylesheet, fonts and probes | the region picker, before every other route, inside the order sheet (lake#831); `POST` with `region` sets the `lake_region` preference cookie and redirects to the region's host with the same path and query ([`../api/regions.md`](../api/regions.md#the-apex-picker), lake#757) |
 | on `LAKE_APEX_HOST`: `GET /order/<offer>`, `GET /order/price-list`, `POST /order`, `GET /orders/<id>?token=…` | the order sheet's forms, the published price list, an order (recorded, then Stripe Checkout or the confirmation; 32 KiB, rate limited, honeypot), and an order's status by its signed link ([`../api/orders.md`](../api/orders.md#routes), lake#831) |
-| a browser's `GET` or `HEAD` of any other path (`Accept: text/html`) | the web app's `index.html` (`no-cache`, `Content-Security-Policy: frame-ancestors 'self'`): `/`, `/repositories`, `/w/<workspace_id>/design/projects` and every other page are the app's ([`../ui/web-app.md`](../ui/web-app.md)); the same path asked for by anything else is the 404 |
+| a browser's `GET` or `HEAD` of any other path (`Accept: text/html`) | the web app's `index.html` (`no-cache`, `Content-Security-Policy: frame-ancestors 'self'; img-src 'self' data:`, [images](#images)): `/`, `/repositories`, `/w/<workspace_id>/design/projects` and every other page are the app's ([`../ui/web-app.md`](../ui/web-app.md)); the same path asked for by anything else is the 404 |
 | `GET /ui/<file>` | the app's content-hashed files (`public, max-age=31536000, immutable`) |
 | `GET /style-<hash>.css`, `GET /fonts/<IBM Plex face>-<hash>.woff2` | content-hashed design-system assets (`public, max-age=31536000, immutable`) linked by the hosted application pages |
 | `GET /style.css`, `GET /fonts/<IBM Plex face>.woff2` | compatibility aliases for direct and older links (`no-cache`) |
@@ -36,7 +36,7 @@ tick.
 | `POST /logout` | revokes the session, clears the cookie and redirects to `/` (to `/sign-in?signed_out=1` under Clerk) |
 | `POST /billing/stripe/webhook` | Stripe's payment notices (lake#620, [billing.md](../api/billing.md#webhooks)): no lake credential, the `Stripe-Signature` HMAC with a five-minute window is checked against the webhook secret in lake's secret store; each event applied once by id and audited centrally; `404` where the lake does not bill or has no Stripe keys |
 | `POST /identity/clerk-session` | exchanges a Clerk session token for the `lake_session` cookie ([`../api/clerk.md`](../api/clerk.md)) |
-| `POST /identity/clerk-webhook` | Clerk's user events through Svix (lake#765, [`../api/clerk.md`](../api/clerk.md#webhooks)): no lake credential, the `svix-signature` HMAC-SHA256 with `LAKE_CLERK_WEBHOOK_SECRET` and a five-minute `svix-timestamp` window; each `svix-id` applied once; `user.created`, `user.updated`, `user.deleted` audited centrally; `401` for a refused signature, `503` when the store fails (Clerk retries), `404` without the secret |
+| `POST /identity/clerk-webhook` | Clerk's user events through Svix (lake#765, [`../api/clerk.md`](../api/clerk.md#webhooks)): no lake credential, the `svix-signature` HMAC-SHA256 with `LAKE_CLERK_WEBHOOK_SECRET` and a five-minute `svix-timestamp` window; each `svix-id` applied once; `user.created`, `user.updated`, `user.deleted`, `session.revoked`, `session.removed`, `session.ended` audited centrally; session events revoke all linked-account credentials, ordered bans/locks suspend access and a newer unban/unlock allows new sign-ins (lake#948); `401` for a refused signature, `503` when the store fails (Clerk retries), `404` without the secret |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity; sets the cookie and redirects |
 | `GET /v1/saml/<provider id>/metadata`, `GET /v1/saml/<provider id>/start`, `POST /v1/saml/<provider id>/acs` | SAML sign-in ([`../api/sso.md#saml-sign-in`](../api/sso.md#saml-sign-in), lake#836), no credential: Lake's SP metadata (its URL is the entity id); a one-use AuthnRequest and a redirect to the IdP; the Assertion Consumer Service, which verifies the form's `SAMLResponse`, sets the cookie and redirects. The ACS is exempt from the cross-site check below |
 | `GET /file/raw`, `/file/download`, `/drive/download`, `/exports/download`, `/share/<token>/download` | the bytes of a repository file, a Drive file, a signed export or a shared file; without a credential a protected download redirects to `/sign-in` |
@@ -211,9 +211,48 @@ handlers. Lake therefore sets that parser ceiling to the larger of 64 MiB and
 | Route class | Effective limit and handling |
 |---|---|
 | OCI blob upload `PATCH` and final `PUT`, for every supported repository-name shape | `LAKE_MAX_REGISTRY_BLOB_BYTES` for the completed upload, 4 GiB by default. Incoming buffers append directly to the upload file. `Content-Range` must begin at the stored offset and cover the bytes received. |
-| REST capability JSON and MCP JSON-RPC | 64 MiB. JSON sinks count bytes before parsing; oversized capability input returns HTTP 413 with `size_invalid` and the byte limit. |
+| REST capability JSON | `Capability::max_body_bytes`, 1 MiB by default; registered bulk inputs allow up to 64 MiB only with an accepted credential. The registry's credential gate runs before the body is read. |
+| MCP JSON-RPC | Anonymous or rejected credentials: 256 KiB for the entire envelope. Accepted credentials: the registered tool's body limit, at most 64 MiB. Discovery and public identity tools remain anonymous within the small budget. |
 | Forms and other string bodies | 64 MiB. The common string reader counts bytes while receiving them. |
 | Liquid sync, model and dataset publication, drive uploads, packages, debug artifacts, SCIM and other specialized adapters | 64 MiB or a smaller route-specific bound. Their bounded buffers and parsers remain in force. |
+
+JSON admission (lake#944, LSR-083) resolves the bearer or browser session before reading input.
+Credentials are resolved again after transfer so a revocation or expiry during the upload is
+still enforced by the final registry gate.
+Protected REST calls without an accepted credential answer 401 and `WWW-Authenticate` before
+reading a body, including malformed input and a declared 2 MiB body. Application-pool sessions
+retain their existing restrictions. Public identity capabilities such as `sign_in_password`
+allow at most 1 MiB, even with an operator credential. A declared oversized body answers 413
+from its headers; chunked bodies count every received byte and stop at the same limit.
+
+The shared JSON reader builds one nlohmann document directly, with at most 64 nested containers
+and 65,536 elements (containers, object keys and scalar values, including duplicate keys). It
+aborts parsing when either structure limit is reached. Byte and structure failures answer 413
+on REST and MCP; malformed JSON answers 400. REST capability refusals are audited without body
+contents.
+The hosted passkey and SCIM JSON adapters use this reader with the 1 MiB default as well.
+
+Larger registered inputs are audio/transcripts, repository and drive file uploads, model gateway
+requests, generic workspace calls, and the engine's dataset, model, workflow and agent-source
+imports. The workspace Zetta proxy and model gateway also apply the credential gate before
+reading input. All URL-prefixed forms use the same handlers and limits.
+
+MCP must read its envelope to learn the tool name. Lake resolves credentials first and reads
+anonymous envelopes incrementally within 256 KiB, then applies the registry's capability gate.
+Authenticated envelopes are bounded by the largest registered input while receiving, then by
+the selected tool's limit before dispatch. The limit counts the whole wire envelope, including
+whitespace and unknown fields; exported tools and other MCP methods keep the 1 MiB default.
+The depth and element caps apply during the single parse, before dispatch on every path.
+
+To change an allowance, set `max_body_bytes` beside the capability registration, retain the
+anonymous ceilings and update its API contract. `HttpServer.CapabilityAdmissionPrecedesTheBody`
+proves 413/401 responses with a declared 2 MiB body and no body bytes sent, for both URL forms,
+missing/rejected credentials, MCP and the alternate authenticated adapters.
+`JsonStructureLimitsApplyToRestAndMcp`, `ChunkedJsonCannotBypassBodyBudgets` and
+`McpAnonymousBudgetPreservesDiscoveryAndBulkInputsRequireCredentials` cover structural limits,
+chunked transfer, duplicate keys, anonymous discovery, the allowed nesting boundary and bulk
+allowances. Run these through `ctest --test-dir build -R 'HttpServer.*(Admission|Json|Budget)'
+--timeout 600 --output-on-failure`, then run the full suite.
 
 OCI limit failures return HTTP 413 with `BLOB_UPLOAD_INVALID` and the configured byte count.
 Transport and storage failures distinguish reading the request from appending the upload. A failed
@@ -360,6 +399,31 @@ path;
 `ctest --test-dir build`. The focused idle-close proof is
 `ctest --test-dir build -R HttpServer.IdleKeepAliveCloseWritesNothingToStderr --output-on-failure`.
 
+## Images
+
+Every HTML page lake answers (the web app, the hosted application pages, the region picker) carries
+`Content-Security-Policy: frame-ancestors 'self'; img-src 'self' data:` (`send_text`). Only lake
+frames its pages, and the browser loads images only from lake's own origin and `data:` URLs (the
+Drive image previews). With Clerk on, the web app's pages add `https://img.clerk.com`, the host
+Clerk's sign-in form shows its logos and provider icons from.
+
+Why (lake#943, LSR-082): an agent's reply is Markdown, and an agent may have read untrusted content
+(a document, a dataset row, an MCP tool's result) that tells it to name an image at an address
+carrying workspace data. A browser that loaded that image would send the data to the address's
+server without anyone clicking. The console's Markdown never loads an image at all; it shows
+`Image: <alt>` with the address in the tooltip ([web app](../ui/web-app.md#markdown)). The policy is
+the second line: no page lake serves can load an image from another origin, whatever renders it.
+
+Verify: `ctest --test-dir build -R 'WebAppHttp.BrowsersGetTheApp|HttpServer.ClerkExchange'`, which read
+the header on the web app's pages, the hosted application pages and the Clerk variant; and
+`npm test` in `frontend/` (`tests/markdown-images.test.ts`). By hand:
+`curl -sI -H 'Accept: text/html' http://127.0.0.1:4900/ | grep -i content-security-policy`.
+
+Change it here and in the tests together. An image host is added only for a page that needs it,
+never for every page; a host that fetches arbitrary addresses for its callers (an image proxy)
+reopens the leak, so any such host is a known weakness to record here. `img.clerk.com` is Clerk's
+image service and is allowed only where Clerk's sign-in is mounted.
+
 ## Cross-site requests
 
 **What.** An unsafe request (`POST`, `PUT`, `PATCH`, `DELETE`) that the browser session
@@ -431,3 +495,5 @@ to REST and MCP. See [sharing](../api/sharing.md).
 A protected download without a credential redirects to `/sign-in`. The explicit operator entry
 stays at `/login` (a web app page) with `POST /session` retaining its existing operator credential
 contract. See [the front-door contract](../ui/front-door.md).
+
+Password, MFA and recovery calls share [authentication attempt limits](../api/identity.md#authentication-attempt-limits) across REST, hosted forms and MCP (lake#966). Client admission reuses the trusted ingress address from `order_client_address`; account admission reserves capacity in the store before credential work.

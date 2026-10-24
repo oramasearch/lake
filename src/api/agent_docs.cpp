@@ -522,7 +522,7 @@ std::vector<Group> tool_groups(const Registry& registry) {
                                 capability->title,
                                 capability->description,
                                 writes(*capability),
-                                capability->requires_auth});
+                                capability->requires_auth || capability->requires_credential});
     }
     std::erase_if(groups, [](const Group& group) { return group.tools.empty(); });
     return groups;

@@ -795,7 +795,8 @@ liquid::runtime::task<StoreOpened> open_store(ApiContext& context,
             co_return refuse("invalid_input", "the store names no repository");
         }
         co_return StoreOpened{
-            repository_store_contents(context.sync_store, customer_id, found->repository_id),
+            repository_store_contents(
+                context.sync_store, customer_id, found->repository_id, "main", context),
             std::nullopt};
     }
     if (!context.store_browser) {
@@ -1361,8 +1362,12 @@ liquid::runtime::task<ApiResult> create_drive(const json& input, ApiContext& con
                 [store, customer_id, repository_id] {
                     std::vector<RepositoryWriteOperation> operations{
                         {.kind = RepositoryWriteKind::Folder, .path = ""}};
-                    return store->commit_repository_files(
-                        customer_id, repository_id, "main", "Create drive", std::move(operations));
+                    return store->commit_repository_files(customer_id,
+                                                          repository_id,
+                                                          "main",
+                                                          "Create drive",
+                                                          std::move(operations),
+                                                          {});
                 },
                 [](std::string message) -> SyncStoreResult<std::string> {
                     return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
@@ -2965,13 +2970,15 @@ void register_drives_capabilities(Registry& registry) {
                             std::string description,
                             json input,
                             json output,
-                            AsyncCapabilityHandler handler) {
+                            AsyncCapabilityHandler handler,
+                            std::size_t body_limit = default_capability_body_bytes) {
         registry.add(Capability{.name = std::move(name),
                                 .title = std::move(title),
                                 .description = std::move(description),
                                 .input_schema = std::move(input),
                                 .output_schema = std::move(output),
                                 .kind = CapabilityKind::Action,
+                                .max_body_bytes = body_limit,
                                 .object = "customer",
                                 .action = "write",
                                 .resolve_object = customer_object,
@@ -3175,7 +3182,8 @@ void register_drives_capabilities(Registry& registry) {
                       {"complete", {{"type", "boolean"}}},
                       {"size", {{"type", "integer"}}}},
                      json::array({"received", "complete", "size"})),
-           append_drive_upload);
+           append_drive_upload,
+           maximum_capability_body_bytes);
     action(
         "finish_drive_upload",
         "Finish an upload",
@@ -3208,7 +3216,8 @@ void register_drives_capabilities(Registry& registry) {
                json::array({"drive_id", "files"})),
            object_of({{"items", {{"type", "array"}, {"items", entry_schema()}}}},
                      json::array({"items"})),
-           upload_drive_entries);
+           upload_drive_entries,
+           maximum_capability_body_bytes);
     read("read_drive_file",
          "Read a Workspace File",
          "A workspace file's (or a store drive file's) bytes as base64: the whole file, or "

@@ -49,6 +49,12 @@ call_workspace(ApiContext& context,
                std::string capability,
                bool read,
                nlohmann::json input) {
+    if (capability == "save_graph") {
+        if (std::string problem = pipeline::check_size(input); !problem.empty()) {
+            co_return control::ZettaControlResult<nlohmann::json>(
+                std::unexpected(control::ZettaControlError{"invalid_input", std::move(problem)}));
+        }
+    }
     const auto timing = context.workspace_call_timing;
     const std::size_t round = timing
         ? timing->completed_rounds.load(std::memory_order_relaxed) + 1 : 0;
@@ -224,7 +230,7 @@ using nlohmann::json;
 // The Zetta capabilities lake's pages may call on a customer's workspace (docs/api/workspaces.md).
 // Reads need `read` on the customer, actions `write`. Anything else is refused, so a lake caller
 // can never reach Zetta's administrative surface (sql, users, cloud provisioning) through lake.
-constexpr std::array<std::string_view, 48> workspace_reads = {"server_info",
+constexpr std::array<std::string_view, 49> workspace_reads = {"server_info",
                                                               "get_run_metrics",
                                                               "compare_runs",
                                                               "get_study",
@@ -254,6 +260,9 @@ constexpr std::array<std::string_view, 48> workspace_reads = {"server_info",
                                                               "get_trace",
                                                               "list_traces",
                                                               "list_source_tables",
+                                                              // A database's safe mode
+                                                              // (lake#906).
+                                                              "get_safe_mode",
                                                               "list_dataset_generators",
                                                               "list_agents",
                                                               "get_agent",
@@ -288,7 +297,7 @@ constexpr std::array<std::string_view, 48> workspace_reads = {"server_info",
                                                               "list_ledger",
                                                               "get_monitor",
                                                               "get_roi_readout"};
-constexpr std::array<std::string_view, 45> workspace_actions = {"create_project",
+constexpr std::array<std::string_view, 46> workspace_actions = {"create_project",
                                                                 "create_study",
                                                                 "stop_study",
                                                                 "stop_trial",
@@ -306,6 +315,7 @@ constexpr std::array<std::string_view, 45> workspace_actions = {"create_project"
                                                                 "run",
                                                                 "create_connection",
                                                                 "delete_connection",
+                                                                "set_safe_mode",
                                                                 "create_dataset_from_query",
                                                                 "upload_dataset",
                                                                 "delete_project",
@@ -812,6 +822,12 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
         // Name the inner capability in the audit event before any refusal, so a person's
         // activity says what a refused workspace call tried to do (lake#445).
         set_audit(context, read ? "workspace.query" : "workspace.act", input, capability);
+        // A call repeated after a safe mode warning says so in the audit (lake#906); the
+        // workspace Zetta audits the confirmed statements themselves.
+        if (const json inner = input.value("input", json::object());
+            inner.is_object() && inner.value("safe_mode_confirmation", json()).is_string()) {
+            context.audit_details["safe_mode_confirmed"] = true;
+        }
         if (read ? !workspace_read_allowed(capability)
                  : !workspace_action_allowed(capability)) {
             co_return ApiResult::failure("invalid_input",
@@ -1158,6 +1174,7 @@ void register_workspace_call(Registry& registry, bool read) {
             json::array({"capability"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
+        .max_body_bytes = maximum_capability_body_bytes,
         .object = "customer",
         .action = read ? "read" : "write",
         .resolve_object = customer_object,
@@ -2110,6 +2127,7 @@ void register_pipeline_capabilities(Registry& registry) {
                                                {"value", json::object()},
                                                {"edits",
                                                 {{"type", "array"},
+                                                 {"maxItems", pipeline::maximum_edits},
                                                  {"items", {{"type", "object"}}}}}},
                                               json::array({"project", "graph"})),
         .output_schema = {{"type", "object"}},
@@ -2135,28 +2153,44 @@ void register_pipeline_capabilities(Registry& registry) {
             if (!*read) {
                 co_return ApiResult::failure((*read).error().code, (*read).error().message);
             }
-            auto current = pipeline::from_json(**read);
-            if (!current) {
-                co_return ApiResult::failure("store_error", current.error());
+            // Own the graph and edits in the pool task: parsing, validation and serialization
+            // must not hold the HTTP executor, including when a stored graph exceeds our budget.
+            auto prepared = co_await blocking_call(
+                [value = std::move(**read), input, project, graph]() -> ApiResult {
+                    auto current = pipeline::from_json(value);
+                    if (!current) {
+                        return ApiResult::failure("invalid_input", current.error());
+                    }
+                    const std::size_t before = current->steps.size();
+                    const json edits = input.value("edits", json());
+                    if (edits.is_null() && !input.contains("op")) {
+                        return ApiResult::failure(
+                            "invalid_input", "give an op or a list of edits", "/op");
+                    }
+                    auto edited = edits.is_null()
+                                      ? pipeline::apply(*current, pipeline::edit_from_json(input))
+                                      : pipeline::apply_all(*current, edits);
+                    if (!edited) {
+                        return ApiResult::failure("invalid_input", edited.error());
+                    }
+                    json save{{"project", project},
+                              {"graph", current->graph_id.empty() ? graph : current->graph_id},
+                              {"nodes", pipeline::steps_json(*edited)},
+                              {"edges", pipeline::edges_json(*edited)}};
+                    if (edited->name != current->name) {
+                        save["new_name"] = edited->name;
+                    }
+                    json result{{"save", std::move(save)}, {"name", edited->name}};
+                    if (edited->steps.size() > before) {
+                        result["step"] = edited->steps.back().id;
+                    }
+                    return ApiResult::success(std::move(result));
+                },
+                [](const std::string& message) { return ApiResult::failure("busy", message); });
+            if (!prepared.ok) {
+                co_return prepared;
             }
-            const std::size_t before = current->steps.size();
-            const json edits = input.value("edits", json());
-            if (edits.is_null() && !input.contains("op")) {
-                co_return ApiResult::failure("invalid_input", "give an op or a list of edits", "/op");
-            }
-            auto edited = edits.is_null()
-                              ? pipeline::apply(*current, pipeline::edit_from_json(input))
-                              : pipeline::apply_all(*current, edits);
-            if (!edited) {
-                co_return ApiResult::failure("invalid_input", edited.error());
-            }
-            json save{{"project", project},
-                      {"graph", current->graph_id.empty() ? graph : current->graph_id},
-                      {"nodes", pipeline::steps_json(*edited)},
-                      {"edges", pipeline::edges_json(*edited)}};
-            if (edited->name != current->name) {
-                save["new_name"] = edited->name;
-            }
+            json save = std::move(prepared.value["save"]);
             auto saved =
                 co_await call_workspace(context, customer, "save_graph", false, std::move(save));
             if (!saved) {
@@ -2166,9 +2200,9 @@ void register_pipeline_capabilities(Registry& registry) {
                 co_return ApiResult::failure((*saved).error().code, (*saved).error().message);
             }
             json value = **saved;
-            value["name"] = edited->name;
-            if (edited->steps.size() > before) {
-                value["step"] = edited->steps.back().id;
+            value["name"] = std::move(prepared.value["name"]);
+            if (prepared.value.contains("step")) {
+                value["step"] = std::move(prepared.value["step"]);
             }
             co_return ApiResult::success(std::move(value));
         }});
@@ -3130,10 +3164,15 @@ void register_sql_capability(Registry& registry) {
                        "the table's columns, and a parse error gives the position where it "
                        "stopped. list_datasets (through workspace_query) names the tables. "
                        "Anything but a read is refused; the workspace's administrative SQL is not "
-                       "reachable. A long statement can be sent as POST with a JSON body.",
-        .input_schema = customer_input_schema(
-            {{"statement", {{"type", "string"}}}, {"database", {{"type", "string"}}}},
-            json::array({"statement"})),
+                       "reachable. A long statement can be sent as POST with a JSON body. When "
+                       "the database's safe mode warns (Warn All warns on every read), the call "
+                       "answers safe_mode_warning with the statement and a confirmation; the same "
+                       "call with `safe_mode_confirmation` runs it.",
+        .input_schema =
+            customer_input_schema({{"statement", {{"type", "string"}}},
+                                   {"database", {{"type", "string"}}},
+                                   {"safe_mode_confirmation", safe_mode_confirmation_schema()}},
+                                  json::array({"statement"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
         // A statement of any length travels as a JSON body (lake#594), as the engine's own sql
@@ -3157,6 +3196,12 @@ void register_sql_capability(Registry& registry) {
             if (const std::string database = input.value("database", std::string());
                 !database.empty()) {
                 query["database"] = database;
+            }
+            if (const std::string confirmation =
+                    input.value("safe_mode_confirmation", std::string());
+                !confirmation.empty()) {
+                query["safe_mode_confirmation"] = confirmation;
+                context.audit_details["safe_mode_confirmed"] = true;
             }
             co_return take(co_await zetta(context, input.at("customer_id"), "sql", true, query));
         }});
@@ -4310,6 +4355,16 @@ settle_solution(ApiContext& context, control::AgentTask task, json edits) {
     co_return created;
 }
 
+namespace {
+
+// Defined with the conversation capabilities below; get_ask_conversation answers it (lake#942).
+json ask_proposal_calls(const ApiContext& context,
+                        const json& payload,
+                        const std::string& customer_id,
+                        const std::string& workspace_id);
+
+} // namespace
+
 void register_agent_flow_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "start_solution",
@@ -4820,11 +4875,20 @@ void register_agent_flow_capabilities(Registry& registry) {
             }
             json out = json::array();
             for (const control::AskMessage& message : *messages) {
-                out.push_back({{"id", message.id},
-                               {"role", message.role},
-                               {"content", message.content},
-                               {"payload", message.payload},
-                               {"created_at", message.created_at}});
+                json item{{"id", message.id},
+                          {"role", message.role},
+                          {"content", message.content},
+                          {"payload", message.payload},
+                          {"created_at", message.created_at}};
+                // Lake's own statement of what each proposal runs, beside the model's payload.
+                if (message.payload.is_object() &&
+                    message.payload.value("proposals", json()).is_array()) {
+                    item["proposal_calls"] = ask_proposal_calls(context,
+                                                                message.payload,
+                                                                input.at("customer_id"),
+                                                                input.at("workspace_id"));
+                }
+                out.push_back(std::move(item));
             }
             co_return ApiResult::success({{"messages", std::move(out)}});
         }});
@@ -5013,6 +5077,63 @@ std::string field_description(const Capability* target, const std::string& field
     }
     const std::string description = text_of(*schema, "description");
     return description.substr(0, description.find(" ("));
+}
+
+// The call a stored Ask Orama proposal makes when the person confirms it (lake#942): the
+// capability as Lake's registry titles it and the exact input confirm_ask_proposal runs, after
+// proposal_input fills the conversation's account and workspace and canonical_input renames
+// deprecated fields, as Registry::call would. `fields` is that input field by field with the
+// schema's own description; `input_sha256` binds the capability and input, and confirm runs only
+// the call whose digest the person sends back. The model's `impact` is never part of it. Empty
+// when Lake cannot say what would run: no such capability, or input that is not an object or that
+// canonical_input refuses. Such a proposal cannot be confirmed.
+std::optional<json> proposal_call(const ApiContext& context,
+                                  const json& proposal,
+                                  const std::string& customer_id,
+                                  const std::string& workspace_id) {
+    const std::string capability = text_of(proposal, "capability");
+    const auto target = !capability.empty() && context.registry != nullptr
+                            ? context.registry->find(capability)
+                            : nullptr;
+    if (!target) {
+        return std::nullopt;
+    }
+    const json proposed = proposal_input(target.get(), proposal, customer_id, workspace_id);
+    if (!proposed.is_object()) {
+        return std::nullopt;
+    }
+    auto canonical = canonical_input(*target, proposed);
+    if (!canonical) {
+        return std::nullopt;
+    }
+    json fields = json::array();
+    for (const auto& [name, value] : canonical->items()) {
+        fields.push_back({{"name", name},
+                          {"description", field_description(target.get(), name)},
+                          {"value", value}});
+    }
+    const std::string digest = control::identity_crypto::sha256_hex(
+        json{{"capability", capability}, {"input", *canonical}}.dump());
+    return json{{"capability", capability},
+                {"title", target->title},
+                {"kind", std::string(to_string(target->kind))},
+                {"input", std::move(*canonical)},
+                {"fields", std::move(fields)},
+                {"input_sha256", digest}};
+}
+
+// One entry per proposal of a stored answer's payload, in order: its proposal_call, or null when
+// it has none.
+json ask_proposal_calls(const ApiContext& context,
+                        const json& payload,
+                        const std::string& customer_id,
+                        const std::string& workspace_id) {
+    json calls = json::array();
+    for (const json& proposal : payload.value("proposals", json::array())) {
+        const auto call = proposal_call(context, proposal, customer_id, workspace_id);
+        calls.push_back(call ? *call : json());
+    }
+    return calls;
 }
 
 // Every required top-level field `input` leaves out, in the schema's order, by the rule
@@ -5382,12 +5503,30 @@ liquid::runtime::task<ApiResult> confirm_ask_proposal(const json& input, ApiCont
             "not_found", "That proposal is not in this conversation.", "/message_id");
     }
     const std::string capability = proposal.value("capability", std::string());
-    context.audit_details = {
-        {"ask_confirm", true}, {"conversation_id", conversation_id}, {"capability", capability}};
+    // Only the exact call the person was shown runs (lake#942): the capability and input Lake
+    // derived from the stored proposal, named by the digest get_ask_conversation answered with it,
+    // never the model's `impact`. A proposal Lake cannot state as a call cannot be confirmed.
+    const auto call = proposal_call(context, proposal, customer_id, workspace_id);
+    if (!call) {
+        co_return ApiResult::failure("invalid_input",
+                                     "Lake cannot show exactly what this proposal runs, so it "
+                                     "cannot be confirmed. Ask Orama again.",
+                                     "/index");
+    }
+    if (input.at("input_sha256") != call->at("input_sha256")) {
+        co_return ApiResult::failure(
+            "conflict",
+            "This is not the call you were shown; read the conversation again and review it.",
+            "/input_sha256");
+    }
+    context.audit_details = {{"ask_confirm", true},
+                             {"conversation_id", conversation_id},
+                             {"capability", capability},
+                             {"input_sha256", call->at("input_sha256")}};
     // A proposal runs in the conversation's account and workspace when its input names none (an
-    // MCP connection's call_mcp_tool from Ask Orama, lake#652).
-    const auto target = context.registry != nullptr ? context.registry->find(capability) : nullptr;
-    const json proposed = proposal_input(target.get(), proposal, customer_id, workspace_id);
+    // MCP connection's call_mcp_tool from Ask Orama, lake#652); proposal_call filled them.
+    const auto target = context.registry->find(capability);
+    const json& proposed = call->at("input");
     const ApiResult done = called(co_await call_capability(context, capability, proposed));
     context.audit_details["ok"] = done.ok;
     // Input the capability refused is said plainly, naming what is missing (lake#794). The stored
@@ -5398,9 +5537,7 @@ liquid::runtime::task<ApiResult> confirm_ask_proposal(const json& input, ApiCont
     std::string why;
     if (!done.ok) {
         if (done.error.code == "invalid_input" && !done.error.path.empty()) {
-            const json checked =
-                target ? canonical_input(*target, proposed).value_or(proposed) : proposed;
-            why = proposal_problem_text(target.get(), capability, done.error, checked);
+            why = proposal_problem_text(target.get(), capability, done.error, proposed);
         } else {
             why = done.error.message;
             if (!why.empty() && why.back() != '.') {
@@ -5571,7 +5708,7 @@ liquid::runtime::task<ApiResult> render_pipeline(const json& input, ApiContext& 
     const std::string workspace_id = input.at("workspace_id");
     const std::string project = input.at("project");
     const std::string graph_name = input.at("graph");
-    const ApiResult read = called(
+    ApiResult read = called(
         co_await call_capability(context,
                                  "workspace_query",
                                  {{"customer_id", customer_id},
@@ -5580,7 +5717,12 @@ liquid::runtime::task<ApiResult> render_pipeline(const json& input, ApiContext& 
     if (!read.ok) {
         co_return read;
     }
-    const auto graph = pipeline::from_json(read.value);
+    auto parsed = co_await run_blocking(
+        [value = std::move(read.value)] { return pipeline::from_json(value); });
+    if (!parsed) {
+        co_return ApiResult::failure("busy", parsed.error().message);
+    }
+    auto graph = std::move(*parsed);
     if (!graph) {
         co_return ApiResult::failure("invalid_input",
                                      "the pipeline cannot be drawn: " + graph.error());
@@ -5594,7 +5736,7 @@ liquid::runtime::task<ApiResult> render_pipeline(const json& input, ApiContext& 
         json latest;
         for (const json& run : runs.value.value("runs", json::array())) {
             const std::string of = run.value("graph", std::string());
-            if ((of == graph_name || of == read.value.value("graph_id", std::string())) &&
+            if ((of == graph_name || of == graph->graph_id) &&
                 (!latest.is_object() ||
                  run.value("created", std::string()) >= latest.value("created", std::string()))) {
                 latest = run;
@@ -5613,8 +5755,15 @@ liquid::runtime::task<ApiResult> render_pipeline(const json& input, ApiContext& 
                              "/design/pipeline?customer_id=" + oauth_url_encode(customer_id) +
                              "&project=" + oauth_url_encode(project) +
                              "&graph=" + oauth_url_encode(graph->name) + "&step=";
-    co_return ApiResult::success(
-        {{"svg", pipeline::render_svg(*graph, status, input.value("step", std::string()), base)}});
+    co_return co_await blocking_call(
+        [graph = std::move(*graph),
+         status = std::move(status),
+         selected = input.value("step", std::string()),
+         base] {
+            return ApiResult::success(
+                {{"svg", pipeline::render_svg(graph, status, selected, base)}});
+        },
+        [](const std::string& message) { return ApiResult::failure("busy", message); });
 }
 
 } // namespace
@@ -5683,14 +5832,22 @@ void register_conversation_capabilities(Registry& registry) {
         .title = "Confirm an Ask Orama proposal",
         .description =
             "Run proposal `index` of the Ask Orama message `message_id` in your conversation, as "
-            "you: only a proposal Lake stored there can be run. The outcome is stored in the "
-            "conversation (`message_id` is that outcome message) and answered with `ok`; a "
-            "capability that refused is `ok: false` with its `error`.",
-        .input_schema =
-            customer_input_schema({{"conversation_id", {{"type", "string"}}},
-                                   {"message_id", {{"type", "string"}}},
-                                   {"index", {{"type", "integer"}, {"minimum", 0}}}},
-                                  json::array({"conversation_id", "message_id", "index"})),
+            "you: only a proposal Lake stored there can be run, and only as the exact call "
+            "get_ask_conversation answered for it in `proposal_calls` (capability and input), "
+            "named by its `input_sha256`; another digest is refused with `conflict` and nothing "
+            "runs. The outcome is stored in the conversation (`message_id` is that outcome "
+            "message) and answered with `ok`; a capability that refused is `ok: false` with its "
+            "`error`.",
+        .input_schema = customer_input_schema(
+            {{"conversation_id", {{"type", "string"}}},
+             {"message_id", {{"type", "string"}}},
+             {"index", {{"type", "integer"}, {"minimum", 0}}},
+             {"input_sha256",
+              {{"type", "string"},
+               {"description",
+                "the input_sha256 of the proposal's entry in get_ask_conversation's "
+                "proposal_calls: the exact call you reviewed"}}}},
+            json::array({"conversation_id", "message_id", "index", "input_sha256"})),
         .output_schema = {{"type", "object"},
                           {"properties",
                            {{"ok", {{"type", "boolean"}}},
@@ -7102,10 +7259,29 @@ engine_input_enum(const json& openapi, std::string_view capability, std::string_
     return std::nullopt;
 }
 
+json safe_mode_confirmation_schema() {
+    return {{"type", "string"},
+            {"minLength", 1},
+            {"description",
+             "the `confirmation` a safe_mode_warning answered: repeat the same call with it to run "
+             "the statements the warning showed"}};
+}
+
 ApiResult workspace_failure(const control::ZettaControlError& error,
                             const json& input,
                             std::string_view prefix,
                             const std::map<std::string, std::string>& renamed) {
+    // The database's safe mode warned (lake#906): the refusal reaches the caller unchanged, its
+    // details included, so a person sees the statements and can repeat the call with
+    // `safe_mode_confirmation`. No field is at fault.
+    if (error.code == "safe_mode_warning") {
+        ApiResult warned = ApiResult::failure(
+            error.code,
+            error.message.empty() ? "the database's safe mode asks to confirm this call first"
+                                  : error.message);
+        warned.error.details = error.details.is_object() ? error.details : json::object();
+        return warned;
+    }
     std::string message = engine_words_in_lake_terms(error.message);
     std::string field;
     // The engine's schema check leads with a pointer: "/format: instance not found in required

@@ -212,7 +212,10 @@ Outcome receive(ApiContext& context,
                {{"svix_id", delivery.id}, {"reason", "the body is not a Clerk event"}});
         return answer(400, {{"error", "invalid_input"}, {"message", "not a Clerk event"}});
     }
-    const std::string type = event.value("type", "");
+    if (!event.contains("type") || !event.at("type").is_string()) {
+        return answer(400, {{"error", "invalid_input"}, {"message", "an event type is required"}});
+    }
+    const std::string type = event.at("type").get<std::string>();
     const nlohmann::json& data = event.at("data");
     const std::string subject =
         data.contains("id") && data.at("id").is_string() ? data.at("id").get<std::string>() : "";
@@ -239,6 +242,51 @@ Outcome receive(ApiContext& context,
         return answer(200, std::move(body));
     };
 
+    if (type == "session.revoked" || type == "session.ended" || type == "session.removed") {
+        if (!data.contains("user_id") || !data.at("user_id").is_string() || subject.empty()) {
+            return answer(
+                400,
+                {{"error", "invalid_input"}, {"message", "a session id and user id are required"}});
+        }
+        const auto at = event.value("timestamp", nlohmann::json());
+        if (!at.is_number_integer() || at.get<std::int64_t>() < 0) {
+            return answer(
+                400,
+                {{"error", "invalid_input"}, {"message", "a session event timestamp is required"}});
+        }
+        const auto revoked = context.store->revoke_clerk_sessions(
+            data.at("user_id").get<std::string>(), at.get<std::int64_t>());
+        if (!revoked)
+            return store_failure(revoked.error());
+        details["clerk_session"] = subject;
+        details["clerk_user"] = data.at("user_id");
+        return done("", {{"revoked", true}});
+    }
+    if (type == "user.created" || type == "user.updated" || type == "user.deleted") {
+        const bool deleted = type == "user.deleted";
+        const auto at = data.contains("updated_at") ? data.at("updated_at")
+                                                    : event.value("timestamp", nlohmann::json());
+        if (!at.is_number_integer() || at.get<std::int64_t>() < 0 || subject.empty() ||
+            (!deleted &&
+             (!data.contains("banned") || !data.at("banned").is_boolean() ||
+              !data.contains("locked") || !data.at("locked").is_boolean() ||
+              (data.contains("deprovisioned") && !data.at("deprovisioned").is_boolean())))) {
+            return answer(
+                400,
+                {{"error", "invalid_input"},
+                 {"message",
+                  "a user state timestamp and boolean banned/locked fields are required"}});
+        }
+        const bool suspended = deleted || data.at("banned").get<bool>() ||
+                               data.at("locked").get<bool>() || data.value("deprovisioned", false);
+        const auto applied_state = context.store->apply_clerk_user_state(
+            {subject, at.get<std::int64_t>(), suspended, deleted});
+        if (!applied_state)
+            return store_failure(applied_state.error());
+        if (!*applied_state)
+            return done("", {{"stale", true}});
+        details["suspended"] = suspended;
+    }
     if (type == "user.created") {
         const auto minted = audit::mint_custodial_identity(
             audit::effective_instance_kek(*context.store, context.instance_kek));

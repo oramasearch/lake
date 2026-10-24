@@ -10,7 +10,8 @@ Orama design tokens, the same IBM Plex faces and the same component classes the 
 - **One app, served by lake.** CMake builds `frontend/` with npm and
   `tools/ui/embed-frontend.mjs` embeds `dist/` into the binary (`include/lake/api/web_app.hpp`).
   Lake answers every page route with `index.html` (`Cache-Control: no-cache`,
-  `Content-Security-Policy: frame-ancestors 'self'`) and serves the content-hashed files under
+  `Content-Security-Policy: frame-ancestors 'self'; img-src 'self' data:`,
+  [`../serving/http.md#images`](../serving/http.md#images)) and serves the content-hashed files under
   `/ui/` immutable for a year. No file is read at run time.
 - **It calls only lake's API.** Every read is `GET /v1/<capability>` and every change
   `POST /v1/<capability>`: the same capabilities, authorization and audit as REST and MCP
@@ -41,7 +42,7 @@ Orama design tokens, the same IBM Plex faces and the same component classes the 
 | `src/routes.tsx`, `src/routes/types.ts`, `src/routes/nav.ts` | The route registry. Each page group owns `src/pages/<group>/routes.ts`; `routes.tsx` joins them and holds the rail (`NAV`) in lake's order. `nav.ts` holds the rules that need no page code: the Home group (`HOME_NAV`) and which rail item a path makes current (`currentNavIn`), tested by `tests/home.test.ts`. |
 | `src/components/Shell.tsx` | The rail, top bar, breadcrumb, workspace picker, Go to (⌘K or `/`), theme switch, Ask Orama panel and account menu ([README.md](README.md#the-shell)). |
 | `src/components/WorkspaceGate.tsx` | The gate a Design, Train or Ship page shows while its workspace Zetta is not ready: why, Start, or the page. |
-| `src/lib/markdown.tsx` | Markdown with lake's heading anchors; raw HTML stays text. |
+| `src/lib/markdown.tsx` | Markdown with lake's heading anchors; raw HTML stays text and images are never loaded (`src/lib/markdownImages.ts`). |
 | `src/lib/phone.ts`, `src/lib/sheet.ts`, `src/lib/phoneSheet.ts`, `src/styles/phone.css` | Lake on a phone, ported from rev-os: recording formats, the keyboard, the counted page lock, `useIsPhone`, `usePhoneSheet`, touch targets and 16 px fields ([mobile-web.md](mobile-web.md)). |
 | `src/lib/dictation.ts`, `src/components/dictation/Dictate.tsx`, `src/components/phone/FromYourPhone.tsx` | The microphone (`useRecorder`, `DictateButton`, `RecordingBar`) sending to `transcribe`, and the help for bringing a recording from a phone. |
 | `src/lib/transcripts.ts`, `src/pages/transcripts/` | Data → Transcripts ([transcripts.md](transcripts.md)). |
@@ -120,7 +121,7 @@ the page is sent `Cache-Control: private, no-store`. Three more things keep late
   existing wording unless it was wrong.
 - **Confirmations name what happens** ("Delete the repository?"), never "Are you sure?".
 - **Markdown is rendered in the browser** with `react-markdown` and `remark-gfm`, never with raw
-  HTML.
+  HTML, and only through `Markdown` (`src/lib/markdown.tsx`); see [Markdown](#markdown).
 - **Live views poll or long-poll the capability** that the server page's script called; nothing
   refreshes the whole page.
 
@@ -247,3 +248,21 @@ not watched: Vite looks for its workspace root in parent folders, and `tsc` read
 `LAKE_FRONTEND_DOCKERFILE=<file>` checks against another Dockerfile; `tests/copied-reads.test.ts`
 proves it fails on the two stages that broke, before their COPY lines were added. The parsing is in
 `scripts/copied-paths.mjs`.
+
+## Markdown
+
+Every Markdown the console shows (agent replies in Ask Orama, the Experiments, Application and
+Agent Factory panels, the pipeline's questions, READMEs, issues, comments, releases, change
+messages and the Docs) goes through `Markdown` in `src/lib/markdown.tsx`. Raw HTML stays text, and
+an image is never loaded (lake#943, LSR-082): `![chart](https://…)` renders as the text
+`Image: chart`, in italics, with `Not loaded: <address>` as its tooltip, and the browser requests
+nothing. A reply an agent wrote after reading untrusted content could otherwise name an image at an
+address that carries workspace data, and the browser would send it the moment the reply showed. A
+linked image keeps its link. The page's `img-src` policy refuses other origins as well
+([`../serving/http.md#images`](../serving/http.md#images)).
+
+`frontend/tests/markdown-images.test.ts` renders replies with remote images (inline, reference,
+protocol-relative, linked, in a table, raw `<img>` and `<picture>`) and fails if any markup would
+fetch; it also fails if another file imports `react-markdown` or `Markdown` stops using
+`inertImages`. To show an image again, render it from lake's own origin through a capability, never
+by letting Markdown name an address.

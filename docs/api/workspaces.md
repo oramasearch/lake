@@ -29,7 +29,7 @@ from the immutable task row when the client omits it and rejects a supplied mism
 | Data | `/connections/connection?name=` | One connection: `list_source_tables` with columns, without pulling anything, and **Load into a dataset** (`create_dataset_from_query`, one read-only `SELECT`). `/train/data?browse=<connection>` redirects here |
 | Train | `/train/data` | A projected `workspace_sql` dataset list (`SELECT database, dataset FROM system.datasets`, annotated with `name`, `id` and `kind`; engine results grouped under *Results*, lake#447); **Pull a dataset** (`create_dataset_from_query` from one of the saved connections with one read-only `SELECT`), **Upload a file** (`upload_dataset`: one CSV or JSONL file of at most 16 MiB) |
 | Train | `/train/dataset?database=&name=` | `get_dataset` (id, partitions, copies, health, the loaded format (`format`, lake#594) labelled *Stored as*), its first 20 rows (`workspace_sql` with `LIMIT 20`, which the workspace pushes to its partitions, zetta#1021), its columns in the loaded file's order with each one's type and empty share over the whole dataset (`get_dataset`'s typed `columns`, `{name, type, nullable, null_fraction}`, zetta#1021; against an older workspace, the value type in the first rows and `analyze_dataset`'s `null_rate` over 256 sampled rows), how each column reads (`analyze_dataset`), *Keep durable* (`promote_dataset`, offered only when a partition has one copy), *Query it* |
-| Train | `/train/query?statement=&database=` | Read-only SQL over the workspace's data (`workspace_sql`) |
+| Train | `/train/query?statement=&database=` | Read-only SQL over the workspace's data (`workspace_sql`); the editor's status bar shows and changes the database's safe mode, and a `safe_mode_warning` opens a dialog with the statement, Run and Cancel ([safe-mode.md](safe-mode.md), lake#906) |
 | Train | `/train/data`, *Generate a dataset* | `list_dataset_generators`, `generate_dataset` (never its `path`, which writes a file on the node) |
 | Train | `/train/data` (layout) | **Load Data** first and open (upload a file, pull a table from a connection, generate one); after an upload, *Loaded N rows from your CSV file into <dataset>* with a link, and *<name> was already taken, so it was saved as <name>_2* when the person chose a rename (lake#447). Then datasets; connections are on Data → Connections, and storage (only what can be created today; the rest one *coming later* line) is Data → Drives → Storage (lake#656). A dataset page shows its id, a Columns table with types, its first 20 rows (`LIMIT 20`, also bounded by Lake) and *Storage details* under a disclosure; the Query page shows at most 500 rows (lake#256, lake#257) |
 | Design | `/design/project` → Build a Pipeline | *From data* (optional): after `compile_intent`, lake points the first connect step at the chosen dataset (`set_attribute` source/table), removes the other connect steps and opens the pipeline with that dataset preselected for the run (lake#251) |
@@ -397,3 +397,28 @@ Status: checked on 2026-10-01 against the dev cluster (lake `36679e1`, workspace
   outside the cluster. Unpublishing stops those calls.
 - Workspace reads time out after 15 seconds and actions after 60. Run reports load:
   `get_run_report` answers since https://github.com/oramasearch/zetta/issues/1007 was fixed.
+
+## Pipeline Work Budgets
+
+Lake limits a pipeline to 50,000 steps and 100,000 edges, and an `edit_pipeline` batch to
+256 edits (lake#967, LSR-101). Oversized stored graphs are refused by both `edit_pipeline` and
+`render_pipeline` before their arrays are copied. Edit growth is checked per operation, including
+intermediate states. `save_pipeline` and `workspace_act` with `save_graph` enforce the same counts
+before forwarding to the engine. A direct engine client can still store a larger graph; Lake
+refuses to edit or draw it. Refusals answer `invalid_input` without saving anything.
+
+Graph parsing, edit application, final validation, save-body construction and SVG generation run
+on Lake's bounded blocking pool. A full pool answers `busy`; graph work never falls back to the
+HTTP thread. Kahn's algorithm indexes outgoing edges and uses a min-heap of original step indices,
+so dependency order and the existing earliest-index tie order are preserved in
+O((V+E) log V) work. Rendering and generated step ids also use indexed lookups.
+
+A batch mutates its private graph in order and validates the result once. An edge can precede
+its new target within that batch; only a valid final graph is saved. Operation failures still
+name their edit position, and final structural failures report the graph problem.
+
+Run `ctest --test-dir <build> --timeout 600 -R 'Pipeline\.|Workspaces.EditPipeline'` to check
+limits, atomic batches, pool saturation and a reversed 50,000-step chain whose validation must
+finish within one second. Change the three constants in `include/lake/api/pipeline.hpp` together
+with these contract notes and tests when changing the budgets. Counts apply to both JSON input
+and in-memory graphs; request byte and JSON parser limits remain additional bounds.

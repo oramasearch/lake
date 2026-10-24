@@ -41,6 +41,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     // Billing is account configuration in the control plane (decision 56, lake#564).
     "bill_preview",
     "billing_account",
+    "cancel_recovery",
     "check_agent_certificate",
     "check_cached_read",
     "claim_recovery_deliveries",
@@ -762,11 +763,42 @@ audit::Result<std::optional<audit::Event>> record_audit(const ApiContext& contex
         if (scoped.details.is_object() && !scoped.details.contains("workspace_id")) {
             scoped.details["workspace_id"] = route.workspace_id;
         }
-        // Dropped at the bound: counted by the recorder (lake_audit_workspace_dropped_total),
-        // never written centrally instead.
-        static_cast<void>(context.audit_recorder->add(
-            route.customer_id, route.workspace_id, audit::pending(scoped)));
-        return Recorded{};
+        auto pending = audit::pending(scoped);
+        const std::string event_id = pending.id;
+        if (context.audit_recorder->add(
+                route.customer_id, route.workspace_id, std::move(pending))) {
+            return Recorded{};
+        }
+        // Delivery failure is control-plane evidence. Keep workspace payloads, object names
+        // and request details out of the central chain, including on the sync entry points.
+        const audit::EventDraft failure{
+            .customer_id = route.customer_id,
+            .kind = "audit_delivery",
+            .principal = scoped.principal,
+            .object = "workspace/" + route.workspace_id,
+            .action = "audit_delivery_failed",
+            .outcome = "failure",
+            .request_id = scoped.request_id,
+            .details = {{"workspace_id", route.workspace_id},
+                        {"event_id", event_id},
+                        {"operation_outcome", scoped.outcome},
+                        {"error_code", "audit_queue_full"}},
+        };
+        const audit::IdentityOptions options{.configured_seed = context.identity_seed,
+                                             .instance_kek = context.instance_kek};
+        const auto evidence = context.store
+                                  ? audit::record(*context.store, failure, options)
+                                  : audit::Result<audit::Event>(std::unexpected(
+                                        audit::Error{"store_unavailable", "no control store"}));
+        if (!evidence) {
+            return std::unexpected(
+                audit::Error{"audit_queue_full",
+                             "workspace audit queue is full; delivery failure evidence "
+                             "could not be recorded"});
+        }
+        return std::unexpected(audit::Error{
+            "audit_queue_full",
+            "workspace audit queue is full; delivery failure recorded as " + evidence->id});
     }
     const audit::IdentityOptions options{.configured_seed = context.identity_seed,
                                          .instance_kek = context.instance_kek};

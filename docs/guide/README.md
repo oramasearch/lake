@@ -103,3 +103,9 @@ may wrap across source lines.
   capability on the page, or describe it in prose.
 - `Docs.EveryGuideHasItsTitleAndRenders` (tests/test_markdown.cpp) checks every page's title and
   renders it; `get_doc` and `list_docs` (sections, headings, `q`) are tested in tests/test_api.cpp.
+
+The secrets guide describes private lifecycle audit and public digest commitments for successful
+calls (lake#953); denied and failed attempts publish nothing.
+[Usage](usage.md#set-the-repository-storage-limit) describes the operator permission needed to
+change repository storage limits; account administrators can still change other usage limits
+(lake#976, LSR-109).

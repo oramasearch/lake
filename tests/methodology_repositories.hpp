@@ -128,7 +128,8 @@ struct MethodologyRepositories final : lake::api::SyncStore {
                                 const std::string&,
                                 const std::string&,
                                 const std::string&,
-                                std::vector<std::byte>) override {
+                                std::vector<std::byte>,
+                                lake::api::RepositoryWriteAuthorizer) override {
         return std::unexpected(unsupported());
     }
     Result<std::string>
@@ -136,12 +137,24 @@ struct MethodologyRepositories final : lake::api::SyncStore {
                             const std::string& repository,
                             const std::string& branch,
                             const std::string& message,
-                            std::vector<lake::api::RepositoryWriteOperation> operations) override {
+                            std::vector<lake::api::RepositoryWriteOperation> operations,
+                            lake::api::RepositoryWriteAuthorizer authorize) override {
         std::lock_guard lock(mutex);
         if (branch != "main") {
             return std::unexpected(SyncStoreError{"invalid_input", "only main in this store"});
         }
         auto& changes = repositories[repository];
+        if (authorize) {
+            std::vector<lake::api::RepositoryTreeEntry> entries;
+            if (!changes.empty()) {
+                for (const auto& [path, contents] : changes.back().files) {
+                    entries.push_back({.path = path, .kind = "file", .size = contents.size()});
+                }
+            }
+            if (const auto allowed = authorize(entries); !allowed) {
+                return std::unexpected(allowed.error());
+            }
+        }
         Change next{"change-" + std::to_string(changes.size() + 1) + "-" + repository.substr(0, 8),
                     changes.empty() ? std::map<std::string, std::string>{} : changes.back().files};
         for (const lake::api::RepositoryWriteOperation& operation : operations) {
@@ -157,10 +170,12 @@ struct MethodologyRepositories final : lake::api::SyncStore {
         messages.push_back(message);
         return next.id;
     }
-    Result<lake::api::RepositoryChange> restore_repository_file(const std::string&,
-                                                                const std::string&,
-                                                                const std::string&,
-                                                                const std::string&) override {
+    Result<lake::api::RepositoryChange>
+    restore_repository_file(const std::string&,
+                            const std::string&,
+                            const std::string&,
+                            const std::string&,
+                            lake::api::RepositoryWriteAuthorizer) override {
         return std::unexpected(unsupported());
     }
     Result<lake::api::RepositoryPortableData>

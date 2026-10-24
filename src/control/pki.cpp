@@ -7,6 +7,7 @@
 #include <chrono>
 #include <ctime>
 #include <format>
+#include <limits>
 #include <memory>
 #include <set>
 #include <string>
@@ -303,6 +304,101 @@ Result<void> add_extension(X509* certificate, int nid, std::string_view value) {
     return {};
 }
 
+bool ascii_alphanumeric(char value) {
+    return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
+           (value >= '0' && value <= '9');
+}
+
+bool valid_dns_identifier(std::string_view value) {
+    if (value.empty() || value.size() > 253 || value.find('.') == std::string_view::npos) {
+        return false;
+    }
+    while (true) {
+        const auto dot = value.find('.');
+        const auto label = value.substr(0, dot);
+        if (label.empty() || label.size() > 63 || !ascii_alphanumeric(label.front()) ||
+            !ascii_alphanumeric(label.back()) ||
+            !std::all_of(label.begin(), label.end(), [](char c) {
+                return ascii_alphanumeric(c) || c == '-';
+            })) {
+            return false;
+        }
+        if (dot == std::string_view::npos) {
+            return true;
+        }
+        value.remove_prefix(dot + 1);
+    }
+}
+
+// SPIFFE IDs have no URI escaping or relative path normalization.
+bool valid_spiffe_id(std::string_view value) {
+    if (!value.starts_with("spiffe://") || value.size() > 2048) {
+        return false;
+    }
+    value.remove_prefix(std::string_view("spiffe://").size());
+    const auto slash = value.find('/');
+    const auto domain = value.substr(0, slash);
+    if (domain.empty() || domain.size() > 255 ||
+        !std::all_of(domain.begin(), domain.end(), [](char c) {
+            return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '-' ||
+                   c == '_';
+        })) {
+        return false;
+    }
+    if (slash == std::string_view::npos) {
+        return true;
+    }
+    value.remove_prefix(slash + 1);
+    while (true) {
+        const auto next = value.find('/');
+        const auto segment = value.substr(0, next);
+        if (segment.empty() || segment == "." || segment == ".." ||
+            !std::all_of(segment.begin(), segment.end(), [](char c) {
+                return ascii_alphanumeric(c) || c == '.' || c == '-' || c == '_';
+            })) {
+            return false;
+        }
+        if (next == std::string_view::npos) {
+            return true;
+        }
+        value.remove_prefix(next + 1);
+    }
+}
+
+// Encode caller identities as data, never as OpenSSL extension configuration.
+Result<void> add_subject_alt_name(X509* certificate, int type, std::string_view value) {
+    const bool valid_uri =
+        type == GEN_URI && !value.empty() &&
+        std::all_of(value.begin(),
+                    value.end(),
+                    [](unsigned char c) { return c > 0x20 && c < 0x7f && c != ','; }) &&
+        (!value.starts_with("spiffe://") || valid_spiffe_id(value));
+    if (value.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        (type == GEN_DNS ? !valid_dns_identifier(value) : !valid_uri)) {
+        return std::unexpected(Error{"invalid_input", "invalid certificate SAN identity"});
+    }
+    std::unique_ptr<GENERAL_NAMES, decltype(&GENERAL_NAMES_free)> names(sk_GENERAL_NAME_new_null(),
+                                                                        GENERAL_NAMES_free);
+    std::unique_ptr<GENERAL_NAME, decltype(&GENERAL_NAME_free)> name(GENERAL_NAME_new(),
+                                                                     GENERAL_NAME_free);
+    std::unique_ptr<ASN1_IA5STRING, decltype(&ASN1_IA5STRING_free)> text(ASN1_IA5STRING_new(),
+                                                                         ASN1_IA5STRING_free);
+    if (!names || !name || !text ||
+        ASN1_STRING_set(text.get(), value.data(), static_cast<int>(value.size())) != 1) {
+        return std::unexpected(crypto_error("could not allocate certificate SAN"));
+    }
+    GENERAL_NAME_set0_value(name.get(), type, text.release());
+    if (sk_GENERAL_NAME_push(names.get(), name.get()) == 0) {
+        return std::unexpected(crypto_error("could not retain certificate SAN"));
+    }
+    name.release();
+    if (X509_add1_ext_i2d(certificate, NID_subject_alt_name, names.get(), 0, X509V3_ADD_DEFAULT) !=
+        1) {
+        return std::unexpected(crypto_error("could not encode certificate SAN"));
+    }
+    return {};
+}
+
 bool has_tunnel_identity(X509* certificate) {
     int index = -1;
     while ((index = X509_get_ext_by_NID(certificate, NID_subject_alt_name, index)) >= 0) {
@@ -392,23 +488,24 @@ Result<Certificate> make_certificate(EVP_PKEY* subject_key,
     if (!usage) {
         return std::unexpected(usage.error());
     }
+    if (!uri_san.empty() && !dns_san.empty()) {
+        return std::unexpected(Error{"invalid_input", "a certificate must name one SAN identity"});
+    }
     if (!uri_san.empty()) {
-        const std::string san = "URI:" + std::string(uri_san);
-        const auto extension = add_extension(certificate.get(), NID_subject_alt_name, san);
+        const auto extension = add_subject_alt_name(certificate.get(), GEN_URI, uri_san);
         if (!extension) {
             return std::unexpected(extension.error());
         }
     }
     if (!dns_san.empty()) {
-        const std::string san = "DNS:" + std::string(dns_san);
-        const auto extension = add_extension(certificate.get(), NID_subject_alt_name, san);
+        const auto extension = add_subject_alt_name(certificate.get(), GEN_DNS, dns_san);
         if (!extension) {
             return std::unexpected(extension.error());
         }
     }
     // The customer CA is shared by PKI profiles. Neither an agent identity nor another SAN
     // profile may mint a grant identity outside the recipient-only tunnel signer. Inspect the
-    // encoded names, including extra names accepted by OpenSSL's extension configuration parser.
+    // encoded names to keep that restriction independent of input validation.
     if (!tunnel_identity && has_tunnel_identity(certificate.get())) {
         return std::unexpected(Error{
             "invalid_input", "tunnel grant identities require the recipient-only CSR capability"});
@@ -717,7 +814,7 @@ Result<Authority> create_authority(std::string_view customer_id) {
 
 Result<X509Svid>
 issue_x509_svid(const Authority& authority, std::string_view spiffe_id, int lifetime_seconds) {
-    if (!spiffe_id.starts_with("spiffe://") || lifetime_seconds <= 0 || lifetime_seconds > 3600) {
+    if (!valid_spiffe_id(spiffe_id) || lifetime_seconds <= 0 || lifetime_seconds > 3600) {
         return std::unexpected(
             Error{"invalid_input", "SVID must use SPIFFE and a lifetime up to one hour"});
     }
@@ -1708,7 +1805,7 @@ Result<AcmeOrder> Service::create_acme_order(::lake::control::Store& store,
                                              std::string_view account_id,
                                              std::string_view identifier,
                                              std::string_view instance_kek) {
-    if (identifier.empty() || identifier.find('.') == std::string_view::npos) {
+    if (!valid_dns_identifier(identifier)) {
         return std::unexpected(Error{"invalid_input", "an ACME DNS identifier is required"});
     }
     auto authority = load_authority(store, customer_id, instance_kek);

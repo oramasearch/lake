@@ -11,6 +11,16 @@ The build also requires a named `zetta_source` context pointing at the authorize
 the same path as `LAKE_ZETTA_SOURCE_DIR`; Lake compiles the client transport and its runtime event
 implementation.
 
+The list of Zetta sources is `zetta-api` in `CMakeLists.txt`. Since Zetta v0.5.0 the native HTTP
+transport enforces the egress policy (zetta#1321) and the destination policies (zetta#1452,
+zetta#1469) and reads the system CA bundle itself, so the list also names
+`src/core/connect/egress_policy.cpp`, `connector_destinations.cpp`, `destination_policy.cpp` and
+`src/core/api/system_trust_store.cpp` (lake#1086). When a new Zetta pin fails to link with undefined
+`zetta::` symbols, add the source that defines each one to that list. The minimal context the
+cluster BuildKit lane uses (`build/contexts/zetta-pin`, liquid-bridge's `liquid-dev` skill) is
+`git archive <pin> include src` of the bridge's Zetta checkout, so it carries every one of them;
+regenerate it whenever the pin moves.
+
 ## Publish a deployment image
 
 Deployment images are built by GitHub Actions, not by a developer workstation, and go to the

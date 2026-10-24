@@ -10,6 +10,7 @@ import { Banner, Button, Card, Chip, DataTable, Empty, Mono, SearchInput, Skelet
 import { WorkspaceFrame, text, timeAgo, useWq, useWsPath } from "@/pages/train/workspace";
 import { DeleteConnection } from "./ConnectionsPage";
 import { LoadFromConnection } from "./forms";
+import { SafeModeControl, useSafeModeRead } from "./SafeMode";
 import { CONNECTIONS_PATH, connectionHost, connectionKind, connectionStatus, datasetNameFor, kindLabel, tableQuery } from "./connections";
 
 export default function ConnectionPage() {
@@ -30,7 +31,16 @@ function ConnectionContent({ name }: { name: string }) {
   const connections = useWq<{ connections?: Row[] }>("list_connections");
   const list = connections.data?.connections ?? [];
   const connection = list.find((c) => text(c, "name") === name);
-  const tables = useWq<{ tables?: Row[]; truncated?: boolean }>(connection ? "list_source_tables" : null, { connection: name, include_columns: true, max_tables: 200 }, { retry: false });
+  // Listing the tables runs a catalog query on the connection, so its safe mode may ask first
+  // (lake#906): Run lists them with the warning's confirmation.
+  const [confirmed, setConfirmed] = useState<string | undefined>(undefined);
+  const tables = useWq<{ tables?: Row[]; truncated?: boolean }>(
+    connection ? "list_source_tables" : null,
+    { connection: name, include_columns: true, max_tables: 200, ...(confirmed ? { safe_mode_confirmation: confirmed } : {}) },
+    { retry: false },
+  );
+  const safe = useSafeModeRead(tables.error, name);
+  if (safe.confirmation !== confirmed) setConfirmed(safe.confirmation);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState<{ query?: string; tableName?: string } | null>(null);
 
@@ -65,6 +75,8 @@ function ConnectionContent({ name }: { name: string }) {
               <Download size={14} aria-hidden /> Load with a query
             </Button>
           </Toolbar>
+          {safe.notice}
+          {safe.dialog}
           {tables.data?.truncated && <Banner tone="quiet">Showing the first {all.length} tables. Search narrows them; Load with a query reaches any table.</Banner>}
           <DataTable<Row>
             q={tables}
@@ -138,6 +150,11 @@ function ConnectionContent({ name }: { name: string }) {
               </dd>
             </dl>
             <p className="muted mb-0 text-[12px]">The password or token is sealed in the workspace and never shown.</p>
+            <div className="mt-3 border-t border-hairline pt-3">
+              <div className="label mb-1.5">Safe mode</div>
+              <SafeModeControl target={{ connection: name }} />
+              <p className="muted mt-1.5 mb-0 text-[12px]">Whether Lake shows the exact query and asks before it runs against this connection.</p>
+            </div>
             <div className="mt-3 border-t border-hairline pt-3">
               <DeleteConnection name={name} variant="danger" onDeleted={() => navigate(ws(CONNECTIONS_PATH))} />
             </div>

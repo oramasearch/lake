@@ -60,3 +60,7 @@ whose Zetta holds its manifests and tags (lake#383 phase A).
 `0069_workspace_volumes`: each workspace Zetta's desired volume size, which never decreases, and the
 content-free volume snapshot policies and status the operator reads and writes (operator#259,
 operator#260).
+
+[schema.md](schema.md) also describes `0094_clerk_revocation` (lake#948): ordered Clerk
+suspension and a persistent account-wide revocation watermark, with `clerk_revocation_guard`.
+[Schema](schema.md#authentication-attempts-migration-0098_authentication_attempts) describes shared password/MFA attempt budgets (lake#966).

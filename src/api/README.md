@@ -1,5 +1,36 @@
 # API implementation
 
+`stream_person` in `agent_stream_triggers.cpp` is shared with `mcp_connection_streams.cpp` and
+requires a present, enabled account (lake#951). Disabled/missing principals trigger idempotent
+workspace cleanup; storage errors leave records pending for retry. No notifications, launches or
+results are processed under a refused principal. Store creation guards also reject a context
+reconstructed before offboarding. See [Clerk offboarding](../../docs/api/clerk.md#webhooks).
+`export_capabilities.cpp` accepts portable archives only after the manifest verifier binds the
+claimed source name to its key (LSR-088, lake#954). Imported forge/artifact claims carry untrusted
+provenance, release evidence cannot satisfy local branch protection, and recreated grants use
+the importer and freshly signed local attestations. See [export.md](../../docs/api/export.md).
+`agent_capabilities.cpp` passes the authenticated acting identity separately to the agent signing
+service. Customer write permission does not allow another dispatcher or a durable agent without
+an active certificate for the customer. See [agent session keys](../../docs/api/agents.md).
+`model_capabilities.cpp` requires authentication in the shared workspace customer resolver for
+`get_dataset` and `get_model`; Registry enforces customer `read` and credential scopes before
+dispatch. Their anonymous public-repository revision reads retain the repository visibility
+check (lake#970, LSR-104). See [models.md](../../docs/api/models.md).
+`pipeline.cpp` uses indexed Kahn traversal with original-index priority, bounded graph sizes and
+one final validation per edit batch (lake#967). `workspace_capabilities.cpp` offloads graph parsing,
+editing and SVG work and checks both save spellings. See
+[pipeline work budgets](../../docs/api/workspaces.md#pipeline-work-budgets).
+
+Capability and MCP body admission (lake#944) resolves credentials first. `Registry::authenticate`
+shares the credential gate with `call` and `call_async`; the REST, workspace Zetta and model
+gateway adapters call it before body reads. `JsonBodySink` builds a single nlohmann document
+within byte, nesting and element budgets. Capability registrations own `max_body_bytes` (1 MiB
+default, explicit bulk opt-ins); anonymous MCP retains discovery within 256 KiB. OpenAPI and the agent docs publish the
+credential requirement for handlers that own their authorization. See
+[request body limits](../../docs/serving/http.md#request-body-limits).
+
+`oidc_jwks.cpp` shares a validated-token, single-flight JWKS cache across Clerk and OIDC. Refresh attempts (including failures) have a 60-second cooldown; network work runs on the blocking pool. Clerk exchanges also have a bounded per-socket-peer rate limit. See [Clerk](../../docs/api/clerk.md#bounded-key-refresh-lake956-lsr-090).
+
 `tunnel_clients.cpp` reads the tunnel client folder (allow-listed `zetta-tunnel-<platform>` files
 with a `SHA256SUMS` line, and `VERSION`) and signs and checks their 15-minute links with
 `signed_link_signature`, the HMAC the Hub's LFS upload links also use (lake#745).
@@ -94,7 +125,9 @@ the workspace of the repository, mount, application, app, build or task its inpu
 central chain; `Registry::call`'s `finish_call` and the push and branch protection events in
 `capabilities.cpp` record through `record_audit`. `audit_recorder.cpp` is the `AuditRecorder`: a
 workspace event is queued without I/O, `ApiServer::drain` flushes it into the workspace's chain
-every `audit_flush_interval`, and `ApiServer::stop` flushes it once more. `audit_logs.cpp` reads
+every `audit_flush_interval`, and `ApiServer::stop` flushes it once more. Customer and workspace
+allocations include in-flight events; overflow returns `audit_queue_full` and signs content-free
+central delivery failure evidence. Registry failures preserve the operation in `operation_result`. `audit_logs.cpp` reads
 both logs for `audit`, `my_audit`, `export_audit`, `verify_audit` and the `/activity` and `/audit`
 pages, every workspace concurrently in one round. See [audit](../../docs/api/audit.md#which-log).
 
@@ -131,6 +164,8 @@ every `usage_sample_interval`. `usage_capabilities.cpp` registers `usage_over_ti
 `set_usage_limit`, `record_model_usage` and `model_completion`, the model gateway (lake#248): an
 agent's model call, sent through `ApiContext::model_provider` on the blocking pool, its tokens added
 to the run's workspace usage and refused past the monthly `model_tokens` limit. `model_gateway.cpp`
+holds the closed per-endpoint text/function request schemas (lake#960), forces generation storage
+off and refuses hosted tools, media, references and unknown fields before any provider work. It also
 holds the gateway's pure parts (the request as forwarded, the usage of every answer shape, the
 provider's refusals, `openai_model_provider`), and `http_server.cpp` serves the OpenAI-compatible
 `POST /openai/v1/<endpoint>` (and the same under `/w/<workspace>/`, which must be the run's own workspace) over `model_completion` and builds the provider over its outbound client
@@ -317,7 +352,7 @@ to find and validate every Docs and API document example against the registry.
 
 OCI blob upload patches and final puts stream request buffers into the upload file. The adapter
 checks the configured completed-blob limit and `Content-Range`, hashes the completed file without
-loading it into memory, and leaves the common 64 MiB body limit on every other route. See
+loading it into memory, and retains route-specific body budgets on other routes. See
 [the HTTP contract](../../docs/serving/http.md) and [image builds](../../docs/api/builds.md).
 
 The single capability registry defines REST, OpenAPI and MCP behavior. `create_token` validates
@@ -426,7 +461,8 @@ the workspace and see only its stores (lake#465). See `docs/api/storage.md`.
 
 `registry.cpp` runs the synchronous handlers of capabilities that wait on a repository store
 (repository, Drive, model and dataset objects, search, `replicate_repository`,
-`move_workspace_store`, `remove_space_store`, `delete_workspace`) on a 32-thread pool, and `run_blocking` /
+`move_workspace_store`, `remove_space_store`, `delete_workspace`) and the identity scan
+(`transparency_identity_scan`, lake#941) on a 32-thread pool, and `run_blocking` /
 `blocking_call` (`registry.hpp`, `capabilities.hpp`) run asynchronous handlers' store calls there,
 so a slow workspace Zetta holds up only its own requests (lake#380). `LiquidCustomerStores` admits
 at most four requests per store lane and refuses a moving lane with 503; it lends repositories to
@@ -653,3 +689,56 @@ holds `OidcDiscovery`, which reads and caches each issuer's `/.well-known/openid
 a fetch `http_server.cpp` injects (the outbound client, public addresses only unless
 `LAKE_OIDC_ALLOW_PRIVATE_ADDRESSES`). `ApiContext::oidc_discovery` carries it to `start_oauth` and
 `start_sso_oidc`, which read it on the blocking pool, and the OAuth callback uses it directly.
+
+`mcp_client.cpp` supplies `mcp_parse_json`, shared with `mcp_connection_capabilities.cpp` for
+OAuth responses. It aborts before constructing a container at depth 65; every remote JSON reader uses
+it. Tool conversion checks depth iteratively before its schema copies. See
+[MCP connection limits](../../docs/api/mcp-connections.md#the-client) (lake#958, LSR-092).
+Folder live grants and bearer links share `require_drive_share_role` in `drive_capabilities.cpp`
+(lake#955): every delegated action must be held by the caller; non-admin identity recipients must
+belong to the account. See [the contract](../../docs/api/sharing.md).
+
+
+Repository file writes (lake#962, LSR-096) use `repository_write_authorizer` from
+`drive_capabilities.cpp`: each destination and replaced, moved or deleted descendant is checked
+against the tree supplied under `LiquidCustomerStores`' mutation lock. Drive writes, restores, conflict resolutions, raw
+commits, methodology changes and `lake` store drives share it. See [drive.md](../../docs/api/drive.md).
+`finish_call` keeps full dynamic-secret events in private central audit and publishes only successful
+events through `TiledLog::append_audit_event`, which emits a digest commitment (lake#953, LSR-087).
+Denied and failed calls append no public leaf; both registry call variants share this finalizer.
+Model entitlement and model/direction billing (LSR-095, lake#961) are documented in
+[`model-gateway.md`](../../docs/api/model-gateway.md). The configured exact model/provider allowlist applies before dispatch on every transport;
+billing additionally requires positive model input and output rates. `model_tokens` classes
+preserve raw counts and bill each direction separately. `test_model_gateway.cpp` and
+`test_billing.cpp` cover provider-call refusal and invoice amounts, including a missing price.
+
+`replication_capabilities.cpp` authenticates replicated heads against trusted signed checkpoints
+before log writes; partial heads require a consistency proof (lake#974, LSR-107). See the
+[replication contract](../../docs/api/replication.md).
+`authentication_work.hpp` reserves at most two jobs on the blocking pool for password sign-in,
+MFA verification/enrollment/disablement, recovery-code sign-in and sign-up. The registry's
+client budget, keyed on the address from the trusted ingress hop (`order_client_address`), spans
+REST, MCP and hosted forms.
+See [authentication limits](../../docs/api/identity.md#authentication-attempt-limits).
+Release source verification (LSR-106) reads the signed action environment only after
+`build::verify_provenance` verifies the selected result in `http_server.cpp`.
+`forge_capabilities.cpp` rejects conflicting source claims and reloads every selected artifact
+before a protected push; stored release snapshots never supply verification authority.
+Unbound legacy releases remain readable. See [forge.md](../../docs/api/forge.md#source-binding-lsr-106).
+OAuth and enterprise OIDC starts pass a per-flow browser binding through `ApiContext` to the
+HTTP response cookie; the shared callback requires it at store consumption (lake#963, LSR-097).
+Both stores reject missing and foreign bindings without consuming the flow; the existing state
+hash includes the binding in Postgres. See [`identity.md`](../../docs/api/identity.md).
+Storage quota writes in `metering_capabilities.cpp` and the `storage` branch of
+`set_usage_limit` in `usage_capabilities.cpp` require the operator credential or instance
+administrator before either persistence write (lake#976, LSR-109). Other usage dimensions keep
+customer-admin authorization; REST and MCP share the registry handlers.
+Email recovery (lake#968, LSR-102) receives ingress-derived client metadata in the shared HTTP
+context for REST and MCP. `cancel_recovery` authorizes the signed-in account and device notices
+link its capability and POST URL. Cancellation stays in the central identity audit log. See [recovery.md](../../docs/api/recovery.md).
+Recurring order notices (lake#972, LSR-105) use the verified Stripe webhook and `PaymentNotice::order_subscription`; `stripe.cpp` reads legacy/current subscription metadata and recurring periods, and `billing_capabilities.cpp` dispatches them to the subscription store operation. Startup validates `LAKE_ORDER_ENTITLEMENT_GRACE_SECONDS` (default three days). See [orders](../../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
+`authentication_work.hpp` reserves at most two jobs on the blocking pool for password, MFA,
+recovery and registration work (lake#969). Registry admission uses the shared Store-backed client
+reservations across REST, MCP and hosted forms, keyed by the trusted ingress address from
+`order_client_address`. See [authentication limits](../../docs/api/identity.md#authentication-attempt-limits)
+(lake#966).

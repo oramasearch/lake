@@ -25,8 +25,10 @@
 #include <unistd.h>
 
 #include <liquid/attestation.hpp>
+#include <liquid/identity.hpp>
 
 #include "lake/audit/audit.hpp"
+#include "objects/records.hpp"
 
 namespace lake::transparency {
 namespace {
@@ -38,6 +40,7 @@ using nlohmann::json;
 constexpr std::string_view tile_header = "LAKE-TILE-1\n";
 constexpr std::string_view hash_tile_header = "LAKE-HASH-TILE-1\n";
 constexpr std::string_view audit_entry_header = "LAKE-AUDIT-EVENT-1\n";
+constexpr std::string_view audit_commitment_header = "LAKE-AUDIT-COMMITMENT-1\n";
 
 class AppendLock {
 public:
@@ -543,39 +546,40 @@ void add_identity(std::vector<std::string>& identities, const std::string& value
     identities.push_back(value);
 }
 
+// Audit digests prove Merkle consistency, not signer or principal authenticity.
 Result<VerifiedAttestation> verify_attestation(std::span<const std::byte> encoded) {
-    const bool audit_entry =
-        encoded.size() > audit_entry_header.size() &&
-        std::ranges::equal(encoded.first(audit_entry_header.size()),
-                           audit_entry_header,
-                           [](std::byte left, char right) {
-                               return left == std::byte{static_cast<unsigned char>(right)};
-                           });
-    if (audit_entry) {
-        const auto body = encoded.subspan(audit_entry_header.size());
-        const json event = json::from_cbor(body, true, false);
-        if (!event.is_object() || event.value("version", "") != "audit_event/1" ||
-            !event.contains("digest") || !event.at("digest").is_string() ||
-            !event.contains("signer") || !event.at("signer").is_string() ||
-            !event.contains("principal") || !event.at("principal").is_string() ||
-            !event.contains("object") || !event.at("object").is_string()) {
-            return std::unexpected(Error{"invalid_input", "audit event entry is malformed"});
+    const auto has_header = [encoded](std::string_view header) {
+        return encoded.size() >= header.size() &&
+               std::ranges::equal(
+                   encoded.first(header.size()), header, [](std::byte left, char right) {
+                       return left == std::byte{static_cast<unsigned char>(right)};
+                   });
+    };
+    if (has_header(audit_commitment_header)) {
+        const auto body = encoded.subspan(audit_commitment_header.size());
+        const json commitment = json::from_cbor(body, true, false);
+        if (!commitment.is_object() || commitment.size() != 1 || !commitment.contains("digest") ||
+            !commitment.at("digest").is_string()) {
+            return std::unexpected(Error{"invalid_input", "audit commitment is malformed"});
         }
-        json stored_event = event;
-        const std::string expected_digest = stored_event.at("digest");
-        stored_event.erase("digest");
-        const std::vector<std::uint8_t> stored_bytes = json::to_cbor(stored_event);
-        const auto digest = sha512_256(std::as_bytes(std::span(stored_bytes)));
-        if (!digest || hex(*digest) != expected_digest) {
-            return std::unexpected(
-                Error{"invalid_input", "audit event entry digest does not verify"});
+        const std::string digest = commitment.at("digest");
+        if (digest.size() != 64 || !std::ranges::all_of(digest, [](char digit) {
+                return (digit >= '0' && digit <= '9') || (digit >= 'a' && digit <= 'f');
+            })) {
+            return std::unexpected(Error{"invalid_input", "audit commitment digest is malformed"});
         }
-        VerifiedAttestation output{.profile = "audit_event/1",
-                                   .issuer = event.at("signer"),
-                                   .subject = event.at("object")};
-        add_identity(output.identities, output.issuer);
-        add_identity(output.identities, event.at("principal"));
-        return output;
+        // Re-encoding rejects duplicate keys and other encodings that hide unparsed bytes.
+        const auto canonical = json::to_cbor(commitment);
+        if (!std::ranges::equal(body, canonical, [](std::byte left, std::uint8_t right) {
+                return std::to_integer<std::uint8_t>(left) == right;
+            })) {
+            return std::unexpected(Error{"invalid_input", "audit commitment is not canonical"});
+        }
+        return VerifiedAttestation{.profile = "audit_commitment/1"};
+    }
+    if (has_header(audit_entry_header)) {
+        return std::unexpected(
+            Error{"invalid_input", "full audit events have no authenticated identity binding"});
     }
     const auto statement = liquid::decode_attestation(encoded);
     if (!statement) {
@@ -583,20 +587,32 @@ Result<VerifiedAttestation> verify_attestation(std::span<const std::byte> encode
             Error{"invalid_input",
                   "entry is not a canonical TAAP attestation: " + statement.error().message});
     }
-    liquid::attestation_verification_options options{.now = statement->at};
-    const liquid::attestation_profile* profile =
-        liquid::attestation_profile_registry::global().find(statement->profile);
-    if (profile && profile->status_policy.kind == liquid::attestation_status_kind::revocable) {
-        options.status = liquid::attestation_status{.revoked = false, .checked_at = statement->at};
-    }
-    const auto verified = liquid::verify_attestation(*statement, options);
-    if (!verified) {
-        return std::unexpected(Error{
-            "invalid_input", "could not verify TAAP attestation: " + verified.error().message});
-    }
-    if (!verified->verified) {
+    // The log records statements; it does not attribute them. An entry must be a registered,
+    // well-formed attestation whose signature verifies under the key it carries, the same
+    // integrity bar audit entries meet. Whether that key belongs to the named issuer is decided
+    // by whoever reads the entry, against the issuer's identity chain (liquid#383): Lake holds no
+    // chain for most issuers, and an identity scan must still list statements made in a name so
+    // that its owner can see forged ones. Entries accepted before liquid#383 met the same bar.
+    if (const auto valid = liquid::attestation_profile_registry::global().validate(*statement);
+        !valid) {
         return std::unexpected(
-            Error{"invalid_input", "TAAP attestation is invalid: " + verified->reason});
+            Error{"invalid_input", "TAAP attestation is invalid: " + valid.error().message});
+    }
+    const auto signature = liquid::decode_signature(statement->signature);
+    const auto body = liquid::objects::encode_attestation_body_unchecked(*statement);
+    if (!signature || !body) {
+        return std::unexpected(
+            Error{"invalid_input",
+                  "TAAP attestation is invalid: " +
+                      (signature ? body.error().message : signature.error().message)});
+    }
+    const auto verified =
+        liquid::verify_key_signature(statement->issuer, "attestation", *body, *signature);
+    if (!verified || !*verified) {
+        return std::unexpected(Error{"invalid_input",
+                                     "TAAP attestation is invalid: " +
+                                         (verified ? std::string{"invalid attestation signature"}
+                                                   : verified.error().message)});
     }
     VerifiedAttestation output{
         .profile = statement->profile,
@@ -615,6 +631,30 @@ Result<VerifiedAttestation> verify_attestation(std::span<const std::byte> encode
     }
     return output;
 }
+
+// The root of one complete tile's entries, kept so that a scan can check a tile it reads again.
+Result<Hash> tile_root(const std::vector<Hash>& leaves) {
+    std::vector<std::optional<Hash>> frontier;
+    for (const Hash& leaf : leaves) {
+        const auto added = add_leaf(frontier, leaf);
+        if (!added) {
+            return std::unexpected(added.error());
+        }
+    }
+    return frontier_root(frontier);
+}
+
+// What identity scans have verified so far, kept across calls (lake#941): the first `tree_size`
+// entries, the Merkle frontier after them, the root of each complete tile, the leaf hashes of the
+// incomplete last tile, and the entries naming each identity. A scan verifies only entries past
+// `tree_size` and checks any tile it reads again against what was verified.
+struct IdentityIndex {
+    std::uint64_t tree_size = 0;
+    std::vector<std::optional<Hash>> frontier;
+    std::vector<Hash> tile_roots;
+    std::vector<Hash> tail_leaves;
+    std::unordered_map<std::string, std::vector<std::uint64_t>> entries;
+};
 
 Result<std::vector<Bytes>> validated_entries(const std::vector<std::string>& attestations) {
     std::vector<Bytes> decoded;
@@ -651,6 +691,9 @@ struct TiledLog::Impl {
     std::filesystem::path directory;
     bool valid_instance = false;
     mutable std::mutex mutex;
+    // Guards `identity_index` only; a scan never takes `mutex`, so it never holds up an append.
+    mutable std::mutex index_mutex;
+    mutable IdentityIndex identity_index;
 
     Impl(std::filesystem::path store_root, std::string instance_name) {
         valid_instance = valid_instance_name(instance_name);
@@ -1192,10 +1235,24 @@ Result<AppendResult> TiledLog::append(const std::vector<std::string>& attestatio
 }
 
 Result<AppendResult> TiledLog::append_audit_event(const audit::Event& event) {
-    const std::vector<std::uint8_t> body = json::to_cbor(audit::to_json(event));
+    if (event.draft.outcome != "success") {
+        return std::unexpected(
+            Error{"invalid_input", "only successful audit events may publish a commitment"});
+    }
+    json recorded = audit::to_json(event);
+    recorded.erase("digest");
+    const auto recorded_bytes = json::to_cbor(recorded);
+    const auto digest = sha512_256(std::as_bytes(std::span(recorded_bytes)));
+    if (!digest) {
+        return std::unexpected(digest.error());
+    }
+    if (hex(*digest) != event.digest) {
+        return std::unexpected(Error{"invalid_input", "audit event digest does not verify"});
+    }
+    const auto body = json::to_cbor(json{{"digest", event.digest}});
     Bytes entry;
-    entry.reserve(audit_entry_header.size() + body.size());
-    for (const char value : audit_entry_header) {
+    entry.reserve(audit_commitment_header.size() + body.size());
+    for (const char value : audit_commitment_header) {
         entry.push_back(std::byte{static_cast<unsigned char>(value)});
     }
     entry.insert(entry.end(),
@@ -1500,8 +1557,9 @@ Result<AppendResult> TiledLog::apply_replication_batch(const LogReplicationBatch
 
 Result<IdentityScan> TiledLog::scan_identity(const std::string& identity,
                                              std::uint64_t tree_size,
-                                             const std::string& root_hash) const {
-    std::unique_lock lock(impl_->mutex);
+                                             const std::string& root_hash,
+                                             std::uint64_t start_index,
+                                             std::size_t limit) const {
     const auto started = std::chrono::steady_clock::now();
     if (!impl_->valid_instance) {
         return std::unexpected(
@@ -1514,30 +1572,71 @@ Result<IdentityScan> TiledLog::scan_identity(const std::string& identity,
     if (!expected_root) {
         return std::unexpected(Error{"invalid_input", "checkpoint root hash is invalid"});
     }
+    // Tiles are immutable and `tree_size` is a published checkpoint's, so the scan reads them
+    // without the append lock. Concurrent scans would only repeat each other's work.
+    std::unique_lock index_lock(impl_->index_mutex, std::try_to_lock);
+    if (!index_lock.owns_lock()) {
+        return std::unexpected(
+            Error{"busy", "another identity scan is verifying the transparency log; retry"});
+    }
+    IdentityIndex& index = impl_->identity_index;
+    if (tree_size < index.tree_size) {
+        // A checkpoint older than what was verified: verify again from the first entry.
+        index = IdentityIndex{};
+    }
     IdentityScan scan{.identity = identity, .tree_size = tree_size, .root_hash = root_hash};
-    std::vector<std::optional<Hash>> frontier;
-    std::unordered_map<std::string, VerifiedAttestation> verification_cache;
-    std::uint64_t entry_index = 0;
-    const std::uint64_t tile_count =
-        tree_size == 0 ? 0 : (tree_size + transparency_tile_width - 1) / transparency_tile_width;
-    for (std::uint64_t tile_index = 0; tile_index < tile_count; ++tile_index) {
-        const std::uint64_t remaining = tree_size - entry_index;
-        const std::size_t width =
-            static_cast<std::size_t>(std::min<std::uint64_t>(remaining, transparency_tile_width));
+    const auto indexed_matches = [&]() -> std::span<const std::uint64_t> {
+        const auto found = index.entries.find(identity);
+        if (found == index.entries.end()) {
+            return {};
+        }
+        const auto first = std::ranges::lower_bound(found->second, start_index);
+        return {first, found->second.end()};
+    };
+    const std::uint64_t verified_size = index.tree_size;
+    const std::size_t earlier = std::min(indexed_matches().size(), limit);
+    const std::size_t keep = limit - earlier;
+
+    // Verify the entries appended since the last scan. Nothing is kept unless they reach the
+    // checkpoint's root; entries naming the identity are kept for this page as they are read.
+    std::vector<IdentityMatch> fresh;
+    std::vector<std::optional<Hash>> frontier = index.frontier;
+    std::vector<Hash> tail = index.tail_leaves;
+    std::vector<Hash> tile_roots;
+    std::unordered_map<std::string, std::vector<std::uint64_t>> named;
+    std::uint64_t entry_index = verified_size;
+    while (entry_index < tree_size) {
+        const std::uint64_t tile_index = entry_index / transparency_tile_width;
+        const std::uint64_t tile_start = tile_index * transparency_tile_width;
+        const std::size_t width = static_cast<std::size_t>(
+            std::min<std::uint64_t>(tree_size - tile_start, transparency_tile_width));
         const auto entries = impl_->load_tile(tile_index, width);
         if (!entries) {
             return std::unexpected(entries.error());
         }
         ++scan.tiles_scanned;
-        for (const Bytes& entry : *entries) {
+        const std::size_t offset = static_cast<std::size_t>(entry_index - tile_start);
+        // Repeated entries in one tile verify once; the cache never outgrows a tile.
+        std::unordered_map<std::string, VerifiedAttestation> verification_cache;
+        for (std::size_t position = 0; position < width; ++position) {
+            const Bytes& entry = (*entries)[position];
             const auto leaf = leaf_hash(entry);
             if (!leaf) {
                 return std::unexpected(leaf.error());
+            }
+            if (position < offset) {
+                if (position >= tail.size() || tail[position] != *leaf) {
+                    return std::unexpected(
+                        Error{"unrecoverable",
+                              "transparency tile does not match the entries already verified"});
+                }
+                continue;
             }
             const auto added = add_leaf(frontier, *leaf);
             if (!added) {
                 return std::unexpected(added.error());
             }
+            tail.push_back(*leaf);
             const auto digest = sha256(entry);
             if (!digest) {
                 return std::unexpected(digest.error());
@@ -1554,22 +1653,34 @@ Result<IdentityScan> TiledLog::scan_identity(const std::string& identity,
                 }
                 verified = verification_cache.emplace(key, *value).first;
             }
-            if (std::ranges::find(verified->second.identities, identity) !=
-                verified->second.identities.end()) {
+            for (const std::string& named_identity : verified->second.identities) {
+                named[named_identity].push_back(entry_index);
+            }
+            if (fresh.size() < keep && entry_index >= start_index &&
+                std::ranges::find(verified->second.identities, identity) !=
+                    verified->second.identities.end()) {
                 const auto encoded = base64url_encode(entry);
                 if (!encoded) {
                     return std::unexpected(encoded.error());
                 }
-                scan.matches.push_back({entry_index,
-                                        verified->second.profile,
-                                        verified->second.issuer,
-                                        verified->second.subject,
-                                        *encoded});
+                fresh.push_back({entry_index,
+                                 verified->second.profile,
+                                 verified->second.issuer,
+                                 verified->second.subject,
+                                 *encoded});
             }
             ++entry_index;
+            ++scan.entries_scanned;
+        }
+        if (width == transparency_tile_width) {
+            const auto root = tile_root(tail);
+            if (!root) {
+                return std::unexpected(root.error());
+            }
+            tile_roots.push_back(*root);
+            tail.clear();
         }
     }
-    scan.entries_scanned = entry_index;
     const auto actual_root = frontier_root(frontier);
     if (!actual_root) {
         return std::unexpected(actual_root.error());
@@ -1577,6 +1688,80 @@ Result<IdentityScan> TiledLog::scan_identity(const std::string& identity,
     if (*actual_root != *expected_root) {
         return std::unexpected(
             Error{"unrecoverable", "transparency tile Merkle root does not match the checkpoint"});
+    }
+    index.tree_size = tree_size;
+    index.frontier = std::move(frontier);
+    index.tail_leaves = std::move(tail);
+    index.tile_roots.insert(index.tile_roots.end(), tile_roots.begin(), tile_roots.end());
+    for (auto& [named_identity, indexes] : named) {
+        std::vector<std::uint64_t>& kept = index.entries[named_identity];
+        kept.insert(kept.end(), indexes.begin(), indexes.end());
+    }
+
+    // Read this page's entries that an earlier scan verified again, checking each tile against
+    // the root or leaf hashes kept for it.
+    const std::span<const std::uint64_t> matches = indexed_matches();
+    std::optional<std::uint64_t> loaded_tile;
+    std::vector<Bytes> loaded;
+    for (const std::uint64_t match : matches.first(earlier)) {
+        const std::uint64_t tile_index = match / transparency_tile_width;
+        const std::uint64_t tile_start = tile_index * transparency_tile_width;
+        if (loaded_tile != tile_index) {
+            const std::size_t width = static_cast<std::size_t>(
+                std::min<std::uint64_t>(tree_size - tile_start, transparency_tile_width));
+            auto entries = impl_->load_tile(tile_index, width);
+            if (!entries) {
+                return std::unexpected(entries.error());
+            }
+            ++scan.tiles_scanned;
+            std::vector<Hash> leaves;
+            leaves.reserve(entries->size());
+            for (const Bytes& entry : *entries) {
+                const auto leaf = leaf_hash(entry);
+                if (!leaf) {
+                    return std::unexpected(leaf.error());
+                }
+                leaves.push_back(*leaf);
+            }
+            bool intact = false;
+            if (width == transparency_tile_width) {
+                const auto root = tile_root(leaves);
+                if (!root) {
+                    return std::unexpected(root.error());
+                }
+                intact =
+                    tile_index < index.tile_roots.size() && index.tile_roots[tile_index] == *root;
+            } else {
+                intact = leaves == index.tail_leaves;
+            }
+            if (!intact) {
+                return std::unexpected(
+                    Error{"unrecoverable",
+                          "transparency tile does not match the entries already verified"});
+            }
+            loaded = std::move(*entries);
+            loaded_tile = tile_index;
+        }
+        const Bytes& entry = loaded[static_cast<std::size_t>(match - tile_start)];
+        const auto verified = verify_attestation(entry);
+        if (!verified) {
+            return std::unexpected(Error{"unrecoverable",
+                                         "transparency tile contains an invalid TAAP "
+                                         "attestation: " +
+                                             verified.error().message});
+        }
+        const auto encoded = base64url_encode(entry);
+        if (!encoded) {
+            return std::unexpected(encoded.error());
+        }
+        scan.matches.push_back(
+            {match, verified->profile, verified->issuer, verified->subject, *encoded});
+    }
+    scan.matches.insert(scan.matches.end(),
+                        std::make_move_iterator(fresh.begin()),
+                        std::make_move_iterator(fresh.end()));
+    if (matches.size() > scan.matches.size()) {
+        scan.next_index = matches[scan.matches.size()];
     }
     scan.duration_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)

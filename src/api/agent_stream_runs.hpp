@@ -21,8 +21,9 @@
 namespace lake::api {
 
 // The person a stream acts as: a context authorized as that user, never as the operator, with
-// `method` as its authentication method in the audit. nullopt when the user is unknown.
-std::optional<ApiContext>
+// `method` as its authentication method in the audit. Missing/disabled users are refused;
+// storage errors remain distinct so workers do not discard configuration during an outage.
+control::Result<ApiContext>
 stream_person(const ApiContext& base, const std::string& user_id, std::string method);
 
 struct StreamRuns {

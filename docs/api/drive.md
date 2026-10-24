@@ -13,20 +13,53 @@ deduplication remain liquid repository values.
 | `download_drive_file` | `read` on the path | `{path, blob, size, media_type, content_base64, download_url}`: the exact bytes as base64 for a file of at most 16 MiB (`null` above), the media type from the name, and the `GET /drive/download` address that streams any size (lake#587) |
 | `drive_share_people` | `share` on the folder | The people a folder can be shared with by email or handle ([sharing.md](sharing.md#live-grants-and-effective-access)) |
 | `create_drive_folder` | `write` on the containing folder | A new liquid change containing an empty-folder marker |
-| `upload_drive_files` | `write` on the containing folder, or its nearest existing folder when it does not exist yet (lake#560) | One liquid change containing all decoded uploads; it creates `main` in a repository with none, and any missing folders |
-| `move_drive_path` | `write` on the source and destination parent | A new liquid move preserving the stable path node |
-| `delete_drive_path` | `write` on the path | A new liquid deletion without history removal |
+| `upload_drive_files` | `write` on the selected folder, every final destination, and every existing node being replaced (lake#962) | One liquid change containing all decoded uploads; it creates `main` in a repository with none, and any missing folders |
+| `move_drive_path` | `write` on the source, every source descendant, and destination | A new liquid move preserving the stable path node |
+| `delete_drive_path` | `write` on the path and every descendant | A new liquid deletion without history removal |
 | `drive_history` | `read` on the path or nearest retained parent | Changes whose structural diff names `path` as its old or new path, one item per change with the path's state after it (see below) |
 | `diff_drive_versions` | `read` on the path or nearest retained parent | The two immutable files and a structural text difference |
 | `drive_conflict` | `read` on the path | Conflict kind, exact region, explanation, reasons, preserved values, and a text difference when registered |
 | `resolve_conflict` | `write` on the path | The selected value and the Liquid change carrying its resolution record |
-| `restore_drive_version` | `write` on the path or nearest retained parent | A new liquid change containing the file bytes from `change_id` |
+| `restore_drive_version` | `write` on the destination in current `main`, including any replaced descendants | A new liquid change containing the file bytes from `change_id` |
 
 A path object has `object_type=path` and external id `<repository UUID>:<liquid node id>`. The
 stable liquid tree node id means a move does not discard policy. Reads use the nearest existing
 folder object, so repository policy remains the default. Move authorization checks both the
-source and destination location. Every mutation calls `commit_repository_files`; the HTTP forms
-do not write the store directly.
+source and destination location. Repository mutations use the same store authorization callback
+through REST, MCP, the compatible upload routes, and `lake` store drives.
+
+## Nested Mutation Permissions (lake#962, LSR-096)
+
+A write grant on a folder does not authorize its non-inheriting descendants. Uploads check every
+final path after joining the selected folder with each item's relative path. An overwrite also
+checks the existing node and all descendants it removes, including a folder replaced by a file.
+Recursive deletion and moves check every affected source node before changing any bytes or policy
+parents. One denied path returns `unauthorized` and leaves the entire batch and `main` unchanged.
+Allowed sibling uploads still succeed, and missing folders and unborn `main` still work.
+
+`RepositoryWriteAuthorizer` runs inside the repository store's mutation lock against the immutable
+working tree being committed to `main`, including staged state. It uses a fresh policy cache instead
+of authorization cached before the ref was read. Version restore and conflict resolution check the actual destination in `main` regardless of the caller's `ref`.
+Tree-read and policy-read errors stop the write. The raw `commit_repository_files` capability,
+methodology source changes, and repository-backed store drives use the same path checks; the first
+empty-folder marker of a newly created drive has no existing descendants to authorize.
+
+Keep new file mutation entry points on `repository_write_authorizer`; a callback must finish all
+permission checks before mutation and must not re-enter the repository store while its lock is held.
+The change adds no migration or operator schema handoff. Existing parent grants cease to permit
+writes across a descendant policy cut.
+
+To verify, run:
+
+```sh
+ctest --test-dir <build> --timeout 600 --output-on-failure \
+  -R 'NestedMutationsRefuseProtectedDescendantsBeforeChangingMain|MutationChecksTheLockedTreeAndRestoreChecksMain'
+```
+
+The HTTP regression uses real repository commits and a folder writer excluded from a protected
+child: direct/nested/mixed uploads, file and folder replacements, recursive deletion/move, raw
+commits, unchanged refs after every denial, and an allowed sibling. The capability regression
+supplies a different node in the tree at commit time and checks historical-ref restore denial.
 
 ## A Moved Folder's Access (lake#929)
 

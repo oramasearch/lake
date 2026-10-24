@@ -2,9 +2,9 @@
 
 Organization → Billing and Administration → Billing (lake#564, decision 56): this month's usage and
 its cost as it grows and the invoice history, one invoice, and the operator's price list editor.
-Lake is priced by usage only (lake#635): one rate per usage dimension (and per GPU class for GPU and
-GPU memory, lake#643), no plans, no monthly fee and nothing included, so there are no plan cards and
-no plan picker. Compute is CPU, RAM, GPU and GPU memory, each at its own rate. They call only the billing
+Lake is priced by usage only (lake#635): rates per usage dimension, model input/output and GPU
+class for GPU and GPU memory (lake#643). There are no plans, no monthly fee and nothing included,
+so there are no plan cards or plan picker. Compute is CPU, RAM, GPU and GPU memory, each at its own rate. They call only the billing
 capabilities ([`../api/billing.md`](../api/billing.md)).
 
 ## Only where the lake bills
@@ -86,3 +86,12 @@ contact, open `/billing` as an account's owner with no contact: the notice shows
 provider, and the form is open with the owner's email; save it with an address and see the card
 read it back without the notice; **Edit** reopens it filled. As a member of the same account, the
 card is read-only and has no **Edit**.
+
+Model/direction prices (LSR-095, lake#961) published through `set_price_list` are retained by
+`rateRows` and `ratesInput` when the operator edits another rate. Model rows keep their exact
+class keys and display casing; GPU defaults are not offered as model classes. The historical
+default model-token rate covers old unclassed usage only. With no published list the editor
+starts from `LIST_RATES`, which carries the default models' input and output rates that migration
+`0095_model_token_prices` seeds (OpenAI's published price plus 30%). `frontend/tests/billing.test.ts` covers an editor round trip
+with distinct input/output prices; [the gateway contract](../api/model-gateway.md#configuration)
+explains the required published rates and model allowlist.

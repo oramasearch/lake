@@ -4,6 +4,54 @@ Account restoration beyond MFA sign-in is specified in [`recovery.md`](recovery.
 restores sign-in credentials and sessions; it does not restore end-to-end encrypted repository
 keys. Offline device grants are specified separately in [`offline.md`](offline.md).
 
+## Authentication attempt limits
+
+Password sign-in, MFA sign-in, MFA enrollment, disable and step-up, recovery-code sign-in and
+recovery completion share ten failed attempts per account per fifteen minutes (lake#966,
+LSR-100). Known accounts use their immutable user id across pools; email lookups use the lowercase
+credential email. Unknown email budgets remain scoped to the requested pool. Unknown credentials and an account cooldown both return `unauthenticated` (REST 401)
+with `invalid credentials`. Real credential verification resets account and client failures;
+a password-only response requiring MFA and an accepted email-recovery start do not reset them.
+Email-recovery initiation verifies no credential and does not change these failure counts;
+its mail/token budgets are tracked separately in lake#968.
+
+REST, hosted application forms and MCP also share 100 failed attempts per trusted client address
+per fifteen minutes, across these operations and account-deletion step-up. The HTTP adapter
+reuses the order/recovery address rule: ingress-nginx's rewritten `X-Real-IP`, else the final
+`X-Forwarded-For` hop, else a shared direct-client bucket. It ignores `CF-Connecting-IP` and earlier
+forwarded hops. Deployments must preserve ingress header sanitizing and prevent direct access
+around that ingress. Capability input cannot supply transport metadata; in-process callers share
+a client bucket. TAAP, passkeys and external identity-provider verification are outside these
+password/MFA budgets.
+
+There is no instance-wide ceiling: one would let anyone lock every person out of sign-in by
+guessing at accounts that are not theirs. Failures against one account or from one client never
+refuse another account's sign-in from another client. Client exhaustion returns `rate_limited`
+(REST 429, MCP error). Refused requests do not extend a window; a successful account/client verification
+starts its cleared budget's next fifteen-minute window.
+
+Admission reserves capacity before expensive verification, including in-flight work so concurrent
+guesses cannot pass the limit before failures are recorded. PostgreSQL commits admission and
+completion separately from credential verification, sharing budgets across processes and
+connections. Expired windows are pruned; window ids prevent late completions changing a replacement
+window, and 100,000 live hashed keys bound storage. Database errors refuse authentication;
+interrupted requests retain their reservation until expiry. Both stores use the same policy.
+
+A successful TOTP records its matched 30-second step under the factor's row lock (or memory-store
+mutex). Only a later step may succeed, across sign-in, step-up and disable; the previous/current/next
+step tolerance remains. PostgreSQL locks the account before its factor rows so verification
+and account deletion use the same lock order. Step-up also consumes recovery codes. Replacing MFA starts a fresh counter
+for the new seed. PostgreSQL stores this counter in the existing encrypted-seed credential's
+`public_data`, never in the client.
+
+Apply migration `0098_authentication_attempts` before the new binary. The operator must vendor
+`db/schema.sql` and select `authentication_attempts_guard`; no operator files change here.
+To verify, run `ctest --test-dir <build> --timeout 600 -R 'AuthenticationLimits|MfaVerificationLocks' --output-on-failure`
+with `LAKE_TEST_DB_URI` configured. The tests alternate REST and MCP over fresh connections, check
+unrelated accounts, separate PostgreSQL connections, cooldown expiry, and TOTP/recovery replay.
+Keep admission before credential verification and counter consumption inside the successful
+verification transaction when changing these paths; update both stores and these tests together.
+
 ## What
 
 Identity capabilities live in the single registry and are therefore available as REST, OpenAPI,
@@ -24,6 +72,16 @@ whose `secret` is the key in RFC 4648 base32 without padding, as the Key Uri For
 authenticator apps decode (lake#773; it was hexadecimal before, so every code an authenticator
 showed was refused; the stored seed is unchanged, so earlier enrollments verify the same), and
 eight recovery codes once; replacing the enrollment invalidates the previous seed and codes.
+Enrollment and replacement require `password`, verified against the account's current password
+on every call, and an active full-authority interactive session (`browser` or `taap`) belonging
+to that user and pool. Tokens (including wildcard and static tokens), device credentials,
+operator credentials and callers without a password credential cannot enroll. A session's age
+does not substitute for the password. Both stores check the proof before changing the seed or
+recovery codes, so a refusal preserves the existing enrollment (lake#959, LSR-093).
+Run `ctest --test-dir <build> --timeout 600 -R MfaEnrollment --output-on-failure` with
+`LAKE_TEST_DB_URI` set to exercise first enrollment, replacement and refusals through REST/MCP
+against memory and PostgreSQL. Keep password and session verification in the store transaction
+when changing enrollment; a caller-side check alone can be bypassed by another store caller.
 Recovery codes are single-use. `disable_mfa` requires a fresh TOTP or unused recovery code and
 revokes the seed and every remaining recovery code. Tokens are named sessions with explicit
 capability-name scopes. Ordinary tokens
@@ -60,10 +118,33 @@ one it answers `identity_proof_required`. The Postgres store verifies and record
 before creating the user and OAuth credential. A returning linked identity does not need to send
 the document again.
 
-The callback consumes state before exchanging the code. OpenID Connect id tokens must use RS256
+OAuth starts bind each flow to the initiating browser (lake#963, LSR-097). The REST start
+response and the hosted `/apps/<id>/identity/oauth` redirect set a separate, unpredictable HttpOnly cookie;
+its name is `__Host-lake_oauth_<SHA-256(state)>` over HTTPS, with `Secure`, `SameSite=Lax`,
+`Path=/`, no Domain, and a five-minute lifetime. Loopback HTTP development uses `lake_oauth_`
+without `Secure`. Different flows use different cookies, so starting another login does not
+replace an earlier flow's binding. The cookie secret is independent of state, PKCE, and the OIDC
+nonce, and never appears in the authorization URL or JSON result. Start the flow on the host that
+will receive the callback; HTTP clients must retain its cookie. An authorization URL obtained
+through MCP alone cannot complete a browser login.
+
+Both stores require the cookie secret as well as provider and state before consuming a flow.
+Postgres hashes state together with the binding in the existing `state_hash` column; no migration
+or operator schema update is required. Missing or foreign cookies answer 403 before a code exchange
+or session issuance and leave the legitimate flow usable. A successful consumption is atomic and
+one-use. The cookie expires after five minutes. Flows started before this change must be restarted.
+Verify with `OAuth.AuthorizationCodePkceOidcAndCachedJwks`,
+`OAuth.EnterpriseOidcAuthorizationCodeCallback`, and
+`PostgresIdentity.SessionsTokensAndDeviceRevocation`: missing and foreign cookies fail, the
+initiating cookie completes once, and replay fails. Changes to either start handler must preserve
+the cookie output and the store's required binding argument.
+
+The callback consumes bound state before exchanging the code. OpenID Connect id tokens must use RS256
 and pass signature, issuer, audience, expiry, not-before, nonce, subject, and key-id checks. JWKS
-documents are fetched through Corosio with TLS peer and hostname verification, cached for one hour,
-and refreshed once when verification fails so key rotation is picked up. GitHub instead verifies
+documents are fetched through Corosio with TLS peer and hostname verification on the blocking pool.
+Malformed tokens and failures with a known key never trigger a fetch; unknown key IDs and valid
+tokens using keys older than an hour share a single-flight refresh with a 60-second cooldown,
+including failures ([bounded key refresh](clerk.md#bounded-key-refresh-lake956-lsr-090), lake#956). GitHub instead verifies
 the returned access token through `https://api.github.com/user`. Google and GitHub use their fixed
 public endpoints; every other provider's endpoints come from its OpenID Connect discovery document
 (below). Provider registration and each OAuth callback create one signed registry-compatible audit
@@ -132,17 +213,26 @@ decision 65): without one, Lake mints a **managed key** for the account (as for 
 sign-in) and the person can switch to their own identity later ([Your own
 identity](#your-own-identity)). With one, and always in an application pool, password sign-up takes
 the client-held TAAP/1 document as a base64url-encoded canonical-CBOR `identity_document`. lake decodes and verifies its self-signature through libliquid's public
-`decode_identity_document`, `encode_identity_document`, and `verify_document` APIs, hashes the
-complete canonical record with SHA-512/256, writes `identity_documents`, and binds the resulting
-`taap_id` to the new user. A document is public, so sign-up takes one only with `identity_proof`, a
-fresh signature by its key ([Proving you hold the key](#proving-you-hold-the-key)). lake never
-receives a person's private key.
+`decode_identity_document`, `encode_identity_document`, and `verify_document` APIs, requires an
+initial document (its identifier must be derived from its own key, liquid#383), hashes the complete
+canonical record with SHA-512/256, writes `identity_documents`, and binds the resulting `taap_id` to
+the new user. A document is public, so sign-up takes one only with `identity_proof`, a fresh
+signature by its key ([Proving you hold the key](#proving-you-hold-the-key)). A rotated successor
+document is refused at sign-up, because without its chain it does not prove which identity it
+belongs to. lake never receives a person's private key.
 
 `sign_in_taap` lets that registered user return without a password. The client signs
 `pool_id + "\n" + nonce + "\n" + issued_at` with the key in its liquid identity document. Lake
-verifies the canonical document and `lake_sign_in` signature through libliquid, accepts a five
-minute freshness window, and records the assertion digest before issuing a one-day session.
-Assertion digests are one-use, so replay fails while the timestamp remains fresh.
+verifies the canonical document, then the `lake_sign_in` signature against that document as a
+carried identity chain (`liquid::verify(actor, chain, ...)`), accepts a five minute freshness window,
+and records the assertion digest before issuing a one-day session. Assertion digests are one-use,
+so replay fails while the timestamp remains fresh.
+
+The chain check is what binds the presented `taap_id` to the signing key (liquid#383). Before it,
+Lake checked only the document's self-signature and then the signature with the document's own key,
+so a self-signed document carrying a registered person's identifier with someone else's key signed
+in as that person. `OwnIdentity.ASignInDocumentNamingAnotherIdentityIsRefused` builds that forged
+document and is refused; the honest initial document signs in.
 
 ### Signing in with a TAAP key: the key must be the identity's
 
@@ -620,3 +710,41 @@ account untouched; one central event without the email),
 by the store) and `TheOperatorDeletesAnAccountAndItsSoleOrganizationsWhenAsked`, each over the
 in-memory store and PostgreSQL. The confirmation in Lake Console is
 [`../ui/settings.md`](../ui/settings.md#deleting-your-account).
+
+## Bounded authentication work and recovery selectors
+
+Password sign-in, `verify_mfa`, `recover_with_code`, MFA enrollment/disablement, sign-up and
+email/token recovery run their store work on the bounded blocking pool. At most two authentication
+jobs may be queued or running across the process; a third receives `rate_limited` (HTTP 429). Admission stays reserved
+until the worker finishes, including if its client disconnects. PostgreSQL authentication uses
+private transactions, so an Argon2 calculation or a locked recovery row never holds the control
+store's shared connection mutex. In-memory verification uses an owned snapshot and rechecks it
+under the lock before issuing or consuming a credential.
+
+The shared [failure budgets](#authentication-attempt-limits) apply before credential work.
+Email-recovery initiation keeps its uniform acknowledgement without clearing verification
+failures. Registration also reserves client capacity; a successful registration does not clear
+failures from earlier authentication attempts.
+
+New recovery codes have the form `rc1_` followed by 32 lowercase hexadecimal characters
+(128 random bits). The SHA-256 selector in `credentials.subject`, indexed by the existing
+unique `(pool_id, kind, subject)` constraint, selects one Argon2id hash. Unknown selectors and
+malformed codes perform no recovery-code derivation. Password-plus-recovery sign-in performs
+one password derivation and at most one recovery derivation. Every recovery verifier, including
+fresh verification and MFA disablement, uses the same selector rule. Every successful use, including step-up, consumes the selected recovery row under lock.
+
+Earlier 12-character recovery codes are refused: their salted hashes cannot be backfilled with
+a selector. Regenerate codes by enrolling MFA again with the current password from an interactive
+session. The MFA page displays this instruction. Existing TOTP seeds, passwords and passkeys
+continue to work. Selector storage uses existing credential columns; the shared failure budgets require migration `0098_authentication_attempts`.
+
+With `LAKE_TEST_DB_URI` configured, run:
+
+```sh
+ctest --test-dir <build> --timeout 600 --output-on-failure \
+  -R 'AuthenticationLimits|AuthenticationStores|AuthenticationClientBudget|RecoveryWorkCannotBlock|MfaEnrollment'
+```
+
+The tests cover shared budgets, selectors, one-use factors, bounded workers, and `/healthz` plus
+unrelated store reads while a recovery row is locked. Keep hash verification outside shared
+connection/store locks and never add a legacy multi-hash fallback.

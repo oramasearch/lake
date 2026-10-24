@@ -88,6 +88,8 @@ Metering and quota configuration uses the `LAKE_PRICE_*` and `LAKE_STORAGE_QUOTA
 environment variables documented in [`docs/api/metering.md`](docs/api/metering.md).
 Agent claim leases use optional per-library `LAKE_AGENT_LEASE_SECONDS` overrides; renewal,
 bounded retries and the operator handoff are documented in [`docs/api/agent-bus.md`](docs/api/agent-bus.md).
+Session-key dispatcher authority and customer agent registration are documented in
+[`docs/api/agents.md`](docs/api/agents.md).
 Ship app hosts, reserved names, and quotas use `LAKE_APPS_WILDCARD`,
 `LAKE_APPS_RESERVED_NAMES`, `LAKE_APPS_PER_CUSTOMER`, and
 `LAKE_APP_REPLICAS_PER_CUSTOMER`; see [`docs/api/web-apps.md`](docs/api/web-apps.md).
@@ -150,7 +152,7 @@ For the full PostgreSQL-backed suite, local database setup, and every run option
 
 ## Releases
 
-The current release is **v0.4.0** (2026-10-21): [`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md), the security release from the multi-tenant audit and the pre-launch review, with SAML sign-in, OpenID Connect discovery and `delete_account`. Before it, **v0.3.1** (2026-10-20), billing through a shared Stripe account; before that, **v0.3.0** (2026-10-19).
+The current release is **v0.5.0** (2026-10-24): [`docs/releases/v0.5.0.md`](docs/releases/v0.5.0.md), the rest of the pre-launch security review, safe mode per database, model prices, and stricter sign-in and recovery limits, built against zetta v0.5.0. Before it, **v0.4.0** (2026-10-21), the security release from the multi-tenant audit with SAML sign-in, OpenID Connect discovery and `delete_account`.
 [`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md) lists what it adds (the lake.live order sheet
 and the 2026-10-18 UX review's fixes), what it does not include, and its known issues.
 [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md) covers secure networking, regions, the managed
@@ -175,8 +177,12 @@ when it calls a capability undeployed that the observed OpenAPI lists.
 [`docs/design/overview.md`](docs/design/overview.md) for the service model,
 [`docs/api/README.md`](docs/api/README.md) for the API, and
 [`docs/ui/front-door.md`](docs/ui/front-door.md) for the customer journey.
+[`docs/api/clerk.md`](docs/api/clerk.md) describes browser sign-in, bounded JWKS refresh and
+the Clerk exchange attempt limit.
 [`docs/api/auth.md`](docs/api/auth.md) describes bearer credentials and the session migration;
 its [measurement proof](docs/build/session-authentication.md) records the regression coverage.
+[Clerk offboarding](docs/api/clerk.md#webhooks) describes account disablement and revocation of
+delegated agent access, including workspace-stream cleanup.
 [`docs/control-plane/network.md`](docs/control-plane/network.md) describes secure-networking
 desired state, audit, rollout and the operator handoff; [`docs/api/network.md`](docs/api/network.md)
 defines its permission-checked REST and MCP capabilities; [`docs/ui/network.md`](docs/ui/network.md)

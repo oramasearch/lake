@@ -9,6 +9,7 @@ import type { Row } from "@/lib/api";
 import { Button, Form } from "@/lib/ui";
 import { text, useAsync, useWorkspace, wa } from "@/pages/train/workspace";
 import { connectionInput } from "./connections";
+import { SafeModeCancelled, useSafeModeAction } from "./SafeMode";
 
 export const NAME_PATTERN = "[A-Za-z_][A-Za-z0-9_]{0,62}";
 
@@ -29,6 +30,7 @@ export function Pull({
   const scope = useWorkspace();
   const toast = useToast();
   const pull = useAsync();
+  const safe = useSafeModeAction();
   useEffect(() => {
     onBusy(pull.busy);
   }, [pull.busy, onBusy]);
@@ -48,8 +50,11 @@ export function Pull({
             input.max_rows = Number(maxRows);
           }
           try {
-            await wa(scope, "create_dataset_from_query", input);
+            // The connection's safe mode may ask first (lake#906): the dialog shows the query, and
+            // Run sends it again with the confirmation.
+            await safe.run((confirmation) => wa(scope, "create_dataset_from_query", confirmation ? { ...input, safe_mode_confirmation: confirmation } : input));
           } catch (e) {
+            if (e instanceof SafeModeCancelled) return;
             // A workspace started with --governance asks for an approval lake cannot give.
             if ((e as { code?: string }).code === "consent_required")
               throw new Error("This workspace requires an approval before it reaches an outside database, and Lake cannot approve it.");
@@ -91,6 +96,7 @@ export function Pull({
         At most this many rows
         <input name="max_rows" inputMode="numeric" placeholder="100000" value={maxRows} onChange={(e) => setMaxRows(e.target.value)} />
       </label>
+      {safe.dialog}
     </Form>
   );
 }

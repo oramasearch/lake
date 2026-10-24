@@ -18,6 +18,7 @@
 
 #include "lake/api/regions.hpp"
 #include "lake/api/sync_store.hpp"
+#include "lake/control/authentication_limits.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store_contents.hpp"
 #include "lake/control/workspace_store.hpp"
@@ -69,6 +70,9 @@ struct ApiError {
     // where to get a new one.
     std::string reason;
     std::string help;
+    // `safe_mode_warning` only: what the workspace would run and the confirmation that runs it
+    // ({database|connection, mode, statements, confirmation}), as the workspace Zetta sent it.
+    nlohmann::json details = nullptr;
 };
 
 // Every error code a capability answers, with its REST status and what it tells the caller
@@ -97,6 +101,9 @@ struct ApiResult {
     nlohmann::json value;
     ApiError error;
     double duration_ms = 0.0;
+    // When auditing a completed operation fails, expose its original result so callers can
+    // inspect committed effects before deciding whether to retry.
+    std::optional<nlohmann::json> operation_result;
     static ApiResult success(nlohmann::json output);
     static ApiResult failure(std::string code, std::string message, std::string path = {});
     nlohmann::json envelope() const;
@@ -166,6 +173,13 @@ struct ModelProviderResponse {
 // run_blocking.
 using ModelProvider = std::function<ModelProviderResponse(const ModelProviderRequest& request)>;
 
+// Exact gateway model names and their provider protocol. An empty list disables all models.
+struct GatewayModel {
+    std::string name;
+    std::string provider = "openai";
+};
+std::vector<GatewayModel> default_gateway_models();
+
 // A served methodology model (lake#690, docs/api/methodologies.md#serving-its-model): one request
 // to its serve pod's Service, `endpoint` (only ever what
 // control::methodology_deployment_endpoint_valid accepts) plus `path` (/predict or /explain).
@@ -189,6 +203,9 @@ enum class CapabilityKind { Read, Action };
 std::string_view to_string(CapabilityKind kind);
 
 enum class CapabilityTransport { Json, LiquidSync, Acme };
+
+inline constexpr std::size_t default_capability_body_bytes = 1024 * 1024;
+inline constexpr std::size_t maximum_capability_body_bytes = 64 * 1024 * 1024;
 
 struct MeteringConfig {
     std::string currency = "USD";
@@ -352,7 +369,9 @@ struct ApiContext {
     std::string acting_identity; // TAAP id, "admin" for operator, empty otherwise
     std::string acting_user_id;  // database user id for identity operations
     std::string request_id;
+    std::string client_address; // the ingress-derived client address; keys authentication budgets
     std::string request_path;  // the page route, for web UI navigation; never used to authorize
+    std::string recovery_client_address; // ingress-derived client address; never capability input
     std::string request_query; // its query string, for the same; never used to authorize
     // Set by the HTTP server for a request: gives its request worker back, counted against the
     // long-request caps for `principal` (empty: the client's address). False when a cap is full.
@@ -386,6 +405,7 @@ struct ApiContext {
     // The model gateway's provider (model_completion, docs/api/model-gateway.md); empty when this
     // lake has no OpenAI key.
     ModelProvider model_provider;
+    std::vector<GatewayModel> model_gateway_models = default_gateway_models();
     // The caller's event stream (lake#665): set by the `/openai/v1/*` route, a streamed
     // model_completion hands it each piece of the provider's event stream as it arrives, instead of
     // answering the whole stream as `events`. Called on the outbound client's thread; false says
@@ -480,6 +500,8 @@ struct ApiContext {
     bool operator_credential = false;
     bool session_credential = false;
     std::string public_host;
+    // Successful OAuth starts pass cookie material to the HTTP adapter, never to the JSON result.
+    std::string oauth_state, oauth_browser_binding;
     // The configured browser-facing origin (LAKE_EXTERNAL_ORIGIN); empty when only public_host is
     // set. The web app's `viewer` reports it with the clone and push origin (lake#561).
     std::string external_origin;
@@ -531,6 +553,7 @@ struct ApiContext {
     // How invoices are paid where billing is on (docs/api/billing.md#payment-providers): `viewer`
     // and `server_info` report its status. Null: billing is off.
     std::shared_ptr<PaymentProviders> payments;
+    int order_entitlement_grace_seconds = 3 * 86400;
 };
 
 using CapabilityHandler =
@@ -548,6 +571,9 @@ struct Capability {
                                   // additionalProperties false
     nlohmann::json output_schema; // the success value's shape
     CapabilityKind kind = CapabilityKind::Read;
+    // HTTP JSON input defaults to 1 MiB. Bulk inputs opt in here; anonymous callers never
+    // receive a larger allowance. The transport ceiling remains 64 MiB.
+    std::size_t max_body_bytes = default_capability_body_bytes;
     // A long poll: called with `wait_ms` > 0 it parks on a bus, so it gives its HTTP request
     // worker back first (lake#534). Declared here, never inferred from a caller's input.
     bool long_poll = false;
@@ -558,6 +584,9 @@ struct Capability {
     bool post_alias = false;
     CapabilityTransport transport = CapabilityTransport::Json;
     bool requires_auth = true;
+    // A handler that owns its authorization (for example agent model calls) can still require
+    // an accepted credential before HTTP reads its body, without using generic policy grants.
+    bool requires_credential = false;
     std::string object;
     std::string action;
     CapabilityObjectResolver resolve_object;
@@ -617,6 +646,9 @@ public:
     bool add(Capability capability);
     std::shared_ptr<const Capability> find(const std::string& name) const;
     std::vector<std::shared_ptr<const Capability>> list() const;
+    // The credential-only gate, before HTTP reads input. Success does not invoke or audit a
+    // handler; failure is audited once. call/call_async repeat this gate before validation.
+    ApiResult authenticate(const std::string& name, ApiContext& context) const;
     // Authorize (requires_auth vs context.authorized), validate, run, time and
     // audit once.
     ApiResult call(const std::string& name, const nlohmann::json& input, ApiContext& context) const;
