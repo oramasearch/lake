@@ -29,6 +29,7 @@ selects the Postgres store. `server_info` reports which one as `store` (`memory`
 | Variable | Meaning | Owner |
 |---|---|---|
 | `LAKE_CONTROL_DB_URI` | Postgres control-plane URI; the operator injects it from the CNPG Secret. `LAKE_CONTROL_DB_PASSWORD` is injected beside it for the operator's use; lake reads the password from the URI | [`../control-plane/postgres.md`](../control-plane/postgres.md) |
+| `ZETTA_EGRESS_ALLOW` | The Zettas lake may reach, in zetta's allowlist syntax (comma-separated `host:port`, `*.suffix:port`, CIDR; zetta `docs/governance/egress-policy.md`). Installed at startup as the policy of zetta's client, which refuses all but loopback without it (zetta v0.5.0, lake#1097). The operator renders it: the bus Zetta's `host:4800` and `*.svc.cluster.local:4800` for workspace Zettas. Unset: only Zettas on loopback; malformed: lake stops | zetta's egress policy |
 | `LAKE_ADMIN_TOKEN` | the operator bearer every capability except `server_info` and the documented public entry points requires; also the UI operator sign-in | [`../api/auth.md`](../api/auth.md) |
 | `LAKE_REPLICATION_TOKEN` | bearer presented to peer Lake instances; no default, never the admin token (lake#915) | [`../api/replication.md`](../api/replication.md) |
 | `LAKE_REPLICATION_PEERS` | the peer Lake origins replication may pull from, comma separated; any other source is refused, so the replication token goes only to these | [`../api/replication.md`](../api/replication.md#peers-and-the-replication-credential) |

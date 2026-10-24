@@ -18,6 +18,13 @@
 
 namespace lake::control {
 
+// Installs the egress allowlist zetta's client consults for every connection lake makes to a Zetta
+// (the bus and each workspace Zetta). zetta v0.5.0's client refuses all but loopback until one is
+// installed (lake#1097); the operator renders the list as ZETTA_EGRESS_ALLOW, in zetta's syntax
+// (zetta docs/governance/egress-policy.md). Returns the error for a malformed list, which is not
+// installed, or nullopt.
+std::optional<std::string> install_zetta_egress_policy(std::string_view allow);
+
 // A customer's managed services (docs/control-plane/services.md, liquid-bridge decision 46): Zetta
 // and Postgres clusters that lake records in its control Postgres and the Orama operator runs.
 // The operator mounts each Ready service's connection into lake as `<service_dir>/<slug>.json`.

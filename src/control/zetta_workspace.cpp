@@ -11,9 +11,20 @@
 #include <optional>
 #include <utility>
 
+#include <zetta/connect/egress_policy.hpp>
 #include <zetta/connect/http_transport.hpp>
 
 namespace lake::control {
+
+std::optional<std::string> install_zetta_egress_policy(std::string_view allow) {
+    std::string error;
+    auto policy = zetta::connect::EgressPolicy::parse(allow, &error);
+    if (!policy) {
+        return error;
+    }
+    zetta::connect::set_egress_policy(std::move(*policy));
+    return std::nullopt;
+}
 namespace {
 
 template <class T> ZettaControlResult<T> workspace_failure(std::string code, std::string message) {
