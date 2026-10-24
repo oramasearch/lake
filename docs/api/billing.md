@@ -528,7 +528,9 @@ and where. The refusal is audited like any refused call. The account a call char
 workspace it acts on, else its `customer_id`, `repository_id` or `organization_id`, else the
 caller's personal account.
 
-**Reading, signing in, stopping and deleting stay open**, so an account can always lower its spend;
+**Reading, signing in, stopping and deleting stay open**, so an account can always lower its spend
+(`update_workspace` is refused only with `desired: running`; stopping or renaming a workspace always
+passes, [#1122](https://github.com/oramasearch/lake/issues/1122));
 **running things keep running** (stopping them for an unpaid balance is a later step, sleep never
 delete, orama-operator#897). `PaidWorkContract.EveryCapabilityThatStartsPaidWorkIsMarked` fails when
 a capability whose name says it creates, starts, runs, deploys, trains, launches, builds, imports

@@ -414,7 +414,7 @@ std::span<const PaidWork> paid_work_capabilities() {
     static constexpr std::array<PaidWork, 51> list{{
         {"create_workspace", "starts a workspace engine, billed by its CPU, RAM and volume"},
         {"start_workspace", "starts a stopped workspace engine"},
-        {"update_workspace", "can resize a workspace engine"},
+        {"update_workspace", "starts a stopped workspace engine (`desired: running`)"},
         {"create_app", "creates an app that runs on billed compute"},
         {"deploy_app", "deploys an app"},
         {"start_app", "starts an app"},
@@ -532,8 +532,21 @@ std::string balance_account_of(const json& input, ApiContext& context) {
     return {};
 }
 
+// A marked capability whose call, with this input, starts nothing that costs money (lake#1122): an
+// account must always be able to stop or rename what it has, so only `update_workspace` with
+// `desired: running` starts paid work; stopping or renaming a workspace is never refused.
+bool call_starts_paid_work(const Capability& capability, const json& input) {
+    if (capability.name == "update_workspace") {
+        return input.is_object() && input.value("desired", std::string()) == "running";
+    }
+    return true;
+}
+
 std::optional<ApiResult>
 balance_refusal(const Capability& capability, const json& input, ApiContext& context) {
+    if (!call_starts_paid_work(capability, input)) {
+        return std::nullopt;
+    }
     if (!context.balance || context.store == nullptr ||
         !balance_caller_exemption(context).empty()) {
         return std::nullopt;

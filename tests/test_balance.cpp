@@ -538,6 +538,19 @@ TEST(Balance, AnInvoiceRecordsWhatTheBalancePaidAndFreezesItsMonth) {
               frozen->amount_micros);
 }
 
+// lake#1122: a blocked account can always stop or rename a workspace; only starting one is paid.
+TEST(Balance, ABlockedAccountCanStopOrRenameAWorkspaceButNotStartOne) {
+    BalanceRig rig;
+    // Before the first top-up the account is blocked.
+    auto stop = rig.owner("update_workspace", {{"customer_id", rig.customer}, {"workspace_id", rig.home}, {"desired", "stopped"}});
+    EXPECT_NE(stop.error.code, "payment_required") << stop.error.message;
+    auto rename = rig.owner("update_workspace", {{"customer_id", rig.customer}, {"workspace_id", rig.home}, {"name", "renamed"}});
+    EXPECT_NE(rename.error.code, "payment_required") << rename.error.message;
+    auto start = rig.owner("update_workspace", {{"customer_id", rig.customer}, {"workspace_id", rig.home}, {"desired", "running"}});
+    ASSERT_EQ(start.error.code, "payment_required") << start.error.message;
+    EXPECT_EQ(start.error.details["reason"], "first_top_up");
+}
+
 TEST(Balance, TheGateRefusesPaidWorkAtTheLimitAndLeavesTheRestOpen) {
     BalanceRig rig;
     const json create{{"customer_id", rig.customer}, {"name", "more"}, {"environment", "dev"}};
