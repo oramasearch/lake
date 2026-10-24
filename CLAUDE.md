@@ -406,13 +406,23 @@ See [`docs/api/model-gateway.md`](docs/api/model-gateway.md).
 
 The quickstart process is the console's home (lake#1128, no migration): `start_quickstart`,
 `quickstart_status`, `train_quickstart` and `quickstart_snippets` take a dropped dataset to a
-published search index, website code (plain web page, React, curl) with a `create_token` key scoped
-to `search_index` and `predict`, and a model trained and published on the same data. Each step is a
+published search index, website code (plain web page, React, curl) with a browser key (below), and a model trained and published on the same data. Each step is a
 nested registry call of an existing capability (balance gate, audit and metering unchanged); state
 is a sealed `lake_quickstarts` record per quickstart in the workspace Zetta. Signed-in people land
-on Quickstart at `/`; Ask Orama moved to `/ask`. A key narrower than the token's scopes is
-lake#1152. Not deployed. See [`docs/api/quickstart.md`](docs/api/quickstart.md) and
+on Quickstart at `/`; Ask Orama moved to `/ask`. The website key is a browser key (lake#1152, below). Not deployed. See [`docs/api/quickstart.md`](docs/api/quickstart.md) and
 [`docs/ui/quickstart.md`](docs/ui/quickstart.md).
+
+Browser keys (lake#1152, migration `0102_browser_keys`): the key a website's page holds, bound to one
+workspace, one search index and optionally one model, callable only for `search_index` and
+`predict` on them (`authorize_browser_key` in `Registry::call`, no policy: it acts as no person),
+only from the origins it lists (checked against `Origin`; `restrict_cors_to_browser_key` answers CORS
+to the calling origin alone), at most its calls a minute (one control-plane row every replica counts
+in), lasting until revoked or its optional expiry whatever happens to its maker's sign-in, and made
+by any credential with write on the account, API tokens and MCP clients included. Its SHA-256 and
+binding are `browser_keys` beside the other credentials (decision 53). `quickstart_snippets` is now
+POSTed and makes one with `origins`; Ship → Search Index lists and revokes them. Not deployed; the
+operator must vendor the schema and select `browser_keys_guard`. See
+[`docs/api/browser-keys.md`](docs/api/browser-keys.md).
 
 lake.live is prepaid (lake#1114, liquid-bridge decision 67, migration `0099_account_balances`): a
 balance per account, credits (Stripe Checkout top-ups, the first exactly `LAKE_BALANCE_FIRST_TOP_UP_USD`
@@ -986,7 +996,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `account_balances_guard` in the source tree, versioned by content hash).
+  `browser_keys_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

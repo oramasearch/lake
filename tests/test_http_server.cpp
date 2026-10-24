@@ -1362,6 +1362,120 @@ TEST_P(HttpResponseIsolation, AKeyMadeInABrowserOutlivesThatBrowsersSignOut) {
         << "revoking the key ends its descendant";
 }
 
+// lake#1152 (docs/api/browser-keys.md): a browser key made in the console searches its one index
+// from its website's origin, answers CORS to that origin alone, keeps working after its maker
+// signs out, and stops at once when revoked.
+TEST_P(HttpResponseIsolation, ABrowserKeyAnswersOnlyItsWebsiteAndOutlivesSignOut) {
+    auto connection = connect();
+    std::string cookie = sign_in(*connection);
+    const nlohmann::json customers = get_v1(*connection, cookie, "list_customers");
+    const std::string customer_id = customers["value"]["items"][0]["id"];
+    select_workspace(*connection, customer_id);
+    const std::string workspace_id = connection->workspace_id;
+    workspace_caller_->answers["get_index"] = {{"index_id", "index-site"}, {"exposed", true}};
+    workspace_caller_->answers["search"] = {
+        {"hits",
+         nlohmann::json::array({{{"id", "1"}, {"score", 2.5}, {"fields", {{"title", "Alien"}}}}})}};
+    const std::string site = "https://shop.example.test";
+    const auto [created_response, created] =
+        post_v1(*connection,
+                cookie,
+                "create_browser_key",
+                {{"customer_id", customer_id},
+                 {"workspace_id", workspace_id},
+                 {"index_id", "index-site"},
+                 {"origins", nlohmann::json::array({site + "/"})}});
+    ASSERT_TRUE(created.value("ok", false)) << created_response.substr(0, 400);
+    const std::string key = created["value"]["secret"];
+    ASSERT_TRUE(key.starts_with("lbk.")) << key;
+    EXPECT_EQ(created["value"]["key"]["origins"], nlohmann::json::array({site}));
+    const std::string key_id = created["value"]["key"]["id"];
+
+    const std::string query = "/v1/search_index?customer_id=" + customer_id +
+                              "&workspace_id=" + workspace_id + "&index_id=index-site&query=alien";
+    const auto search_from = [&](const std::string& origin) {
+        std::vector<std::pair<std::string, std::string>> headers;
+        if (!origin.empty()) {
+            headers.emplace_back("Origin", origin);
+        }
+        return connection->request(
+            "GET", query, "", "", "HTTP/1.1", key, "application/json", headers);
+    };
+    const std::string found = search_from(site);
+    ASSERT_TRUE(found.starts_with("HTTP/1.1 200")) << found.substr(0, 400);
+    EXPECT_EQ(response_header(found, "access-control-allow-origin"), site);
+    EXPECT_NE(response_header(found, "vary").find("Origin"), std::string::npos);
+    EXPECT_EQ(nlohmann::json::parse(response_body(found))["value"]["hits"][0]["fields"]["title"],
+              "Alien");
+
+    // Another website: refused, and its page could not read the answer anyway.
+    const std::string elsewhere = search_from("https://evil.example.test");
+    EXPECT_TRUE(elsewhere.starts_with("HTTP/1.1 403")) << elsewhere.substr(0, 400);
+    EXPECT_TRUE(response_header(elsewhere, "access-control-allow-origin").empty()) << elsewhere;
+    EXPECT_TRUE(search_from("").starts_with("HTTP/1.1 403")) << "no Origin, no answer";
+    // Another index of the same workspace, and another capability.
+    const std::string other_index = connection->request(
+        "GET",
+        "/v1/search_index?customer_id=" + customer_id + "&workspace_id=" + workspace_id +
+            "&index_id=index-other&query=alien",
+        "",
+        "",
+        "HTTP/1.1",
+        key,
+        "application/json",
+        {{"Origin", site}});
+    EXPECT_TRUE(other_index.starts_with("HTTP/1.1 403")) << other_index.substr(0, 400);
+    const std::string listing = connection->request("GET",
+                                                    "/v1/list_customers",
+                                                    "",
+                                                    "",
+                                                    "HTTP/1.1",
+                                                    key,
+                                                    "application/json",
+                                                    {{"Origin", site}});
+    EXPECT_TRUE(listing.starts_with("HTTP/1.1 403")) << listing.substr(0, 400);
+    const std::string metrics = connection->request(
+        "GET", "/metrics", "", "", "HTTP/1.1", key, "application/json", {{"Origin", site}});
+    EXPECT_TRUE(metrics.starts_with("HTTP/1.1 403")) << metrics.substr(0, 200);
+
+    // A preflight carries no credential: it is answered as every other preflight is.
+    const std::string preflight =
+        connection->request("OPTIONS",
+                            "/v1/search_index",
+                            "",
+                            "",
+                            "HTTP/1.1",
+                            {},
+                            "application/json",
+                            {{"Origin", site},
+                             {"Access-Control-Request-Method", "GET"},
+                             {"Access-Control-Request-Headers", "authorization"}});
+    EXPECT_TRUE(preflight.starts_with("HTTP/1.1 204")) << preflight.substr(0, 300);
+
+    // Signing out ends the session, not the website's key.
+    const std::string signed_out = connection->request("POST", "/logout", {}, cookie);
+    ASSERT_TRUE(signed_out.starts_with("HTTP/1.1 302")) << signed_out.substr(0, 300);
+    EXPECT_TRUE(
+        connection->request("GET", "/v1/list_sessions", {}, cookie).starts_with("HTTP/1.1 401"));
+    const std::string after_sign_out = search_from(site);
+    EXPECT_TRUE(after_sign_out.starts_with("HTTP/1.1 200")) << after_sign_out.substr(0, 400);
+
+    // Revoked from a new sign-in: refused at once, as an unknown credential.
+    cookie = sign_in(*connection);
+    const auto [listed_response, listed] = post_v1(
+        *connection, cookie, "revoke_browser_key", {{"customer_id", customer_id}, {"id", key_id}});
+    ASSERT_TRUE(listed.value("ok", false)) << listed_response.substr(0, 400);
+    EXPECT_EQ(listed["value"]["key"]["state"], "revoked");
+    const std::string revoked = search_from(site);
+    EXPECT_TRUE(revoked.starts_with("HTTP/1.1 401")) << revoked.substr(0, 400);
+    const nlohmann::json keys =
+        get_v1(*connection, cookie, "list_browser_keys?customer_id=" + customer_id);
+    ASSERT_EQ(keys["value"]["keys"].size(), 1U) << keys.dump();
+    EXPECT_EQ(keys["value"]["keys"][0]["state"], "revoked");
+    EXPECT_EQ(keys["value"]["keys"][0].dump().find(key.substr(41)), std::string::npos)
+        << "a listed key never carries its secret";
+}
+
 // lake#18: every call to a capability route is audited, a body lake cannot read included. A
 // malformed body and a well-formed one each leave exactly one signed failure event under their
 // request id, with the error and the body's size but never its contents.

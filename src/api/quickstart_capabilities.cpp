@@ -10,7 +10,9 @@
 // - train_quickstart: a standalone model on the same dataset (train_model), then publishing it
 //   (expose_model) once it is trained;
 // - quickstart_snippets: the website instructions (a plain web page, React, curl) with the hosts
-//   and ids filled in, and the create_token call that makes the key they need.
+//   and ids filled in, and a browser key bound to the index (and model) and the website's origin
+//   (create_browser_key, lake#1152): made by this call when `origins` is sent, otherwise named as
+//   the call that makes it.
 //
 // Every write is a nested Registry call as the same person. The quickstart's own state is one
 // sealed record per quickstart in the workspace Zetta (`lake_quickstarts`); nothing is added to
@@ -46,8 +48,10 @@ constexpr std::size_t listed_quickstarts = 20;
 // The methodology and held-out share Train → Models' New Model starts with.
 constexpr std::string_view default_methodology = "M-1";
 constexpr double default_holdout = 0.2;
-// Where the website snippets put the key create_token answers.
+// Where the website snippets put the browser key create_browser_key answers.
 constexpr std::string_view key_placeholder = "YOUR_LAKE_SEARCH_KEY";
+// The origin the key's create call names until the caller says which website it is for.
+constexpr std::string_view example_site = "https://www.example.com";
 
 std::string lookup_of(const std::string& customer_id) {
     return "customer:" + customer_id;
@@ -1169,10 +1173,10 @@ std::string html_snippet(const std::string& origin,
         "  const LAKE = " +
         script_value(origin) +
         ";\n"
-        "  // Anyone who opens this page can read the key: it can only search published indexes";
-    out += model.is_null() ? "" : " and ask published models";
-    out += ".\n"
-           "  // Revoke it on Lake's Tokens page.\n"
+        "  // Anyone who opens this page can read the key: it can only search this index";
+    out += model.is_null() ? "" : " and ask this model";
+    out += ",\n"
+           "  // and only from your website's address. Revoke it on the index's page in Lake.\n"
            "  const KEY = " +
            script_value(std::string(key_placeholder)) +
            ";\n"
@@ -1241,9 +1245,10 @@ std::string react_snippet(const std::string& origin,
            "const LAKE = " +
            script_value(origin) +
            ";\n"
-           "// Anyone who opens the page can read the key: it can only search published indexes";
-    out += model.is_null() ? "" : " and ask published models";
-    out += ".\nconst KEY = " + script_value(std::string(key_placeholder)) +
+           "// Anyone who opens the page can read the key: it can only search this index";
+    out += model.is_null() ? "" : " and ask this model";
+    out += ", and only from your website's address.\nconst KEY = " +
+           script_value(std::string(key_placeholder)) +
            ";\n"
            "const SEARCH = " +
            script_value(search) +
@@ -1318,13 +1323,19 @@ std::string react_snippet(const std::string& origin,
     return out;
 }
 
-std::string curl_snippet(const std::string& origin, const json& search, const json& model) {
+// `site` is the website's origin the key lists: a browser key answers only calls that name it in
+// Origin, as a browser does, so curl names it too.
+std::string curl_snippet(const std::string& origin,
+                         const json& search,
+                         const json& model,
+                         const std::string& site) {
     std::string out = "export LAKE_SEARCH_KEY=" + std::string(key_placeholder) +
                       "\n"
                       "curl -s -G \"" +
                       origin +
                       "/v1/search_index\" \\\n"
-                      "  -H \"Authorization: Bearer $LAKE_SEARCH_KEY\" \\\n";
+                      "  -H \"Authorization: Bearer $LAKE_SEARCH_KEY\" -H \"Origin: " +
+                      site + "\" \\\n";
     for (const char* field : {"customer_id", "workspace_id", "index_id"}) {
         out += "  --data-urlencode \"" + std::string(field) + "=" + text(search, field) + "\" \\\n";
     }
@@ -1334,8 +1345,10 @@ std::string curl_snippet(const std::string& origin, const json& search, const js
         body["rows"] = json::array({{{"<column>", "<value>"}}});
         out += "\ncurl -s \"" + origin +
                "/v1/predict\" \\\n"
-               "  -H \"Authorization: Bearer $LAKE_SEARCH_KEY\" -H \"Content-Type: "
-               "application/json\" \\\n"
+               "  -H \"Authorization: Bearer $LAKE_SEARCH_KEY\" -H \"Origin: " +
+               site +
+               "\" \\\n"
+               "  -H \"Content-Type: application/json\" \\\n"
                "  -d '" +
                body.dump() + "'\n";
     }
@@ -1394,45 +1407,89 @@ liquid::runtime::task<ApiResult> quickstart_snippets(const json& input, ApiConte
     }
     const std::string target = text(record.value("training", json(nullptr)), "target");
     const std::string table = text(record.value("dataset", json(nullptr)), "name");
-    json scopes = json::array({"search_index"});
+    json capabilities = json::array({"search_index"});
     if (!model.is_null()) {
-        scopes.push_back("predict");
+        capabilities.push_back("predict");
+    }
+    // The browser key the code needs (lake#1152): bound to this index (and model), this workspace
+    // and the website's origins. With `origins` it is made here, through create_browser_key as the
+    // same caller (its own authorization and audit), and its secret answered once.
+    json create_input{{"customer_id", customer_id},
+                      {"workspace_id", workspace_id},
+                      {"index_id", text(index, "id")},
+                      {"name", "website " + (table.empty() ? std::string("search") : table)},
+                      {"origins", json::array({std::string(example_site)})}};
+    if (!model.is_null()) {
+        create_input["model_id"] = text(model_record, "id");
+    }
+    std::string secret;
+    std::string site = std::string(example_site);
+    json made = nullptr;
+    if (const auto origins = input.find("origins"); origins != input.end()) {
+        create_input["origins"] = *origins;
+        ApiResult created = take(co_await nested(context, "create_browser_key", create_input));
+        if (!created.ok) {
+            co_return created;
+        }
+        secret = created.value.value("secret", std::string());
+        made = created.value.at("key");
+        site = made.at("origins").at(0).get<std::string>();
     }
     out["ready"] = true;
     out["key"] = {
+        {"kind", "browser_key"},
         {"placeholder", key_placeholder},
-        {"scopes", scopes},
-        {"create",
-         {{"capability", "create_token"},
-          {"input",
-           {{"name", "website " + (table.empty() ? std::string("search") : table)},
-            {"scopes", scopes}}}}},
+        {"capabilities", capabilities},
+        {"create", {{"capability", "create_browser_key"}, {"input", create_input}}},
+        {"secret", secret.empty() ? json(nullptr) : json(secret)},
+        {"browser_key", made},
         {"note",
-         "Make the key with create_token (its `secret` is shown once) and put it where the "
-         "snippets say " +
-             std::string(key_placeholder) + ". It can only search published indexes" +
-             (model.is_null() ? std::string() : std::string(" and ask published models")) +
-             " of the accounts you can read, never change anything, and lasts as long as the "
-             "sign-in that made it (at most 30 days) unless it is a standing key. Revoke it on "
-             "the Tokens page. Every search and model answer is billed to the account."}};
+         std::string(
+             secret.empty()
+                 ? "Make the key with create_browser_key, naming your website's origins "
+                   "(or call quickstart_snippets again with `origins`): its `secret` is "
+                   "shown once and goes where the code says " +
+                       std::string(key_placeholder) + ". "
+                 : "The key is in the code below and is shown only this once: copy it now. ") +
+             "It can only search this index" +
+             (model.is_null() ? std::string() : std::string(" and ask this model")) +
+             ", only from the websites it lists, and never change anything. It belongs to the "
+             "workspace, not to your sign-in, so signing out leaves your website working; it "
+             "lasts until you revoke it (list_browser_keys, revoke_browser_key, or the index's "
+             "page in Lake). Every search and model answer is billed to the account."}};
+    const auto with_secret = [&](std::string code) {
+        if (secret.empty()) {
+            return code;
+        }
+        for (std::size_t at = code.find(key_placeholder); at != std::string::npos;
+             at = code.find(key_placeholder, at + secret.size())) {
+            code.replace(at, key_placeholder.size(), secret);
+        }
+        return code;
+    };
     out["snippets"] = json::array(
         {{{"id", "html"},
           {"title", "Plain Web Page"},
           {"language", "html"},
-          {"code", html_snippet(origin, search, model, target.empty() ? "model" : target, table)}},
+          {"code",
+           with_secret(
+               html_snippet(origin, search, model, target.empty() ? "model" : target, table))}},
          {{"id", "react"},
           {"title", "React"},
           {"language", "jsx"},
-          {"code", react_snippet(origin, search, model, target.empty() ? "model" : target)}},
+          {"code",
+           with_secret(react_snippet(origin, search, model, target.empty() ? "model" : target))}},
          {{"id", "curl"},
           {"title", "curl"},
           {"language", "shell"},
-          {"code", curl_snippet(origin, search, model)}}});
-    out["next"] = model.is_null()
-                      ? "Paste a snippet into your site with a key from create_token. "
-                        "train_quickstart adds model answers."
-                      : "Paste a snippet into your site with a key from create_token: it shows "
-                        "search results with the model's answer beside each.";
+          {"code", with_secret(curl_snippet(origin, search, model, site))}}});
+    out["next"] = !secret.empty() ? "Paste a snippet into your site: the key is already in it."
+                  : model.is_null()
+                      ? "Make the key (quickstart_snippets with `origins`, or create_browser_key) "
+                        "and paste a snippet into your site. train_quickstart adds model answers."
+                      : "Make the key (quickstart_snippets with `origins`, or create_browser_key) "
+                        "and paste a snippet into your site: it shows search results with the "
+                        "model's answer beside each.";
     co_return ApiResult::success(std::move(out));
 }
 
@@ -1609,15 +1666,27 @@ void register_quickstart_capabilities(Registry& registry) {
             "The website instructions of the quickstart process (lake#1128): code for a plain web "
             "page, a React component and curl that search the quickstart's published index, with "
             "the model's answer beside each result once train_quickstart has published it, with "
-            "Lake's host and the account, workspace, index and model ids filled in. The key is "
-            "never stored or answered: `key.create` is the create_token call (scopes search_index, "
-            "and predict once there is a model) whose `secret` goes where the code says "
-            "YOUR_LAKE_SEARCH_KEY. The key can only search published indexes and ask published "
-            "models, and anyone who opens the page can read it.",
-        .input_schema =
-            input_schema({{"workspace_id", workspace_schema("the workspace the quickstart is in")},
-                          {"quickstart_id", quickstart_id_schema()}},
-                         json::array({"workspace_id"})),
+            "Lake's host and the account, workspace, index and model ids filled in. The code needs "
+            "a browser key (lake#1152): one bound to this index (and model), this workspace and "
+            "your website's address, that works only from there and outlives your sign-in. Send "
+            "`origins` (such as [\"https://www.example.com\"]) and this call makes it through "
+            "create_browser_key and answers it once, in `key.secret` and already in the code; "
+            "without `origins` it makes nothing and `key.create` is the create_browser_key call "
+            "whose `secret` goes where the code says YOUR_LAKE_SEARCH_KEY. Anyone who opens the "
+            "page can read the key; it can only search and ask, and every call is billed to the "
+            "account.",
+        .input_schema = input_schema(
+            {{"workspace_id", workspace_schema("the workspace the quickstart is in")},
+             {"quickstart_id", quickstart_id_schema()},
+             {"origins",
+              {{"type", "array"},
+               {"items", {{"type", "string"}, {"minLength", 1}, {"maxLength", 300}}},
+               {"minItems", 1},
+               {"maxItems", 20},
+               {"description",
+                "your website's origins, such as https://www.example.com: makes the browser key "
+                "now (create_browser_key) and puts it in the code, shown once"}}}},
+            json::array({"workspace_id"})),
         .output_schema = {{"type", "object"},
                           {"properties",
                            {{"quickstart_id", {{"type", "string"}}},
@@ -1630,7 +1699,9 @@ void register_quickstart_capabilities(Registry& registry) {
                             {"next", {{"type", "string"}}}}},
                           {"required",
                            json::array({"quickstart_id", "origin", "ready", "snippets", "key"})}},
-        .kind = CapabilityKind::Read,
+        // POST, because with `origins` it makes a key (through create_browser_key, which is
+        // authorized as a write); without, it changes nothing and is authorized as a read.
+        .kind = CapabilityKind::Action,
         .object = "customer",
         .action = "read",
         .resolve_object = customer_object,

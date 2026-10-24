@@ -9566,6 +9566,12 @@ struct ApiServer::Impl {
                 ctx.credential_expires_at_unix = principal->expires_at_unix;
                 ctx.pool_id = principal->pool_id;
                 ctx.scopes = principal->scopes;
+                // A browser key acts as no person and is no session (lake#1152): the registry
+                // admits it only to what it is bound to.
+                if (principal->browser_key) {
+                    ctx.session_credential = false;
+                    ctx.browser_key = principal->browser_key;
+                }
             } else {
                 // Said apart so a caller knows to renew rather than fix its key (lake#450).
                 ctx.credential_rejection =
@@ -14746,7 +14752,9 @@ struct ApiServer::Impl {
     }
 
     boost::http::route_task serve_metrics(boost::http::route_params& route) {
-        if (!context_for(route).authorized) {
+        // A browser key sits in a public page and reaches nothing but its binding (lake#1152).
+        if (const ApiContext context = context_for(route);
+            !context.authorized || context.browser_key) {
             return send_text(route,
                              boost::http::status::forbidden,
                              error_body("unauthorized", "a valid admin bearer token is required"),
@@ -15334,6 +15342,26 @@ struct ApiServer::Impl {
                         context.authorized ? maximum_sync_body_size : std::size_t{1024 * 1024});
     }
 
+    // Lake's CORS answers any origin (`Access-Control-Allow-Origin: *`); a call made with a browser
+    // key (lake#1152, docs/api/browser-keys.md) is answered to the key's own origins only: the
+    // calling origin when the key lists it, and no Access-Control-Allow-Origin otherwise, so a page
+    // of any other site cannot read the answer even if the call reached Lake. A preflight carries
+    // no credential, so it is answered as every other preflight is.
+    static void restrict_cors_to_browser_key(boost::http::route_params& route,
+                                             const ApiContext& ctx) {
+        if (!ctx.browser_key) {
+            return;
+        }
+        namespace http = boost::http;
+        route.res.erase(http::field::access_control_allow_origin);
+        route.res.set(http::field::vary, "Origin");
+        const auto origin = control::browser_key_origin(ctx.caller_origin);
+        if (origin && std::ranges::find(ctx.browser_key->origins, *origin) !=
+                          ctx.browser_key->origins.end()) {
+            route.res.set(http::field::access_control_allow_origin, ctx.caller_origin);
+        }
+    }
+
     boost::http::route_task serve_capability(boost::http::route_params& route,
                                              std::shared_ptr<const Capability> capability) {
         namespace http = boost::http;
@@ -15433,6 +15461,8 @@ struct ApiServer::Impl {
             status == http::status::too_many_requests) {
             route.res.set(http::field::retry_after, "1");
         }
+        // A browser key's answer is readable only by the websites it lists (lake#1152).
+        restrict_cors_to_browser_key(route, ctx);
         // A repository write names its workspace store requests as a page does (lake#527).
         route.res.set("Server-Timing", server_timing_of(route));
         stamp_response_headers(route, body);
@@ -15572,6 +15602,7 @@ struct ApiServer::Impl {
         if (!session_id.empty()) {
             route.res.set("Mcp-Session-Id", session_id);
         }
+        restrict_cors_to_browser_key(route, ctx);
         route.res.set("Server-Timing", server_timing_of(route));
         stamp_response_headers(route, body);
         auto [send_error] = co_await route.send(body);

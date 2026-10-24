@@ -91,6 +91,16 @@ struct Engine {
         if (capability == "expose_index") {
             return json{{"index_id", input.at("index")}, {"exposed", true}};
         }
+        // What create_browser_key reads to bind a key (lake#1152).
+        if (capability == "get_index") {
+            return json{{"index_id", input.at("index_id")}, {"exposed", true}};
+        }
+        if (capability == "get_model") {
+            return json{{"id", input.at("model_id")}, {"exposed", true}};
+        }
+        if (capability == "search") {
+            return json{{"hits", json::array()}};
+        }
         if (capability == "train_model") {
             ++run_count;
             return json{{"run_id", "run-" + std::to_string(run_count)},
@@ -306,13 +316,14 @@ TEST(Quickstart, ADroppedDatasetBecomesSearchThenModelAnswers) {
     ASSERT_EQ(read.value["quickstarts"].size(), 1U);
     EXPECT_EQ(read.value["quickstarts"][0]["dataset_id"], "datasets/movies");
 
-    // The website code: Lake's host and the ids filled in, the key from create_token.
+    // The website code: Lake's host and the ids filled in, the call that makes its browser key.
     auto snippets = q.by(me, "quickstart_snippets", where);
     ASSERT_TRUE(snippets.ok) << snippets.error.message;
     EXPECT_EQ(snippets.value["ready"], true);
     EXPECT_EQ(snippets.value["includes_model"], false);
-    EXPECT_EQ(snippets.value["key"]["create"]["capability"], "create_token");
-    EXPECT_EQ(snippets.value["key"]["scopes"], json::array({"search_index"}));
+    EXPECT_EQ(snippets.value["key"]["create"]["capability"], "create_browser_key");
+    EXPECT_EQ(snippets.value["key"]["capabilities"], json::array({"search_index"}));
+    EXPECT_EQ(snippets.value["key"]["secret"], nullptr) << "without origins nothing is made";
     ASSERT_EQ(snippets.value["snippets"].size(), 3U);
     const std::string html = snippets.value["snippets"][0]["code"];
     EXPECT_EQ(snippets.value["snippets"][0]["id"], "html");
@@ -323,16 +334,61 @@ TEST(Quickstart, ADroppedDatasetBecomesSearchThenModelAnswers) {
     EXPECT_NE(html.find("/v1/search_index"), std::string::npos);
     EXPECT_NE(html.find("const MODEL = null"), std::string::npos);
     EXPECT_EQ(snippets.value["snippets"][1]["id"], "react");
-    // The key the snippets name is made by the existing capability, and can only search.
-    // (create_token itself needs a signed-in session, which this rig does not make.)
-    const auto create_token = q.registry.find("create_token");
-    ASSERT_TRUE(create_token);
-    const auto valid =
-        lake::api::validate_input(*create_token, snippets.value["key"]["create"]["input"]);
+    // The call the snippets name is create_browser_key's, bound to this index and workspace.
+    const auto create_key = q.registry.find("create_browser_key");
+    ASSERT_TRUE(create_key);
+    const json& create_input = snippets.value["key"]["create"]["input"];
+    const auto valid = lake::api::validate_input(*create_key, create_input);
     EXPECT_TRUE(valid.ok) << valid.error.message;
-    for (const json& scope : snippets.value["key"]["scopes"]) {
-        EXPECT_TRUE(q.registry.find(scope.get<std::string>())) << scope;
+    EXPECT_EQ(create_input["index_id"], "index-1");
+    EXPECT_EQ(create_input["workspace_id"], me.workspace_id);
+    EXPECT_FALSE(create_input.contains("model_id"));
+    const std::string curl = snippets.value["snippets"][2]["code"];
+    EXPECT_NE(curl.find("-H \"Origin: https://www.example.com\""), std::string::npos) << curl;
+    EXPECT_TRUE(q.store->list_browser_keys(me.customer_id, "")->empty());
+
+    // With the website's origin, the call makes the key and puts it in the code, shown once.
+    json for_site = where;
+    for_site["origins"] = json::array({"https://shop.example.test"});
+    auto keyed = q.by(me, "quickstart_snippets", for_site);
+    ASSERT_TRUE(keyed.ok) << keyed.error.message;
+    const std::string secret = keyed.value["key"]["secret"];
+    EXPECT_TRUE(secret.starts_with("lbk.")) << secret;
+    EXPECT_EQ(keyed.value["key"]["browser_key"]["origins"],
+              json::array({"https://shop.example.test"}));
+    EXPECT_EQ(keyed.value["key"]["browser_key"]["index_id"], "index-1");
+    const std::string keyed_html = keyed.value["snippets"][0]["code"];
+    EXPECT_NE(keyed_html.find(secret), std::string::npos);
+    EXPECT_EQ(keyed_html.find("YOUR_LAKE_SEARCH_KEY"), std::string::npos);
+    EXPECT_NE(
+        std::string(keyed.value["snippets"][2]["code"]).find("Origin: https://shop.example.test"),
+        std::string::npos);
+    ASSERT_EQ(q.store->list_browser_keys(me.customer_id, me.workspace_id)->size(), 1U);
+    // The key it made searches the quickstart's index from that website, as no person.
+    {
+        auto website = q.operator_context();
+        website.operator_credential = false;
+        website.acting_identity.clear();
+        const auto principal = q.store->context_for(secret);
+        ASSERT_TRUE(principal) << principal.error().message;
+        website.acting_identity = principal->taap_id;
+        website.credential_kind = principal->kind;
+        website.browser_key = principal->browser_key;
+        website.caller_origin = "https://shop.example.test";
+        const auto searched = q.call("search_index",
+                                     {{"customer_id", me.customer_id},
+                                      {"workspace_id", me.workspace_id},
+                                      {"index_id", "index-1"},
+                                      {"query", "alien"}},
+                                     website);
+        EXPECT_TRUE(searched.ok) << searched.error.message;
     }
+    // A bad origin is create_browser_key's refusal, word for word, and makes nothing.
+    for_site["origins"] = json::array({"shop.example.test/x y"});
+    const auto refused_site = q.by(me, "quickstart_snippets", for_site);
+    EXPECT_EQ(refused_site.error.code, "invalid_input");
+    EXPECT_EQ(refused_site.error.path, "/origins/0");
+    EXPECT_EQ(q.store->list_browser_keys(me.customer_id, me.workspace_id)->size(), 1U);
 
     // One click trains a model on the same dataset.
     auto training = q.by(
@@ -381,7 +437,8 @@ TEST(Quickstart, ADroppedDatasetBecomesSearchThenModelAnswers) {
     // The snippets grow the model's answer beside each result.
     snippets = q.by(me, "quickstart_snippets", where);
     EXPECT_EQ(snippets.value["includes_model"], true);
-    EXPECT_EQ(snippets.value["key"]["scopes"], json::array({"search_index", "predict"}));
+    EXPECT_EQ(snippets.value["key"]["capabilities"], json::array({"search_index", "predict"}));
+    EXPECT_EQ(snippets.value["key"]["create"]["input"]["model_id"], "model-1");
     const std::string with_model = snippets.value["snippets"][0]["code"];
     EXPECT_NE(with_model.find("/v1/predict"), std::string::npos);
     EXPECT_NE(with_model.find("model-1"), std::string::npos);
@@ -674,7 +731,12 @@ TEST(Quickstart, AgentsFindItFirstInOpenApiMcpLlmsTxtAndTheSkill) {
     EXPECT_TRUE(openapi["paths"]["/v1/start_quickstart"].contains("post"));
     EXPECT_TRUE(openapi["paths"]["/v1/quickstart_status"].contains("get"));
     EXPECT_TRUE(openapi["paths"]["/v1/train_quickstart"].contains("post"));
-    EXPECT_TRUE(openapi["paths"]["/v1/quickstart_snippets"].contains("get"));
+    // POSTed: with `origins` it makes the browser key (lake#1152).
+    EXPECT_TRUE(openapi["paths"]["/v1/quickstart_snippets"].contains("post"));
+    for (const char* name : {"create_browser_key", "list_browser_keys", "revoke_browser_key"}) {
+        EXPECT_TRUE(openapi["paths"].contains(std::string("/v1/") + name)) << name;
+        EXPECT_EQ(lake::api::agent_docs::group_of(name), "Browser keys") << name;
+    }
     const json tools = lake::api::mcp_tools(registry, lake::api::SchemaAudience::Caller);
     for (const std::string& name : names) {
         EXPECT_TRUE(std::ranges::any_of(tools, [&](const json& tool) {

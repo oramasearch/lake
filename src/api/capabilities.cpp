@@ -7269,6 +7269,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_agent_stream_capabilities(registry);
     register_solution_capabilities(registry);
     register_quickstart_capabilities(registry);
+    register_browser_key_capabilities(registry);
     register_methodology_capabilities(registry);
     register_drives_capabilities(registry);
     register_deletion_capabilities(registry);

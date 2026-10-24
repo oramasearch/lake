@@ -3,7 +3,7 @@
  * balance. `npm test`; the build runs it. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MAX_UPLOAD_BYTES, blockedBy, keyCovers, currentStep, fileKind, firstColumns, hitLine, pollInterval, publishesNow, rateLabel, stepTone, uploadContent, withKey } from "../src/pages/quickstart/quickstart.ts";
+import { MAX_UPLOAD_BYTES, blockedBy, keyCovers, currentStep, fileKind, firstColumns, hitLine, pollInterval, publishesNow, rateLabel, siteOrigin, stepTone, uploadContent, withKey } from "../src/pages/quickstart/quickstart.ts";
 
 test("a dropped file is sent as what upload_dataset takes", () => {
   assert.deepEqual(uploadContent("movies.csv", "title,genre\nAlien,horror\n"), { content: "title,genre\nAlien,horror\n", format: "csv" });
@@ -90,4 +90,17 @@ test("a key made before the model was published is not enough for its answers", 
   assert.equal(keyCovers(["search_index"], ["search_index"]), true);
   assert.equal(keyCovers(["search_index"], ["search_index", "predict"]), false);
   assert.equal(keyCovers(["search_index", "predict"], ["search_index", "predict"]), true);
+});
+
+test("the website's address becomes the origin its browser key lists (lake#1152)", () => {
+  assert.deepEqual(siteOrigin("https://www.example.com"), { origin: "https://www.example.com" });
+  assert.deepEqual(siteOrigin("  WWW.Example.com/products?x=1 "), { origin: "https://www.example.com" });
+  assert.deepEqual(siteOrigin("https://shop.example.com:8443/"), { origin: "https://shop.example.com:8443" });
+  assert.deepEqual(siteOrigin("https://shop.example.com:443"), { origin: "https://shop.example.com" });
+  assert.deepEqual(siteOrigin("localhost:5173"), { origin: "http://localhost:5173" });
+  assert.deepEqual(siteOrigin("http://127.0.0.1:8080/app"), { origin: "http://127.0.0.1:8080" });
+  assert.match((siteOrigin("") as { error: string }).error, /address/);
+  assert.match((siteOrigin("http://example.com") as { error: string }).error, /https/);
+  assert.match((siteOrigin("ftp://example.com") as { error: string }).error, /https/);
+  assert.match((siteOrigin("https://exa mple.com") as { error: string }).error, /not a website/);
 });

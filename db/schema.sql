@@ -5063,6 +5063,39 @@ CREATE INDEX IF NOT EXISTS billing_coupon_attempts_by_window ON billing_coupon_a
 CREATE TABLE IF NOT EXISTS coupons_guard (applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0101_coupons') ON CONFLICT DO NOTHING;
 
+-- 0102_browser_keys (lake#1152, docs/api/browser-keys.md): the key a website's own page holds.
+-- A credential, so in the control plane beside sessions and the keystore (multitenancy, decision
+-- 53): its SHA-256 (never the secret), its binding (one workspace, one search index, optionally
+-- one model), the website origins it may be called from, its calls a minute and the current
+-- minute's count (one row every replica counts in), who made it, its optional expiry and its
+-- revocation. It names no session, so signing out leaves it working. Additive: one table and a
+-- guard. 0100 and 0101 are taken by open pull requests (lake#1155, lake#1156).
+CREATE TABLE IF NOT EXISTS browser_keys (
+    id                    uuid        PRIMARY KEY,
+    customer_id           uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    workspace_id          uuid        NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    index_id              text        NOT NULL CHECK (length(index_id) BETWEEN 1 AND 256),
+    model_id              text        NOT NULL DEFAULT '' CHECK (length(model_id) <= 256),
+    name                  text        NOT NULL DEFAULT '' CHECK (length(name) <= 200),
+    origins               text[]      NOT NULL CHECK (cardinality(origins) BETWEEN 1 AND 20),
+    rate_limit_per_minute integer     NOT NULL DEFAULT 600
+                                      CHECK (rate_limit_per_minute BETWEEN 1 AND 6000),
+    secret_sha256         text        NOT NULL UNIQUE CHECK (secret_sha256 ~ '^[0-9a-f]{64}$'),
+    created_by_user_id    uuid        REFERENCES users(id) ON DELETE SET NULL,
+    created_by_taap_id    text        NOT NULL DEFAULT '',
+    created_at            timestamptz NOT NULL DEFAULT now(),
+    expires_at            timestamptz,
+    revoked_at            timestamptz,
+    revoked_by_taap_id    text        NOT NULL DEFAULT '',
+    last_used_at          timestamptz,
+    window_started_at     timestamptz,
+    window_calls          integer     NOT NULL DEFAULT 0 CHECK (window_calls >= 0)
+);
+CREATE INDEX IF NOT EXISTS browser_keys_customer_idx
+    ON browser_keys (customer_id, workspace_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS browser_keys_guard (applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0102_browser_keys') ON CONFLICT DO NOTHING;
+
 -- ---------------------------------------------------------------------------------------------
 -- 0103_clerk_session_binding (lake#1163, docs/api/clerk.md#webhooks): each Lake browser session
 -- made by a Clerk exchange records the Clerk session it came from (`sid`, from Clerk's signed

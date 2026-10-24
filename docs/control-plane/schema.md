@@ -1502,3 +1502,27 @@ vendors lake's schema today (`internal/controller/assets/lake-schema.sql`, until
 orama-operator#936), so an operator release carrying it through `0101_coupons`, with `coupons_guard`
 selected, rolls before a lake image that serves coupons, after the one for `0100_balance_grants`
 (unless lake#1147's `lake migrate` has taken the schema over by then).
+
+## Browser keys (migration `0102_browser_keys`)
+
+`0102_browser_keys` (lake#1152, [`../api/browser-keys.md`](../api/browser-keys.md)) adds
+`browser_keys`, one row per browser key: a credential, so in the control plane beside `sessions` and
+the keystore (multitenancy, decision 53), never in a workspace Zetta.
+
+- `id` (the key's id, also in its secret `lbk.<id>.<random>`), `customer_id` and `workspace_id`
+  (both cascade), `index_id` (1 to 256 characters), `model_id` (empty: the key asks no model),
+  `name` (at most 200);
+- `origins`, 1 to 20 lowercase origins without a trailing slash (lake checks the form; the table
+  checks the count);
+- `rate_limit_per_minute` (1 to 6000, default 600) with `window_started_at` and `window_calls`, the
+  current minute and its count, which `admit_browser_key_call` moves in one `UPDATE` so every replica
+  counts in the same row;
+- `secret_sha256`, unique, 64 lowercase hex digits: the secret itself is never stored;
+- `created_by_user_id` (set null if the user row goes) and `created_by_taap_id`, `created_at`,
+  `expires_at` (null: until revoked), `revoked_at` and `revoked_by_taap_id`, `last_used_at`.
+
+The row names no session, so revoking sessions (signing out, `revoke_user_sessions`, Clerk's
+account-wide session events) leaves it working; `revoke_browser_key` ends it, and a workspace whose
+`desired` is `deleted` ends its keys. Additive: the table, its index and `browser_keys_guard`.
+Apply before the new binary: the schema through `0102` reaches the control database first (lake's
+`lake migrate`, or the operator's vendored copy).

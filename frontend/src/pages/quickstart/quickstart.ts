@@ -36,9 +36,54 @@ export type Snippets = {
   ready: boolean;
   includes_model: boolean;
   snippets: Snippet[];
-  key: { placeholder: string; scopes: string[]; create: { capability: string; input: { name: string; scopes: string[] } }; note: string } | null;
+  /** The browser key the code needs (lake#1152): `secret` once, when the call made it with `origins`. */
+  key: {
+    kind: "browser_key";
+    placeholder: string;
+    capabilities: string[];
+    create: { capability: string; input: Record<string, unknown> };
+    secret: string | null;
+    browser_key: BrowserKey | null;
+    note: string;
+  } | null;
   next?: string;
 };
+
+/** A browser key as create_browser_key and list_browser_keys answer it (docs/api/browser-keys.md). */
+export type BrowserKey = {
+  id: string;
+  name: string;
+  workspace_id: string;
+  index_id: string;
+  model_id: string | null;
+  origins: string[];
+  capabilities: string[];
+  rate_limit_per_minute: number;
+  state: "active" | "revoked" | "expired";
+  created_by?: string;
+  created_at?: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+  last_used_at: string | null;
+};
+
+/** A website's origin as a browser key lists it, from what a person typed (`www.shop.com`,
+ * `https://shop.com/products`): https unless it is this computer, lowercase, no path. Lake checks it
+ * again; this only says early what it will refuse. */
+export function siteOrigin(typed: string): { origin: string } | { error: string } {
+  let text = typed.trim();
+  if (!text) return { error: "Type your website's address, such as https://www.example.com." };
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) text = (/^(localhost|127\.0\.0\.1)(:|$)/i.test(text) ? "http://" : "https://") + text;
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    return { error: "That is not a website address." };
+  }
+  const local = url.hostname === "localhost" || url.hostname === "127.0.0.1";
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) return { error: "A website's address starts with https:// (http:// only for localhost)." };
+  return { origin: `${url.protocol}//${url.host}`.toLowerCase() };
+}
 
 /** The most a dataset file may hold: what upload_dataset takes. */
 export const MAX_UPLOAD_BYTES = 16 * 1024 * 1024;

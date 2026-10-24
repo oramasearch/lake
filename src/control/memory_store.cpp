@@ -5875,6 +5875,129 @@ Result<IssuedSession> InMemoryStore::create_token(const NewToken& input) {
     return issued;
 }
 
+namespace {
+
+std::int64_t unix_now() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+std::string browser_key_time(std::int64_t unix) {
+    return std::format("{:%FT%TZ}", std::chrono::sys_seconds{std::chrono::seconds{unix}});
+}
+
+Result<void> check_new_browser_key(const NewBrowserKey& input) {
+    if (input.customer_id.empty() || input.workspace_id.empty() || input.index_id.empty()) {
+        return std::unexpected(
+            StoreError{"invalid_input", "a browser key names its account, workspace and index"});
+    }
+    if (input.origins.empty() || input.origins.size() > browser_key_max_origins) {
+        return std::unexpected(StoreError{"invalid_input", "a browser key lists 1 to 20 origins"});
+    }
+    if (input.rate_limit_per_minute < 1 ||
+        input.rate_limit_per_minute > browser_key_max_rate_limit) {
+        return std::unexpected(
+            StoreError{"invalid_input", "rate_limit_per_minute is between 1 and 6000"});
+    }
+    if (input.expires_in_seconds < 0) {
+        return std::unexpected(StoreError{"invalid_input", "expires_in_seconds is positive"});
+    }
+    return {};
+}
+
+} // namespace
+
+Result<IssuedBrowserKey> InMemoryStore::create_browser_key(const NewBrowserKey& input) {
+    if (auto checked = check_new_browser_key(input); !checked) {
+        return std::unexpected(checked.error());
+    }
+    std::lock_guard lock(mutex_);
+    const auto workspace = std::ranges::find(workspaces_, input.workspace_id, &Workspace::id);
+    if (workspace == workspaces_.end() || workspace->customer_id != input.customer_id ||
+        workspace->desired == "deleted") {
+        return std::unexpected(StoreError{
+            "invalid_input", "workspace_id must name a workspace Zetta in this account"});
+    }
+    StoredBrowserKey stored;
+    stored.key.id = new_uuid_v4();
+    stored.key.customer_id = input.customer_id;
+    stored.key.workspace_id = input.workspace_id;
+    stored.key.index_id = input.index_id;
+    stored.key.model_id = input.model_id;
+    stored.key.name = input.name;
+    stored.key.origins = input.origins;
+    stored.key.rate_limit_per_minute = input.rate_limit_per_minute;
+    stored.key.created_by_user_id = input.created_by_user_id;
+    stored.key.created_by_taap_id = input.created_by_taap_id;
+    const std::int64_t now = unix_now();
+    stored.key.created_at = browser_key_time(now);
+    if (input.expires_in_seconds > 0) {
+        stored.expires_unix = now + input.expires_in_seconds;
+        stored.key.expires_at = browser_key_time(stored.expires_unix);
+    }
+    const std::string random = identity_crypto::random_secret();
+    if (random.size() < 32) {
+        return std::unexpected(StoreError{"store_error", "could not generate a browser key"});
+    }
+    IssuedBrowserKey issued{
+        stored.key, std::string(browser_key_credential_prefix) + stored.key.id + "." + random};
+    stored.secret_sha256 = identity_crypto::sha256_hex(issued.secret);
+    browser_keys_.push_back(std::move(stored));
+    return issued;
+}
+
+Result<std::vector<BrowserKey>> InMemoryStore::list_browser_keys(const std::string& customer_id,
+                                                                 const std::string& workspace_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<BrowserKey> out;
+    for (auto it = browser_keys_.rbegin(); it != browser_keys_.rend(); ++it) {
+        if (it->key.customer_id == customer_id &&
+            (workspace_id.empty() || it->key.workspace_id == workspace_id)) {
+            out.push_back(it->key);
+        }
+    }
+    return out;
+}
+
+Result<BrowserKey> InMemoryStore::revoke_browser_key(const std::string& customer_id,
+                                                     const std::string& id,
+                                                     const std::string& revoked_by_taap_id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find_if(
+        browser_keys_, [&](const StoredBrowserKey& row) { return row.key.id == id; });
+    if (found == browser_keys_.end() || found->key.customer_id != customer_id) {
+        return std::unexpected(
+            StoreError{"not_found", "no browser key " + id + " in this account"});
+    }
+    if (found->key.revoked_at.empty()) {
+        found->key.revoked_at = browser_key_time(unix_now());
+        found->key.revoked_by_taap_id = revoked_by_taap_id;
+    }
+    return found->key;
+}
+
+Result<BrowserKeyAdmission> InMemoryStore::admit_browser_key_call(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find_if(
+        browser_keys_, [&](const StoredBrowserKey& row) { return row.key.id == id; });
+    if (found == browser_keys_.end()) {
+        return std::unexpected(StoreError{"not_found", "session is not active"});
+    }
+    const std::int64_t now = unix_now();
+    if (now - found->window_started_unix >= 60) {
+        found->window_started_unix = now;
+        found->window_calls = 0;
+    }
+    ++found->window_calls;
+    if (found->window_calls > found->key.rate_limit_per_minute) {
+        return BrowserKeyAdmission{
+            false,
+            static_cast<int>(std::max<std::int64_t>(1, 60 - (now - found->window_started_unix)))};
+    }
+    return BrowserKeyAdmission{true, 0};
+}
+
 Result<std::vector<Session>> InMemoryStore::list_sessions(const std::string& user_id,
                                                           const std::string& pool_id) {
     std::lock_guard lock(mutex_);
@@ -6060,6 +6183,29 @@ Result<Principal> InMemoryStore::resolve_principal(const std::string& secret) {
                          "agent_schedule",
                          schedule->scopes,
                          std::nullopt};
+    }
+    if (secret.starts_with(browser_key_credential_prefix)) {
+        const auto parsed = parse_agent_credential(secret, browser_key_credential_prefix);
+        if (!parsed) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        const auto key = std::ranges::find_if(browser_keys_, [&](const StoredBrowserKey& row) {
+            return row.key.id == parsed->first;
+        });
+        if (key == browser_keys_.end() || !key->key.revoked_at.empty() ||
+            !constant_time_hex_equal(workload_digest, key->secret_sha256)) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        const auto workspace =
+            std::ranges::find(workspaces_, key->key.workspace_id, &Workspace::id);
+        if (workspace == workspaces_.end() || workspace->desired == "deleted") {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        if (key->expires_unix != 0 && key->expires_unix <= unix_now()) {
+            return std::unexpected(StoreError{"expired", "the browser key has expired"});
+        }
+        key->key.last_used_at = browser_key_time(unix_now());
+        return browser_key_principal(key->key, workload_digest);
     }
     if (secret.starts_with(methodology_run_credential_prefix)) {
         const auto parsed = parse_agent_credential(secret, methodology_run_credential_prefix);

@@ -258,6 +258,43 @@ struct IssuedSession {
     // True when this call created the user (a sign-up, or a first OAuth sign-in in a pool).
     bool created_user = false;
 };
+// A browser key (lake#1152, docs/api/browser-keys.md): the key a website's own page holds. It is
+// bound to one published index (and optionally one published model) of one workspace, may call
+// only `search_index` and `predict` on them, only from its listed origins, and only so many times
+// a minute. It belongs to the workspace, not to the sign-in that made it: it lives until it is
+// revoked or reaches its optional expiry. Its secret is `lbk.<id>.<secret>`; the control plane
+// keeps its SHA-256 and binding beside the other credentials (`browser_keys`, migration
+// 0102_browser_keys, multitenancy: decision 53) and never the secret.
+inline constexpr std::string_view browser_key_credential_prefix = "lbk.";
+// The most origins one key lists, and its default and largest calls a minute.
+inline constexpr std::size_t browser_key_max_origins = 20;
+inline constexpr int browser_key_default_rate_limit = 600;
+inline constexpr int browser_key_max_rate_limit = 6000;
+struct BrowserKey {
+    std::string id, customer_id, workspace_id, index_id, model_id, name;
+    std::vector<std::string> origins;
+    int rate_limit_per_minute = browser_key_default_rate_limit;
+    std::string created_by_user_id, created_by_taap_id, created_at, expires_at, revoked_at,
+        revoked_by_taap_id, last_used_at;
+};
+struct NewBrowserKey {
+    std::string customer_id, workspace_id, index_id, model_id, name;
+    std::vector<std::string> origins;
+    int rate_limit_per_minute = browser_key_default_rate_limit;
+    // 0: the key lives until it is revoked.
+    std::int64_t expires_in_seconds = 0;
+    std::string created_by_user_id, created_by_taap_id;
+};
+struct IssuedBrowserKey {
+    BrowserKey key;
+    std::string secret; // shown once, never stored
+};
+// One call counted against a key's calls a minute: whether it may proceed, and when the key's
+// minute starts again when it may not.
+struct BrowserKeyAdmission {
+    bool allowed = true;
+    int retry_after_seconds = 0;
+};
 struct Principal {
     std::string user_id, taap_id, session_id, device_id, pool_id, kind;
     std::vector<std::string> scopes;
@@ -267,7 +304,15 @@ struct Principal {
     std::string workload_repository_id;
     std::string workload_revision;
     std::string workload_token_hash;
+    // Set for a browser key (kind `browser_key`): its binding, which the registry checks.
+    std::optional<BrowserKey> browser_key;
 };
+// Whether `origin` is a website origin a browser key may list: `https://host[:port]`, or
+// `http://localhost[:port]` / `http://127.0.0.1[:port]` for development, lowercase, with no path,
+// query or fragment. Answers the normalized origin, or why not.
+std::expected<std::string, std::string> browser_key_origin(std::string_view origin);
+// The principal a browser key's credential resolves to: no person, its own identity.
+Principal browser_key_principal(const BrowserKey& key, std::string digest);
 // A proof that the person holds the key of the identity document they enroll with (lake#931,
 // docs/api/identity.md#proving-you-hold-the-key): the nonce and expiry begin_identity_proof issued,
 // and what `liquid sign artifact <challenge>` printed.
@@ -2648,6 +2693,20 @@ public:
                                             const std::string& state,
                                             const std::string& browser_binding) = 0;
     virtual Result<IssuedSession> create_token(const NewToken&) = 0;
+    // Browser keys (lake#1152, docs/api/browser-keys.md). The caller has checked the binding
+    // (the workspace is the account's, the index and model exist) and normalized the origins;
+    // the store refuses a workspace of another account or one being deleted. Lists newest first,
+    // revoked ones too; `workspace_id` empty lists every workspace of the account.
+    virtual Result<IssuedBrowserKey> create_browser_key(const NewBrowserKey&) = 0;
+    virtual Result<std::vector<BrowserKey>> list_browser_keys(const std::string& customer_id,
+                                                              const std::string& workspace_id) = 0;
+    // not_found for a key of another account; revoking a revoked key answers it unchanged.
+    virtual Result<BrowserKey> revoke_browser_key(const std::string& customer_id,
+                                                  const std::string& id,
+                                                  const std::string& revoked_by_taap_id) = 0;
+    // Counts one call in the key's current minute (shared by every replica, since it is a row):
+    // refused once the minute holds `rate_limit_per_minute` calls.
+    virtual Result<BrowserKeyAdmission> admit_browser_key_call(const std::string& id) = 0;
     virtual Result<std::vector<Session>> list_sessions(const std::string& user_id,
                                                        const std::string& pool_id) = 0;
     virtual Result<void> revoke_session(const std::string& user_id,

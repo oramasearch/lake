@@ -122,9 +122,9 @@ Result<Principal> accepted_principal(Result<Principal> principal) {
     if (!principal) {
         return principal;
     }
-    const bool workload = principal->kind.starts_with("app_") ||
-                          principal->kind.starts_with("build_") ||
-                          principal->kind.starts_with("methodology_");
+    const bool workload =
+        principal->kind.starts_with("app_") || principal->kind.starts_with("build_") ||
+        principal->kind.starts_with("methodology_") || principal->kind == "browser_key";
     if (principal->taap_id == operator_principal ||
         (!workload && !principal->taap_id.empty() && !valid_principal_id(principal->taap_id))) {
         return std::unexpected(StoreError{"not_found", "session is not active"});

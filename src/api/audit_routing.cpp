@@ -56,6 +56,8 @@ constexpr std::array central = std::to_array<std::string_view>({
     "copy_workspace_records",
     // Coupon codes are billing, in the control plane (lake#1156, decision 56).
     "create_coupon",
+    // A browser key is a credential, kept with the others in the control plane (lake#1152).
+    "create_browser_key",
     "create_customer",
     "create_federation_issuer",
     "create_grant",
@@ -115,6 +117,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "list_agent_library",
     "list_applications",
     "list_coupons",
+    "list_browser_keys",
     "list_customers",
     "list_devices",
     "list_docs",
@@ -171,6 +174,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "revoke_agent_certificate",
     "revoke_agent_session",
     "revoke_balance_credit",
+    "revoke_browser_key",
     "revoke_device",
     "revoke_dynamic_secret",
     "revoke_grant",

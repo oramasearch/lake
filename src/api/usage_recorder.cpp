@@ -204,6 +204,7 @@ const std::vector<std::pair<std::string_view, std::string_view>>& calls_only_cap
         {"create_secret_mount", "a secret mount record"},
         {"create_team", "a membership record"},
         {"create_token", "a credential"},
+        {"create_browser_key", "a credential"},
         {"create_user", "an identity record"},
         {"publish_transparency_checkpoint", "the instance's transparency log"},
         {"publish_tuf_metadata", "the instance's update metadata"},

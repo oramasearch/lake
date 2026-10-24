@@ -112,6 +112,9 @@ operator sign-in, passkey sign-in and the public share pages).
   listed as *not running on this Lake* and cannot be picked; every library agent is offered, the Eval Generator Agent and the two corpus agents included (lake#788).
 - **Quickstart** (`/`, `pages/quickstart/QuickstartPage.tsx`, lake#1128) is where a signed-in
   person lands: drop a dataset, get search and model answers on a website ([quickstart.md](quickstart.md)).
+- **Website keys** (lake#1152): the Quickstart's one-click key for the website's address, and Ship →
+  Search Index's *Website Keys* card, which makes, lists and revokes the index's browser keys
+  ([browser-keys.md](browser-keys.md)).
 - **Ask Orama's page** (`/ask`, `pages/ask/AskHome.tsx`; the home from lake#600 until lake#1128). It is the panel's conversation (`pages/ask/thread.ts`, the same `sessionStorage` entry)
   across the page's width, in one centred 880px column like the expanded panel, with the message box
   at the foot. Empty, it greets the person, says what Lake is for, and explains what they can do
