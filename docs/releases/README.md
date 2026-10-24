@@ -3,6 +3,9 @@
 One page per tagged release, newest first. A page states what the release includes, what it
 does not, what is knowingly still broken, and how it was verified.
 
+- [v0.6.0](v0.6.0.md) — 2026-10-24. lake.live becomes prepaid: an account balance with Stripe top-ups,
+  warnings and emails, and a stop on paid work at $50 below zero; sign-in with no name in Clerk.
+  Migration `0099`.
 - [v0.5.2](v0.5.2.md) — 2026-10-24. A patch: request headers up to 1 MiB, so people can sign in with
   Google (#1108).
 - [v0.5.1](v0.5.1.md) — 2026-10-24. A patch: lake installs the operator's `ZETTA_EGRESS_ALLOW`, so it
