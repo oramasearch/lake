@@ -34,7 +34,7 @@ Expect:
   brand panel: the mark and "Orama", "Lake", "Design, train and ship AI on your own data, in your
   own workspace." and the list "Design", "Train", "Ship".
 - Step 2: the theme changes; the button's name is "Use dark theme" or "Use light theme".
-- Step 3: the landing at `/` opens.
+- Step 3: the landing at `/` opens (for an account, Quickstart, lake#1128).
 
 #### AUTH-002 · A signed-in person is sent on · P1
 As: owner, then operator

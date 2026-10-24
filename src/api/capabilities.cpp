@@ -7268,6 +7268,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_mcp_connection_capabilities(registry);
     register_agent_stream_capabilities(registry);
     register_solution_capabilities(registry);
+    register_quickstart_capabilities(registry);
     register_methodology_capabilities(registry);
     register_drives_capabilities(registry);
     register_deletion_capabilities(registry);

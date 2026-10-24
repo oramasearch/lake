@@ -404,6 +404,16 @@ new publication for the current month on a fresh and an existing instance.
 Not deployed; the operator must vendor the schema and select `model_token_prices_guard`.
 See [`docs/api/model-gateway.md`](docs/api/model-gateway.md).
 
+The quickstart process is the console's home (lake#1128, no migration): `start_quickstart`,
+`quickstart_status`, `train_quickstart` and `quickstart_snippets` take a dropped dataset to a
+published search index, website code (plain web page, React, curl) with a `create_token` key scoped
+to `search_index` and `predict`, and a model trained and published on the same data. Each step is a
+nested registry call of an existing capability (balance gate, audit and metering unchanged); state
+is a sealed `lake_quickstarts` record per quickstart in the workspace Zetta. Signed-in people land
+on Quickstart at `/`; Ask Orama moved to `/ask`. A key narrower than the token's scopes is
+lake#1152. Not deployed. See [`docs/api/quickstart.md`](docs/api/quickstart.md) and
+[`docs/ui/quickstart.md`](docs/ui/quickstart.md).
+
 lake.live is prepaid (lake#1114, liquid-bridge decision 67, migration `0099_account_balances`): a
 balance per account, credits (Stripe Checkout top-ups, the first exactly `LAKE_BALANCE_FIRST_TOP_UP_USD`
 $20, and auto top-ups off a saved card, off by default) minus charges (each month's bill, refreshed

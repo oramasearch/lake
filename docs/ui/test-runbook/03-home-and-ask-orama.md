@@ -1,7 +1,9 @@
 # Home and Ask Orama
 
 The Home group: the landing a visitor and the operator see at `/`, the Dashboard (`/dashboard`),
-and Ask Orama, which is a signed-in person's home at `/` and the panel beside every other page.
+and Ask Orama, which was a signed-in person's home at `/` and the panel beside every other page.
+Since lake#1128 the home is Quickstart ([../quickstart.md](../quickstart.md)) and Ask Orama's page is
+`/ask`; the steps below that open `/` as Ask Orama open `/ask`.
 Also the message box's microphone (dictation) and *From your phone*.
 
 ## Before you start

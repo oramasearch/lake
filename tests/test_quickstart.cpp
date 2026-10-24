@@ -1,0 +1,846 @@
+// The quickstart process (lake#1128, docs/api/quickstart.md): start_quickstart, quickstart_status,
+// train_quickstart and quickstart_snippets compose upload_dataset, create_index, expose_index,
+// train_model and expose_model through the registry, and keep their state in the workspace Zetta.
+// The workspace engine is the test double (StreamCaller); QuickstartZetta runs the whole process
+// against a real Zetta when LAKE_TEST_ZETTA_URL and LAKE_TEST_ZETTA_TOKEN name one.
+
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
+
+#include "lake/api/agent_docs.hpp"
+#include "lake/api/balance.hpp"
+#include "lake/api/billing.hpp"
+#include "lake/api/capabilities.hpp"
+#include "lake/api/mcp.hpp"
+#include "lake/api/registry.hpp"
+#include "lake/api/rest.hpp"
+#include "lake/control/memory_store.hpp"
+#include "lake/control/zetta_control.hpp"
+#include "lake/control/zetta_workspace.hpp"
+#include "workspace_fixture.hpp"
+
+namespace {
+
+using json = nlohmann::json;
+using lake::control::ZettaControlError;
+using lake::control::ZettaControlResult;
+
+constexpr std::string_view kek = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+constexpr std::int64_t dollar = 1'000'000;
+
+const std::string movies = "title,genre,rating,popular\n"
+                           "The Matrix,scifi,8.7,1\n"
+                           "Amelie,romance,8.3,0\n"
+                           "Alien,horror,8.5,1\n"
+                           "Clue,comedy,7.2,0\n";
+
+// A workspace engine for the quickstart: it keeps the datasets, indexes, runs and models it was
+// asked to make, and fails a capability on request.
+struct Engine {
+    std::map<std::string, ZettaControlError> fail_next;
+    std::string run_status = "running";
+    bool listed_model = true;
+    int index_count = 0;
+    int run_count = 0;
+
+    std::optional<ZettaControlResult<json>> answer(const std::string& capability,
+                                                   const json& input) {
+        if (const auto failing = fail_next.find(capability); failing != fail_next.end()) {
+            ZettaControlError error = failing->second;
+            fail_next.erase(failing);
+            return ZettaControlResult<json>(std::unexpected(error));
+        }
+        if (capability == "upload_dataset") {
+            return json{{"database", input.value("database", std::string("datasets"))},
+                        {"table", input.at("table_name")},
+                        {"rows", 4},
+                        {"format", input.at("format")}};
+        }
+        if (capability == "get_dataset") {
+            if (input.value("dataset", std::string()) == "missing") {
+                return ZettaControlResult<json>(
+                    std::unexpected(ZettaControlError{"not_found", "no dataset named that"}));
+            }
+            return json{{"name", input.at("dataset")},
+                        {"database", "datasets"},
+                        {"rows", 12},
+                        {"columns",
+                         json::array({{{"name", "title"}, {"type", "string"}},
+                                      {{"name", "genre"}, {"type", "string"}},
+                                      {{"name", "rating"}, {"type", "number"}},
+                                      {{"name", "popular"}, {"type", "integer"}}})}};
+        }
+        if (capability == "create_index") {
+            ++index_count;
+            return json{{"index_id", "index-" + std::to_string(index_count)},
+                        {"fields", json::array({"title", "genre", "rating", "popular"})},
+                        {"exposed", false},
+                        {"kind", "search"},
+                        {"table", input.at("table")}};
+        }
+        if (capability == "expose_index") {
+            return json{{"index_id", input.at("index")}, {"exposed", true}};
+        }
+        if (capability == "train_model") {
+            ++run_count;
+            return json{{"run_id", "run-" + std::to_string(run_count)},
+                        {"status", "running"},
+                        {"standalone", true}};
+        }
+        if (capability == "get_run") {
+            json run{{"id", input.at("run_id")}, {"status", run_status}};
+            if (run_status == "failed") {
+                run["error"] = "the label column has one value";
+            }
+            return run;
+        }
+        if (capability == "list_models") {
+            json models = json::array();
+            if (listed_model && run_status == "succeeded") {
+                models.push_back({{"id", "model-" + std::to_string(run_count)},
+                                  {"run_id", "run-" + std::to_string(run_count)},
+                                  {"exposed", false}});
+            }
+            return json{{"models", models}};
+        }
+        if (capability == "expose_model") {
+            return json{{"model_id", input.at("model")}, {"exposed", true}};
+        }
+        return std::nullopt;
+    }
+};
+
+// Two accounts, each with a Ready workspace; billing on with a price list and the balance's
+// runtime, which a test turns on to see the gate.
+struct Quickstart {
+    std::shared_ptr<lake::control::InMemoryStore> store =
+        std::make_shared<lake::control::InMemoryStore>();
+    lake::test::RecordWorkspaces workspaces{store};
+    lake::api::Registry registry;
+    Engine engine;
+    std::shared_ptr<lake::api::PaymentProviders> providers =
+        lake::api::fixed_payment_providers(lake::api::manual_payment_provider());
+    std::shared_ptr<lake::api::BalanceRuntime> runtime =
+        std::make_shared<lake::api::BalanceRuntime>();
+    bool gated = false;
+    struct Account {
+        std::string identity, user_id, customer_id, workspace_id;
+    };
+    Account first, second;
+
+    Account account(const std::string& name, bool with_workspace = true) {
+        Account out;
+        out.identity = "taap:1:ed25519:quickstart-" + name;
+        const auto user = store->create_user({out.identity, name + "@example.test", name});
+        EXPECT_TRUE(user) << user.error().message;
+        out.user_id = user->id;
+        const auto customer = store->create_customer({"individual", user->id, "", "qs" + name});
+        EXPECT_TRUE(customer) << customer.error().message;
+        out.customer_id = customer->id;
+        const auto object = store->find_policy_object("customer", out.customer_id);
+        EXPECT_TRUE(object);
+        EXPECT_TRUE(store->create_grant({out.identity,
+                                         object->id,
+                                         "admin",
+                                         "attestation-" + name,
+                                         "admin",
+                                         "request-" + name}));
+        if (with_workspace) {
+            out.workspace_id = workspaces.create(out.customer_id, "home");
+        }
+        return out;
+    }
+
+    Quickstart() {
+        lake::api::register_core_capabilities(registry, "test");
+        lake::api::register_billing_capabilities(registry, providers);
+        workspaces.zetta->responder = [this](const std::string& capability, const json& input) {
+            return engine.answer(capability, input);
+        };
+        runtime->origin = "https://lake.test";
+        first = account("first");
+        second = account("second");
+        auto op = operator_context();
+        const auto published = call(
+            "set_price_list",
+            {{"effective_from", "2026-01"},
+             {"prices",
+              json::array({{{"dimension", "cpu"}, {"unit_micros", 2'000}, {"per", 60'000}},
+                           {{"dimension", "searches"}, {"unit_micros", 500'000}, {"per", 1000}}})}},
+            op);
+        EXPECT_TRUE(published.ok) << published.error.message;
+    }
+
+    lake::api::ApiContext operator_context() {
+        lake::api::ApiContext context;
+        context.store = store.get();
+        context.workspaces = workspaces.service.get();
+        context.authorized = true;
+        context.acting_identity = "admin";
+        context.operator_credential = true;
+        context.request_id = lake::control::new_uuid_v4();
+        context.instance_kek = std::string(kek);
+        context.payments = providers;
+        context.external_origin = "https://lake.test";
+        if (gated) {
+            context.balance = runtime;
+        }
+        context.registry = &registry;
+        return context;
+    }
+
+    lake::api::ApiContext as(const Account& who) {
+        auto context = operator_context();
+        context.operator_credential = false;
+        context.acting_identity = who.identity;
+        context.acting_user_id = who.user_id;
+        context.session_credential = true;
+        context.credential_session_id = "session-" + who.user_id;
+        context.scopes = {"*"};
+        return context;
+    }
+
+    lake::api::ApiResult call(const std::string& name, json input, lake::api::ApiContext& context) {
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(completed);
+        return completed ? std::move(*completed) : lake::api::ApiResult{};
+    }
+
+    lake::api::ApiResult by(const Account& who, const std::string& name, json input) {
+        auto context = as(who);
+        if (!input.contains("customer_id")) {
+            input["customer_id"] = who.customer_id;
+        }
+        return call(name, std::move(input), context);
+    }
+
+    // The engine capabilities called, in order, without the record store's own calls.
+    std::vector<std::string> engine_calls() const {
+        std::vector<std::string> out;
+        for (const auto& [capability, input] : workspaces.zetta->calls) {
+            if (!lake::test::RecordTables::handles(capability, input)) {
+                out.push_back(capability);
+            }
+        }
+        return out;
+    }
+
+    static json step(const json& status, const std::string& name) {
+        for (const json& entry : status.at("steps")) {
+            if (entry.at("step") == name) {
+                return entry;
+            }
+        }
+        return nullptr;
+    }
+};
+
+std::size_t count(const std::vector<std::string>& calls, const std::string& name) {
+    return static_cast<std::size_t>(std::ranges::count(calls, name));
+}
+
+TEST(Quickstart, ADroppedDatasetBecomesSearchThenModelAnswers) {
+    Quickstart q;
+    const auto& me = q.first;
+    const json where{{"workspace_id", me.workspace_id}};
+
+    // Drop a CSV: the dataset, its index and publishing it, in that order.
+    auto started = q.by(me,
+                        "start_quickstart",
+                        {{"workspace_id", me.workspace_id},
+                         {"content", movies},
+                         {"format", "csv"},
+                         {"name", "movies"}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const json& status = started.value;
+    EXPECT_EQ(status["state"], "search_ready");
+    const std::string id = status["quickstart_id"];
+    EXPECT_FALSE(id.empty());
+    EXPECT_EQ(status["dataset"]["id"], "datasets/movies");
+    EXPECT_EQ(status["dataset"]["rows"], 4);
+    // The file's columns in its order (the index lists its fields sorted), for the model's columns.
+    EXPECT_EQ(status["dataset"]["columns"][0]["name"], "title");
+    EXPECT_EQ(status["dataset"]["columns"][3]["name"], "popular");
+    EXPECT_EQ(status["index"]["id"], "index-1");
+    EXPECT_EQ(status["index"]["published"], true);
+    for (const char* done : {"workspace", "dataset", "search_index", "website"}) {
+        EXPECT_EQ(Quickstart::step(status, done)["state"], "done") << done;
+    }
+    EXPECT_EQ(Quickstart::step(status, "model")["state"], "pending");
+    EXPECT_EQ(status["search"]["capability"], "search_index");
+    EXPECT_EQ(status["search"]["input"]["index_id"], "index-1");
+    EXPECT_EQ(q.engine_calls(),
+              (std::vector<std::string>{
+                  "upload_dataset", "get_dataset", "create_index", "expose_index"}));
+    // Through the same capabilities a person calls: upload_dataset's name rule and rename.
+    for (const auto& [capability, input] : q.workspaces.zetta->calls) {
+        if (capability == "upload_dataset") {
+            EXPECT_EQ(input["table_name"], "movies");
+            EXPECT_EQ(input["if_exists"], "rename");
+        }
+    }
+
+    // Kept sealed in the workspace's own Zetta, and nowhere else.
+    const auto& rows = q.workspaces.records(me.workspace_id).rows("quickstarts");
+    ASSERT_EQ(rows.size(), 1U);
+    for (const auto& [key, row] : rows) {
+        EXPECT_EQ(row.dump().find("movies"), std::string::npos) << "sealed at rest";
+    }
+    EXPECT_TRUE(q.workspaces.records(q.second.workspace_id).rows("quickstarts").empty());
+
+    // The status reads the same, and lists the quickstart.
+    auto read = q.by(me, "quickstart_status", where);
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["quickstart_id"], id);
+    EXPECT_EQ(read.value["state"], "search_ready");
+    ASSERT_EQ(read.value["quickstarts"].size(), 1U);
+    EXPECT_EQ(read.value["quickstarts"][0]["dataset_id"], "datasets/movies");
+
+    // The website code: Lake's host and the ids filled in, the key from create_token.
+    auto snippets = q.by(me, "quickstart_snippets", where);
+    ASSERT_TRUE(snippets.ok) << snippets.error.message;
+    EXPECT_EQ(snippets.value["ready"], true);
+    EXPECT_EQ(snippets.value["includes_model"], false);
+    EXPECT_EQ(snippets.value["key"]["create"]["capability"], "create_token");
+    EXPECT_EQ(snippets.value["key"]["scopes"], json::array({"search_index"}));
+    ASSERT_EQ(snippets.value["snippets"].size(), 3U);
+    const std::string html = snippets.value["snippets"][0]["code"];
+    EXPECT_EQ(snippets.value["snippets"][0]["id"], "html");
+    EXPECT_NE(html.find("\"https://lake.test\""), std::string::npos);
+    EXPECT_NE(html.find("index-1"), std::string::npos);
+    EXPECT_NE(html.find(me.workspace_id), std::string::npos);
+    EXPECT_NE(html.find("YOUR_LAKE_SEARCH_KEY"), std::string::npos);
+    EXPECT_NE(html.find("/v1/search_index"), std::string::npos);
+    EXPECT_NE(html.find("const MODEL = null"), std::string::npos);
+    EXPECT_EQ(snippets.value["snippets"][1]["id"], "react");
+    // The key the snippets name is made by the existing capability, and can only search.
+    // (create_token itself needs a signed-in session, which this rig does not make.)
+    const auto create_token = q.registry.find("create_token");
+    ASSERT_TRUE(create_token);
+    const auto valid =
+        lake::api::validate_input(*create_token, snippets.value["key"]["create"]["input"]);
+    EXPECT_TRUE(valid.ok) << valid.error.message;
+    for (const json& scope : snippets.value["key"]["scopes"]) {
+        EXPECT_TRUE(q.registry.find(scope.get<std::string>())) << scope;
+    }
+
+    // One click trains a model on the same dataset.
+    auto training = q.by(
+        me,
+        "train_quickstart",
+        {{"workspace_id", me.workspace_id}, {"target", "popular"}, {"entity_column", "title"}});
+    ASSERT_TRUE(training.ok) << training.error.message;
+    EXPECT_EQ(training.value["state"], "training");
+    EXPECT_EQ(training.value["training"]["run_id"], "run-1");
+    EXPECT_EQ(training.value["training"]["methodology"], "M-1");
+    EXPECT_EQ(training.value["training"]["holdout_fraction"], 0.2);
+    for (const auto& [capability, input] : q.workspaces.zetta->calls) {
+        if (capability == "train_model") {
+            EXPECT_EQ(input["dataset_path"], "datasets.movies");
+            EXPECT_EQ(input["target"], "popular");
+            EXPECT_EQ(input["entity_column"], "title");
+            EXPECT_EQ(input["methodology"], "M-1");
+        }
+    }
+
+    // Its progress, read live; a second train while it runs changes nothing.
+    read = q.by(me, "quickstart_status", where);
+    EXPECT_EQ(read.value["state"], "training");
+    EXPECT_EQ(Quickstart::step(read.value, "model")["state"], "running");
+    EXPECT_EQ(Quickstart::step(read.value, "model")["progress"]["status"], "running");
+    auto again = q.by(me, "train_quickstart", where);
+    EXPECT_EQ(again.value["state"], "training");
+    EXPECT_EQ(count(q.engine_calls(), "train_model"), 1U);
+
+    // Trained: the status names the model; the next train publishes it.
+    q.engine.run_status = "succeeded";
+    read = q.by(me, "quickstart_status", where);
+    EXPECT_EQ(read.value["state"], "trained");
+    EXPECT_EQ(read.value["model"]["id"], "model-1");
+    EXPECT_EQ(count(q.engine_calls(), "expose_model"), 0U) << "a read publishes nothing";
+    auto published = q.by(me, "train_quickstart", where);
+    ASSERT_TRUE(published.ok) << published.error.message;
+    EXPECT_EQ(published.value["state"], "done");
+    EXPECT_EQ(published.value["model"]["published"], true);
+    EXPECT_EQ(published.value["predict"]["input"]["model_id"], "model-1");
+    EXPECT_EQ(count(q.engine_calls(), "expose_model"), 1U);
+    for (const char* done : {"model", "model_answers"}) {
+        EXPECT_EQ(Quickstart::step(published.value, done)["state"], "done") << done;
+    }
+
+    // The snippets grow the model's answer beside each result.
+    snippets = q.by(me, "quickstart_snippets", where);
+    EXPECT_EQ(snippets.value["includes_model"], true);
+    EXPECT_EQ(snippets.value["key"]["scopes"], json::array({"search_index", "predict"}));
+    const std::string with_model = snippets.value["snippets"][0]["code"];
+    EXPECT_NE(with_model.find("/v1/predict"), std::string::npos);
+    EXPECT_NE(with_model.find("model-1"), std::string::npos);
+    EXPECT_NE(with_model.find("\"popular\""), std::string::npos);
+    const std::string react = snippets.value["snippets"][1]["code"];
+    EXPECT_NE(react.find("export function LakeSearch"), std::string::npos);
+    EXPECT_NE(react.find("/v1/predict"), std::string::npos);
+
+    // Done stays done: calling again calls nothing.
+    const std::size_t before = q.engine_calls().size();
+    EXPECT_EQ(q.by(me, "train_quickstart", where).value["state"], "done");
+    EXPECT_EQ(q.engine_calls().size(), before);
+
+    // Another quickstart in the same workspace keeps the first.
+    auto other = q.by(me,
+                      "start_quickstart",
+                      {{"workspace_id", me.workspace_id}, {"dataset_id", "datasets/existing"}});
+    ASSERT_TRUE(other.ok) << other.error.message;
+    EXPECT_NE(other.value["quickstart_id"], id);
+    EXPECT_EQ(other.value["dataset"]["source"], "existing");
+    read = q.by(me, "quickstart_status", where);
+    EXPECT_EQ(read.value["quickstart_id"], other.value["quickstart_id"]) << "the newest";
+    EXPECT_EQ(read.value["quickstarts"].size(), 2U);
+    read =
+        q.by(me, "quickstart_status", {{"workspace_id", me.workspace_id}, {"quickstart_id", id}});
+    EXPECT_EQ(read.value["state"], "done");
+}
+
+TEST(Quickstart, AStepThatFailsIsKeptWithWhyAndResumed) {
+    Quickstart q;
+    const auto& me = q.first;
+    const json where{{"workspace_id", me.workspace_id}};
+    q.engine.fail_next["create_index"] = {"engine_error", "the index backend is busy"};
+    auto started =
+        q.by(me,
+             "start_quickstart",
+             {{"workspace_id", me.workspace_id}, {"content", movies}, {"format", "csv"}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    EXPECT_EQ(started.value["state"], "failed");
+    EXPECT_EQ(Quickstart::step(started.value, "dataset")["state"], "done");
+    const json failed = Quickstart::step(started.value, "search_index");
+    EXPECT_EQ(failed["state"], "failed");
+    EXPECT_NE(failed["error"]["message"].get<std::string>().find("busy"), std::string::npos);
+    EXPECT_NE(started.value["next"].get<std::string>().find("start_quickstart"), std::string::npos);
+    const std::string id = started.value["quickstart_id"];
+
+    // Someone who leaves and comes back sees where it stopped.
+    auto read = q.by(me, "quickstart_status", where);
+    EXPECT_EQ(read.value["state"], "failed");
+    EXPECT_EQ(read.value["dataset"]["name"], "quickstart");
+
+    // Resumed: the dataset is not loaded twice.
+    auto resumed =
+        q.by(me, "start_quickstart", {{"workspace_id", me.workspace_id}, {"quickstart_id", id}});
+    ASSERT_TRUE(resumed.ok) << resumed.error.message;
+    EXPECT_EQ(resumed.value["state"], "search_ready");
+    EXPECT_EQ(Quickstart::step(resumed.value, "search_index")["error"], nullptr);
+    EXPECT_EQ(count(q.engine_calls(), "upload_dataset"), 1U);
+    EXPECT_EQ(count(q.engine_calls(), "create_index"), 2U);
+    // A quickstart with its dataset takes no second file.
+    auto twice = q.by(me,
+                      "start_quickstart",
+                      {{"workspace_id", me.workspace_id},
+                       {"quickstart_id", id},
+                       {"content", movies},
+                       {"format", "csv"}});
+    EXPECT_EQ(twice.error.code, "invalid_input");
+    EXPECT_EQ(twice.error.path, "/content");
+
+    // A training run that fails says why; the next call trains again with the same settings.
+    auto training =
+        q.by(me, "train_quickstart", {{"workspace_id", me.workspace_id}, {"target", "popular"}});
+    ASSERT_TRUE(training.ok) << training.error.message;
+    q.engine.run_status = "failed";
+    read = q.by(me, "quickstart_status", where);
+    EXPECT_EQ(read.value["state"], "failed");
+    EXPECT_EQ(Quickstart::step(read.value, "model")["error"]["message"],
+              "the label column has one value");
+    auto retried = q.by(me, "train_quickstart", where);
+    ASSERT_TRUE(retried.ok) << retried.error.message;
+    EXPECT_EQ(retried.value["state"], "training");
+    EXPECT_EQ(retried.value["training"]["attempt"], 2);
+    EXPECT_EQ(retried.value["training"]["target"], "popular") << "the settings before";
+    EXPECT_EQ(count(q.engine_calls(), "train_model"), 2U);
+    std::vector<std::string> names;
+    for (const auto& [capability, input] : q.workspaces.zetta->calls) {
+        if (capability == "train_model") {
+            names.push_back(input["name"]);
+        }
+    }
+    ASSERT_EQ(names.size(), 2U);
+    EXPECT_NE(names[0], names[1]) << "a standalone model's name is taken once";
+
+    // A refused train is kept with why and tried again.
+    q.engine.run_status = "succeeded";
+    q.engine.fail_next["expose_model"] = {"engine_error", "serving is starting"};
+    auto exposing = q.by(me, "train_quickstart", where);
+    ASSERT_TRUE(exposing.ok) << exposing.error.message;
+    EXPECT_EQ(exposing.value["state"], "failed");
+    EXPECT_EQ(Quickstart::step(exposing.value, "model")["state"], "done");
+    EXPECT_EQ(Quickstart::step(exposing.value, "model_answers")["state"], "failed");
+    EXPECT_NE(exposing.value["next"].get<std::string>().find("train_quickstart"),
+              std::string::npos);
+    auto exposed = q.by(me, "train_quickstart", where);
+    EXPECT_EQ(exposed.value["state"], "done");
+}
+
+TEST(Quickstart, ABlockedBalanceGetsTheTopUpLinkAndNothingStarts) {
+    Quickstart q;
+    q.gated = true;
+    const auto& me = q.first;
+    // Before the first top-up the account is blocked.
+    auto refused =
+        q.by(me,
+             "start_quickstart",
+             {{"workspace_id", me.workspace_id}, {"content", movies}, {"format", "csv"}});
+    ASSERT_EQ(refused.error.code, "payment_required") << refused.error.message;
+    EXPECT_EQ(refused.error.details["add_funds_url"],
+              "https://lake.test/billing/add-funds?customer_id=" + me.customer_id);
+    EXPECT_TRUE(q.engine_calls().empty()) << "no step started";
+    EXPECT_TRUE(q.workspaces.records(me.workspace_id).rows("quickstarts").empty());
+    auto train = q.by(me, "train_quickstart", {{"workspace_id", me.workspace_id}});
+    EXPECT_EQ(train.error.code, "payment_required");
+    // Reading stays open, and says what the paid steps cost and where the balance stands.
+    auto read =
+        q.by(me, "quickstart_status", {{"workspace_id", me.workspace_id}, {"include_costs", true}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["state"], "not_started");
+    const json costs = read.value["costs"];
+    EXPECT_EQ(costs["billing"], true);
+    EXPECT_EQ(costs["balance"]["state"], "blocked");
+    EXPECT_EQ(costs["balance"]["add_funds_url"],
+              "https://lake.test/billing/add-funds?customer_id=" + me.customer_id);
+    json model_cost;
+    for (const json& entry : costs["steps"]) {
+        if (entry["step"] == "model") {
+            model_cost = entry;
+        }
+    }
+    ASSERT_TRUE(model_cost.is_object());
+    EXPECT_EQ(model_cost["capabilities"], json::array({"train_model", "expose_model"}));
+    bool cpu_rated = false;
+    for (const json& dimension : model_cost["billed_by"]) {
+        if (dimension["dimension"] == "cpu") {
+            cpu_rated = dimension["rate"] == json({{"unit_micros", 2'000}, {"per", 60'000}});
+        }
+    }
+    EXPECT_TRUE(cpu_rated) << model_cost.dump();
+    EXPECT_FALSE(read.warnings.is_null()) << "the answer carries the balance warning";
+
+    // After the first top-up the same call goes through.
+    lake::control::BalanceCredit credit;
+    credit.customer_id = me.customer_id;
+    credit.kind = "top_up";
+    credit.amount_micros = 20 * dollar;
+    credit.provider = "stripe";
+    credit.reference = "cs_quickstart";
+    ASSERT_TRUE(q.store->apply_balance_credit(credit));
+    auto allowed =
+        q.by(me,
+             "start_quickstart",
+             {{"workspace_id", me.workspace_id}, {"content", movies}, {"format", "csv"}});
+    ASSERT_TRUE(allowed.ok) << allowed.error.message;
+    EXPECT_EQ(allowed.value["state"], "search_ready");
+}
+
+TEST(Quickstart, AnotherAccountsWorkspaceIsRefused) {
+    Quickstart q;
+    const auto& me = q.first;
+    const auto& them = q.second;
+    ASSERT_TRUE(q.by(me,
+                     "start_quickstart",
+                     {{"workspace_id", me.workspace_id}, {"content", movies}, {"format", "csv"}})
+                    .ok);
+    const std::size_t calls = q.engine_calls().size();
+    for (const std::string capability :
+         {"start_quickstart", "quickstart_status", "train_quickstart", "quickstart_snippets"}) {
+        json input{{"customer_id", me.customer_id}, {"workspace_id", me.workspace_id}};
+        if (capability == "start_quickstart") {
+            input["content"] = movies;
+            input["format"] = "csv";
+        }
+        // Their own credential naming my account: no grant.
+        const auto refused = q.by(them, capability, input);
+        EXPECT_FALSE(refused.ok) << capability;
+        EXPECT_EQ(refused.error.code, "unauthorized")
+            << capability << ": " << refused.error.message;
+        // Their own account naming my workspace: not theirs.
+        input["customer_id"] = them.customer_id;
+        const auto foreign = q.by(them, capability, input);
+        EXPECT_FALSE(foreign.ok) << capability;
+        EXPECT_EQ(foreign.error.code, "invalid_input")
+            << capability << ": " << foreign.error.message;
+        EXPECT_NE(foreign.error.message.find("workspace"), std::string::npos) << capability;
+    }
+    EXPECT_EQ(q.engine_calls().size(), calls) << "nothing reached my workspace";
+}
+
+TEST(Quickstart, WithoutAWorkspaceOneIsMadeAndTheQuickstartWaitsForIt) {
+    Quickstart q;
+    const auto newcomer = q.account("newcomer", false);
+    auto waiting = q.by(newcomer, "start_quickstart", {{"content", movies}, {"format", "csv"}});
+    ASSERT_TRUE(waiting.ok) << waiting.error.message;
+    EXPECT_EQ(waiting.value["state"], "waiting_for_workspace");
+    EXPECT_TRUE(waiting.value["quickstart_id"].is_null()) << "nothing kept yet";
+    EXPECT_EQ(Quickstart::step(waiting.value, "workspace")["state"], "running");
+    const std::string workspace_id = waiting.value["workspace_id"];
+    ASSERT_FALSE(workspace_id.empty());
+    const auto made = q.store->list_workspaces(newcomer.customer_id);
+    ASSERT_TRUE(made);
+    ASSERT_EQ(made->size(), 1U);
+    EXPECT_EQ(made->front().id, workspace_id);
+    EXPECT_TRUE(q.engine_calls().empty());
+
+    // The status says the same while it starts.
+    auto read = q.by(newcomer, "quickstart_status", {{"workspace_id", workspace_id}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["state"], "waiting_for_workspace");
+
+    // Once it is ready, the same call goes on; a second start makes no second workspace.
+    q.workspaces.ready(workspace_id);
+    auto started = q.by(newcomer, "start_quickstart", {{"content", movies}, {"format", "csv"}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    EXPECT_EQ(started.value["workspace_id"], workspace_id);
+    EXPECT_EQ(started.value["state"], "search_ready");
+    EXPECT_EQ(q.store->list_workspaces(newcomer.customer_id)->size(), 1U);
+}
+
+TEST(Quickstart, TheInputSaysWhatIsMissing) {
+    Quickstart q;
+    const auto& me = q.first;
+    auto none = q.by(me, "start_quickstart", {{"workspace_id", me.workspace_id}});
+    EXPECT_EQ(none.error.code, "invalid_input");
+    EXPECT_EQ(none.error.path, "/content");
+    auto both = q.by(me,
+                     "start_quickstart",
+                     {{"workspace_id", me.workspace_id},
+                      {"content", movies},
+                      {"format", "csv"},
+                      {"dataset_id", "datasets/existing"}});
+    EXPECT_EQ(both.error.path, "/dataset_id");
+    auto no_format =
+        q.by(me, "start_quickstart", {{"workspace_id", me.workspace_id}, {"content", movies}});
+    EXPECT_EQ(no_format.error.path, "/format");
+    auto bad_name = q.by(me,
+                         "start_quickstart",
+                         {{"workspace_id", me.workspace_id},
+                          {"content", movies},
+                          {"format", "csv"},
+                          {"name", "my movies"}});
+    EXPECT_EQ(bad_name.error.path, "/name");
+    auto malformed =
+        q.by(me,
+             "start_quickstart",
+             {{"workspace_id", me.workspace_id}, {"content", "a,b\n1,2,3\n"}, {"format", "csv"}});
+    ASSERT_TRUE(malformed.ok) << malformed.error.message;
+    EXPECT_EQ(Quickstart::step(malformed.value, "dataset")["state"], "failed");
+    EXPECT_NE(
+        Quickstart::step(malformed.value, "dataset")["error"]["message"].get<std::string>().find(
+            "malformed"),
+        std::string::npos)
+        << "upload_dataset's own CSV check";
+    auto missing = q.by(me,
+                        "start_quickstart",
+                        {{"workspace_id", me.workspace_id}, {"dataset_id", "datasets/missing"}});
+    ASSERT_TRUE(missing.ok) << missing.error.message;
+    EXPECT_EQ(Quickstart::step(missing.value, "dataset")["state"], "failed");
+    auto unknown =
+        q.by(me,
+             "quickstart_status",
+             {{"workspace_id", me.workspace_id}, {"quickstart_id", lake::control::new_uuid_v4()}});
+    EXPECT_EQ(unknown.error.code, "not_found");
+    auto untrained =
+        q.by(me,
+             "train_quickstart",
+             {{"workspace_id", q.second.workspace_id}, {"customer_id", q.second.customer_id}});
+    EXPECT_FALSE(untrained.ok);
+    auto no_snippets =
+        q.by(q.second, "quickstart_snippets", {{"workspace_id", q.second.workspace_id}});
+    EXPECT_EQ(no_snippets.error.code, "invalid_input");
+}
+
+TEST(Quickstart, AgentsFindItFirstInOpenApiMcpLlmsTxtAndTheSkill) {
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const std::vector<std::string> names{
+        "start_quickstart", "quickstart_status", "train_quickstart", "quickstart_snippets"};
+    const json openapi = lake::api::openapi_document(registry, "test");
+    EXPECT_TRUE(openapi["paths"].contains("/v1/start_quickstart"));
+    EXPECT_TRUE(openapi["paths"]["/v1/start_quickstart"].contains("post"));
+    EXPECT_TRUE(openapi["paths"]["/v1/quickstart_status"].contains("get"));
+    EXPECT_TRUE(openapi["paths"]["/v1/train_quickstart"].contains("post"));
+    EXPECT_TRUE(openapi["paths"]["/v1/quickstart_snippets"].contains("get"));
+    const json tools = lake::api::mcp_tools(registry, lake::api::SchemaAudience::Caller);
+    for (const std::string& name : names) {
+        EXPECT_TRUE(std::ranges::any_of(tools, [&](const json& tool) {
+            return tool["name"] == name;
+        })) << name;
+        EXPECT_EQ(lake::api::agent_docs::group_of(name), "Quickstart") << name;
+    }
+    EXPECT_TRUE(registry.find("start_quickstart")->starts_paid_work);
+    EXPECT_TRUE(registry.find("train_quickstart")->starts_paid_work);
+    EXPECT_FALSE(registry.find("quickstart_status")->starts_paid_work);
+    EXPECT_EQ(registry.find("start_quickstart")->max_body_bytes,
+              lake::api::maximum_capability_body_bytes)
+        << "a dataset's text, as upload_dataset";
+
+    const auto groups = lake::api::agent_docs::tool_groups(registry);
+    ASSERT_FALSE(groups.empty());
+    EXPECT_EQ(groups.front().title, "Quickstart");
+    EXPECT_EQ(lake::api::agent_docs::flows().front().steps.front().tool, "start_quickstart");
+    const std::string llms = lake::api::agent_docs::llms_txt(registry, "https://lake.test");
+    const std::string full = lake::api::agent_docs::llms_full_txt(registry, "https://lake.test");
+    const std::string skill = lake::api::agent_docs::skill_md(registry, "https://lake.test");
+    for (const std::string* text : {&llms, &full, &skill}) {
+        const auto start_here = text->find("## Start Here");
+        ASSERT_NE(start_here, std::string::npos);
+        EXPECT_LT(start_here, text->find("## Connect")) << "before anything else";
+        EXPECT_NE(text->find("start_quickstart"), std::string::npos);
+    }
+    EXPECT_LT(llms.find("### Quickstart"), llms.find("### Workspace: Design, Train and Ship"));
+    EXPECT_LT(llms.find("### Quickstart: search and model answers"),
+              llms.find("### Build and run a pipeline"));
+}
+
+// The whole process against a real Zetta (a local `zetta --headless` from the zetta pin): the
+// dataset, the index, a real search through search_index, training, publishing and predict.
+TEST(QuickstartZetta, ADatasetBecomesSearchAndModelAnswersOnARealEngine) {
+    const char* url = std::getenv("LAKE_TEST_ZETTA_URL");
+    const char* token = std::getenv("LAKE_TEST_ZETTA_TOKEN");
+    if (url == nullptr || token == nullptr || *url == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_ZETTA_URL and LAKE_TEST_ZETTA_TOKEN are not set";
+    }
+    lake::control::install_zetta_control_transport();
+    struct Shutdown {
+        ~Shutdown() {
+            lake::control::shutdown_zetta_control_transport();
+        }
+    } shutdown;
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const std::filesystem::path dir =
+        lake::test::fixture_path("quickstart-zetta-" + lake::control::new_uuid_v4());
+    std::filesystem::create_directories(dir);
+    auto service = std::make_shared<lake::control::WorkspaceService>(
+        lake::control::WorkspaceConfig{dir.string(), 0},
+        store,
+        std::make_shared<lake::control::ZettaWorkspaceCaller>());
+    const std::string identity = "taap:1:ed25519:quickstart-zetta";
+    const auto user = store->create_user({identity, "zetta@example.test", "Zetta"});
+    ASSERT_TRUE(user);
+    const auto customer = store->create_customer({"individual", user->id, "", "qszetta"});
+    ASSERT_TRUE(customer);
+    const auto object = store->find_policy_object("customer", customer->id);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(store->create_grant({identity, object->id, "admin", "a", "admin", "r"}));
+    const auto workspace = store->create_workspace({customer->id, "home", "dev", ""});
+    ASSERT_TRUE(workspace) << workspace.error().message;
+    const auto zetta_service = store->get_service(workspace->zetta_service_id);
+    ASSERT_TRUE(zetta_service);
+    ASSERT_TRUE(store->set_service_status(zetta_service->id, "Ready", "", url));
+    std::ofstream(dir / (zetta_service->slug + ".json"))
+        << json{{"kind", "zetta"}, {"token", token}}.dump();
+
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const auto call = [&](const std::string& name, json input) {
+        lake::api::ApiContext context;
+        context.store = store.get();
+        context.workspaces = service.get();
+        context.authorized = true;
+        context.acting_identity = identity;
+        context.acting_user_id = user->id;
+        context.session_credential = true;
+        context.scopes = {"*"};
+        context.instance_kek = std::string(kek);
+        context.external_origin = "https://lake.test";
+        context.request_id = lake::control::new_uuid_v4();
+        input["customer_id"] = customer->id;
+        input["workspace_id"] = workspace->id;
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(completed);
+        return completed ? std::move(*completed) : lake::api::ApiResult{};
+    };
+
+    // Each run gets its own table, so a Zetta reused across runs answers this run's data.
+    std::string csv = "title,description,genre,rating,popular\n";
+    const std::vector<std::vector<std::string>> films{
+        {"The Matrix", "A hacker learns reality is a simulation", "scifi", "8.7", "1"},
+        {"Inception", "A thief steals secrets through dreams", "scifi", "8.8", "1"},
+        {"Amelie", "A shy waitress helps people in Paris", "romance", "8.3", "0"},
+        {"Alien", "A crew meets a deadly creature in space", "horror", "8.5", "1"},
+        {"Notting Hill", "A bookseller falls for a film star", "romance", "7.2", "0"},
+        {"Heat", "A detective hunts a crew of thieves", "crime", "8.3", "1"},
+        {"Clue", "Guests at a mansion solve a murder", "comedy", "7.2", "0"},
+        {"Arrival", "A linguist talks with visitors from space", "scifi", "7.9", "1"},
+        {"Big", "A boy wakes up as an adult", "comedy", "7.3", "0"},
+        {"Ronin", "Mercenaries chase a mysterious case", "crime", "7.2", "0"}};
+    for (int copy = 0; copy < 4; ++copy) {
+        for (const auto& film : films) {
+            csv += film[0] + " " + std::to_string(copy) + "," + film[1] + "," + film[2] + "," +
+                   film[3] + "," + film[4] + "\n";
+        }
+    }
+    const std::string table = "qs_" + lake::control::new_uuid_v4().substr(0, 8);
+    auto started = call("start_quickstart", {{"content", csv}, {"format", "csv"}, {"name", table}});
+    ASSERT_TRUE(started.ok) << started.error.code << ": " << started.error.message;
+    ASSERT_EQ(started.value["state"], "search_ready") << started.value.dump(2);
+    EXPECT_EQ(started.value["dataset"]["rows"], 40);
+    ASSERT_EQ(started.value["dataset"]["columns"].size(), 5U);
+    EXPECT_EQ(started.value["dataset"]["columns"][0]["name"], "title");
+    EXPECT_EQ(started.value["dataset"]["columns"][4]["name"], "popular");
+    const std::string index_id = started.value["index"]["id"];
+
+    // The website's search, as the snippet makes it.
+    auto searched =
+        call("search_index", {{"index_id", index_id}, {"query", "space"}, {"top_k", 5}});
+    ASSERT_TRUE(searched.ok) << searched.error.message;
+    ASSERT_FALSE(searched.value["hits"].empty());
+    EXPECT_NE(searched.value["hits"][0]["fields"]["description"].get<std::string>().find("space"),
+              std::string::npos);
+    auto snippets = call("quickstart_snippets", json::object());
+    ASSERT_TRUE(snippets.ok) << snippets.error.message;
+    EXPECT_NE(snippets.value["snippets"][0]["code"].get<std::string>().find(index_id),
+              std::string::npos);
+
+    // Train, wait for the run, publish.
+    auto training = call("train_quickstart", {{"target", "popular"}, {"entity_column", "title"}});
+    ASSERT_TRUE(training.ok) << training.error.message;
+    ASSERT_NE(training.value["state"], "failed") << training.value.dump(2);
+    json status;
+    for (int attempt = 0; attempt < 120; ++attempt) {
+        status = call("quickstart_status", json::object()).value;
+        if (status["state"] != "training") {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    ASSERT_EQ(status["state"], "trained") << status.dump(2);
+    auto published = call("train_quickstart", json::object());
+    ASSERT_TRUE(published.ok) << published.error.message;
+    ASSERT_EQ(published.value["state"], "done") << published.value.dump(2);
+    const std::string model_id = published.value["model"]["id"];
+
+    // The model's answer for each search result, as the snippet asks for it.
+    json rows = json::array();
+    for (const json& hit : searched.value["hits"]) {
+        rows.push_back(hit["fields"]);
+    }
+    auto predicted = call("predict", {{"model_id", model_id}, {"rows", rows}});
+    ASSERT_TRUE(predicted.ok) << predicted.error.message;
+    ASSERT_EQ(predicted.value["ranked"].size(), rows.size());
+    for (const json& entry : predicted.value["ranked"]) {
+        EXPECT_TRUE(entry["risk"].is_number());
+        EXPECT_TRUE(entry["row"].is_number_integer());
+    }
+    snippets = call("quickstart_snippets", json::object());
+    EXPECT_EQ(snippets.value["includes_model"], true);
+    std::error_code ignored;
+    std::filesystem::remove_all(dir, ignored);
+}
+
+} // namespace

@@ -9,7 +9,7 @@ endif()
 # optional: it is embedded when its file exists and skipped otherwise (a page written on its own
 # branch can take its slot before it lands).
 set(GUIDE_SECTIONS
-  "Get Started|index concepts workspaces account ask-orama phone"
+  "Get Started|index quickstart concepts workspaces account ask-orama phone"
   "Data|repositories repository-collaboration repository-settings drives sharing search load-data connections transcripts mcp-connections"
   "Design|design solutions"
   "Train|train agents experiments streams"

@@ -743,6 +743,37 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     auto copy_id = transcript_scope;
     copy_id["id"] = copy.at("solution").at("id");
     http.call("delete_solution", copy_id);
+    // The quickstart process (docs/api/quickstart.md, lake#1128) over canned engine answers.
+    auto& engine = experiments.caller->answers;
+    engine["upload_dataset"] = {{"database", "datasets"}, {"table", "schema_movies"}, {"rows", 2}};
+    engine["get_dataset"] = {{"name", "schema_movies"},
+                             {"database", "datasets"},
+                             {"rows", 2},
+                             {"columns",
+                              json::array({{{"name", "title"}, {"type", "string"}},
+                                           {{"name", "popular"}, {"type", "integer"}}})}};
+    engine["create_index"] = {{"index_id", "index-schema"},
+                              {"fields", json::array({"popular", "title"})},
+                              {"exposed", false}};
+    engine["expose_index"] = {{"index_id", "index-schema"}, {"exposed", true}};
+    engine["train_model"] = {{"run_id", "run-schema"}, {"status", "running"}};
+    engine["get_run"] = {{"id", "run-schema"}, {"status", "succeeded"}};
+    engine["list_models"] = {
+        {"models", json::array({{{"id", "model-quickstart"}, {"run_id", "run-schema"}}})}};
+    engine["expose_model"] = {{"model_id", "model-quickstart"}, {"exposed", true}};
+    auto quickstart = transcript_scope;
+    quickstart.update({{"content", "title,popular\nAlien,1\nBig,0\n"},
+                       {"format", "csv"},
+                       {"name", "schema_movies"}});
+    const auto started = http.call("start_quickstart", quickstart);
+    auto quickstart_id = transcript_scope;
+    quickstart_id["quickstart_id"] = started.at("quickstart_id");
+    http.call("quickstart_snippets", quickstart_id);
+    auto quickstart_training = quickstart_id;
+    quickstart_training["target"] = "popular";
+    http.call("train_quickstart", quickstart_training);
+    http.call("quickstart_status", quickstart_id);
+    http.call("train_quickstart", quickstart_id);
     // A workspace's own methodologies (docs/api/methodologies.md, lake#655): the engine's
     // registry is canned; the code is committed to a real repository of the workspace.
     json own_methodology{{"id", "W-0000000a"},

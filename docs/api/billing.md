@@ -506,6 +506,8 @@ Every capability that creates, starts or grows something that costs money is mar
 `src/api/balance.cpp`, applied by `Registry::add`, so the engine's capabilities registered from its
 schema are marked too:
 
+- the quickstart process: `start_quickstart`, `train_quickstart`, refused before any step starts
+  ([quickstart.md](quickstart.md#the-balance));
 - apps: `create_app`, `deploy_app`, `start_app`, `restart_app`, `scale_app`, `rollback_app`,
   `build_app`;
 - services and stores: `create_service`, `create_service_and_bind_to_app`, `connect_service`,

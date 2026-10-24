@@ -10,6 +10,14 @@ AddressSanitizer).
 region serves. `http_server.cpp` answers them from the region picker's middleware
 (`apex_agent_document`) for a `GET` of those paths on the apex. See
 [regions](../../docs/api/regions.md#the-apexs-agent-documents-lake1110).
+`quickstart_capabilities.cpp` is the quickstart process (lake#1128): `start_quickstart`,
+`quickstart_status`, `train_quickstart` and `quickstart_snippets`. Each step is a nested
+`Registry::call_async` as the same person (`start_workspace`, `upload_dataset`, `create_index`,
+`expose_index`, `train_model`, `expose_model`), so authorization, the balance gate, audit and
+metering stay each capability's own; its bookkeeping reads (`get_run`, `list_models`,
+`get_dataset`) use `call_workspace`. The state is a sealed `lake_quickstarts` record per quickstart
+in the workspace Zetta. The website code is built here and never carries a key; `key.create` is the
+`create_token` call. See [quickstart.md](../../docs/api/quickstart.md).
 
 `stream_person` in `agent_stream_triggers.cpp` is shared with `mcp_connection_streams.cpp` and
 requires a present, enabled account (lake#951). Disabled/missing principals trigger idempotent

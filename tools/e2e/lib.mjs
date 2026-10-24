@@ -1,7 +1,7 @@
 // What the browser scripts share (docs/deployment/browser-testing.md): Playwright, a log with
 // pass/fail checks, Clerk sign-in with a one-time ticket (lake lands a signed-in person on `/`),
 // lake's /v1 capabilities called with the browser's own session, the first top-up through Stripe's
-// test Checkout, and the person's first workspace started from Ask Orama's home.
+// test Checkout, and the person's first workspace started from Ask Orama's home (`/ask`).
 //
 // Playwright is not a dependency of lake. It is found through PLAYWRIGHT (a path to its index.mjs),
 // then a `playwright` package on the module path, then the sibling orama-website-v2 checkout. Not
@@ -75,7 +75,7 @@ export async function newPage(chromium, base) {
 }
 
 /** Sign in through Clerk's own form, which consumes the ticket; lake exchanges Clerk's session for
- * its `lake_session` and lands on `/` (Ask Orama, "Hello, <name>"). Answers the viewer. */
+ * its `lake_session` and lands on `/` (Quickstart, lake#1128). Answers the viewer. */
 export async function signIn(page, base, ticketFile) {
   const state = process.env.LAKE_E2E_STATE;
   if (state && fs.existsSync(state)) {
@@ -86,7 +86,7 @@ export async function signIn(page, base, ticketFile) {
     await page.goto(`${base}/sign-in?__clerk_ticket=${encodeURIComponent(ticket)}`);
   }
   await page.waitForURL((url) => url.origin === base && url.pathname === "/", { timeout: 90000 });
-  await page.getByRole("heading", { level: 1, name: /^Hello/ }).waitFor({ timeout: 60000 });
+  await page.getByTestId("quickstart-page").waitFor({ timeout: 60000 });
   if (state && !fs.existsSync(state)) {
     // Keep the session for the next script. It is a credential: mode 600, delete it when done.
     await page.context().storageState({ path: state });
@@ -167,11 +167,12 @@ export async function ensureFunds(page, base, { note, check }) {
 }
 
 /** The current workspace, ready. With none, start the first one with Ask Orama's home button
- * ("Start a workspace", lake#764) and wait until Lake reports it ready. Answers its id, or "". */
+ * ("Start a workspace", lake#764, at `/ask` since lake#1128) and wait until Lake reports it ready.
+ * Answers its id, or "". */
 export async function ensureWorkspace(page, base, { note, check }, minutes = 10) {
   let viewer = await api(page, base, "viewer");
   if (!viewer.workspace_id) {
-    await page.goto(`${base}/`);
+    await page.goto(`${base}/ask`);
     const start = page.getByRole("button", { name: "Start a workspace" });
     await start.waitFor({ timeout: 30000 });
     await start.click();

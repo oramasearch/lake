@@ -100,6 +100,11 @@ void register_transcript_capabilities(Registry& registry);
 // docs/api/solutions.md): list_solutions, get_solution, create_solution, update_solution,
 // delete_solution, duplicate_solution.
 void register_solution_capabilities(Registry& registry);
+// The quickstart process (lake#1128, docs/api/quickstart.md): start_quickstart, quickstart_status,
+// train_quickstart and quickstart_snippets, which compose upload_dataset, create_index,
+// expose_index, train_model and expose_model through the registry; the state is a sealed record
+// per quickstart in the workspace Zetta.
+void register_quickstart_capabilities(Registry& registry);
 // A workspace's own methodologies from Python code beside Orama's read-only catalogue (lake#655,
 // docs/api/methodologies.md): draft_methodology, create_methodology, get_methodology,
 // update_methodology, delete_methodology, duplicate_methodology, validate_methodology,

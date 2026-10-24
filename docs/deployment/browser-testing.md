@@ -53,12 +53,13 @@ lake is prepaid (lake#1114): a new account is blocked until it adds its first $2
 costs money starts before that. The scripts add it themselves on Billing → Add Funds, paying on
 Stripe's Checkout with Stripe's test card (`4242 4242 4242 4242`). They refuse to pay unless the
 Checkout session is in test mode (`cs_test_…`), which dev's Stripe key is. They then start the
-account's first workspace from Ask Orama's home (**Start a workspace**) and wait until it is Ready.
+account's first workspace from Ask Orama's home at `/ask` (**Start a workspace**) and wait until it
+is Ready.
 
 ## 2. Sign in by hand
 
 Open `https://lake-dev.oramadev.net/sign-in?__clerk_ticket=<ticket>` in any browser. Clerk signs you
-in, and lake lands you on `/`: Ask Orama, *Hello, <first name>*.
+in, and lake lands you on `/`: Quickstart (lake#1128). Ask Orama, *Hello, <first name>*, is at `/ask`.
 
 ## 3. The scripts
 
@@ -98,8 +99,8 @@ node tools/e2e/walkthrough.mjs https://lake-dev.oramadev.net /tmp/lake-ticket /t
 
 | Step | What it checks |
 |---|---|
-| Sign in | The ticket signs in through Clerk and lake lands on `/` (Ask Orama, *Hello, …*) |
-| Funds and workspace | A new account's first top-up on Stripe's test Checkout, then **Start a workspace** on `/` and the workspace Ready |
+| Sign in | The ticket signs in through Clerk and lake lands on `/` (Quickstart) |
+| Funds and workspace | A new account's first top-up on Stripe's test Checkout, then **Start a workspace** on `/ask` and the workspace Ready |
 | Design → Projects | **New project** (name, description, decision) opens the project page |
 | Build pipeline | **Build pipeline** from what it should predict lists a pipeline under Pipelines |
 | Pipeline page | The graph is drawn; *Change the Pipeline* adds an `act` step and an edge to it; **Approve**, then **Check** shows the Checks table |
@@ -187,6 +188,21 @@ python3 tools/e2e/agents.py https://lake-dev.oramadev.net /tmp/lake-token <custo
 Drives the Agent Library through the public API with a key that has every tool (Developer → MCP,
 *Every tool*), as [`tools/e2e/README.md`](../../tools/e2e/README.md) describes. Every call names the
 workspace. The customer and workspace ids are on `/v1/viewer` (`customer_id`, `workspace_id`).
+
+### 3f. The quickstart process
+
+The quickstart process has its own walkthrough (lake#1128, [../ui/quickstart.md](../ui/quickstart.md)),
+with a ticket of its own (a ticket signs in once):
+
+```sh
+node tools/e2e/quickstart.mjs https://lake-dev.oramadev.net /tmp/lake-ticket /tmp/lake-quickstart
+```
+
+It checks that an account's sign-in lands on Quickstart at `/`, drops a 40-row CSV, searches it on
+the page, serves the plain web page code from a local origin and searches there with the key it
+made, trains and publishes the model, and checks its answers on the page and on that website. It
+stops with the top-up link named when the account's balance is blocked. It leaves the dataset,
+index, model and key in the account's workspace.
 
 ## What a failure usually means
 

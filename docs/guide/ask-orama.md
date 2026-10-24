@@ -1,6 +1,7 @@
 # Ask Orama
 
-Ask Orama is Lake's home page and the assistant at the top of every page. Ask it anything about your Lake in plain words:
+Ask Orama is the assistant at the top of every page, and has a page of its own (Home → Ask Orama,
+`/ask`; Lake's home page is [Quickstart](/docs/quickstart)). Ask it anything about your Lake in plain words:
 your repositories, projects, data, runs, models, services and agents. It answers from what you are
 allowed to read, proposes every change for you to confirm, and brings in another agent when that
 agent does the job better.
@@ -43,20 +44,20 @@ agent does the job better.
     Opportunities only while the Auto-Suggest Agent runs.
 
   Pressing a question puts it in the message box, so you can change it before you press **Send**.
-  With no workspace, the home starts with **Start a workspace**: one click makes your first one,
+  With no workspace, the page starts with **Start a workspace**: one click makes your first one,
   because everything in Lake (your data, projects, models and conversations) lives in a workspace.
   If you have workspaces but none is chosen, **Choose a workspace** opens Workspaces. **Home →
   Dashboard** (`/dashboard`) is the platform at a glance.
 - On any other page, press **Ask Orama** in the top bar. It opens beside the page, in the current
   workspace, and knows which page you asked from. Drag its edge to resize it (or use the arrow keys
-  on the handle; double-click resets it). On the Ask Orama home the same button puts the cursor in
+  on the handle; double-click resets it). On Ask Orama's page the same button puts the cursor in
   the message box instead of opening a second conversation.
-- The panel and the home show **the same conversation**. **Expand over the page** widens the panel;
-  **Open as a page** takes the conversation to the home, still about the page you opened it from
+- The panel and Ask Orama's page show **the same conversation**. **Expand over the page** widens the
+  panel; **Open as a page** takes the conversation to Ask Orama's page, still about the page you opened it from
   (*About the page …*, which you can dismiss).
-- The **Start a new conversation** button (**New conversation** on the home) begins another.
-- An old `/ask` link, or **Talk to this agent in Ask Orama** on an agent's page, opens the home with
-  that conversation or that agent.
+- The **Start a new conversation** button (**New conversation** on Ask Orama's page) begins another.
+- **Talk to this agent in Ask Orama** on an agent's page, or an older link to a conversation, opens
+  Ask Orama's page with that conversation or that agent.
 - On a phone, Ask Orama fills the screen ([Using Lake on a Phone](/docs/phone)).
 
 Ask Orama needs a workspace. With none selected it says so and links to **Ship → Workspaces**.
@@ -175,7 +176,7 @@ nothing is saved until you press Create ([Your own methodologies](/docs/solution
 
 ## Delete a Conversation
 
-On the Ask Orama home, press **Delete** beside **New conversation**, type `delete` and press
+On Ask Orama's page, press **Delete** beside **New conversation**, type `delete` and press
 **Delete conversation**. Every message of it is removed from the workspace and a new conversation
 starts. The agent tasks it started go with it, with what they asked and answered, and so do the
 tasks those agents asked for in turn. Only you can delete your conversations.
@@ -203,7 +204,7 @@ tasks those agents asked for in turn. Only you can delete your conversations.
 
 | You see | What to do |
 |---|---|
-| *Ask Orama works in a workspace, and you have none selected* (the panel) | Choose a workspace in the top bar, or start one on **Ship → Workspaces**. On the home, press **Start a workspace**. |
+| *Ask Orama works in a workspace, and you have none selected* (the panel) | Choose a workspace in the top bar, or start one on **Ship → Workspaces**. On Ask Orama's page, press **Start a workspace**. |
 | An agent is not offered in **Talk to** | It is not deployed on your Lake, or it does not chat. Every one of Orama's agents is offered when it runs; **Design → Agents** says which of them run. |
 | *That proposal is not in this conversation* (`not_found`) | Only proposals Lake stored in your conversation can be confirmed. |
 | `workspace_not_ready` | The workspace is not ready; conversations live in it. |

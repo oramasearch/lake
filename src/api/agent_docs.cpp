@@ -32,6 +32,22 @@ struct GroupRule {
 // none of them claims falls to `ungrouped`, which Docs.EveryCapabilityHasADeliberateGroup keeps
 // empty (lake#642).
 constexpr std::array group_rules{
+    // The quickstart process (lake#1128, docs/api/quickstart.md): first, so an agent finds it
+    // before anything else.
+    GroupRule{"Quickstart",
+              "Start here. The quickstart process takes a dataset to search and model answers on "
+              "your own website in four calls: start_quickstart (makes the workspace when there "
+              "is none, adds the dataset, builds and publishes its search index), "
+              "quickstart_status (each step's state and what to call next), train_quickstart "
+              "(trains a model on the same data, then publishes it) and quickstart_snippets (the "
+              "plain web page, React and curl code with the hosts and ids filled in, and the "
+              "create_token call for the key). A step that fails says why and is resumed by the "
+              "next call; paid steps answer 402 payment_required with the top-up link while the "
+              "balance is blocked.",
+              [](std::string_view n) {
+                  return n == "start_quickstart" || n == "quickstart_status" ||
+                         n == "train_quickstart" || n == "quickstart_snippets";
+              }},
     GroupRule{
         "Experiments",
         "Read training experiments (each trial is one run of its settings), run metrics, "
@@ -380,7 +396,8 @@ constexpr std::array group_rules{
 };
 
 // The order groups are shown in.
-constexpr std::array<std::string_view, 30> group_order{"Workspace: Design, Train and Ship",
+constexpr std::array<std::string_view, 31> group_order{"Quickstart",
+                                                       "Workspace: Design, Train and Ship",
                                                        "Projects and pipelines",
                                                        "Training and runs",
                                                        "Experiments",
@@ -494,6 +511,15 @@ constexpr std::string_view rules =
     "carries `reason` (`missing`, `invalid` or `expired`) and `help`, the page that makes a new "
     "key.\n";
 
+// The first thing an agent connected to Lake should know (lake#1128): the quickstart process.
+constexpr std::string_view start_here =
+    "New to Lake, or helping someone who is? Run the **quickstart process**: `start_quickstart` "
+    "with a dataset file's text makes the workspace if there is none, loads the dataset, and "
+    "builds and publishes a search index; `quickstart_snippets` answers the code that puts a "
+    "search box on a website; `train_quickstart` trains a model on the same data and publishes "
+    "it, so the snippets show its answer beside each result. `quickstart_status` says where each "
+    "step stands and what to call next. The worked flow is the first one below.\n";
+
 constexpr std::string_view what_lake_does =
     "- **Data**: repositories (liquid version control with reviews, issues and releases), drives "
     "in four kinds (workspace files, a repository with history, virtual folders of shortcuts, or "
@@ -553,6 +579,31 @@ std::vector<std::string> read_tool_names(const Registry& registry) {
 
 const std::vector<Flow>& flows() {
     static const std::vector<Flow> all{
+        {"Quickstart: search and model answers on your website",
+         "Start here (lake#1128). A dataset becomes a search box on your website, then a model "
+         "trained on the same data answers beside each result. Every step is kept in the "
+         "workspace and resumed by calling again.",
+         {{"start_quickstart",
+           "`customer_id` (list_customers or viewer), the file's `content` with `format: "
+           "\"csv\"|\"jsonl\"` (or `dataset_id`); `workspace_id` optional: without it the "
+           "account's first workspace is used and made if absent. While it starts the answer is "
+           "`waiting_for_workspace`: call again with the same input and the `workspace_id` once "
+           "it is ready. Answers `quickstart_id` and each step's state"},
+          {"quickstart_status",
+           "`customer_id`, `workspace_id`: the steps (workspace, dataset, search_index, website, "
+           "model, model_answers), `next`, and with `include_costs` what the paid steps cost "
+           "against the balance"},
+          {"quickstart_snippets",
+           "`customer_id`, `workspace_id`: plain web page, React and curl code; call "
+           "`key.create` (create_token) and put its `secret` where the code says "
+           "YOUR_LAKE_SEARCH_KEY"},
+          {"train_quickstart",
+           "`customer_id`, `workspace_id`, `target` (the column to predict), `entity_column` "
+           "(the column that names a row): starts training; read quickstart_status until the "
+           "model step is done, then call it again to publish the model"},
+          {"quickstart_snippets",
+           "again: the code now shows the model's answer beside each "
+           "search result"}}},
         {"Build and run a pipeline",
          "A pipeline is a Zetta execution graph of steps (connect, clean, model, index, serve, "
          "act) joined by edges.",
@@ -886,6 +937,7 @@ std::string llms_txt(const Registry& registry, std::string_view origin) {
         "Each account (yours or an organization's) has workspaces, and every data call names one "
         "with `workspace_id`. Everything a person can do in the Lake Console is a capability in "
         "one registry, served as REST, OpenAPI and MCP.\n\n"
+        "## Start Here\n\n{3}\n"
         "## What Lake Does\n\n{2}\n"
         "## Connect\n\n{0}\n"
         "## The Lake skill for Claude\n\n"
@@ -900,13 +952,15 @@ std::string llms_txt(const Registry& registry, std::string_view origin) {
         "- [MCP setup and keys]({1}/developer/mcp)\n\n",
         how_to_connect(origin),
         origin,
-        what_lake_does);
+        what_lake_does,
+        start_here);
     return out + tools_flows_and_rules(registry);
 }
 
 std::string llms_full_txt(const Registry& registry, std::string_view origin) {
-    std::string out = std::format("# Lake — every tool\n\n{}\nThe Lake skill for Claude: "
-                                  "{}/skills/lake/SKILL.md (public).\n\n",
+    std::string out = std::format("# Lake — every tool\n\n## Start Here\n\n{}\n{}\nThe Lake "
+                                  "skill for Claude: {}/skills/lake/SKILL.md (public).\n\n",
+                                  start_here,
                                   how_to_connect(origin),
                                   origin);
     return out + tool_reference(registry);
@@ -917,13 +971,15 @@ std::string skill_md(const Registry& registry, std::string_view origin) {
         "---\n"
         "name: lake\n"
         "description: Work in Lake ({0}) through its MCP server — Design, Train and Ship in a "
-        "workspace (projects, pipelines, data, runs, experiments, models, search indexes), "
+        "workspace (the quickstart process first: a dataset to search and model answers on a "
+        "website; then projects, pipelines, data, runs, experiments, models, search indexes), "
         "drives, transcripts, agents, apps, managed services (Postgres, Kafka, ClickHouse, …), "
         "repositories, usage and billing. Use when asked to build or run a pipeline, load data, "
         "keep files in a drive, search, stand up or connect a database service, check usage or "
         "the bill, or do anything on Lake.\n"
         "---\n\n"
         "# Lake\n\n"
+        "## Start Here\n\n{3}\n"
         "## What Lake Does\n\n{2}\n"
         "## Connect\n\n{1}\n"
         "Check the connection with `server_info`, then `tools/list`. Full reference: "
@@ -931,7 +987,8 @@ std::string skill_md(const Registry& registry, std::string_view origin) {
         "skill is always at {0}/skills/lake/SKILL.md.\n\n",
         origin,
         how_to_connect(origin),
-        what_lake_does);
+        what_lake_does,
+        start_here);
     return out + skill_tools_flows_and_rules(registry);
 }
 
@@ -953,18 +1010,22 @@ apex_llms_txt(const Registry& registry, const Regions& regions, std::string_view
         "A region's own copy (above) names only that region.\n\n"
         "## Learn more\n\n"
         "- [Every tool with its input schema]({0}/llms-full.txt)\n\n"
+        "## Start Here\n\n{3}\n"
         "## What Lake Does\n\n{2}\n",
         apex_origin,
         apex_regions_section(regions, apex_origin),
-        what_lake_does);
+        what_lake_does,
+        start_here);
     return out + tools_flows_and_rules(registry);
 }
 
 std::string
 apex_llms_full_txt(const Registry& registry, const Regions& regions, std::string_view apex_origin) {
-    std::string out = std::format("# Lake — every tool\n\n{}The Lake skill for Claude: "
-                                  "{}/skills/lake/SKILL.md (public, names every region).\n\n",
+    std::string out = std::format("# Lake — every tool\n\n{}## Start Here\n\n{}\nThe Lake "
+                                  "skill for Claude: {}/skills/lake/SKILL.md (public, names every "
+                                  "region).\n\n",
                                   apex_regions_section(regions, apex_origin),
+                                  start_here,
                                   apex_origin);
     return out + tool_reference(registry);
 }
@@ -975,7 +1036,8 @@ apex_skill_md(const Registry& registry, const Regions& regions, std::string_view
         "---\n"
         "name: lake\n"
         "description: Work in Lake ({0}, one Lake per region) through its MCP server — Design, "
-        "Train and Ship in a workspace (projects, pipelines, data, runs, experiments, models, "
+        "Train and Ship in a workspace (the quickstart process first: a dataset to search and "
+        "model answers on a website; then projects, pipelines, data, runs, experiments, models, "
         "search indexes), drives, transcripts, agents, apps, managed services (Postgres, Kafka, "
         "ClickHouse, …), repositories, usage and billing. Use when asked to build or run a "
         "pipeline, load data, keep files in a drive, search, stand up or connect a database "
@@ -985,10 +1047,12 @@ apex_skill_md(const Registry& registry, const Regions& regions, std::string_view
         "{1}"
         "Check the connection with `server_info` (it names the region), then `tools/list`. The "
         "latest copy of this skill is always at {0}/skills/lake/SKILL.md.\n\n"
+        "## Start Here\n\n{3}\n"
         "## What Lake Does\n\n{2}\n",
         apex_origin,
         apex_regions_section(regions, apex_origin),
-        what_lake_does);
+        what_lake_does,
+        start_here);
     return out + skill_tools_flows_and_rules(registry);
 }
 

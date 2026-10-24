@@ -1,0 +1,599 @@
+/** Quickstart (`/` for a signed-in person, lake#1128, docs/ui/quickstart.md): drop a dataset and
+ * Lake takes it to search and model answers on your own website. Every step is a capability
+ * (start_quickstart, quickstart_status, train_quickstart, quickstart_snippets), so an agent can do
+ * the same over MCP; the page shows each step's state, resumes where the person stopped, says what
+ * a paid step costs before it runs, and offers the top-up link when the balance blocks it. */
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
+import { Brain, Code2, Database, KeyRound, Plus, Search, SearchX, Wallet } from "lucide-react";
+import { act, ApiError, usePostRead, useRead, type Row } from "@/lib/api";
+import { useSession } from "@/lib/session";
+import { useTrail } from "@/lib/trail";
+import { Banner, Button, Card, CopyBlock, Empty, ErrorBlock, FilePicker, Page, Skeleton, StateTabs, Status } from "@/lib/ui";
+import { addFundsPath } from "@/pages/billing/balance";
+import { money } from "@/pages/billing/billing";
+import { nameForFile } from "@/pages/train/upload";
+import {
+  MAX_UPLOAD_BYTES,
+  blockedBy,
+  firstColumns,
+  hitLine,
+  pollInterval,
+  publishesNow,
+  rateLabel,
+  stepTone,
+  uploadContent,
+  withKey,
+  keyCovers,
+  type Costs,
+  type Snippets,
+  type Status as QuickstartStatus,
+} from "./quickstart";
+
+/** What the page holds while a new workspace starts: the file, so the same start goes on once it is
+ * ready without asking for it again. */
+type Pending = { content: string; format: "csv" | "jsonl"; name: string };
+
+export default function QuickstartPage() {
+  useTrail([{ label: "Quickstart" }], "drop a dataset, get search and model answers on your website");
+  const session = useSession();
+  const { viewer } = session;
+  const customerId = session.space?.id ?? viewer.customer_id ?? "";
+  const [workspaceId, setWorkspaceId] = useState<string>(session.workspaceId ?? "");
+  const [quickstartId, setQuickstartId] = useState<string>("");
+  const [fresh, setFresh] = useState(false);
+  const status = useRead<QuickstartStatus>(
+    "quickstart_status",
+    { customer_id: customerId, workspace_id: workspaceId, ...(quickstartId ? { quickstart_id: quickstartId } : {}) },
+    {
+      enabled: !!customerId && !!workspaceId,
+      refetchInterval: (query) => pollInterval((query.state.data as QuickstartStatus | undefined)?.state),
+    },
+  );
+  const costs = useRead<QuickstartStatus>(
+    "quickstart_status",
+    { customer_id: customerId, workspace_id: workspaceId, include_costs: true },
+    { enabled: !!customerId && !!workspaceId, staleTime: 5 * 60_000 },
+  );
+  const current = fresh ? null : status.data && status.data.quickstart_id ? status.data : null;
+  const balance = viewer.billing ? viewer.balance ?? costs.data?.costs?.balance ?? null : null;
+  const blocked = blockedBy(balance);
+
+  return (
+    <Page
+      eyebrow="Quickstart"
+      title="Search and Model Answers on Your Website"
+      sub="Drop a dataset. Lake adds it to your workspace, builds a search index you can try here and put on your website, then trains a model on the same data so your site shows its answers too."
+      actions={
+        current ? (
+          <Button
+            data-testid="quickstart-start-another"
+            onClick={() => {
+              setFresh(true);
+              setQuickstartId("");
+            }}
+          >
+            <Plus size={14} aria-hidden /> Start another
+          </Button>
+        ) : null
+      }
+    >
+      <div className="grid gap-4" data-testid="quickstart-page">
+        {!customerId ? (
+          <Banner tone="warn">Lake could not tell which account to use. Choose a workspace first.</Banner>
+        ) : workspaceId && status.isLoading ? (
+          <Skeleton lines={4} />
+        ) : workspaceId && status.isError ? (
+          <ErrorBlock error={status.error} retry={() => void status.refetch()} what="the quickstart" />
+        ) : (
+          <>
+            <Steps status={fresh ? null : status.data ?? null} />
+            <Others status={status.data ?? null} chosen={quickstartId} onChoose={(id) => { setFresh(false); setQuickstartId(id); }} />
+            {!current ? (
+              <DropStep
+                customerId={customerId}
+                workspaceId={workspaceId}
+                waiting={status.data?.state === "waiting_for_workspace" ? status.data : null}
+                workspaceReady={status.data?.workspace?.ready === true && status.data.state === "not_started"}
+                costs={costs.data?.costs}
+                blocked={blocked}
+                onStarted={(answer) => {
+                  if (answer.workspace_id) setWorkspaceId(answer.workspace_id);
+                  if (answer.quickstart_id) {
+                    setFresh(false);
+                    setQuickstartId(answer.quickstart_id);
+                  }
+                  void status.refetch();
+                }}
+              />
+            ) : (
+              <Started status={current} costs={costs.data?.costs} blocked={blocked} onChanged={() => void status.refetch()} />
+            )}
+          </>
+        )}
+      </div>
+    </Page>
+  );
+}
+
+/** Each step with its state: done, running, failed and why, or still to come. */
+function Steps({ status }: { status: QuickstartStatus | null }) {
+  const steps = status?.steps ?? [
+    { step: "workspace", title: "Workspace", state: "pending" as const, error: null },
+    { step: "dataset", title: "Dataset", state: "pending" as const, error: null },
+    { step: "search_index", title: "Search Index", state: "pending" as const, error: null },
+    { step: "website", title: "Search on Your Website", state: "pending" as const, error: null },
+    { step: "model", title: "Model", state: "pending" as const, error: null },
+    { step: "model_answers", title: "Model Answers on Your Website", state: "pending" as const, error: null },
+  ];
+  return (
+    <Card label="The quickstart process" title="Steps">
+      <ol className="m-0 grid list-none gap-1.5 p-0" aria-label="Quickstart steps" data-testid="quickstart-steps">
+        {steps.map((step, i) => (
+          <li key={step.step} className="grid grid-cols-[1.5rem_minmax(0,1fr)_auto] items-start gap-2" data-testid={`quickstart-step-${step.step}`} data-state={step.state}>
+            <span className="font-mono text-[12px] text-ink-3 tabular-nums">{i + 1}</span>
+            <span className="min-w-0">
+              <span className="text-[13.5px] text-ink">{step.title}</span>
+              {step.error ? <span className="block text-[12.5px] text-bad">{step.error.message}</span> : null}
+            </span>
+            <Status value={step.state} tone={stepTone(step.state)} />
+          </li>
+        ))}
+      </ol>
+    </Card>
+  );
+}
+
+/** The workspace's other quickstarts, to open one again. */
+function Others({ status, chosen, onChoose }: { status: QuickstartStatus | null; chosen: string; onChoose: (id: string) => void }) {
+  const list = status?.quickstarts ?? [];
+  if (list.length < 2) return null;
+  return (
+    <label className="block max-w-[28rem]">
+      <span className="label m-0 block">Your quickstarts</span>
+      <select className="w-full" value={chosen || status?.quickstart_id || ""} onChange={(e) => onChoose(e.target.value)} data-testid="quickstart-choose">
+        {list.map((q) => (
+          <option key={q.quickstart_id} value={q.quickstart_id}>
+            {q.dataset_id ?? "no dataset yet"} · {q.created_at ?? ""}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+/** What a paid step is billed by, at the published rates, with the balance. */
+function CostNote({ costs, step }: { costs: Costs | undefined; step: string }) {
+  const entry = costs?.steps.find((s) => s.step === step);
+  if (!costs || !entry) return null;
+  const currency = costs.currency || "USD";
+  const rated = entry.billed_by.map((d) => [d.title, rateLabel(d.rate, d.unit, (m) => money(m, currency))] as const).filter(([, label]) => label);
+  return (
+    <div className="text-[12.5px] text-ink-2" data-testid={`quickstart-cost-${step}`}>
+      <p className="m-0">
+        What it costs: {entry.note}.{" "}
+        {costs.billing ? "It is charged against your prepaid balance." : "This Lake does not bill."}
+      </p>
+      {rated.length ? (
+        <ul className="mt-1 mb-0 pl-4">
+          {rated.map(([title, label]) => (
+            <li key={title}>
+              {title}: {label}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {costs.balance ? <p className="mt-1 mb-0">Your balance: {money(costs.balance.balance_micros, currency)}.</p> : null}
+    </div>
+  );
+}
+
+/** The balance blocks paid work: the top-up link, never a step that fails. */
+function TopUp({ customerId }: { customerId: string }) {
+  return (
+    <Banner
+      tone="warn"
+      title="Add funds to continue"
+      action={
+        <Button variant="primary" to={addFundsPath(customerId)} data-testid="quickstart-top-up">
+          <Wallet size={14} aria-hidden /> Add funds
+        </Button>
+      }
+    >
+      Your prepaid balance does not cover new work yet. Add funds, then come back: the quickstart goes on from here.
+    </Banner>
+  );
+}
+
+function isBlocked(error: unknown): boolean {
+  return error instanceof ApiError && error.code === "payment_required";
+}
+
+/** Step 1: drop a dataset. Without a workspace one is made, and the start goes on once it is ready. */
+function DropStep({
+  customerId,
+  workspaceId,
+  waiting,
+  workspaceReady,
+  costs,
+  blocked,
+  onStarted,
+}: {
+  customerId: string;
+  workspaceId: string;
+  waiting: QuickstartStatus | null;
+  workspaceReady: boolean;
+  costs: Costs | undefined;
+  blocked: boolean;
+  onStarted: (answer: QuickstartStatus) => void;
+}) {
+  const [file, setFile] = useState<File | null>(null);
+  const [problem, setProblem] = useState<string>("");
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<Pending | null>(null);
+  const resumed = useRef(false);
+
+  const start = async (upload: Pending, workspace: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const answer = await act<QuickstartStatus>("start_quickstart", {
+        customer_id: customerId,
+        ...(workspace ? { workspace_id: workspace } : {}),
+        content: upload.content,
+        format: upload.format,
+        name: upload.name,
+      });
+      if (answer.state === "waiting_for_workspace") {
+        resumed.current = false;
+        setPending(upload);
+      } else setPending(null);
+      onStarted(answer);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // The workspace this page asked for became ready: the same start goes on, once.
+  useEffect(() => {
+    if (pending && workspaceReady && workspaceId && !resumed.current) {
+      resumed.current = true;
+      void start(pending, workspaceId);
+    }
+  }, [pending, workspaceReady, workspaceId]);
+
+  const choose = async (picked: File | null) => {
+    setFile(picked);
+    setProblem("");
+    setError(null);
+    if (!picked) return;
+    if (picked.size > MAX_UPLOAD_BYTES) setProblem("The file is larger than 16 MiB. Load larger data from Data → Datasets or a connection.");
+  };
+
+  const send = async () => {
+    if (!file) return;
+    const read = uploadContent(file.name, await file.text());
+    if ("error" in read) {
+      setProblem(read.error);
+      return;
+    }
+    resumed.current = false;
+    await start({ ...read, name: nameForFile("", "", file.name) || "quickstart" }, workspaceId);
+  };
+
+  return (
+    <Card label="Step 1" title="Drop a Dataset" tone="active">
+      <p className="mt-0 text-[13px] text-ink-2">
+        A CSV, JSON or JSON Lines file of up to 16 MiB. Lake adds it to your workspace{workspaceId ? "" : ", making one for you,"} and builds a search index over every column.
+      </p>
+      <div data-testid="quickstart-drop">
+        <FilePicker file={file} onFile={(f) => void choose(f)} accept=".csv,.json,.jsonl,.ndjson,.parquet" name="dataset" prompt="Drop your dataset here or choose a file" hint="CSV, JSON or JSON Lines" disabled={busy || !!pending} />
+      </div>
+      {problem ? <p className="text-[12.5px] text-bad" role="alert">{problem}</p> : null}
+      {pending || waiting ? (
+        <Banner tone="info" title="Making your workspace">
+          Your workspace is starting{waiting?.workspace?.phase ? ` (${waiting.workspace.phase})` : ""}. {pending ? "Your dataset goes in as soon as it is ready; keep this page open." : "You can add your dataset now: it goes in as soon as the workspace is ready."}
+        </Banner>
+      ) : null}
+      {isBlocked(error) || blocked ? (
+        <TopUp customerId={customerId} />
+      ) : (
+        <>
+          {error ? <ErrorBlock error={error} /> : null}
+          <CostNote costs={costs} step="search_index" />
+          <div className="mt-3">
+            <Button variant="primary" loading={busy} disabled={!file || !!problem || !!pending} onClick={() => void send()} data-testid="quickstart-start">
+              <Database size={14} aria-hidden /> Add it and build search
+            </Button>
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
+/** Steps 2 to 5, once there is a quickstart: the live search box, the website code, training and
+ * the model's answers. */
+function Started({ status, costs, blocked, onChanged }: { status: QuickstartStatus; costs: Costs | undefined; blocked: boolean; onChanged: () => void }) {
+  const searchable = !!status.index?.published;
+  return (
+    <>
+      {status.state === "failed" && status.steps.some((s) => s.state === "failed" && (s.step === "dataset" || s.step === "search_index")) ? (
+        <Resume status={status} onChanged={onChanged} />
+      ) : null}
+      {searchable ? <TrySearch status={status} /> : null}
+      {searchable ? <Website status={status} /> : null}
+      {searchable ? <Train status={status} costs={costs} blocked={blocked} onChanged={onChanged} /> : null}
+    </>
+  );
+}
+
+/** A dataset or search step failed: try it again from where it stopped. */
+function Resume({ status, onChanged }: { status: QuickstartStatus; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  return (
+    <Card label="Try again" title="Resume the Quickstart" tone="exception">
+      {isBlocked(error) ? <TopUp customerId={status.customer_id} /> : error ? <ErrorBlock error={error} /> : null}
+      <Button
+        variant="primary"
+        loading={busy}
+        data-testid="quickstart-resume"
+        onClick={() => {
+          setBusy(true);
+          setError(null);
+          act("start_quickstart", { customer_id: status.customer_id, workspace_id: status.workspace_id, quickstart_id: status.quickstart_id })
+            .then(onChanged, setError)
+            .finally(() => setBusy(false));
+        }}
+      >
+        Try the failed step again
+      </Button>
+    </Card>
+  );
+}
+
+/** Step 2: a search box over the person's own data, with the model's answer beside each result
+ * once it is published, exactly as the website will show them. */
+function TrySearch({ status }: { status: QuickstartStatus }) {
+  const [typed, setTyped] = useState("");
+  const [query, setQuery] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setQuery(typed.trim()), 250);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [typed]);
+  const found = useRead<{ hits?: Row[] }>(
+    "search_index",
+    { customer_id: status.customer_id, workspace_id: status.workspace_id, index_id: status.index?.id ?? "", query, top_k: 10 },
+    { enabled: !!query && !!status.index?.id },
+  );
+  const hits = useMemo(() => found.data?.hits ?? [], [found.data]);
+  const modelId = status.model?.published ? status.model.id : "";
+  const rows = useMemo(() => hits.map((hit) => ({ ...(hit.fields ?? {}) })), [hits]);
+  // predict changes nothing; it is POSTed because rows go in a body.
+  const answers = usePostRead<{ ranked?: { row: number; risk: number }[] }>(
+    "predict",
+    { customer_id: status.customer_id, workspace_id: status.workspace_id, model_id: modelId, rows },
+    { enabled: !!modelId && rows.length > 0 },
+  );
+  const answerAt = new Map<number, number>((answers.data?.ranked ?? []).map((entry) => [entry.row, entry.risk]));
+  const target = status.training?.target ?? "model";
+  return (
+    <Card label="Step 2" title="Search Your Data" tone="active">
+      <form className="flex flex-wrap items-end gap-2" role="search" onSubmit={(e) => e.preventDefault()}>
+        <label className="min-w-[14rem] flex-1">
+          <span className="label m-0 block">Search {status.dataset?.name ?? "your dataset"}</span>
+          <input type="search" className="w-full" value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="Type anything in your data" data-testid="quickstart-search" />
+        </label>
+      </form>
+      <div className="mt-3" data-testid="quickstart-hits">
+        {!query ? (
+          <Empty compact icon={Search} title="Try your search">
+            Results appear as you type, ranked, with each row's values{modelId ? " and the model's answer" : ""}.
+          </Empty>
+        ) : found.isLoading ? (
+          <Skeleton />
+        ) : found.isError ? (
+          <ErrorBlock error={found.error} retry={() => void found.refetch()} what="the search" />
+        ) : hits.length === 0 ? (
+          <Empty compact icon={SearchX} title="Nothing matched">
+            Try other words.
+          </Empty>
+        ) : (
+          <ol className="m-0 list-none divide-y divide-hairline rounded-[6px] border border-hairline p-0" aria-label="Search results">
+            {hits.map((hit, i) => (
+              <li key={`${String(hit.id)}-${i}`} className="flex flex-wrap items-baseline justify-between gap-2 px-3 py-2 text-[13px]" data-testid="quickstart-hit">
+                <span className="min-w-0 break-words text-ink">{hitLine(hit.fields as Record<string, unknown> | undefined)}</span>
+                {answerAt.has(i) ? (
+                  <span className="font-mono text-[12px] text-ai" data-testid="quickstart-answer">
+                    {target}: {answerAt.get(i)!.toFixed(2)}
+                  </span>
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        )}
+        {answers.isError ? <ErrorBlock error={answers.error} what="the model's answers" /> : null}
+      </div>
+    </Card>
+  );
+}
+
+type Lang = "html" | "react" | "curl";
+
+/** Steps 3 and 5: the code for a website, with Lake's host and the ids filled in, and a key made
+ * here and put into it. */
+function Website({ status }: { status: QuickstartStatus }) {
+  const snippets = useRead<Snippets>("quickstart_snippets", {
+    customer_id: status.customer_id,
+    workspace_id: status.workspace_id,
+    ...(status.quickstart_id ? { quickstart_id: status.quickstart_id } : {}),
+  });
+  const [lang, setLang] = useState<Lang>("html");
+  const [made, setMade] = useState<{ secret: string; scopes: string[] } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const value = snippets.data;
+  const snippet = value?.snippets.find((s) => s.id === lang);
+  const placeholder = value?.key?.placeholder ?? "YOUR_LAKE_SEARCH_KEY";
+  // A key made before the model was published can only search: the code needs a new one.
+  const stale = !!made && !!value?.key && !keyCovers(made.scopes, value.key.scopes);
+  const secret = made && !stale ? made.secret : null;
+  return (
+    <Card label={status.model?.published ? "Steps 3 and 5" : "Step 3"} title={status.model?.published ? "Search and Model Answers on Your Website" : "Search on Your Website"}>
+      {snippets.isLoading ? (
+        <Skeleton />
+      ) : snippets.isError ? (
+        <ErrorBlock error={snippets.error} retry={() => void snippets.refetch()} what="the website code" />
+      ) : value && value.ready ? (
+        <div data-testid="quickstart-website">
+          <ol className="mt-0 pl-4 text-[13px] text-ink-2">
+            <li>Make a key for your website. It can only search{value.includes_model ? " and ask your published model" : ""}, and it is shown once.</li>
+            <li>Copy the code into your page: a plain web page or a React component.</li>
+            <li>Open the page and search. {value.includes_model ? "Each result shows the model's answer beside it." : "Train a model below to add its answers."}</li>
+          </ol>
+          {error ? <ErrorBlock error={error} /> : null}
+          {stale ? <Banner tone="info">Your key can only search. Make a new key that can also ask your model, and copy the code again.</Banner> : null}
+          {secret ? (
+            <CopyBlock value={secret} label="Your website key" />
+          ) : (
+            <Button
+              loading={busy}
+              data-testid="quickstart-create-key"
+              onClick={() => {
+                if (!value.key) return;
+                setBusy(true);
+                setError(null);
+                const scopes = value.key.scopes;
+                act<{ secret?: string }>(value.key.create.capability, value.key.create.input)
+                  .then((issued) => setMade(issued.secret ? { secret: issued.secret, scopes } : null), setError)
+                  .finally(() => setBusy(false));
+              }}
+            >
+              <KeyRound size={14} aria-hidden /> Make a website key
+            </Button>
+          )}
+          <div className="mt-3">
+            <StateTabs<Lang>
+              value={lang}
+              onChange={setLang}
+              label="Code"
+              tabs={[
+                { value: "html", label: "Plain web page" },
+                { value: "react", label: "React" },
+                { value: "curl", label: "curl" },
+              ]}
+            />
+          </div>
+          {snippet ? (
+            <div data-testid={`quickstart-snippet-${snippet.id}`}>
+              <CopyBlock value={withKey(snippet.code, placeholder, secret)} multiline />
+            </div>
+          ) : null}
+          {value.key ? <p className="mb-0 text-[12px] text-ink-3">{value.key.note} <Link to="/tokens">Tokens</Link></p> : null}
+          <p className="mb-0 text-[12px] text-ink-3">
+            <Code2 size={12} aria-hidden className="inline" /> An AI agent reaches the same index through the MCP tool <code>search_index</code> at <code>{value.origin}/mcp</code>.
+          </p>
+        </div>
+      ) : (
+        <Banner tone="quiet">{value?.next ?? "The search index is not published yet."}</Banner>
+      )}
+    </Card>
+  );
+}
+
+/** Step 4: one click trains a model on the same dataset, with its progress; once trained it is
+ * published by the same click, so the website code grows its answers. */
+function Train({ status, costs, blocked, onChanged }: { status: QuickstartStatus; costs: Costs | undefined; blocked: boolean; onChanged: () => void }) {
+  const columns = status.dataset?.columns ?? [];
+  const fields = columns.length ? columns.map((c) => c.name) : status.index?.fields ?? [];
+  const guess = firstColumns(fields, columns);
+  const [target, setTarget] = useState(status.training?.target ?? guess.target);
+  const [entity, setEntity] = useState(status.training?.entity_column ?? guess.entity);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const model = status.steps.find((s) => s.step === "model");
+  const answers = status.steps.find((s) => s.step === "model_answers");
+  const train = (input: Row) => {
+    setBusy(true);
+    setError(null);
+    act("train_quickstart", { customer_id: status.customer_id, workspace_id: status.workspace_id, quickstart_id: status.quickstart_id, ...input })
+      .then(onChanged, setError)
+      .finally(() => setBusy(false));
+  };
+  // Trained: publish it now, as part of the click that trained it.
+  const publishing = useRef("");
+  useEffect(() => {
+    if (publishesNow(status) && publishing.current !== status.quickstart_id && !blocked) {
+      publishing.current = status.quickstart_id ?? "";
+      train({});
+    }
+  }, [status.state, status.quickstart_id, blocked]);
+
+  const done = answers?.state === "done";
+  const running = model?.state === "running" || status.state === "trained";
+  return (
+    <Card label="Step 4" title="Train a Model on the Same Data" tone={done ? "default" : "active"} actions={model ? <Status value={done ? "published" : model.state} tone={done ? "success" : stepTone(model.state)} /> : null}>
+      <div data-testid="quickstart-train">
+        {done ? (
+          <p className="m-0 text-[13px] text-ink-2">
+            The model is trained and published: the search above and your website code show its answer for {status.training?.target ?? "each result"}. <Link to="/ship/models">Ship → Models</Link> has its scores and traffic.
+          </p>
+        ) : running ? (
+          <p className="m-0 text-[13px] text-ink-2" data-testid="quickstart-training">
+            <Brain size={14} aria-hidden className="inline" /> {status.state === "trained" ? "Trained. Publishing it…" : `Training on ${status.dataset?.name ?? "your dataset"}${model?.progress?.status ? ` (${model.progress.status})` : ""}. This page follows it; you can leave and come back.`}
+          </p>
+        ) : (
+          <>
+            <p className="mt-0 text-[13px] text-ink-2">Lake learns to predict one column from the others, then answers it for every search result.</p>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <label>
+                <span className="label m-0 block">Column to predict</span>
+                <select className="w-full" value={target} onChange={(e) => setTarget(e.target.value)} data-testid="quickstart-target">
+                  {fields.map((f) => (
+                    <option key={f} value={f}>
+                      {f}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span className="label m-0 block">Column that names a row</span>
+                <select className="w-full" value={entity} onChange={(e) => setEntity(e.target.value)} data-testid="quickstart-entity">
+                  <option value="">None</option>
+                  {fields.filter((f) => f !== target).map((f) => (
+                    <option key={f} value={f}>
+                      {f}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            {model?.error ? <p className="text-[12.5px] text-bad">{model.error.message}</p> : null}
+            {answers?.error ? <p className="text-[12.5px] text-bad">{answers.error.message}</p> : null}
+            <div className="mt-2">
+              <CostNote costs={costs} step="model" />
+            </div>
+            {isBlocked(error) || blocked ? (
+              <TopUp customerId={status.customer_id} />
+            ) : (
+              <>
+                {error ? <ErrorBlock error={error} /> : null}
+                <div className="mt-3">
+                  <Button variant="primary" loading={busy} disabled={!target} onClick={() => train({ target, ...(entity ? { entity_column: entity } : {}) })} data-testid="quickstart-train-button">
+                    <Brain size={14} aria-hidden /> {model?.state === "failed" || answers?.state === "failed" ? "Try again" : "Train a model"}
+                  </Button>
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </div>
+    </Card>
+  );
+}
