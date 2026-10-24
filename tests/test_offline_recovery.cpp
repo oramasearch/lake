@@ -436,7 +436,7 @@ TEST_P(EmailRecoveryLimits, CancellationIsOwnerOnlyAndKeepsTheAccountBudget) {
     const auto completion =
         store->complete_recovery(delivery.recovery_id, delivery.token, "cancel bypass");
     ASSERT_FALSE(completion);
-    EXPECT_EQ(completion.error().code, "unauthorized");
+    EXPECT_EQ(completion.error().code, "unauthenticated");
     EXPECT_TRUE(store->context_for(target.issued.secret));
     anonymous.recovery_client_address = "192.0.2.2";
     const auto suppressed = begin();
