@@ -4039,6 +4039,67 @@ void register_identity_capabilities(Registry& registry) {
                           : from_store_error(result.error());
         },
         .serves_application_pools = true});
+    // The person's own account-wide revocation (lake#1163). A Clerk session event, including
+    // Clerk's signOutOfOtherSessions after a password reset, ends browser sessions only; this is
+    // how a person also ends every API key, static token, MCP key and device of theirs.
+    registry.add(Capability{
+        .name = "sign_out_everywhere",
+        .title = "Sign out everywhere",
+        .description = "Revoke every session, API key, static token and device of your own "
+                       "account, including the credential making this call. Tokens derived from "
+                       "them stop too. Use it when a key or a device may be lost or exposed; "
+                       "signing out of one browser does not end your keys.",
+        .input_schema = {{"type", "object"},
+                         {"properties", json::object()},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"sessions", {{"type", "integer"}}},
+                            {"devices", {{"type", "integer"}}}}}},
+        .kind = CapabilityKind::Action,
+        .object = "principal",
+        .action = "write",
+        .resolve_object = self_object,
+        .handler = [](const json&, ApiContext& context) {
+            if (!context.store)
+                return no_store();
+            if (context.acting_user_id.empty() || context.operator_credential) {
+                return ApiResult::failure("invalid_input",
+                                          "sign_out_everywhere needs a signed-in person");
+            }
+            int sessions_revoked = 0;
+            int devices_revoked = 0;
+            auto sessions = context.store->list_sessions(context.acting_user_id, context.pool_id);
+            if (!sessions)
+                return from_store_error(sessions.error());
+            for (const auto& session : *sessions) {
+                if (!session.revoked_at.empty())
+                    continue;
+                if (auto result =
+                        context.store->revoke_session(context.acting_user_id, session.id)) {
+                    ++sessions_revoked;
+                } else if (result.error().code != "not_found") {
+                    return from_store_error(result.error());
+                }
+            }
+            auto devices = context.store->list_devices(context.acting_user_id);
+            if (!devices)
+                return from_store_error(devices.error());
+            for (const auto& device : *devices) {
+                if (!device.revoked_at.empty())
+                    continue;
+                if (auto result =
+                        context.store->revoke_device(context.acting_user_id, device.id)) {
+                    ++devices_revoked;
+                } else if (result.error().code != "not_found") {
+                    return from_store_error(result.error());
+                }
+            }
+            context.audit_details = {{"sessions", sessions_revoked},
+                                     {"devices", devices_revoked}};
+            return ApiResult::success(
+                {{"sessions", sessions_revoked}, {"devices", devices_revoked}});
+        }});
     register_own_identity_capabilities(registry);
 }
 

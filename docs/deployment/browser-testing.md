@@ -71,18 +71,17 @@ A ticket works once. To run several scripts on one ticket, set `LAKE_E2E_STATE` 
 first script saves the signed-in session there (mode 600), and the next ones reuse it. That file is a
 credential; delete it when you are done.
 
-The walkthrough signs out at the end, and a Clerk sign-out revokes **every** session, API key and
-device of the account, not only that browser's (`../api/clerk.md`, *Webhooks*: Clerk's templates
-carry no trusted session id, so revocation is account-wide). Run the walkthrough last, after every
-other script on that account has finished, and mint `agents.py`'s key after it, or use another test
-user for it. A script that loses its session mid-run shows *Your session has ended* and fails.
+The walkthrough signs out at the end. That ends only its own browser session (lake#1163, below), but
+that is the session saved in `LAKE_E2E_STATE`, so run it after the scripts that reuse that file. API
+keys, `agents.py`'s key and other browsers are not affected. A script that loses its session mid-run
+shows *Your session has ended* and fails.
 
 ```sh
 export LAKE_E2E_STATE=/tmp/lake-session.json
 node tools/e2e/mcp.mjs         https://lake-dev.oramadev.net /tmp/lake-ticket /tmp/lake-mcp
 node tools/e2e/storage.mjs     https://lake-dev.oramadev.net /tmp/lake-ticket /tmp/lake-storage
 node tools/e2e/services.mjs    https://lake-dev.oramadev.net /tmp/lake-ticket /tmp/lake-services
-node tools/e2e/walkthrough.mjs https://lake-dev.oramadev.net /tmp/lake-ticket /tmp/lake-e2e   # last: it signs out
+node tools/e2e/walkthrough.mjs https://lake-dev.oramadev.net /tmp/lake-ticket /tmp/lake-e2e   # after the scripts sharing LAKE_E2E_STATE: it signs out
 rm "$LAKE_E2E_STATE"
 ```
 
@@ -111,6 +110,14 @@ node tools/e2e/walkthrough.mjs https://lake-dev.oramadev.net /tmp/lake-ticket /t
 | Services | Leftover `e2e-` services are deleted; a Postgres service is created, Ready, **Show connection** has a `postgresql://` URI (never logged); Data → Connections **Connect** it; **Load data → From a connection** pulls `SELECT 1`; the service is deleted with its typed name |
 | Delete projects | This run's project and any earlier `e2e-` project, with the typed confirmation |
 | Account menu → Sign out | lake and Clerk both sign out; `/design/projects` then goes to sign-in |
+
+The sign-out ends only the walkthrough's own browser session (lake#1163): Clerk's session event
+names the Clerk session that ended, and lake ends just the Lake browser session bound to it. The
+tester's API keys, MCP keys, devices and other browsers keep working, so scripts with their own
+browser session or key may run before, after or beside it; only the session saved in
+`LAKE_E2E_STATE` ends with it. (Before lake#1163 a Clerk
+sign-out revoked every session, key and device of the account.) A key made *in the walkthrough's
+own browser* without *Never expires* still ends with that browser, as on any sign-out.
 
 Read `log.json` and **look at the screenshots**: a page can show its title and still show an empty
 state that should not be empty.

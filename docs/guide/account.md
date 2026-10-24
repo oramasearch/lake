@@ -172,7 +172,12 @@ it, choose **Use a passkey** on the sign-in page.
 Open **Sessions** from the account menu.
 
 - **This session** is the browser you are using. **Revoke and sign out** ends it after a
-  confirmation.
+  confirmation. Signing out ends only this browser: your API keys, MCP keys, other browsers and
+  devices keep working (lake#1163). A key you made in this browser without *Never expires* ends
+  with it.
+- **Sign out everywhere** ends every session, API key, MCP key, static token and device of your
+  account, this browser included, after a confirmation. Use it when a key or a device may be lost
+  or exposed; agents and scripts using your keys stop until you make new ones.
 - **Sessions** lists your other sessions and tokens, with their scopes, expiry and status; filter by
   **Active** or **Revoked**. **Revoke** ends one on its next request.
 - **Devices** lists the devices you signed in from, including passkeys. Revoking a device ends its

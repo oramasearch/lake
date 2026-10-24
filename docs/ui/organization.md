@@ -28,7 +28,7 @@ the rows already read.
 | Secret Mounts, Secrets, Encryption Keys | `/secret-mounts`, `/secrets?mount_id=&name=`, `/encryption-keys?mount_id=` | A workspace chooser that sets `workspace_id`; tables with empty states that say what to do; Secrets is a split with the lookup and version history on the left and the mount on the right |
 | Transparency Monitor, Model | `/transparency`, `/models/…` | Figures from the scan or the model's storage; the model's provenance in the side column |
 | Settings | `/settings?tab=` | Tabs of cards (profile and MFA state, sessions and devices figures, passkeys, tokens, notifications) |
-| Sessions and Devices | `/sessions` | This browser's session first, highlighted, with "Revoke and sign out" behind a confirmation; other sessions in a table with kind and state chips; devices as cards |
+| Sessions and Devices | `/sessions` | This browser's session first, highlighted, with "Revoke and sign out" and "Sign out everywhere" (`sign_out_everywhere`, lake#1163) each behind a confirmation; other sessions in a table with kind and state chips; devices as cards |
 | API Tokens | `/tokens` | Figures; "New token" in a drawer (the Liquid scopes can be filled in with one click); the secret shows once in a highlighted callout |
 | Passkeys, MFA | `/passkeys`, `/mfa` | Cards; enrolling or replacing MFA asks for the current password and clears it after the request; the authenticator URI and recovery codes show once in a highlighted callout |
 

@@ -4828,7 +4828,8 @@ Result<ClerkUserProvisioned> InMemoryStore::clerk_user_locked(const ClerkIdentit
 }
 
 Result<IssuedSession> InMemoryStore::sign_in_clerk(const ClerkIdentity& input) {
-    if (input.issued_at <= 0 || input.subject.empty() || input.subject.size() > 256) {
+    if (input.issued_at <= 0 || input.subject.empty() || input.subject.size() > 256 ||
+        input.session_id.size() > 256) {
         return std::unexpected(
             StoreError{"invalid_input", "a Clerk subject and token issue time are required"});
     }
@@ -4862,31 +4863,36 @@ Result<IssuedSession> InMemoryStore::sign_in_clerk(const ClerkIdentity& input) {
         add_session(sessions_, found->user_id, "lake", device.id, "browser", "", {"*"}, "", 86400);
     if (issued.secret.empty())
         return std::unexpected(StoreError{"store_error", "could not issue session"});
+    if (!input.session_id.empty())
+        clerk_session_of_[issued.session.id] = input.session_id;
     issued.session.reason.clear();
     return issued;
 }
 
 Result<void> InMemoryStore::revoke_clerk_sessions(const std::string& subject,
+                                                  const std::string& session_id,
                                                   std::int64_t revoked_at) {
-    if (subject.empty() || subject.size() > 256 || revoked_at < 0) {
-        return std::unexpected(
-            StoreError{"invalid_input", "a Clerk subject and revocation timestamp are required"});
+    if (subject.empty() || subject.size() > 256 || session_id.empty() ||
+        session_id.size() > 256 || revoked_at < 0) {
+        return std::unexpected(StoreError{
+            "invalid_input", "a Clerk subject, session id and revocation timestamp are required"});
     }
     std::lock_guard lock(mutex_);
     auto [revoked, inserted] = clerk_revoked_before_.try_emplace(subject, -1);
-    if (revoked_at < revoked->second)
-        return {};
-    revoked->second = revoked_at;
+    // An event older than the watermark still ends the browser bound to its own Clerk session;
+    // only the unbound browsers' account-wide revocation follows the watermark's order.
+    const bool current = revoked_at >= revoked->second;
+    revoked->second = std::max(revoked->second, revoked_at);
     for (const auto& credential : oauth_credentials_) {
         if (credential.pool_id == "lake" && credential.subject == "clerk:" + subject) {
             const auto now = now_iso8601();
             for (auto& session : sessions_) {
-                if (session.user_id == credential.user_id && session.revoked_at.empty())
+                if (session.user_id != credential.user_id || session.pool_id != "lake" ||
+                    session.kind != "browser" || !session.revoked_at.empty())
+                    continue;
+                const auto bound = clerk_session_of_.find(session.id);
+                if (bound == clerk_session_of_.end() ? current : bound->second == session_id)
                     session.revoked_at = now;
-            }
-            for (auto& device : devices_) {
-                if (device.user_id == credential.user_id && device.revoked_at.empty())
-                    device.revoked_at = now;
             }
         }
     }

@@ -10838,6 +10838,52 @@ struct ApiServer::Impl {
                                                         .device = device_name});
             return back(message);
         };
+        // Which Clerk session this browser is (lake#1163): a JWT template carries no session id,
+        // so the page also posts Clerk's default session token, whose signed `sid` names it. It
+        // is verified with the same JWKS and issuer, must carry no `aud` (so the template cannot
+        // stand in for it) and must name the same user. The Lake browser session is bound to that
+        // sid, and a Clerk session event then ends only this browser. Absent (a page from before
+        // lake#1163): the session is unbound, and any session event of the account ends it.
+        std::string clerk_session_id;
+        if (const std::string session_token = form_field(body, "session_token");
+            !session_token.empty()) {
+            auto ran = co_await run_blocking(
+                [cache = oidc_jwks, fetch = jwks_fetch(), session_token, config = *clerk] {
+                    std::string reason;
+                    auto verified = cache->verify(session_token,
+                                                  config.jwks_url,
+                                                  config.issuer,
+                                                  "",
+                                                  "",
+                                                  false,
+                                                  fetch,
+                                                  false,
+                                                  &reason,
+                                                  true);
+                    return std::pair{std::move(verified), std::move(reason)};
+                });
+            std::string why = ran ? std::move(ran->second)
+                                  : "verification did not run: " + ran.error().message;
+            if (ran && ran->first) {
+                if (ran->first->subject != claims->subject) {
+                    why = "the session token names another user";
+                } else if (ran->first->session_id.empty() ||
+                           ran->first->session_id.size() > 256) {
+                    why = "the session token carries no sid";
+                } else {
+                    clerk_session_id = ran->first->session_id;
+                }
+            }
+            if (clerk_session_id.empty()) {
+                std::cerr << nlohmann::json{{"event", "clerk_sign_in_refused"},
+                                            {"reason", "session token: " + why},
+                                            {"expected_issuer", clerk->issuer},
+                                            {"jwks_url", clerk->jwks_url}}
+                                 .dump()
+                          << '\n';
+                co_return co_await denied("Your sign-in could not be verified. Please try again.");
+            }
+        }
         const ClerkGet get =
             options.clerk_http
                 ? options.clerk_http
@@ -10882,7 +10928,8 @@ struct ApiServer::Impl {
                                           minted->taap_id,
                                           minted->public_key,
                                           minted->wrapped_seed,
-                                          claims->issued_at});
+                                          claims->issued_at,
+                                          clerk_session_id});
         if (!issued) {
             co_return co_await denied(issued.error().message);
         }

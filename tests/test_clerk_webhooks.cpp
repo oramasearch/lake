@@ -288,22 +288,46 @@ namespace {
 
 void expect_upstream_revocation(lake::control::Store& store) {
     auto identity = sign_in("user_recovered", "recovered@example.test");
-    const auto first = store.sign_in_clerk(identity);
-    const auto second_exchange = store.sign_in_clerk(identity);
-    const auto other_device = store.sign_in_clerk(identity);
+    // Each exchange names the Clerk session it came from (lake#1163).
+    const auto in_browser = [&](const std::string& clerk_session) {
+        auto bound = identity;
+        bound.session_id = clerk_session;
+        return store.sign_in_clerk(bound);
+    };
+    const auto first = in_browser("sess_compromised");
+    const auto second_exchange = in_browser("sess_compromised");
+    const auto other_browser = in_browser("sess_other");
+    const auto legacy = store.sign_in_clerk(identity); // unbound: a page from before lake#1163
     const auto unrelated = store.sign_in_clerk(sign_in("user_unrelated", "other@example.test"));
     ASSERT_TRUE(first);
     ASSERT_TRUE(second_exchange);
-    ASSERT_TRUE(other_device);
+    ASSERT_TRUE(other_browser);
+    ASSERT_TRUE(legacy);
     ASSERT_TRUE(unrelated);
     const auto principal = store.context_for(first->secret);
     ASSERT_TRUE(principal);
-    const auto child = store.create_token(
-        {principal->user_id, "lake", "child", "", {"*"}, 3600, false, first->session.id});
+    const std::string user_id = principal->user_id;
+    // Keys made in the browser that signs out descend from it and end with it, as on /logout.
+    const auto child =
+        store.create_token({user_id, "lake", "child", "", {"*"}, 3600, false, first->session.id});
     ASSERT_TRUE(child) << child.error().message;
     const auto grandchild = store.create_token(
-        {principal->user_id, "lake", "grandchild", "", {"*"}, 3600, false, child->session.id});
+        {user_id, "lake", "grandchild", "", {"*"}, 3600, false, child->session.id});
     ASSERT_TRUE(grandchild);
+    // The account's keys: an API key made in another browser and its own descendant, a standing
+    // (static) MCP key and a key derived from it.
+    const auto api_key = store.create_token(
+        {user_id, "lake", "agent key", "", {"*"}, 3600, false, other_browser->session.id});
+    ASSERT_TRUE(api_key) << api_key.error().message;
+    const auto api_key_child = store.create_token(
+        {user_id, "lake", "agent key child", "", {"*"}, 600, false, api_key->session.id});
+    ASSERT_TRUE(api_key_child) << api_key_child.error().message;
+    const auto mcp_key = store.create_token(
+        {user_id, "lake", "MCP key", "created on Developer -> MCP", {"*"}, 0, true});
+    ASSERT_TRUE(mcp_key) << mcp_key.error().message;
+    const auto mcp_key_child = store.create_token(
+        {user_id, "lake", "MCP key child", "", {"*"}, 600, false, mcp_key->session.id});
+    ASSERT_TRUE(mcp_key_child) << mcp_key_child.error().message;
     ASSERT_TRUE(store.context_for(grandchild->secret));
 
     const auto revoked_event =
@@ -315,16 +339,35 @@ void expect_upstream_revocation(lake::control::Store& store) {
     const auto revoked = deliver(store, delivery_of("msg_revoke", revoked_event));
     ASSERT_EQ(revoked.status, 200) << revoked.body;
     EXPECT_EQ(revoked.body.value("applied", false), true);
+    // The browser bound to the ended Clerk session ends, with what descends from it.
     EXPECT_FALSE(store.context_for(first->secret));
     EXPECT_FALSE(store.context_for(second_exchange->secret));
     EXPECT_FALSE(store.context_for(child->secret));
     EXPECT_FALSE(store.context_for(grandchild->secret));
-    EXPECT_FALSE(store.context_for(other_device->secret)) << "revocation is account-wide";
+    EXPECT_FALSE(store.context_for(legacy->secret))
+        << "an unbound browser session cannot be told apart, so it ends too";
+    // Nothing else of the account ends (lake#1163): not another browser, not a key, not a device.
+    EXPECT_TRUE(store.context_for(other_browser->secret)) << "another browser stays signed in";
+    EXPECT_TRUE(store.context_for(api_key->secret)) << "API keys survive a sign-out";
+    EXPECT_TRUE(store.context_for(api_key_child->secret)) << "and so do their descendants";
+    EXPECT_TRUE(store.context_for(mcp_key->secret)) << "MCP keys survive a sign-out";
+    EXPECT_TRUE(store.context_for(mcp_key_child->secret));
+    const auto devices = store.list_devices(user_id);
+    ASSERT_TRUE(devices);
+    EXPECT_GE(devices->size(), 4U);
+    for (const auto& device : *devices) {
+        EXPECT_TRUE(device.revoked_at.empty()) << "a session event revokes no device";
+    }
     EXPECT_TRUE(store.context_for(unrelated->secret));
+    EXPECT_TRUE(store.create_token(
+        {user_id, "lake", "after", "", {"*"}, 600, false, api_key->session.id}))
+        << "a surviving key still derives";
+    EXPECT_FALSE(store.create_token(
+        {user_id, "lake", "after", "", {"*"}, 3600, false, first->session.id}));
+    // The watermark still refuses every template minted at or before the event.
     EXPECT_FALSE(store.sign_in_clerk(identity))
         << "an unexpired JWT cannot be exchanged after revocation";
-    EXPECT_FALSE(store.create_token(
-        {principal->user_id, "lake", "after", "", {"*"}, 3600, false, first->session.id}));
+    EXPECT_FALSE(in_browser("sess_other")) << "the watermark is account-wide for exchanges";
     EXPECT_EQ(
         deliver(store, delivery_of("msg_revoke", revoked_event)).body.value("duplicate", false),
         true);
@@ -332,11 +375,32 @@ void expect_upstream_revocation(lake::control::Store& store) {
     const auto recovered = store.sign_in_clerk(identity);
     ASSERT_TRUE(recovered) << recovered.error().message;
     EXPECT_TRUE(store.context_for(recovered->secret));
+    const auto rebound = in_browser("sess_compromised_late");
+    ASSERT_TRUE(rebound) << rebound.error().message;
     auto older_event = revoked_event;
     older_event["timestamp"] = revoked_event.at("timestamp").get<std::int64_t>() - 1;
     deliver(store, delivery_of("msg_old_revoke", older_event));
     EXPECT_TRUE(store.context_for(recovered->secret))
-        << "stale revocation cannot revoke a newer sign-in";
+        << "stale revocation cannot revoke a newer unbound sign-in";
+    // A stale event still ends the browser bound to its own Clerk session.
+    auto late_event = older_event;
+    late_event["data"]["id"] = "sess_compromised_late";
+    deliver(store, delivery_of("msg_old_revoke_late", late_event));
+    EXPECT_FALSE(store.context_for(rebound->secret))
+        << "a delayed event still ends the browser of the Clerk session it names";
+    EXPECT_TRUE(store.context_for(recovered->secret));
+    EXPECT_TRUE(store.context_for(other_browser->secret));
+    // The other two event types behave the same and touch no key of their own.
+    for (const std::string type : {"session.ended", "session.removed"}) {
+        auto fresh_event = event(type, {{"id", "sess_other"}, {"user_id", "user_recovered"}});
+        fresh_event["timestamp"] = revoked_event.at("timestamp").get<std::int64_t>() + 1000;
+        ASSERT_EQ(deliver(store, delivery_of("msg_other_" + type, fresh_event)).status, 200);
+        EXPECT_FALSE(store.context_for(other_browser->secret)) << type;
+        EXPECT_FALSE(store.context_for(api_key->secret))
+            << type << ": a key derived from the ended browser ends with it (lake#234)";
+        EXPECT_TRUE(store.context_for(mcp_key->secret)) << type;
+        EXPECT_TRUE(store.context_for(mcp_key_child->secret)) << type;
+    }
 
     // Revocation is retained when it precedes every exchange and even provisioning.
     for (const std::string type : {"session.revoked", "session.ended", "session.removed"}) {
@@ -358,6 +422,44 @@ void expect_upstream_revocation(lake::control::Store& store) {
     EXPECT_EQ(deliver(store, delivery_of("msg_bad_revoke", event("session.revoked", {{"id", ""}})))
                   .status,
               400);
+}
+
+// A ban, a lock or a deletion still ends everything, keys and devices included (lake#1163 keeps
+// that); and a person's own sign_out_everywhere does the same for their account.
+void expect_account_wide_endings(lake::control::Store& store) {
+    for (const std::string how : {"ban", "lock", "delete"}) {
+        auto identity = sign_in("user_ending_" + how, "ending-" + how + "@example.test");
+        identity.session_id = "sess_ending_" + how;
+        const auto browser = store.sign_in_clerk(identity);
+        ASSERT_TRUE(browser) << browser.error().message;
+        const std::string user_id = store.context_for(browser->secret)->user_id;
+        const auto key = store.create_token(
+            {user_id, "lake", "MCP key", "created on Developer -> MCP", {"*"}, 0, true});
+        ASSERT_TRUE(key);
+        const auto derived = store.create_token(
+            {user_id, "lake", "derived", "", {"*"}, 600, false, key->session.id});
+        ASSERT_TRUE(derived);
+        lake::api::clerk_webhooks::Outcome outcome;
+        if (how == "delete") {
+            outcome = deliver(store,
+                              delivery_of("msg_end_" + how,
+                                          event("user.deleted", {{"id", identity.subject}})));
+        } else {
+            auto data = user(identity.subject, "ending-" + how + "@example.test", "Ending");
+            data[how == "ban" ? "banned" : "locked"] = true;
+            outcome = deliver(store, delivery_of("msg_end_" + how, event("user.updated", data)));
+        }
+        ASSERT_EQ(outcome.status, 200) << outcome.body;
+        EXPECT_FALSE(store.context_for(browser->secret)) << how;
+        EXPECT_FALSE(store.context_for(key->secret)) << how << " ends keys";
+        EXPECT_FALSE(store.context_for(derived->secret)) << how;
+        const auto devices = store.list_devices(user_id);
+        ASSERT_TRUE(devices);
+        for (const auto& device : *devices) {
+            EXPECT_FALSE(device.revoked_at.empty()) << how << " revokes devices";
+        }
+        EXPECT_FALSE(store.sign_in_clerk(identity)) << how;
+    }
 }
 
 void expect_upstream_suspension(lake::control::Store& store) {
@@ -472,8 +574,11 @@ protected:
     std::shared_ptr<lake::control::Store> store;
 };
 
-TEST_P(ClerkRevocation, SessionRevocationStopsExchangesAndDescendants) {
+TEST_P(ClerkRevocation, SessionEventsEndOnlyBrowserSessions) {
     expect_upstream_revocation(*store);
+}
+TEST_P(ClerkRevocation, SignOutKeepsKeysAndBansStillEndEverything) {
+    expect_account_wide_endings(*store);
 }
 TEST_P(ClerkRevocation, OrderedBansAndLocksOnlyRestoreNewSignIns) {
     expect_upstream_suspension(*store);
@@ -550,7 +655,7 @@ TEST_P(ClerkRevocation, LinkedSubjectsShareSuspensionAndRevocation) {
     ASSERT_TRUE(store->apply_clerk_user_state({first.subject, 102, false}));
     ASSERT_TRUE(store->sign_in_clerk(second));
     const auto revoked_at = now() * 1000;
-    ASSERT_TRUE(store->revoke_clerk_sessions(first.subject, revoked_at));
+    ASSERT_TRUE(store->revoke_clerk_sessions(first.subject, "sess_alias", revoked_at));
     EXPECT_FALSE(store->sign_in_clerk(second))
         << "an alias cannot exchange a pre-revocation template";
     second.issued_at = revoked_at / 1000 + 1;

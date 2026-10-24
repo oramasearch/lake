@@ -122,7 +122,8 @@ Expect:
 - Breadcrumb Account › Sessions. Eyebrow "Account", title "Sessions and Devices", sub "Revocation
   takes effect on the next request."
 - Card "This session" titled with its name (or kind), the badge "Active", rows "Kind", "Started"
-  (relative, full date on hover) and "Expires", and the danger **Revoke and sign out**.
+  (relative, full date on hover) and "Expires", and the danger **Revoke and sign out** and
+  **Sign out everywhere** (lake#1163; it ends every session, key and device of the account).
 - Section "Sessions" with "<active> active of <total>.", a search "Search sessions…", kind chips
   "Any kind" plus one per kind with a count ("Session", "API token", …), and state chips "Any
   state", "Active", "Revoked".

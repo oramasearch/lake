@@ -24,7 +24,8 @@ every page and API call is resolved by `context_for` as before.
    (`clerk.frontend_api`), and mounts it with the publishable key. After Clerk signs the person
    in, it returns to `/sign-in`.
 2. With a Clerk session present, the page asks Clerk for a token from the **`lake` JWT template**
-   and posts it once, as an ordinary form, to `POST /identity/clerk-session`.
+   and for Clerk's **default session token**, and posts both once, as an ordinary form, to
+   `POST /identity/clerk-session` (fields `token` and `session_token`).
 3. lake verifies the token with `identity_crypto::verify_oidc_id_token` against the instance JWKS
    (`<issuer>/.well-known/jwks.json`, with the bounded refresh policy below): RS256,
    `iss` equal to the instance issuer, `aud` equal to `lake`, `exp` in the future, and `nbf` and
@@ -33,6 +34,19 @@ every page and API call is resolved by `context_for` as before.
    renders an unset template value as `null`, so a person with no name in Clerk carries
    `"name": null` and is accepted with an empty display name; any other type is refused
    (lake#1115, which locked every nameless person out of lake.live through v0.5.2).
+   **Which Clerk session this browser is** (lake#1163). A JWT template carries no session id
+   (Clerk: *"session-bound claims like `sid` ... cannot be included in custom JWTs"*,
+   [JWT templates](https://clerk.com/docs/guides/sessions/jwt-templates)), but Clerk's default
+   session token carries a signed `sid` ([session tokens](https://clerk.com/docs/guides/sessions/session-tokens)).
+   Lake verifies `session_token` with the same JWKS and issuer, RS256, `exp`, `nbf` and `iat` as
+   above, and requires that it carry **no `aud`** (so the template can never stand in for it), name
+   the template's `sub`, and carry a string `sid` of at most 256 characters. The Lake browser
+   session is then bound to that `sid` (`sessions.clerk_session_id`, migration
+   `0103_clerk_session_binding`), and a Clerk session event ends only the browser it names
+   ([Webhooks](#webhooks)). A present but unverifiable session token refuses the sign-in. An absent
+   one (a page loaded before lake#1163) signs in unbound; any session event of the account ends an
+   unbound browser session. No Clerk configuration changes: the default session token exists on
+   every instance.
    A refused token is logged as one `clerk_sign_in_refused` line: the reason (for example
    `aud does not name lake`, `expired (exp …, now …)`, `key … is not in the JWKS`), the issuer,
    audience and JWKS URL lake expected, and the token's `alg`, `kid`, `iss`, `aud`, `azp`, `iat`,
@@ -91,7 +105,9 @@ identity document is sent.
 ## Webhooks
 
 **Status: implemented, not deployed.** Account provisioning uses `0087_clerk_webhooks` (lake#765);
-ordered suspension and account-wide revocation use `0094_clerk_revocation` (lake#948, LSR-085).
+ordered suspension and the revocation watermark use `0094_clerk_revocation` (lake#948, LSR-085);
+session events end only browser sessions, bound per Clerk session by `0103_clerk_session_binding`
+(lake#1163).
 
 Without webhooks a Lake account exists only from a person's first sign-in. With them, Clerk's user
 events reach Lake as they happen: a user made in Clerk (an invitation, a waitlist approval, the
@@ -148,21 +164,41 @@ account is disabled.
   agent triggers are removed and MCP streaming settings, subscriptions and pending results are
   cleared. A storage outage leaves those records for retry and grants no authority; other workspace
   data and the MCP connection remain. The same agent-workload withdrawal runs on account deletion.
-- **`session.revoked`, `session.removed`, `session.ended`** revoke every session, API/static token
-  and device of the account linked to `data.user_id`. This intentionally signs out its other Lake
-  sessions too. Clerk [custom JWT templates](https://clerk.com/docs/guides/sessions/jwt-templates)
-  do not contain a trusted session id, so revocation is account-wide. The event's millisecond
-  `timestamp` is a monotonic revocation watermark; older revocation events are ignored and
-  equal-timestamp restrictions apply.
-  This watermark is independent of profile ordering, so a newer profile cannot hide a delayed
-  revocation. A template minted in the revocation's second or earlier cannot be exchanged again.
-  Revocation is retained before the first exchange, and account row locks serialize it with
-  session/token issuance. Password recovery with Clerk's `signOutOfOtherSessions` and account
-  sign-out depend on these events reaching Lake; replaying the old Lake bearer then fails through
-  the common `context_for` path. These events govern the account's session, API/static-token
-  and device family. Independently delegated agent work and stream settings retain their own
-  lifecycle; bans, locks, deprovisioning and deletion withdraw and gate that authority as described
-  above. Other event types are acknowledged and ignored.
+- **`session.revoked`, `session.removed`, `session.ended`** end **browser sessions only**
+  (lake#1163; Steve, 2026-10-24: *"don't revoke api keys on signout"*). `data.id` is the Clerk
+  session that ended and `data.user_id` its user. Lake revokes, for the account linked to that user:
+  - every Lake browser session bound to that Clerk session (`sessions.clerk_session_id`, set at
+    exchange from the session token's signed `sid`), whenever the event arrives;
+  - every **unbound** Lake browser session of the account (exchanged before lake#1163, or by a
+    password or passkey sign-in), unless the event is older than the account's revocation
+    watermark. Lake cannot tell which Clerk session those belong to.
+
+  It **never** revokes API keys, static tokens, MCP keys, TAAP sessions or devices, nor anything
+  derived from them: they end when the person revokes them (`revoke_session`, `revoke_device`,
+  `sign_out_everywhere`), when an operator runs `revoke_user_sessions`, or when the account is
+  banned, locked, deprovisioned or deleted (above). Another browser bound to another Clerk session
+  stays signed in. A token **derived from the browser session that ended** (an ordinary key made
+  in that browser without *Never expires*, whose `parent_session_id` is that session) ends with it,
+  exactly as it does when that browser posts `/logout` ([identity.md](identity.md#token-derivation-and-revocation),
+  lake#234); a key that must outlive the browser is made with *Never expires*.
+
+  The event's millisecond `timestamp` is still a monotonic revocation watermark: it only moves
+  forward, and a template minted in the revocation's second or earlier cannot be exchanged again,
+  from any browser of the account. This watermark is independent of profile ordering, so a newer
+  profile cannot hide a delayed revocation. Revocation is retained before the first exchange, and
+  account row locks serialize it with session issuance. Replaying the ended browser's Lake bearer
+  fails through the common `context_for` path.
+
+  **Signing out everywhere.** Clerk's `signOutOfOtherSessions` (password recovery) and a sign-out
+  of every device in Clerk reach Lake only as these session events, so they now end the account's
+  browser sessions and **not** its API keys, MCP keys or devices. To end those too, the person calls
+  **`sign_out_everywhere`** (REST `POST /v1/sign_out_everywhere`, MCP tool, any of their own
+  credentials): it revokes every session, API key, static token and device of their own account,
+  including the credential making the call, and answers the counts. An operator's
+  `revoke_user_sessions` does the same for any user's sessions and tokens.
+  Independently delegated agent work and stream settings retain their own lifecycle; bans, locks,
+  deprovisioning and deletion withdraw and gate that authority as described above. Other event
+  types are acknowledged and ignored.
 - **Audit:** every delivery is one central event, object `clerk`, method `clerk_webhook`, action
   `webhook.<type>` (`webhook` for a refused or replayed delivery), outcome `success`, `failure` or
   `denied`, with the `svix_id`, the Clerk user and the Lake user in its details.
@@ -175,6 +211,9 @@ subscribed to `user.created`, `user.updated`, `user.deleted`, `session.revoked`,
 and `session.ended`, and give its signing secret to Lake as `LAKE_CLERK_WEBHOOK_SECRET`. Before rollout, the operator must vendor `db/schema.sql`,
 select `clerk_revocation_guard`, add any missing event subscriptions, and inject the instance's
 secret key as `LAKE_CLERK_SECRET_KEY`. No operator files are changed by lake#948.
+Migration `0103_clerk_session_binding` (lake#1163) adds the nullable `sessions.clerk_session_id`, its
+index and the guard `clerk_session_binding_guard`. Additive; the operator vendors the schema and
+selects the guard before the image that needs it rolls. Lake sessions issued before it are unbound.
 Migration 0094 revokes every existing session, token and device of Clerk-linked accounts once,
 and sets their token cutoff to migration time. This requires a fresh Clerk sign-in: old ignored
 webhooks were already acknowledged and cannot reliably be replayed. Reapplying the schema never
@@ -263,6 +302,15 @@ needs a real Clerk instance: sign in at `/sign-in` with an invited address and c
 pre-exchange delivery, old-template replay, token descendants, provisioning retries and suspended
 account linking, a suspended account's email recovery queueing no mail, and a delayed ban after
 another subject's newer profile on memory and PostgreSQL stores.
+`Stores/ClerkRevocation.SessionEventsEndOnlyBrowserSessions` pins lake#1163: each of the three
+session events ends the browser bound to its Clerk session (and unbound browsers) while another
+browser, API keys and their descendants, MCP keys and their descendants, and every device keep
+working; a delayed event still ends its own browser but not a newer unbound sign-in; the watermark
+still refuses old templates. `Stores/ClerkRevocation.SignOutKeepsKeysAndBansStillEndEverything`
+checks a ban, a lock and a deletion still end keys, derived keys and devices.
+`Clerk.TheSessionTokenBindsTheBrowserToItsClerkSession` runs the exchange route with a session token
+(refusing the template in its place, another user's token, a missing `sid` and any `aud`), and
+`Clerk.SignOutEverywhereEndsEveryKeyAndDeviceOfOnlyThatPerson` the person's own revocation.
 `Clerk.BackendStatusFailsClosedAndUsesOnlyTheFixedApiOrigin` checks malformed and failed Backend
 API responses; `ClerkWebhooks.MigrationRevokesLegacyCredentialsOnceAndRejectsOldTemplates`
 checks the one-time upgrade, native-account isolation, old-template rejection and repeatability.

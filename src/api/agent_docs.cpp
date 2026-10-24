@@ -306,7 +306,8 @@ constexpr std::array group_rules{
               "Sign-in, passkeys, multi-factor authentication, sessions, tokens, devices, "
               "recovery, and deleting your account (delete_account, `dry_run: true` first).",
               [](std::string_view n) {
-                  return n == "delete_account" || contains_any(n,
+                  return n == "delete_account" || n == "sign_out_everywhere" ||
+                         contains_any(n,
                                       {"sign_in",
                                        "sign_up",
                                        "passkey",

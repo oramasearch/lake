@@ -203,6 +203,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "sign_in_saml",
     "sign_in_sso",
     "sign_in_taap",
+    "sign_out_everywhere",
     "sign_up_password",
     "start_oauth",
     "start_sso_oidc",

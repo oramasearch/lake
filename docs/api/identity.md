@@ -70,8 +70,13 @@ and MCP tools. `sign_up_password`, `sign_in_password`, `verify_mfa`,
 `begin_passkey_sign_in`, `sign_in_passkey`, `begin_identity_proof`, `start_oauth`, and
 `sign_in_taap` are unauthenticated entry points.
 `enroll_mfa`, `disable_mfa`, `begin_passkey_registration`, `register_passkey`,
-`create_token`, `list_sessions`, `revoke_session`, `list_devices`, and `revoke_device` require
-the same row-resolved session or operator credential as every other protected capability.
+`create_token`, `list_sessions`, `revoke_session`, `list_devices`, `revoke_device` and
+`sign_out_everywhere` require the same row-resolved session or operator credential as every other
+protected capability. `sign_out_everywhere` (lake#1163) revokes every session, API key, static
+token and device of the caller's own account, the calling credential included; an operator
+credential is refused, since it is no person. It is the person's account-wide sign-out: signing out
+of one browser, or a Clerk session event, ends browser sessions only and never a key or a device
+([clerk.md](clerk.md#webhooks)).
 The session and device lists authorize the authenticated principal through the registry's batched
 authorization path before returning any row.
 
@@ -334,7 +339,8 @@ durable identity.
   (never `*`) within the issuer's scopes, the person's personal account must have
   `allow_non_expiring_credentials` on (`set_customer_credential_policy`), and the instance must not
   set `LAKE_ALLOW_NON_EXPIRING_CREDENTIALS=false`. Its authority is still the person's live grants on
-  every request; revoking it, `revoke_user_sessions`, or removing the person stops it. The tokens
+  every request; revoking it, `sign_out_everywhere`, `revoke_user_sessions`, or removing the person
+  stops it. The tokens
   page offers it as *Never expires* and lists such tokens as *Never expires* with their reason.
   Verify: `TokenAttenuation.NeverExpiringTokensNeedTheOptInAndSurviveSignOut`.
 - Browser and TAAP sessions are expiring issuers and cannot create static tokens. Static authority

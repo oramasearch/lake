@@ -332,6 +332,10 @@ struct ClerkIdentity {
     std::string subject, email, display_name, device_name;
     std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
     std::int64_t issued_at = 0; // verified Clerk JWT iat; required only for exchange
+    // The Clerk session the browser signed in with: `sid` from Clerk's signed default session
+    // token, verified at exchange (lake#1163). The Lake browser session is bound to it, so a
+    // session event ends only that browser. Empty: unbound (a page from before lake#1163).
+    std::string session_id;
 };
 // Upstream account state, ordered by Clerk's user updated_at (milliseconds).
 struct ClerkUserState {
@@ -2459,9 +2463,15 @@ public:
     // deletion is permanent. Suspension revokes all sessions and devices atomically. A current
     // identical state returns true so retries can finish profile/provisioning work; false is stale.
     virtual Result<bool> apply_clerk_user_state(const ClerkUserState&) = 0;
-    // Retain a millisecond revocation watermark before exchange too; revoke all account
-    // credentials.
+    // A Clerk session event (session.revoked/removed/ended) for Clerk session `session_id`
+    // (lake#1163, docs/api/clerk.md#webhooks). Advances the account's millisecond revocation
+    // watermark, retained before exchange too, so a template minted at or before it cannot be
+    // exchanged. Revokes only Lake browser sessions: those bound to `session_id` always, and
+    // unbound browser sessions of the account unless the event is older than the watermark.
+    // API keys, static tokens, TAAP sessions and devices are never touched; tokens derived from
+    // a revoked browser session end with it, as on POST /logout.
     virtual Result<void> revoke_clerk_sessions(const std::string& subject,
+                                               const std::string& session_id,
                                                std::int64_t revoked_at) = 0;
     // user.updated: the email (when non-empty) and display name of the account linked to the
     // subject; not_found when none is linked, conflict when another account has the email.

@@ -254,8 +254,10 @@ Outcome receive(ApiContext& context,
                 400,
                 {{"error", "invalid_input"}, {"message", "a session event timestamp is required"}});
         }
+        // Ends the Lake browser session(s) bound to this Clerk session, and unbound browser
+        // sessions; never API keys, static tokens or devices (lake#1163).
         const auto revoked = context.store->revoke_clerk_sessions(
-            data.at("user_id").get<std::string>(), at.get<std::int64_t>());
+            data.at("user_id").get<std::string>(), subject, at.get<std::int64_t>());
         if (!revoked)
             return store_failure(revoked.error());
         details["clerk_session"] = subject;

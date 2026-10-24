@@ -5,6 +5,13 @@ applies it to `LAKE_CONTROL_DB_URI` in one transaction under an advisory lock, a
 `PostgresSchema` Job does; `lake manifest` reports its latest migration and guard tables
 (lake#1119, [operator-interface.md](../docs/deployment/operator-interface.md)). Once
 orama-operator#936 consumes them, a new migration needs no operator vendoring.
+Migration `0103_clerk_session_binding` (lake#1163) adds the nullable `sessions.clerk_session_id` (the
+Clerk session a browser sign-in came from, from the signed `sid` of Clerk's default session token),
+the index `sessions_clerk_session_id_idx` and the guard `clerk_session_binding_guard`. A Clerk session
+event then ends only the Lake browser sessions bound to it, never API keys, static tokens or devices.
+Additive; numbered after the open `0100` (lake#1155), `0101` (lake#1156) and `0102` (lake#1152).
+Apply before the new binary: the operator vendors the schema and selects the guard first. See
+[Clerk](../docs/api/clerk.md#webhooks) and [schema.md](../docs/control-plane/schema.md).
 
 Migration `0099_account_balances` (lake#1114, liquid-bridge decision 67) adds the prepaid balance:
 `account_balances` (each account's settings, last refresh, email marks and auto top-up, with a
