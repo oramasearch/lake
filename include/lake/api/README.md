@@ -258,3 +258,4 @@ its client attempt table across transports. See [the contract](../../../docs/api
 `ApiContext::recovery_client_address` carries ingress-derived transport metadata for anonymous
 recovery limits. It is never capability input; empty addresses share a bucket. See
 [recovery.md](../../../docs/api/recovery.md#email-recovery-budgets).
+`PaymentNotice::order_subscription` (lake#972) routes verified recurring order events separately from ordinary usage invoices. `ApiContext` and `ServerOptions` carry `order_entitlement_grace_seconds`, default three days. See [orders](../../../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).

@@ -931,6 +931,11 @@ public:
         return call("apply_cloud_order_payment",
                     [&] { return store_->apply_cloud_order_payment(payment); });
     }
+    control::Result<control::CloudOrderPaymentResult>
+    apply_cloud_order_subscription(const control::CloudOrderSubscriptionEvent& event) override {
+        return call("apply_cloud_order_subscription",
+                    [&] { return store_->apply_cloud_order_subscription(event); });
+    }
     control::Result<std::vector<control::CloudOrder>>
     claim_cloud_order_emails(int limit, int lease_seconds) override {
         return call("claim_cloud_order_emails",

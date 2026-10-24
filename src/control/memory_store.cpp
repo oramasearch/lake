@@ -3245,7 +3245,9 @@ Result<CloudOrder> InMemoryStore::transition_cloud_order(const CloudOrderTransit
 Result<CloudOrderPaymentResult>
 InMemoryStore::apply_cloud_order_payment(const CloudOrderPayment& payment) {
     if (payment.provider.empty() || payment.event_id.empty() || payment.event_id.size() > 255 ||
-        (payment.state != "paid" && payment.state != "cancelled")) {
+        (payment.state != "paid" && payment.state != "cancelled") || payment.grace_seconds < 0 ||
+        payment.grace_seconds > 30 * 86400 || payment.checkout_session_id.size() > 255 ||
+        payment.subscription_id.size() > 255 || payment.customer_id.size() > 255) {
         return std::unexpected(StoreError{"invalid_input",
                                           "an order payment needs its provider, its id and a "
                                           "state of paid or cancelled"});
@@ -3264,6 +3266,25 @@ InMemoryStore::apply_cloud_order_payment(const CloudOrderPayment& payment) {
     if (found == cloud_orders_.end()) {
         return result;
     }
+    if (!payment.order_id.empty() && payment.order_id != found->id) {
+        return result;
+    }
+    if (found->state != "pending_payment") {
+        result.matched = true;
+        result.order = *found;
+        return result;
+    }
+    if ((!found->stripe_subscription_id.empty() && !payment.subscription_id.empty() &&
+         found->stripe_subscription_id != payment.subscription_id) ||
+        (!found->stripe_customer_id.empty() && !payment.customer_id.empty() &&
+         found->stripe_customer_id != payment.customer_id) ||
+        (!payment.subscription_id.empty() &&
+         std::ranges::any_of(cloud_orders_, [&](const CloudOrder& other) {
+             return other.id != found->id &&
+                    other.stripe_subscription_id == payment.subscription_id;
+         }))) {
+        return result;
+    }
     result.matched = true;
     if (found->state == "pending_payment") {
         found->state = payment.state;
@@ -3273,6 +3294,16 @@ InMemoryStore::apply_cloud_order_payment(const CloudOrderPayment& payment) {
         if (!payment.subscription_id.empty()) {
             found->stripe_subscription_id = payment.subscription_id;
         }
+        if (payment.state == "paid" && found->entitlement.access_until == 0 &&
+            (found->entitlement.subscription_status == "pending" ||
+             found->entitlement.subscription_status == "incomplete") &&
+            !found->stripe_subscription_id.empty()) {
+            found->entitlement.access_until =
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count();
+            found->entitlement.grace_seconds = payment.grace_seconds;
+        }
         found->updated_at = now_iso8601();
         cloud_order_event_locked(found->id,
                                  "pending_payment",
@@ -3281,6 +3312,47 @@ InMemoryStore::apply_cloud_order_payment(const CloudOrderPayment& payment) {
                                  payment.event_type + " " + payment.event_id +
                                      (payment.detail.empty() ? "" : ": " + payment.detail));
         result.changed = true;
+    }
+    result.order = *found;
+    return result;
+}
+
+Result<CloudOrderPaymentResult>
+InMemoryStore::apply_cloud_order_subscription(const CloudOrderSubscriptionEvent& event) {
+    if (!valid_cloud_order_subscription_event(event)) {
+        return std::unexpected(StoreError{"invalid_input", "invalid order subscription event"});
+    }
+    std::lock_guard lock(mutex_);
+    CloudOrderPaymentResult result;
+    if (!payment_events_.insert({event.provider, event.event_id}).second) {
+        result.duplicate = true;
+        return result;
+    }
+    auto found = std::ranges::find(
+        cloud_orders_, event.subscription_id, &CloudOrder::stripe_subscription_id);
+    if (found == cloud_orders_.end()) {
+        found = std::ranges::find(cloud_orders_, event.order_id, &CloudOrder::id);
+        if (found == cloud_orders_.end() || found->state != "pending_payment" ||
+            !found->stripe_subscription_id.empty()) {
+            return result;
+        }
+    }
+    if (found->path != "checkout" || (!event.order_id.empty() && event.order_id != found->id) ||
+        (!found->stripe_customer_id.empty() && found->stripe_customer_id != event.customer_id)) {
+        return result;
+    }
+    found->stripe_subscription_id = event.subscription_id;
+    found->stripe_customer_id = event.customer_id;
+    result.matched = true;
+    result.changed = apply_cloud_order_entitlement(found->entitlement, event);
+    if (result.changed) {
+        found->updated_at = now_iso8601();
+        cloud_order_event_locked(found->id,
+                                 found->state,
+                                 found->state,
+                                 "stripe",
+                                 event.event_type + " " + event.event_id + ": subscription " +
+                                     event.status);
     }
     result.order = *found;
     return result;

@@ -15,7 +15,8 @@ the apex host's region picker with its closest-region choice and preference cook
 [ui/regions.md](ui/regions.md) is where the web app shows the region.
 [api/orders.md](api/orders.md) defines the apex order sheet (lake#831): offers and prices from
 `LAKE_ORDER_SHEET`, Stripe Checkout and the order form, `cloud_orders` (migration `0089`, the
-contract orama-operator#634 provisions from), Resend email and the status link;
+contract orama-operator#634 provisions from), Resend email and the status link; migration `0097`
+(lake#972) adds signed recurring entitlement and the required operator suspension contract;
 [ui/regions.md](ui/regions.md#the-order-sheet) is the page.
 [api/scoped-credentials.md](api/scoped-credentials.md) defines an app connection's credential
 scope, workspace-secret reference, rotation and revocation (lake#731);

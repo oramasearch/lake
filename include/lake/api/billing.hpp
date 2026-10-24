@@ -77,6 +77,8 @@ struct PaymentNotice {
     // The object is another app's or another Lake's in a shared Stripe account (lake#855): it is
     // acknowledged and nothing is recorded.
     bool foreign = false;
+    // A verified recurring order event, handled separately from usage invoices and Checkout.
+    std::optional<control::CloudOrderSubscriptionEvent> order_subscription;
 };
 
 // A subscription to pay for an order through the provider's hosted checkout (lake#831): one line,

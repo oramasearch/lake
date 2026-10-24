@@ -1380,3 +1380,7 @@ bucket and hashed client buckets admit bounded hourly requests across replicas; 
 lock the user and reuse an unexpired attempt before inserting. No address is persisted.
 The operator must vendor this schema and select `email_recovery_limits_guard` before rollout.
 The [recovery contract](../api/recovery.md#email-recovery-budgets) lists limits and verification.
+
+## Cloud order entitlements migration
+
+`0097_cloud_order_entitlements` (lake#972, LSR-105) adds subscription status, paid-through and access deadlines (Unix seconds), the signed-event watermark, first-unpaid-invoice binding and per-order grace to `cloud_orders`. A partial unique index makes a subscription belong to one order; creating it fails the apply if two existing orders already share a subscription id. Defaults suspend orders without payment evidence. The operator reads `cloud_order_desired_state` on every reconciliation; the view names its columns instead of `cloud_orders.*`, so a later column on `cloud_orders` cannot fail a repeated apply; its entitlement and desired state expire at read time. Vendor this schema and select `cloud_order_entitlements_guard` before rolling Lake, and ship the paired operator suspension/event-registration change before enabling order provisioning. See [the contract and verification](../api/orders.md#recurring-entitlement-lsr-105-lake972).

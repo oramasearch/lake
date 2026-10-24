@@ -454,6 +454,7 @@ TEST(StripeClient, AnInvoiceThatIsNotThisLakesIsForeign) {
         const json body{{"id", "evt_1"},
                         {"object", "event"},
                         {"type", "invoice.paid"},
+                        {"created", 100},
                         {"data", {{"object", object}}}};
         const auto notice = lake::api::parse_stripe_event(body.dump(), this_lake);
         EXPECT_TRUE(notice);
@@ -475,6 +476,13 @@ TEST(StripeClient, AnInvoiceThatIsNotThisLakesIsForeign) {
     const auto generated = [](const json& subscription) {
         return json{{"id", "in_2"},
                     {"object", "invoice"},
+                    {"customer", "cus_2"},
+                    {"subscription", "sub_2"},
+                    {"lines",
+                     {{"has_more", false},
+                      {"data",
+                       json::array({{{"type", "subscription"},
+                                     {"period", {{"start", 100}, {"end", 200}}}}})}}},
                     {"metadata", json::object()},
                     {"subscription_details", {{"metadata", subscription}}}};
     };

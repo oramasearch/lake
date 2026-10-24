@@ -4837,3 +4837,62 @@ CREATE TABLE IF NOT EXISTS offline_recovery_budgets (
 CREATE TABLE IF NOT EXISTS email_recovery_limits_guard (id integer PRIMARY KEY CHECK (id = 1));
 INSERT INTO email_recovery_limits_guard (id) VALUES (1) ON CONFLICT DO NOTHING;
 INSERT INTO schema_migrations (version) VALUES ('0096_email_recovery_limits') ON CONFLICT DO NOTHING;
+
+-- 0097_cloud_order_entitlements (lake#972): signed subscription snapshots and a clock-evaluated
+-- operator contract. Existing subscriptions require a signed renewal/snapshot before provisioning.
+ALTER TABLE cloud_orders ADD COLUMN IF NOT EXISTS subscription_status text NOT NULL DEFAULT 'pending'
+    CHECK (length(subscription_status) <= 64);
+ALTER TABLE cloud_orders ADD COLUMN IF NOT EXISTS paid_through bigint NOT NULL DEFAULT 0
+    CHECK (paid_through BETWEEN 0 AND 253402300799);
+ALTER TABLE cloud_orders ADD COLUMN IF NOT EXISTS entitlement_access_until bigint NOT NULL DEFAULT 0
+    CHECK (entitlement_access_until BETWEEN 0 AND 253402300799);
+ALTER TABLE cloud_orders ADD COLUMN IF NOT EXISTS subscription_event_created bigint NOT NULL DEFAULT 0
+    CHECK (subscription_event_created BETWEEN 0 AND 253402300799);
+ALTER TABLE cloud_orders ADD COLUMN IF NOT EXISTS entitlement_grace_seconds integer NOT NULL DEFAULT 259200
+    CHECK (entitlement_grace_seconds BETWEEN 0 AND 2592000);
+ALTER TABLE cloud_orders ADD COLUMN IF NOT EXISTS entitlement_retry_invoice_id text NOT NULL DEFAULT ''
+    CHECK (length(entitlement_retry_invoice_id) <= 255);
+CREATE UNIQUE INDEX IF NOT EXISTS cloud_orders_subscription_unique ON cloud_orders (stripe_subscription_id)
+    WHERE stripe_subscription_id IS NOT NULL;
+
+-- Read this view on every reconcile, including already-ready orders. No expiry worker is required.
+-- The columns are listed, never `*`: Postgres fixes a view's columns when it is created, so a
+-- later `ALTER TABLE cloud_orders ADD COLUMN` would make this CREATE OR REPLACE VIEW try to insert
+-- a column before `entitlement_state` and fail the whole schema apply. A later migration that wants
+-- a new column in the view appends it after `desired_state`.
+CREATE OR REPLACE VIEW cloud_order_desired_state AS
+SELECT
+    id, created_at, updated_at, offer, path, cloud_provider, region, contact_name, contact_email,
+    company, details, quantity, amount_cents, currency, included_credit_cents,
+    stripe_checkout_session_id, stripe_customer_id, stripe_subscription_id, state, host,
+    failure_reason, claimed_by, claimed_at, organization_id, support_emailed_state,
+    customer_emailed_state, email_attempts, email_error, email_retry_at, subscription_status,
+    paid_through, entitlement_access_until, subscription_event_created, entitlement_grace_seconds,
+    entitlement_retry_invoice_id,
+    entitlement_state, CASE
+    WHEN path <> 'checkout' THEN 'unmanaged'
+    WHEN state IN ('paid', 'provisioning', 'ready') AND entitlement_state IN ('active', 'grace')
+        THEN 'present'
+    ELSE 'suspended'
+END AS desired_state
+FROM (
+    SELECT
+        id, created_at, updated_at, offer, path, cloud_provider, region, contact_name, contact_email,
+        company, details, quantity, amount_cents, currency, included_credit_cents,
+        stripe_checkout_session_id, stripe_customer_id, stripe_subscription_id, state, host,
+        failure_reason, claimed_by, claimed_at, organization_id, support_emailed_state,
+        customer_emailed_state, email_attempts, email_error, email_retry_at, subscription_status,
+        paid_through, entitlement_access_until, subscription_event_created, entitlement_grace_seconds,
+        entitlement_retry_invoice_id,
+        CASE
+        WHEN path <> 'checkout' THEN 'not_applicable'
+        WHEN stripe_subscription_id IS NULL OR stripe_customer_id IS NULL OR entitlement_access_until = 0
+            THEN 'suspended'
+        WHEN extract(epoch FROM statement_timestamp()) < entitlement_access_until THEN 'active'
+        WHEN extract(epoch FROM statement_timestamp()) < entitlement_access_until + entitlement_grace_seconds THEN 'grace'
+        ELSE 'suspended'
+    END AS entitlement_state
+    FROM cloud_orders
+) orders;
+CREATE TABLE IF NOT EXISTS cloud_order_entitlements_guard (applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0097_cloud_order_entitlements') ON CONFLICT DO NOTHING;

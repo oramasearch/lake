@@ -430,6 +430,8 @@ public:
     Result<CloudOrder> transition_cloud_order(const CloudOrderTransition& change) override;
     Result<CloudOrderPaymentResult>
     apply_cloud_order_payment(const CloudOrderPayment& payment) override;
+    Result<CloudOrderPaymentResult>
+    apply_cloud_order_subscription(const CloudOrderSubscriptionEvent& event) override;
     Result<std::vector<CloudOrder>> claim_cloud_order_emails(int limit, int lease_seconds) override;
     Result<void> record_cloud_order_email(const CloudOrderEmailOutcome& outcome) override;
     Result<std::vector<CloudOrderEvent>> unaudited_cloud_order_events(int limit) override;

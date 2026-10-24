@@ -1071,6 +1071,32 @@ liquid::runtime::task<NoticeOutcome> receive_payment_notice(PaymentProviders& pr
         // neither a payment event row nor an audit event.
         co_return NoticeOutcome{200, {{"received", true}, {"ignored", true}}};
     }
+    if (notice->order_subscription) {
+        notice->order_subscription->grace_seconds = context.order_entitlement_grace_seconds;
+        const auto applied =
+            context.store->apply_cloud_order_subscription(*notice->order_subscription);
+        if (!applied) {
+            co_return answer(applied.error().code == "invalid_input" ? 400 : 503,
+                             applied.error().code,
+                             applied.error().message);
+        }
+        if (applied->duplicate) {
+            co_return NoticeOutcome{200, {{"received", true}, {"duplicate", true}}};
+        }
+        if (!applied->matched) {
+            co_return NoticeOutcome{200, {{"received", true}, {"matched", false}}};
+        }
+        const auto seconds =
+            std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+        co_return NoticeOutcome{
+            200,
+            {{"received", true},
+             {"order_id", applied->order.id},
+             {"state", applied->order.state},
+             {"changed", applied->changed},
+             {"entitlement_state",
+              control::cloud_order_entitlement_state(applied->order.entitlement, seconds)}}};
+    }
     if (!notice->order_state.empty()) {
         // An order of the apex order sheet (lake#831, docs/api/orders.md#paying): applied once per
         // event id, from pending_payment only. The order's event row is what reaches the central
@@ -1084,7 +1110,8 @@ liquid::runtime::task<NoticeOutcome> receive_payment_notice(PaymentProviders& pr
                                        notice->order_state,
                                        notice->customer,
                                        notice->subscription,
-                                       notice->order_detail});
+                                       notice->order_detail,
+                                       context.order_entitlement_grace_seconds});
         if (!applied) {
             co_return answer(applied.error().code == "invalid_input" ? 400 : 503,
                              applied.error().code,

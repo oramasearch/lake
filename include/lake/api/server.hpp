@@ -147,6 +147,7 @@ struct ServerOptions {
     // The apex order sheet (LAKE_ORDER_SHEET, lake#831, docs/api/orders.md): its offers, prices and
     // limits. Shown on the apex host in place of the plain picker while `enabled`.
     OrderSheet order_sheet = *order_sheet_from_environment("");
+    int order_entitlement_grace_seconds = 3 * 86400;
     // Email through Resend (LAKE_RESEND_API_KEY, LAKE_RESEND_FROM, LAKE_SUPPORT_EMAIL): Orama's
     // platform credentials. Without the key, orders are still recorded and their email waits.
     // `resend_http` replaces the outbound client (tests); `resend_api_base` is Resend's origin.

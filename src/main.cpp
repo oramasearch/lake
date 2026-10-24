@@ -103,6 +103,8 @@ int usage() {
         "install, billing is absent. LAKE_BILLING_INSTRUCTIONS tells accounts how to pay");
     std::println("  LAKE_STRIPE_SECRET_KEY, LAKE_STRIPE_WEBHOOK_SECRET Stripe's keys (lake's own "
                  "platform credentials); either unset, invoices are paid outside lake");
+    std::println("  LAKE_ORDER_ENTITLEMENT_GRACE_SECONDS subscription expiry grace (default "
+                 "259200; 0 to 2592000)");
     std::println("  LAKE_LOG_MODE air-gapped, witnessed (default), or anchored when "
                  "LAKE_STORE_ROOT is set");
     std::println("  LAKE_LOG_WITNESSES JSON witness endpoint/public_key records; "
@@ -305,6 +307,16 @@ int main(int argc, char** argv) {
             return 2;
         }
         opts.order_sheet = std::move(*sheet);
+        const auto grace = env_or("LAKE_ORDER_ENTITLEMENT_GRACE_SECONDS", "259200");
+        const auto parsed = std::from_chars(
+            grace.data(), grace.data() + grace.size(), opts.order_entitlement_grace_seconds);
+        if (parsed.ec != std::errc{} || parsed.ptr != grace.data() + grace.size() ||
+            opts.order_entitlement_grace_seconds < 0 ||
+            opts.order_entitlement_grace_seconds > 30 * 86400) {
+            std::println(
+                stderr, "lake: LAKE_ORDER_ENTITLEMENT_GRACE_SECONDS must be between 0 and 2592000");
+            return 2;
+        }
         opts.regions.order_sheet_url = opts.order_sheet.url;
         auto resend = lake::api::resend_settings_from_environment(env_or("LAKE_RESEND_API_KEY", ""),
                                                                   env_or("LAKE_RESEND_FROM", ""),

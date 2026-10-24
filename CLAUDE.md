@@ -25,7 +25,12 @@ The apex order sheet is in the source tree, not deployed (lake#831, migration `0
 [`docs/api/orders.md`](docs/api/orders.md)): lake.live's picker shows four offers with USD prices
 from `LAKE_ORDER_SHEET`, Stripe Checkout or an order form that skips payment, orders in
 `cloud_orders`, email through Resend (`LAKE_RESEND_API_KEY`). The operator provisions paid orders
-(orama-operator#634); the credit on the monthly bill and the 5-minute promise's test are not built.
+(orama-operator#634); recurring entitlement now has signed subscription events, paid-through/access
+deadlines and a clock-evaluated desired-state view (lake#972, migration `0097_cloud_order_entitlements`).
+The operator must vendor the schema, select `cloud_order_entitlements_guard`, register the new events
+and suspend expired orders before automatic provisioning is enabled; this paired work is not implemented
+in Lake. The credit on the monthly bill and the 5-minute promise's test are not built. See
+[`docs/api/orders.md`](docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
 
 Secure-networking desired state is implemented in the source tree (lake#727, `0084_network`):
 four desired/status pairs, scoped stores, signed atomic audit and app-to-service rollout rows.
@@ -932,7 +937,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `email_recovery_limits_guard` in the source tree, versioned by content hash).
+  `cloud_order_entitlements_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means
