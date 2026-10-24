@@ -152,7 +152,7 @@ For the full PostgreSQL-backed suite, local database setup, and every run option
 
 ## Releases
 
-The current release is **v0.5.0** (2026-10-24): [`docs/releases/v0.5.0.md`](docs/releases/v0.5.0.md), the rest of the pre-launch security review, safe mode per database, model prices, and stricter sign-in and recovery limits, built against zetta v0.5.0. Before it, **v0.4.0** (2026-10-21), the security release from the multi-tenant audit with SAML sign-in, OpenID Connect discovery and `delete_account`.
+The current release is **v0.5.1** (2026-10-24), a patch so lake reaches its Zettas ([`docs/releases/v0.5.1.md`](docs/releases/v0.5.1.md)). Before it, **v0.5.0** (2026-10-24): [`docs/releases/v0.5.0.md`](docs/releases/v0.5.0.md), the rest of the pre-launch security review, safe mode per database, model prices, and stricter sign-in and recovery limits, built against zetta v0.5.0. Before it, **v0.4.0** (2026-10-21), the security release from the multi-tenant audit with SAML sign-in, OpenID Connect discovery and `delete_account`.
 [`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md) lists what it adds (the lake.live order sheet
 and the 2026-10-18 UX review's fixes), what it does not include, and its known issues.
 [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md) covers secure networking, regions, the managed
