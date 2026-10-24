@@ -131,8 +131,16 @@ the client still sends (at most 64 KiB, at most a second) before it closes, so a
 a reset. During the drain a connection waiting for its next request is closed at once; a request
 in flight finishes, and a connection that has not sent its first request yet is still answered.
 
+**Request headers (lake#1108).** All of a request's headers together may be up to
+`LAKE_HTTP_MAX_HEADER_BYTES` (default 1 MiB, settable from 8 KiB to 16 MiB). boost::http's defaults
+(8 KiB in all, 4 KiB a field) refused browsers signed in through Clerk, whose cookies for the apex
+domain grow past them after an OAuth round trip (`header_too_large` at `/identity/clerk-session`).
+Its parser compares the per-field limit with how far into the whole header block it has parsed, so
+lake sets the field limit to the total; one line is still capped by the ingress (nginx, 8 KiB header
+buffers). `HttpConnections.ABrowsersClerkCookiesFitLakesHeaderLimits` holds it.
+
 **Before any route.** A request target that is not a valid URL, or a request that cannot be parsed,
-is answered `400`; a header over 8 KiB is `431`; both close the connection and are logged like the
+is answered `400`; request headers over 1 MiB in all (`LAKE_HTTP_MAX_HEADER_BYTES`, lake#1108) are `431`; both close the connection and are logged like the
 busy refusal. A request with `Expect: 100-continue` is answered `100 Continue` at its route's first
 read of the body, so a route that refuses without reading never invites the body (and its
 connection closes). A client that reset its connection, or closed it before sending the whole
@@ -142,11 +150,12 @@ want of descriptors (`EMFILE`, `ENFILE`) backs off 10 ms; other accept errors ar
 A connection refused at the cap while 64 refusals are already lingering gets one non-blocking
 `503` write and is closed, so a flood of refusals never slows the accept loop.
 
-**Memory.** An idle connection costs about 25 KiB of lake's resident memory (the parser's 8 KiB
-header area and buffers, the serializer, the session), measured by
-`HttpConnections.AnIdleConnectionCostsLittleMemory` on macOS, plus the kernel's socket buffers,
+**Memory.** An idle connection costs about 49 KiB of lake's resident memory (the parser's header
+area, filled only as far as a request's headers reach, its buffers, the serializer, the session),
+measured with lake's 1 MiB header limit by `HttpConnections.AnIdleConnectionCostsLittleMemory` on
+macOS (about 25 KiB with boost::http's 8 KiB default), plus the kernel's socket buffers,
 which the container's memory cgroup also charges. At the default cap, 4096 idle connections are
-about 100 MiB of the dev pod's 512 MiB limit (`Lake/prod`, `requests 128Mi`, `limits 512Mi`); lower
+about 200 MiB of a 512 MiB pod limit (lake.live's) (`Lake/prod`, `requests 128Mi`, `limits 512Mi`); lower
 `LAKE_HTTP_MAX_CONNECTIONS` or raise the limit for a pod that must hold more. On Linux, `ApiServer::start` fixes glibc's
 mmap threshold at 128 KiB (unless `MALLOC_MMAP_THRESHOLD_` is set): glibc otherwise raises it to
 32 MiB as large blocks are freed, after which request bodies and transfer buffers come from the

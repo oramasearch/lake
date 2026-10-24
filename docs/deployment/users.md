@@ -9,7 +9,7 @@ sign-in design behind it is [`../api/clerk.md`](../api/clerk.md) (liquid-bridge 
 | Environment | URL | Sign-in | Who creates the account |
 |---|---|---|---|
 | **Dev (AKS)**, `Lake/prod` on `orama-production-cluster-01` | https://lake.oramadev.net | Clerk, application `lake`, **development** instance `above-seahorse-7535` | An Orama admin, in Clerk; sign-up on the site is restricted |
-| **lake.live** | https://lake.live | Clerk, application `lake`, **production** instance — **not created yet** | Same flow as dev once the instance exists (below) |
+| **lake.live** | https://lake.live (`eu.lake.live`, `us.lake.live`) | Clerk, application `Orama Lake` (`app_3Kq02xRIBqet27addrsP0tGAjTG`), **production** instance `ins_3Kq0xJzpNiRB38AIhYHon8uoCYb`, sign-up restricted | An Orama admin, in Clerk ([lake.live](#lakelive) below) |
 | **Local** (`./build/lake`) | http://127.0.0.1:4900 | lake's own pages, unless started with `--clerk-publishable-key` | The person, at `/sign-up` |
 | **On-prem / without Clerk** | the customer's host | lake's own pages | The person, at `/sign-up`, or the customer's SSO |
 | **Operator access** (any environment) | `/login` | The instance admin token | Not a user; the token is minted by the operator |
@@ -53,6 +53,22 @@ the person to Clerk; lake creates their account the first time they sign in.
 Accounts created so far: `steve@orama.com` (linked to the existing lake account, 2026-09-25) and
 `steve.sperandeo@gmail.com` (Clerk user `user_3JpUKQFkOXWBelPZAiFWshP0OUH`, 2026-09-25) and
 `juan@orama.com` (Clerk user `user_3JqKCeuPkKnFflV5QNH6WFQi1kQ`, 2026-09-25).
+
+## lake.live
+
+The same flow as dev, in the production instance of the `Orama Lake` application. With sign-up
+restricted, Clerk refuses anyone it does not know ("New sign-ups are currently restricted").
+
+1. Create the person in that instance, with its secret key (the managing cluster's Secret
+   `lake/clerk-lake-prod`, key `secretKey`; never printed): `POST https://api.clerk.com/v1/users`
+   with `{"email_address": ["person@example.com"], "first_name": ..., "last_name": ...}`, or
+   `clerk users create` with the CLI linked to `app_3Kq02xRIBqet27addrsP0tGAjTG` and that instance.
+   The address is marked verified.
+2. They sign in at https://lake.live with that email and an emailed code; lake creates their
+   account and personal space on first sign-in.
+
+Accounts created so far: `steve.sperandeo@gmail.com` (Clerk user `user_3L7lEqk8A5xojV3anlcvmoiqaqB`,
+2026-10-24, at launch; lake#755).
 
 ### Letting anyone sign up (not the current setting)
 

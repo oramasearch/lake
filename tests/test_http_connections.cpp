@@ -246,7 +246,7 @@ constexpr std::size_t stream_size = 4U * 1024U * 1024U;
 // /busy and /limited refuse, /stream streams 4 MiB, /healthz needs no worker.
 class Served {
 public:
-    explicit Served(lake::api::HttpConnectionLimits limits) {
+    explicit Served(lake::api::HttpConnectionLimits limits, std::size_t max_header_bytes = 0) {
         namespace http = boost::http;
         http::router<http::route_params> router;
         const auto answer = [](http::route_params& route, http::status status,
@@ -413,7 +413,13 @@ public:
         connections_ = std::make_unique<lake::api::HttpConnections>(
             io_context_,
             std::move(router),
-            http::make_parser_config(http::parser_config{true}),
+            http::make_parser_config([&] {
+                http::parser_config config{true};
+                if (max_header_bytes > 0) {
+                    lake::api::apply_header_limits(config, max_header_bytes);
+                }
+                return config;
+            }()),
             http::make_serializer_config(http::serializer_config()),
             std::move(limits));
         const std::string error = connections_->bind(
@@ -970,6 +976,31 @@ TEST(HttpConnections, TheConnectionCapFitsTheOpenFileLimit) {
               lake::api::connections_for_open_files(4096, budget.open_files));
 }
 
+// lake#1108: with lake's limits a browser's Clerk cookies (a 12 KiB Cookie field, 20 KiB of headers)
+// are answered, and past the total it is still 431, one field or many.
+TEST(HttpConnections, ABrowsersClerkCookiesFitLakesHeaderLimits) {
+    Served served(limits_with(1), lake::api::default_max_header_bytes);
+    Client signed_in(served.port());
+    ASSERT_TRUE(signed_in.send("GET /fine HTTP/1.1\r\nHost: localhost\r\nCookie: __session=" +
+                               std::string(12 * 1024, 'c') + "\r\nX-Other: " +
+                               std::string(8 * 1024, 'o') + "\r\n\r\n"));
+    const std::string answer = signed_in.response();
+    EXPECT_TRUE(answer.starts_with("HTTP/1.1 200")) << answer.substr(0, 200);
+
+    Client one_field(served.port());
+    ASSERT_TRUE(one_field.send("GET /fine HTTP/1.1\r\nHost: localhost\r\nCookie: a=" +
+                               std::string(1025 * 1024, 'c') + "\r\n\r\n"));
+    EXPECT_TRUE(one_field.response().starts_with("HTTP/1.1 431"));
+
+    Client total(served.port());
+    std::string headers;
+    for (int i = 0; i < 9; ++i) {
+        headers += "X-Part-" + std::to_string(i) + ": " + std::string(120 * 1024, 'p') + "\r\n";
+    }
+    ASSERT_TRUE(total.send("GET /fine HTTP/1.1\r\nHost: localhost\r\n" + headers + "\r\n"));
+    EXPECT_TRUE(total.response().starts_with("HTTP/1.1 431"));
+}
+
 // Nits: a malformed target is 400, a header over 8 KiB is 431, `Expect: 100-continue` is answered,
 // and a client that left while its request waited is not dispatched.
 TEST(HttpConnections, MalformedRequestsAndExpectContinue) {
@@ -1063,7 +1094,8 @@ TEST(HttpConnections, TheDrainLetsRequestsInFlightAndNewConnectionsFinish) {
 // regression shows.
 TEST(HttpConnections, AnIdleConnectionCostsLittleMemory) {
     raise_descriptor_limit(4096);
-    Served served(limits_with(2));
+    // With lake's own header limits (lake#1108), not boost::http's defaults.
+    Served served(limits_with(2), lake::api::default_max_header_bytes);
     constexpr int count = 1000;
     std::vector<std::unique_ptr<Client>> idle;
     idle.reserve(count);
