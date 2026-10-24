@@ -103,7 +103,7 @@ to `https://data.example.com/sign-in`.
      settings.
 3. **Provision people with SCIM.** Lake creates a user on first SSO sign-in only with just-in-time
    provisioning on **and** a TAAP identity in the sign-in, which a person coming from the customer's
-   IdP does not have. Until that gap is closed (filed from lake#1136), provision every user through
+   IdP does not have. Until that gap is closed ([lake#1166](https://github.com/oramasearch/lake/issues/1166)), provision every user through
    SCIM with their TAAP id mapped (`taapId`), as [`sign-in.md` §4](sign-in.md#4-enterprise-sso-and-scim)
    describes. Deactivating a user in the IdP revokes their sessions at once.
 
