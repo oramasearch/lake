@@ -237,6 +237,12 @@ closes that connection while it is idle. A request on a second connection follow
 stops the server and asserts that the pipe stayed empty. `OutputPipe` captures stderr by default,
 or stdout.
 
+`test_client_address.cpp` (lake#1083) covers which address per-client limits count: a trusted
+peer's `X-Real-IP` and last `X-Forwarded-For` hop, an untrusted peer counted on its own address
+whatever it sends, the unset default (loopback and private ranges), `none`, and the parsing of
+`LAKE_TRUSTED_PROXY_CIDRS`; `test_http_server.cpp`'s
+`AuthenticationClientBudgetIgnoresForwardedHeadersFromAnUntrustedPeer` proves it through the server.
+
 `test_http_connections.cpp` (lake#534) covers connections apart from request workers
 (`src/api/http_connections.hpp`) over raw sockets: two hundred idle connections beside a request
 answered within 500 ms (with a small router and through `ApiServer`), forty long polls that leave

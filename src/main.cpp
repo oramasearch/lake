@@ -179,6 +179,8 @@ int usage() {
                  "a worker, after 10 s (default 1024; 0 turns it off)");
     std::println("  LAKE_HTTP_MAX_LONG_REQUESTS long polls and pulls at once (default 512); "
                  "LAKE_HTTP_MAX_LONG_REQUESTS_PER_CALLER per caller (default 64)");
+    std::println("  LAKE_TRUSTED_PROXY_CIDRS peers whose X-Real-IP / X-Forwarded-For per-client limits "
+                 "believe, comma-separated CIDRs or 'none' (default loopback and private ranges)");
     std::println("  LAKE_WORKSPACE_STORE_PREOPEN=false opens workspace stores on first use only "
                  "(default true: opened in the background from start)");
     std::println("  --tunnel-clients-dir the tunnel client downloads (default "
@@ -366,6 +368,18 @@ int main(int argc, char** argv) {
         env_u64("LAKE_HTTP_MAX_LONG_REQUESTS_PER_CALLER", opts.max_long_requests_per_caller));
     opts.header_timeout = std::chrono::seconds{env_u64("LAKE_HTTP_HEADER_TIMEOUT_SECONDS", 10)};
     opts.worker_wait = std::chrono::seconds{env_u64("LAKE_HTTP_WORKER_WAIT_SECONDS", 10)};
+    // lake#1083: whose X-Real-IP / X-Forwarded-For the per-client limits believe. Unset: loopback
+    // and the private ranges, so an image rolled before the operator sets it counts as before.
+    {
+        auto trusted = lake::api::parse_trusted_proxies(env_or("LAKE_TRUSTED_PROXY_CIDRS", ""));
+        if (!trusted) {
+            std::println(stderr, "lake: {}", trusted.error());
+            return 2;
+        }
+        opts.trusted_proxies = std::move(*trusted);
+        std::println(stderr, "lake: per-client limits believe X-Real-IP from {}",
+                     opts.trusted_proxies.description);
+    }
     // Every connection is a descriptor: raise the soft limit to the hard one and keep the
     // connection cap inside it, with room for PostgreSQL, stores and outbound calls.
     const std::size_t wanted_connections = opts.max_connections;

@@ -443,6 +443,19 @@ public:
         return found == state_->tokens.end() ? 0 : found->second;
     }
 
+    // The address of the connection `route` arrived on, as text; empty when the request is not
+    // one this server is serving. Per-client limits use it to decide whether X-Real-IP is
+    // believed (lake#1083). IO executor only: call it from the route.
+    [[nodiscard]] std::string peer(const boost::http::route_params& route) const {
+        const auto token = state_->tokens.find(&route);
+        if (token == state_->tokens.end()) {
+            return {};
+        }
+        const auto slot = state_->slots.find(token->second);
+        return slot == state_->slots.end() || slot->second->connection == nullptr ? std::string{}
+                                                                                 : slot->second->connection->peer;
+    }
+
     // The request parks (a long poll) or streams a long response: it gives its worker back and
     // finishes outside the worker budget, counted against the long-request caps for `principal`
     // (empty: the client's address). False when a cap is full: the request keeps its worker and

@@ -3755,6 +3755,46 @@ TEST(HttpServer, AuthenticationClientBudgetFollowsTheIngressAddressAcrossRestAnd
     EXPECT_NE(probe.request("GET", "/healthz").find("200 OK"), std::string::npos);
 }
 
+// lake#1083: X-Real-IP is believed only from a trusted proxy. A caller inside the cluster that
+// reaches the Service directly is counted on its own address however it rotates the header.
+TEST(HttpServer, AuthenticationClientBudgetIgnoresForwardedHeadersFromAnUntrustedPeer) {
+    for (const bool trusted : {false, true}) {
+        lake::api::ServerOptions options;
+        options.port = 0;
+        options.store = std::make_shared<lake::control::InMemoryStore>();
+        // The test's loopback peer: trusted as a proxy, or a caller that skipped the ingress.
+        options.trusted_proxies = *lake::api::parse_trusted_proxies(trusted ? "127.0.0.1/32" : "10.244.0.0/16");
+        lake::api::ApiServer server(options);
+        ASSERT_TRUE(server.start()) << server.reason();
+        int attempt = 0;
+        auto authenticate = [&](std::vector<std::pair<std::string, std::string>> headers) {
+            HttpConnection connection(server.port());
+            const nlohmann::json arguments{{"email", std::to_string(attempt++) + "@example.test"},
+                                           {"code", "wrong"}};
+            const auto response = connection.request("POST",
+                                                     "/v1/recover_with_code",
+                                                     arguments.dump(),
+                                                     "",
+                                                     "HTTP/1.1",
+                                                     "",
+                                                     "application/json",
+                                                     std::move(headers));
+            EXPECT_FALSE(response.empty());
+            return response.find("rate_limited") != std::string::npos;
+        };
+        // A fresh X-Real-IP and X-Forwarded-For on every attempt.
+        for (int i = 0; i < 100; ++i) {
+            const std::string address = "192.0.2." + std::to_string(i + 1);
+            EXPECT_FALSE(authenticate({{"X-Real-IP", address}, {"X-Forwarded-For", address}}))
+                << trusted << " " << i;
+        }
+        // Untrusted: all 100 were one client (the peer), now out of budget. Trusted: each address
+        // was its own client, and a new one still has its budget.
+        EXPECT_EQ(authenticate({{"X-Real-IP", "198.51.100.1"}}), !trusted);
+        EXPECT_EQ(authenticate({{"X-Forwarded-For", "198.51.100.2"}}), !trusted);
+    }
+}
+
 TEST(HttpServer, RecoveryWorkCannotBlockHealthOrTheSharedStoreConnection) {
     const auto uri = lake::test::postgres_uri();
     if (!uri)

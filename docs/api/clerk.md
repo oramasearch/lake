@@ -298,13 +298,12 @@ even if its response is abandoned. All JWKS HTTP requests have the OIDC ten-seco
 
 `POST /identity/clerk-session` accepts 60 attempts per minute per client address, counting
 successes and failures before reading the body. Further attempts answer 429 with `Retry-After: 60`
-and do not add an authentication audit row. The address comes from the trusted ingress hop, as the
-order sheet's does ([orders](orders.md#abuse-protection), lake#838): `X-Real-IP`, which
-ingress-nginx always sets itself, else the last `X-Forwarded-For` hop. The socket peer is the
-ingress pod, so keying on it would put every user in one bucket. A client that reaches Lake
-without either header shares one `direct` bucket, which is still limited. Lake trusts these
-headers only because the ingress is its one way in; a deployment that exposes Lake's port
-directly lets a sender choose its bucket. The address map holds at most 4,096 active buckets,
+and do not add an authentication audit row. The address follows the rule in
+[client addresses](../deployment/client-addresses.md) (lake#838, lake#1083), as the order sheet's
+does: from a trusted proxy (`LAKE_TRUSTED_PROXY_CIDRS`), `X-Real-IP`, which ingress-nginx always
+sets itself, else the last `X-Forwarded-For` hop, else the proxy's address. The socket peer is the
+ingress pod, so keying on it alone would put every user in one bucket. Any other peer is counted
+on its own address, whatever headers it sends. The address map holds at most 4,096 active buckets,
 refuses new addresses when full, and releases buckets after a minute without evicting active
 limits.
 

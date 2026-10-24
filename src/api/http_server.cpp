@@ -11,6 +11,7 @@
 #include "lake/api/audit_recorder.hpp"
 #include "lake/api/billing.hpp"
 #include "lake/api/clerk_webhooks.hpp"
+#include "lake/api/client_address.hpp"
 #include "lake/api/mcp_client.hpp"
 #include "lake/api/mcp_connections.hpp"
 #include "lake/api/metering_recorder.hpp"
@@ -10595,8 +10596,8 @@ struct ApiServer::Impl {
     }
 
     // IO-thread-only, bounded address state. Never evict an active bucket to admit a new client.
-    // Keyed on the address the trusted ingress hop reports (order_client_address): the socket peer
-    // is the ingress pod, which every user shares. Direct clients share the "direct" bucket.
+    // Keyed on order_client_address: the address a trusted proxy reports (the socket peer is the
+    // ingress pod, which every user shares), else the peer's own address (lake#1083).
     bool allow_clerk_exchange(const boost::http::route_params& route) {
         const auto now = std::chrono::steady_clock::now();
         std::erase_if(clerk_attempts, [&](const auto& item) {
@@ -13589,24 +13590,25 @@ struct ApiServer::Impl {
     }
 
     // The address an anonymous order and an authentication attempt are counted against (lake#838,
-    // LSR-103): X-Real-IP, which the ingress (ingress-nginx) always sets itself, overwriting any
-    // the sender sent; else the last X-Forwarded-For hop, the one the nearest proxy appended; else
-    // one bucket for every direct client. Never CF-Connecting-IP or the first X-Forwarded-For hop: a sender that reaches the
-    // ingress without passing Cloudflare can write either, and would land in a fresh bucket with
-    // each request. The ingress decides which client address to trust (Cloudflare's ranges), and
-    // lake counts what it decided.
-    static std::string order_client_address(const boost::http::route_params& route) {
-        if (route.req.count("x-real-ip") != 0) {
-            return std::string(route.req.at("x-real-ip")).substr(0, 64);
-        }
-        if (route.req.count("x-forwarded-for") != 0) {
-            std::string forwarded(route.req.at("x-forwarded-for"));
-            const auto comma = forwarded.rfind(',');
-            forwarded = comma == std::string::npos ? forwarded : forwarded.substr(comma + 1);
-            const auto first = forwarded.find_first_not_of(' ');
-            return first == std::string::npos ? "direct" : forwarded.substr(first, 64);
-        }
-        return "direct";
+    // LSR-103, lake#1083). From a trusted proxy (LAKE_TRUSTED_PROXY_CIDRS): X-Real-IP, which the
+    // ingress (ingress-nginx) always sets itself, overwriting any the sender sent; else the last
+    // X-Forwarded-For hop, the one the nearest proxy appended; else the proxy's own address. From
+    // any other peer: the peer's address, whatever headers it sent, so a caller that reaches the
+    // Service without passing the ingress cannot rotate X-Real-IP past the limits. Never
+    // CF-Connecting-IP or the first X-Forwarded-For hop: a sender that reaches the ingress without
+    // passing Cloudflare can write either. The ingress decides which client address to trust
+    // (Cloudflare's ranges), and lake counts what it decided.
+    std::string order_client_address(const boost::http::route_params& route) const {
+        const auto header = [&](const char* name) -> std::optional<std::string_view> {
+            if (route.req.count(name) == 0) {
+                return std::nullopt;
+            }
+            return route.req.at(name);
+        };
+        return client_address(options.trusted_proxies,
+                              server ? server->peer(route) : std::string{},
+                              header("x-real-ip"),
+                              header("x-forwarded-for"));
     }
 
     // Where order links point: https://<apex host>, else the order sheet's configured URL.

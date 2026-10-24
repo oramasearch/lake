@@ -8,6 +8,7 @@
 #include "lake/api/balance.hpp"
 #include "lake/api/billing.hpp"
 #include "lake/api/clerk.hpp"
+#include "lake/api/client_address.hpp"
 #include "lake/api/oidc_jwks.hpp"
 #include "lake/api/orders.hpp"
 #include "lake/api/regions.hpp"
@@ -80,6 +81,10 @@ struct ServerOptions {
     // request is answered 429 (LAKE_HTTP_MAX_LONG_REQUESTS, LAKE_HTTP_MAX_LONG_REQUESTS_PER_CALLER).
     std::size_t max_long_requests = 512;
     std::size_t max_long_requests_per_caller = 64;
+    // The peers whose X-Real-IP and X-Forwarded-For per-client limits believe; any other peer is
+    // counted on its own address (LAKE_TRUSTED_PROXY_CIDRS, lake#1083). Default: loopback and the
+    // private ranges (default_trusted_proxy_cidrs).
+    TrustedProxies trusted_proxies = *parse_trusted_proxies("");
     // A request header must arrive whole within this of its first byte, or of the accept for a
     // connection's first request; otherwise the connection is closed
     // (LAKE_HTTP_HEADER_TIMEOUT_SECONDS).
