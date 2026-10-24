@@ -20,6 +20,7 @@ std::string new_recovery_code();
 std::string recovery_selector(std::string_view code);
 std::string new_totp_secret();
 bool verify_totp(std::string_view secret, std::string_view code);
+std::optional<std::int64_t> totp_step(std::string_view secret, std::string_view code);
 std::string sha256_hex(std::string_view value);
 std::string sha256_base64url(std::string_view value);
 std::string base64url_encode(std::string_view value);

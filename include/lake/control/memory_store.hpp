@@ -5,6 +5,7 @@
 #include <set>
 #include <vector>
 
+#include "lake/control/authentication_limits.hpp"
 #include "lake/control/store.hpp"
 
 namespace lake::control {
@@ -504,6 +505,13 @@ public:
     Result<IssuedSession> sign_up_password(const NewPasswordUser&) override;
     Result<IdentityProofChallenge> begin_identity_proof(const std::string& pool_id,
                                                         const std::string& document) override;
+    Result<AuthenticationAttempt>
+    authentication_attempt(const std::string& pool_id,
+                           const std::string& email,
+                           const std::string& user_id,
+                           const std::string& client_address) override;
+    Result<void> authentication_attempt_finished(const AuthenticationAttempt&,
+                                                 AuthenticationOutcome) override;
     Result<IssuedSession> sign_in_password(const PasswordSignIn&) override;
     Result<IssuedSession> sign_in_taap(const TaapSignIn&) override;
     Result<MfaEnrollment> enroll_mfa(const std::string& user_id,
@@ -764,9 +772,11 @@ private:
     std::vector<CustomerKekRecord> customer_keks_;
     std::vector<SecretMountRoute> secret_mount_routes_;
     std::vector<SecretLeaseRoute> secret_lease_routes_;
+    AuthenticationAttempts authentication_budgets_;
     struct PasswordCredential {
         std::string user_id, pool_id, email, password, totp_secret;
         std::map<std::string, std::string> recovery_hashes;
+        std::int64_t last_totp_step = -1;
     };
     struct PasskeyCredential {
         std::string user_id, pool_id, credential_id, public_key_pem, name, device_id, revoked_at;

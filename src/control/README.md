@@ -46,7 +46,7 @@ step of deleting a mount ([deletion.md](../../docs/api/deletion.md)). Both imple
 or the account is an organization's only owner; removes the account's identity rows, memberships
 and grants and its space's billing contact, limits and policy objects, and marks the user and its
 space deleted, the email and name erased, so every read of users leaves it out; and
-`verify_mfa_code`, the step-up that changes nothing ([identity.md](../../docs/api/identity.md#deleting-an-account)).
+`verify_mfa_code`, the step-up that consumes its TOTP step or recovery code ([identity.md](../../docs/api/identity.md#deleting-an-account)).
 
 `WorkspaceService` caches deployment catalogues and project/pipeline definitions in memory for
 five seconds, scoped to the workspace and connection generation. Successful writes explicitly
@@ -350,3 +350,5 @@ budgets inside both stores before queuing mail or device notices. PostgreSQL kee
 in `offline_recovery_budgets` (migration `0096_email_recovery_limits`); cancellation clears the
 token and removes unclaimed deliveries. See [recovery.md](../../docs/api/recovery.md).
 `order_entitlements.cpp` (lake#972, LSR-105) is the shared subscription-event reducer and deadline evaluator. Both stores serialize subscription/customer/order matching and event deduplication, preserve canceled subscriptions and reject stale renewal snapshots. PostgreSQL exposes time-dependent desired state through `cloud_order_desired_state`; provisioning suspension remains an operator handoff. See [orders](../../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
+
+`authentication_attempt` commits per-account and per-client reservations before credential verification, independently of verification rollback; completion records failures or releases and clears successful account/client reservations. Both stores consume successful TOTP steps and recovery codes atomically; see [identity limits](../../docs/api/identity.md#authentication-attempt-limits) (lake#966).

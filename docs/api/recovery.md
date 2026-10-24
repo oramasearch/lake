@@ -106,3 +106,4 @@ instance keeps the budget and an elapsed window resets it; owner cancellation re
 account, invalidates already delivered tokens, removes pending mail and cannot be reversed by
 administrator approval. PostgreSQL moves a cancelled attempt beyond its cooling period before
 trying its original token.
+Recovery-code sign-in and completion share the [account and client attempt limits](identity.md#authentication-attempt-limits) with password and MFA verification (lake#966). Failed verification spends the budget; a new recovery attempt id or connection does not reset it.

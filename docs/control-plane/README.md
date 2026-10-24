@@ -63,3 +63,4 @@ operator#260).
 
 [schema.md](schema.md) also describes `0094_clerk_revocation` (lake#948): ordered Clerk
 suspension and a persistent account-wide revocation watermark, with `clerk_revocation_guard`.
+[Schema](schema.md#authentication-attempts-migration-0098_authentication_attempts) describes shared password/MFA attempt budgets (lake#966).

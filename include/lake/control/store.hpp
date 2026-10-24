@@ -5,7 +5,6 @@
 #include <chrono>
 #include <cstdint>
 #include <expected>
-#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -17,7 +16,6 @@
 
 #include "lake/audit/audit.hpp"
 #include "lake/control/apps.hpp"
-#include "lake/control/authentication_limits.hpp"
 #include "lake/control/builds.hpp"
 #include "lake/control/network.hpp"
 #include "lake/control/offline_recovery.hpp"
@@ -38,6 +36,11 @@ struct StoreError {
     std::string message;
 };
 template <class T> using Result = std::expected<T, StoreError>;
+
+enum class AuthenticationOutcome { failure, success, neutral };
+struct AuthenticationAttempt {
+    std::string key, window_id;
+};
 
 struct User {
     std::string id, taap_id, email, display_name, created_at, updated_at;
@@ -1646,23 +1649,6 @@ nlohmann::json to_json(const ScimGroup&);
 nlohmann::json to_json(const ProvisioningLog&);
 
 class Store {
-    AuthenticationAttempts authentication_attempts_{8};
-
-protected:
-    template <class Callable>
-    auto authentication_attempt(std::string user_id, Callable&& callable) {
-        using ResultType = std::invoke_result_t<Callable>;
-        const auto now = AuthenticationAttempts::Clock::now();
-        if (!authentication_attempts_.admit(user_id, now))
-            return ResultType(std::unexpect,
-                              StoreError{"rate_limited",
-                                         "too many authentication attempts; retry in one minute"});
-        auto result = std::invoke(std::forward<Callable>(callable));
-        if (result || result.error().code == "mfa_required")
-            authentication_attempts_.refund(user_id, now);
-        return result;
-    }
-
 public:
     virtual ~Store() = default;
     [[nodiscard]] virtual std::string kind() const = 0; // "postgres" | "memory"
@@ -2338,6 +2324,15 @@ public:
     // OAuth sign-in in `pool_id` binds that document to a new account (lake#931).
     virtual Result<IdentityProofChallenge>
     begin_identity_proof(const std::string& pool_id, const std::string& identity_document) = 0;
+    // Reserve capacity before verification; settle once after the result is known.
+    // Empty client_address selects the account; otherwise it selects trusted ingress metadata.
+    virtual Result<AuthenticationAttempt>
+    authentication_attempt(const std::string& pool_id,
+                           const std::string& email,
+                           const std::string& user_id,
+                           const std::string& client_address) = 0;
+    virtual Result<void> authentication_attempt_finished(const AuthenticationAttempt&,
+                                                         AuthenticationOutcome) = 0;
     virtual Result<IssuedSession> sign_in_password(const PasswordSignIn&) = 0;
     virtual Result<IssuedSession> sign_in_taap(const TaapSignIn&) = 0;
     // Verify an active full-authority interactive session and the current password before
@@ -2351,9 +2346,8 @@ public:
     // Whether the user has an active TOTP enrollment in the pool (the web app's `viewer`,
     // lake#561).
     virtual Result<bool> mfa_enrolled(const std::string& user_id, const std::string& pool_id) = 0;
-    // Checks a fresh TOTP code (or an unused recovery code) of an enrolled user and changes
-    // nothing: the step-up a destructive action asks for (delete_account, lake#810). `unauthorized`
-    // when it does not verify, `not_found` when MFA is not enrolled.
+    // Consumes a fresh TOTP step or an unused recovery code for a destructive action
+    // (delete_account, lake#810). Replays are unauthorized; missing enrollment is not_found.
     virtual Result<void> verify_mfa_code(const std::string& user_id,
                                          const std::string& pool_id,
                                          const std::string& code) = 0;

@@ -1384,3 +1384,14 @@ The [recovery contract](../api/recovery.md#email-recovery-budgets) lists limits 
 ## Cloud order entitlements migration
 
 `0097_cloud_order_entitlements` (lake#972, LSR-105) adds subscription status, paid-through and access deadlines (Unix seconds), the signed-event watermark, first-unpaid-invoice binding and per-order grace to `cloud_orders`. A partial unique index makes a subscription belong to one order; creating it fails the apply if two existing orders already share a subscription id. Defaults suspend orders without payment evidence. The operator reads `cloud_order_desired_state` on every reconciliation; the view names its columns instead of `cloud_orders.*`, so a later column on `cloud_orders` cannot fail a repeated apply; its entitlement and desired state expire at read time. Vendor this schema and select `cloud_order_entitlements_guard` before rolling Lake, and ship the paired operator suspension/event-registration change before enabling order provisioning. See [the contract and verification](../api/orders.md#recurring-entitlement-lsr-105-lake972).
+
+## Authentication attempts (migration `0098_authentication_attempts`)
+
+`authentication_attempts` keeps SHA-256 keys, failure/pending counts, window ids and fifteen-minute expiry times for the shared
+[account and client budgets](../api/identity.md#authentication-attempt-limits) (lake#966, LSR-100).
+Admission commits independently of credential verification and serializes across PostgreSQL
+connections. Expired keys are pruned and live keys are capped at 100,000. Existing TOTP credentials
+also record `last_used_step` in `public_data`, updated while holding the credential row lock.
+The operator must vendor this schema and select `authentication_attempts_guard` before deployment.
+Change the store budgets and their contract tests
+together; verify with `ctest --test-dir <build> --timeout 600 -R AuthenticationLimits`.

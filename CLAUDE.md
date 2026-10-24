@@ -69,6 +69,11 @@ grants, audit and repositories stay; `sign_in_taap` with the own key reaches it,
 vendor the schema and select `identity_links_guard`. See
 [`docs/api/identity.md#your-own-identity`](docs/api/identity.md#your-own-identity).
 
+Password, MFA and recovery verification share per-account and per-client failure budgets (no instance-wide ceiling) with concurrent reservations (lake#966, LSR-100,
+`0098_authentication_attempts`); successful TOTP steps and recovery codes are consumed across
+sign-in and step-up. Not deployed; operator schema vendoring and `authentication_attempts_guard`
+are required. See [`docs/api/identity.md#authentication-attempt-limits`](docs/api/identity.md#authentication-attempt-limits).
+
 Clerk webhooks follow (lake#765, migration `0087_clerk_webhooks`): `POST /identity/clerk-webhook`,
 verified with Lake's own Svix HMAC and `LAKE_CLERK_WEBHOOK_SECRET` (404 without it), applies each
 `svix-id` once: `user.created` provisions the account as a first Clerk sign-in does, `user.updated`
@@ -938,6 +943,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
   `cloud_order_entitlements_guard` in the source tree, versioned by content hash).
+  `authentication_attempts_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means
