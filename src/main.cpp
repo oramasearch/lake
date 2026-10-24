@@ -152,6 +152,8 @@ int usage() {
                  "LAKE_HTTP_WORKER_WAIT_SECONDS a request's wait for one before 503 (default 10)");
     std::println("  LAKE_HTTP_MAX_CONNECTIONS open connections before new ones get 503 "
                  "(default 4096)");
+    std::println("  LAKE_HTTP_MAX_HEADER_BYTES the request headers' total size, larger is 431 "
+                 "(default 1048576)");
     std::println("  LAKE_HTTP_IDLE_TIMEOUT_SECONDS closes idle keep-alive connections (default 75, "
                  "above the proxy's); LAKE_HTTP_HEADER_TIMEOUT_SECONDS bounds a request header "
                  "(default 10)");
@@ -259,6 +261,8 @@ int main(int argc, char** argv) {
         env_u64("LAKE_HTTP_WORKERS", static_cast<std::uint64_t>(opts.worker_coroutines)), 65536));
     opts.max_connections = static_cast<std::size_t>(
         env_u64("LAKE_HTTP_MAX_CONNECTIONS", opts.max_connections));
+    opts.max_header_bytes = static_cast<std::size_t>(std::clamp<std::uint64_t>(
+        env_u64("LAKE_HTTP_MAX_HEADER_BYTES", opts.max_header_bytes), 8 * 1024, 16 * 1024 * 1024));
     opts.idle_timeout = std::chrono::seconds{env_u64("LAKE_HTTP_IDLE_TIMEOUT_SECONDS", 75)};
     opts.io_timeout = std::chrono::seconds{env_u64("LAKE_HTTP_IO_TIMEOUT_SECONDS", 60)};
     opts.min_transfer_rate =

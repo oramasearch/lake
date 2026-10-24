@@ -89,6 +89,20 @@
 
 namespace lake::api {
 
+// The request header limits (lake#1108). boost::http's defaults (8 KiB in all, 4 KiB a field)
+// refused browsers signed in through Clerk, whose session cookies for the apex domain pass them
+// after an OAuth round trip. Its parser compares `max_field` with how far into the whole header
+// block it has parsed, not with one field's length (`detail/header.cpp`, `field_size_limit`), so
+// `max_field` caps the whole header too: it is set to the total. One line is still capped by the
+// ingress (nginx, 8 KiB header buffers). The parser's header area is this size per connection
+// (docs/serving/http.md#memory).
+inline constexpr std::size_t default_max_header_bytes = 1024 * 1024;
+
+inline void apply_header_limits(boost::http::parser_config& config, std::size_t max_header_bytes) {
+    config.headers.max_size = max_header_bytes;
+    config.headers.max_field = max_header_bytes;
+}
+
 struct HttpConnectionLimits {
     // Requests whose routes run at once (LAKE_HTTP_WORKERS). A request that leaves its worker
     // (a long poll, a streamed pull) no longer counts.
@@ -954,7 +968,7 @@ private:
                 co_await answer_raw(connection.socket,
                                     large ? "431 Request Header Fields Too Large" : "400 Bad Request",
                                     large ? "header_too_large" : "invalid_input",
-                                    large ? "the request header exceeds 8 KiB"
+                                    large ? "the request headers are larger than lake accepts"
                                           : "the request could not be parsed",
                                     false,
                                     std::chrono::seconds(1));
