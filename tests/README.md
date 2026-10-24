@@ -152,8 +152,12 @@ confirmation (`Experiments.AgentDocsNameTheLiveReadAndTheConfirmation`; lake#449
 lake's experiment names translated to and from the engine's study names
 (`Experiments.LakeSaysExperimentAndTheEngineKeepsItsStudyNames`, lake#561).
 `Docs.AgentDocsSayLakeAndNeverSpace` (`test_markdown.cpp`, lake#647) renders llms.txt,
-llms-full.txt, the skill and every description in OpenAPI and `tools/list` and fails on `space` or
-a lowercase "lake" in their prose. `Docs.DeveloperDocsNeverSaySpace` (lake#669) reads every
+llms-full.txt, the skill (a region's and the apex's, lake#1110) and every description in OpenAPI
+and `tools/list` and fails on `space` or a lowercase "lake" in their prose.
+`RegionsApexAgentDocuments.*` (`test_regions.cpp`, lake#1110) builds the apex's llms.txt,
+llms-full.txt and skill from a three-region list (every region with every link, no apex `/mcp`),
+serves them on the apex host (content types, the picker still on every other path and on a
+`POST`), keeps a region host's own text, and leaves a Lake with no regions unchanged. `Docs.DeveloperDocsNeverSaySpace` (lake#669) reads every
 `docs/api/*.md` and `docs/guide/*.md` file, READMEs included, and fails on `space` or `spaces` as a
 word in their prose; code spans and blocks, workspace, namespace and whitespace are allowed.
 `Docs.GuidesSpeakOfExperiments` and `frontend/tests/wording.test.ts` keep "study" out of the guides

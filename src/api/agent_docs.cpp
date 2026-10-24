@@ -742,29 +742,11 @@ const std::vector<Flow>& flows() {
     return all;
 }
 
-std::string llms_txt(const Registry& registry, std::string_view origin) {
-    std::string out = std::format(
-        "# Lake\n\n"
-        "> Lake is Orama's platform for designing, training and shipping AI on your own data. "
-        "Each account (yours or an organization's) has workspaces, and every data call names one "
-        "with `workspace_id`. Everything a person can do in the Lake Console is a capability in "
-        "one registry, served as REST, OpenAPI and MCP.\n\n"
-        "## What Lake Does\n\n{2}\n"
-        "## Connect\n\n{0}\n"
-        "## The Lake skill for Claude\n\n"
-        "Download [SKILL.md]({1}/skills/lake/SKILL.md) (public, no key needed) and install it:\n\n"
-        "```sh\nmkdir -p ~/.claude/skills/lake && curl -fsSL {1}/skills/lake/SKILL.md -o "
-        "~/.claude/skills/lake/SKILL.md\n```\n\n"
-        "It says how to connect, which tools to use for which task, the worked flows and the "
-        "rules.\n\n"
-        "## Learn more\n\n"
-        "- [Every tool with its input schema]({1}/llms-full.txt)\n"
-        "- [OpenAPI]({1}/v1/openapi.json)\n"
-        "- [MCP setup and keys]({1}/developer/mcp)\n\n"
-        "## Tools\n\n",
-        how_to_connect(origin),
-        origin,
-        what_lake_does);
+namespace {
+
+// llms.txt's tool list, worked flows and rules: the same on a region and on the apex.
+std::string tools_flows_and_rules(const Registry& registry) {
+    std::string out = "## Tools\n\n";
     for (const Group& group : tool_groups(registry)) {
         out += std::format("### {}\n\n{}\n\n", group.title, group.summary);
         for (const Tool& tool : group.tools) {
@@ -778,11 +760,9 @@ std::string llms_txt(const Registry& registry, std::string_view origin) {
     return out;
 }
 
-std::string llms_full_txt(const Registry& registry, std::string_view origin) {
-    std::string out = std::format("# Lake — every tool\n\n{}\nThe Lake skill for Claude: "
-                                  "{}/skills/lake/SKILL.md (public).\n\n",
-                                  how_to_connect(origin),
-                                  origin);
+// llms-full.txt's reference: every tool with its input schema, the worked flows and the rules.
+std::string tool_reference(const Registry& registry) {
+    std::string out;
     for (const Group& group : tool_groups(registry)) {
         out += std::format("## {}\n\n{}\n\n", group.title, group.summary);
         for (const Tool& tool : group.tools) {
@@ -800,27 +780,9 @@ std::string llms_full_txt(const Registry& registry, std::string_view origin) {
     return out;
 }
 
-std::string skill_md(const Registry& registry, std::string_view origin) {
-    std::string out = std::format(
-        "---\n"
-        "name: lake\n"
-        "description: Work in Lake ({0}) through its MCP server — Design, Train and Ship in a "
-        "workspace (projects, pipelines, data, runs, experiments, models, search indexes), "
-        "drives, transcripts, agents, apps, managed services (Postgres, Kafka, ClickHouse, …), "
-        "repositories, usage and billing. Use when asked to build or run a pipeline, load data, "
-        "keep files in a drive, search, stand up or connect a database service, check usage or "
-        "the bill, or do anything on Lake.\n"
-        "---\n\n"
-        "# Lake\n\n"
-        "## What Lake Does\n\n{2}\n"
-        "## Connect\n\n{1}\n"
-        "Check the connection with `server_info`, then `tools/list`. Full reference: "
-        "{0}/llms.txt and {0}/llms-full.txt (every tool's input schema). The latest copy of this "
-        "skill is always at {0}/skills/lake/SKILL.md.\n\n"
-        "## Which tools for which task\n\n",
-        origin,
-        how_to_connect(origin),
-        what_lake_does);
+// The skill's task map, flows and rules.
+std::string skill_tools_flows_and_rules(const Registry& registry) {
+    std::string out = "## Which tools for which task\n\n";
     for (const Group& group : tool_groups(registry)) {
         if (group.title == "Server") {
             continue;
@@ -840,6 +802,191 @@ std::string skill_md(const Registry& registry, std::string_view origin) {
     out += "\n## Flows\n\n" + flows_markdown(registry);
     out += "## Rules\n\n" + std::string(rules);
     return out;
+}
+
+std::string region_origin(const Region& region) {
+    return "https://" + region.host;
+}
+
+// The apex's region list (lake#1110): every region's Lake and the agent URLs it serves.
+std::string regions_markdown(const Regions& regions) {
+    std::string out;
+    for (const Region& region : regions.list) {
+        const std::string origin = region_origin(region);
+        out += std::format("### {0} (`{1}`): {2}\n\n"
+                           "- MCP server: `{2}/mcp`\n"
+                           "- Agent guide: {2}/llms.txt\n"
+                           "- Every tool with its input schema: {2}/llms-full.txt\n"
+                           "- Claude skill: {2}/skills/lake/SKILL.md\n"
+                           "- Sign up or sign in: {2}/\n"
+                           "- API tokens for MCP: {2}/developer/mcp\n"
+                           "- OpenAPI: {2}/v1/openapi.json\n"
+                           "- Claude Code: `claude mcp add --transport http lake-{3} {2}/mcp "
+                           "--header \"Authorization: Bearer $LAKE_KEY\"`\n\n",
+                           region.label,
+                           region.name,
+                           origin,
+                           region.host.substr(0, region.host.find('.')));
+    }
+    return out;
+}
+
+// What the apex says about regions before anything else: it is not a Lake, which region to use,
+// and that nothing crosses between regions.
+std::string apex_regions_section(const Regions& regions, std::string_view apex_origin) {
+    // "A (a.host), B (b.host) and C (c.host)", and one MCP server name per region: lake-<the
+    // first label of its host>.
+    const auto joined = [&regions](auto item) {
+        std::string out;
+        for (std::size_t i = 0; i < regions.list.size(); ++i) {
+            out += (i == 0 ? "" : (i + 1 == regions.list.size() ? " and " : ", ")) +
+                   item(regions.list[i]);
+        }
+        return out;
+    };
+    const std::string names = joined(
+        [](const Region& region) { return std::format("{} ({})", region.label, region.host); });
+    const std::string server_names = joined([](const Region& region) {
+        return "`lake-" + region.host.substr(0, region.host.find('.')) + "`";
+    });
+    return std::format(
+        "## Choose a region first\n\n"
+        "{0} is not a Lake: it lists Lake's regions, {1}. Each region is a separate Lake, with "
+        "its own accounts, sign-up, API tokens and MCP server. A workspace lives in the region it "
+        "was created in and is reached only through that region; a token from one region does "
+        "not work in another.\n\n"
+        "Use the region where the person's account and workspaces are. For a new account, ask "
+        "the person which region to use (where their data must stay, else the closest). Then "
+        "use that region's URLs below for everything: the MCP server, the REST API, the guides "
+        "and the skill. People choose a region, and see the plans and prices, at {0}/.\n\n"
+        "## Regions\n\n{2}"
+        "Every region's MCP server is Streamable HTTP, JSON-RPC 2.0, protocol {3} (`initialize`, "
+        "`ping`, `tools/list`, `tools/call`), authenticated with `Authorization: Bearer <key>`: "
+        "a Lake API token made in that region. Every tool is also `<region>/v1/<tool>` over REST "
+        "(a read is GET with a query string, an action is POST with a JSON body). Answers are "
+        "`{{\"ok\": true, \"value\": …}}` or `{{\"ok\": false, \"error\": {{\"code\", "
+        "\"message\"}}}}`. To work in more than one region, add one MCP server per region under "
+        "different names ({4}).\n\n",
+        apex_origin,
+        names,
+        regions_markdown(regions),
+        mcp_protocol_version,
+        server_names);
+}
+
+} // namespace
+
+std::string llms_txt(const Registry& registry, std::string_view origin) {
+    std::string out = std::format(
+        "# Lake\n\n"
+        "> Lake is Orama's platform for designing, training and shipping AI on your own data. "
+        "Each account (yours or an organization's) has workspaces, and every data call names one "
+        "with `workspace_id`. Everything a person can do in the Lake Console is a capability in "
+        "one registry, served as REST, OpenAPI and MCP.\n\n"
+        "## What Lake Does\n\n{2}\n"
+        "## Connect\n\n{0}\n"
+        "## The Lake skill for Claude\n\n"
+        "Download [SKILL.md]({1}/skills/lake/SKILL.md) (public, no key needed) and install it:\n\n"
+        "```sh\nmkdir -p ~/.claude/skills/lake && curl -fsSL {1}/skills/lake/SKILL.md -o "
+        "~/.claude/skills/lake/SKILL.md\n```\n\n"
+        "It says how to connect, which tools to use for which task, the worked flows and the "
+        "rules.\n\n"
+        "## Learn more\n\n"
+        "- [Every tool with its input schema]({1}/llms-full.txt)\n"
+        "- [OpenAPI]({1}/v1/openapi.json)\n"
+        "- [MCP setup and keys]({1}/developer/mcp)\n\n",
+        how_to_connect(origin),
+        origin,
+        what_lake_does);
+    return out + tools_flows_and_rules(registry);
+}
+
+std::string llms_full_txt(const Registry& registry, std::string_view origin) {
+    std::string out = std::format("# Lake — every tool\n\n{}\nThe Lake skill for Claude: "
+                                  "{}/skills/lake/SKILL.md (public).\n\n",
+                                  how_to_connect(origin),
+                                  origin);
+    return out + tool_reference(registry);
+}
+
+std::string skill_md(const Registry& registry, std::string_view origin) {
+    std::string out = std::format(
+        "---\n"
+        "name: lake\n"
+        "description: Work in Lake ({0}) through its MCP server — Design, Train and Ship in a "
+        "workspace (projects, pipelines, data, runs, experiments, models, search indexes), "
+        "drives, transcripts, agents, apps, managed services (Postgres, Kafka, ClickHouse, …), "
+        "repositories, usage and billing. Use when asked to build or run a pipeline, load data, "
+        "keep files in a drive, search, stand up or connect a database service, check usage or "
+        "the bill, or do anything on Lake.\n"
+        "---\n\n"
+        "# Lake\n\n"
+        "## What Lake Does\n\n{2}\n"
+        "## Connect\n\n{1}\n"
+        "Check the connection with `server_info`, then `tools/list`. Full reference: "
+        "{0}/llms.txt and {0}/llms-full.txt (every tool's input schema). The latest copy of this "
+        "skill is always at {0}/skills/lake/SKILL.md.\n\n",
+        origin,
+        how_to_connect(origin),
+        what_lake_does);
+    return out + skill_tools_flows_and_rules(registry);
+}
+
+std::string
+apex_llms_txt(const Registry& registry, const Regions& regions, std::string_view apex_origin) {
+    std::string out = std::format(
+        "# Lake\n\n"
+        "> Lake is Orama's platform for designing, training and shipping AI on your own data. "
+        "It runs as one Lake per region; {0} only lists them. Each account (yours or an "
+        "organization's) has workspaces in one region, and every data call names one with "
+        "`workspace_id`. Everything a person can do in the Lake Console is a capability in one "
+        "registry, served as REST, OpenAPI and MCP by each region.\n\n"
+        "{1}"
+        "## The Lake skill for Claude\n\n"
+        "Download [SKILL.md]({0}/skills/lake/SKILL.md) (public, no key needed; it names every "
+        "region) and install it:\n\n"
+        "```sh\nmkdir -p ~/.claude/skills/lake && curl -fsSL {0}/skills/lake/SKILL.md -o "
+        "~/.claude/skills/lake/SKILL.md\n```\n\n"
+        "A region's own copy (above) names only that region.\n\n"
+        "## Learn more\n\n"
+        "- [Every tool with its input schema]({0}/llms-full.txt)\n\n"
+        "## What Lake Does\n\n{2}\n",
+        apex_origin,
+        apex_regions_section(regions, apex_origin),
+        what_lake_does);
+    return out + tools_flows_and_rules(registry);
+}
+
+std::string
+apex_llms_full_txt(const Registry& registry, const Regions& regions, std::string_view apex_origin) {
+    std::string out = std::format("# Lake — every tool\n\n{}The Lake skill for Claude: "
+                                  "{}/skills/lake/SKILL.md (public, names every region).\n\n",
+                                  apex_regions_section(regions, apex_origin),
+                                  apex_origin);
+    return out + tool_reference(registry);
+}
+
+std::string
+apex_skill_md(const Registry& registry, const Regions& regions, std::string_view apex_origin) {
+    std::string out = std::format(
+        "---\n"
+        "name: lake\n"
+        "description: Work in Lake ({0}, one Lake per region) through its MCP server — Design, "
+        "Train and Ship in a workspace (projects, pipelines, data, runs, experiments, models, "
+        "search indexes), drives, transcripts, agents, apps, managed services (Postgres, Kafka, "
+        "ClickHouse, …), repositories, usage and billing. Use when asked to build or run a "
+        "pipeline, load data, keep files in a drive, search, stand up or connect a database "
+        "service, check usage or the bill, or do anything on Lake.\n"
+        "---\n\n"
+        "# Lake\n\n"
+        "{1}"
+        "Check the connection with `server_info` (it names the region), then `tools/list`. The "
+        "latest copy of this skill is always at {0}/skills/lake/SKILL.md.\n\n"
+        "## What Lake Does\n\n{2}\n",
+        apex_origin,
+        apex_regions_section(regions, apex_origin),
+        what_lake_does);
+    return out + skill_tools_flows_and_rules(registry);
 }
 
 } // namespace lake::api::agent_docs

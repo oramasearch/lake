@@ -41,7 +41,9 @@ every offer above it list their own domain, white-labelled, available on request
 
 lake#757: [regions.md](regions.md) documents regions: the four variables the operator sets,
 `server_info`'s `region` and `regions`, and the apex host's region picker (closest region from
-`CF-IPCountry`, the `lake_region` preference cookie, the path and query kept).
+`CF-IPCountry`, the `lake_region` preference cookie, the path and query kept). lake#1110: on the
+apex, `/llms.txt`, `/llms-full.txt` and the skill name every region with its MCP server and agent
+documents instead of the picker ([regions.md](regions.md#the-apexs-agent-documents-lake1110)).
 
 lake#650: [engine-capabilities.md](engine-capabilities.md) documents every capability of a
 workspace's engine as a named Lake capability (its own route, OpenAPI operation and MCP tool, with

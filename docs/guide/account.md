@@ -91,6 +91,9 @@ United States (`us.lake.live`). Each region is a separate Lake with its own acco
 - **The front door picks for you.** Opening `lake.live` shows a page that preselects the region
   closest to you, or the one you chose there before. Press **Continue** to go to that region at the
   same address; Lake remembers the choice in a cookie that holds only the region's name.
+- **An agent reads every region from the front door.** `lake.live/llms.txt`, `lake.live/llms-full.txt`
+  and `lake.live/skills/lake/SKILL.md` name each region with its MCP server, guides and skill, so an
+  agent pointed at `lake.live` knows to work in the region where your account is.
 - Where Lake has no regions (an installation on your own servers, or a development Lake), none of
   this is shown.
 
