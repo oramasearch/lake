@@ -464,8 +464,13 @@ SyncStoreResult<liquid::sync_item> sync_item_from_json(const nlohmann::json& val
     }
     liquid::sync_item output;
     const unsigned kind = value.value("kind", 0U);
-    if (kind < static_cast<unsigned>(liquid::sync_item_kind::drip) ||
-        kind > static_cast<unsigned>(liquid::sync_item_kind::reference)) {
+    // An archive carries what liquid persists: drips, changes, directories, references and the
+    // identity chains that attribute them. Presence is live state and never persists.
+    const bool persisted =
+        (kind >= static_cast<unsigned>(liquid::sync_item_kind::drip) &&
+         kind <= static_cast<unsigned>(liquid::sync_item_kind::reference)) ||
+        kind == static_cast<unsigned>(liquid::sync_item_kind::identity);
+    if (!persisted) {
         return std::unexpected(SyncStoreError{"invalid_input", "invalid sync item kind", "export"});
     }
     output.kind = static_cast<liquid::sync_item_kind>(kind);
