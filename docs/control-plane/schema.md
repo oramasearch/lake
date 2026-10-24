@@ -1388,7 +1388,7 @@ The [recovery contract](../api/recovery.md#email-recovery-budgets) lists limits 
 ## Authentication attempts (migration `0098_authentication_attempts`)
 
 `authentication_attempts` keeps SHA-256 keys, failure/pending counts, window ids and fifteen-minute expiry times for the shared
-[account, global and client budgets](../api/identity.md#authentication-attempt-limits) (lake#966, LSR-100).
+[account and client budgets](../api/identity.md#authentication-attempt-limits) (lake#966, LSR-100).
 Admission commits independently of credential verification and serializes across PostgreSQL
 connections. Expired keys are pruned and live keys are capped at 100,000. Existing TOTP credentials
 also record `last_used_step` in `public_data`, updated while holding the credential row lock.

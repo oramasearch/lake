@@ -121,7 +121,3 @@ A new flag or variable is added to `usage()` and the table above in the same cha
 default, and the page that owns the behavior links back here.
 
 `LAKE_ORDER_ENTITLEMENT_GRACE_SECONDS` (lake#972) sets the grace on signed order subscription events and initial paid Checkout: default `259200` (three days), integer `0` through `2592000` (30 days). Invalid values stop startup. The policy is captured while entitled or on positive entitlement evidence; a negative event cannot extend an expired order. See [orders](../api/orders.md#recurring-entitlement-lsr-105-lake972).
-`LAKE_AUTH_GLOBAL_FAILURE_LIMIT` bounds failed password/MFA/recovery verifications across all
-accounts and clients in a fifteen-minute window (default 1,000, allowed 1–1,000,000). Invalid
-values refuse authentication. Successful sign-ins do not reset this global count; see
-[identity limits](../api/identity.md#authentication-attempt-limits) (lake#966).
