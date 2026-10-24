@@ -210,6 +210,15 @@ int main(int argc, char** argv) {
     opts.clerk_publishable_key = env_or("LAKE_CLERK_PUBLISHABLE_KEY", "");
     opts.clerk_webhook_secret = env_or("LAKE_CLERK_WEBHOOK_SECRET", "");
     opts.clerk_secret_key = env_or("LAKE_CLERK_SECRET_KEY", "");
+    // The Zettas lake may reach (lake#1097): rendered by the operator. A malformed list stops lake
+    // rather than widen or narrow it; an empty one leaves only Zettas on loopback reachable.
+    if (const std::string allow = env_or("ZETTA_EGRESS_ALLOW", "");
+        const auto error = lake::control::install_zetta_egress_policy(allow)) {
+        std::println(stderr, "lake: ZETTA_EGRESS_ALLOW: {}", *error);
+        return 2;
+    } else if (allow.empty()) {
+        std::println(stderr, "lake: ZETTA_EGRESS_ALLOW is not set: only Zettas on loopback are reachable");
+    }
     // The cluster delivery key the operator publishes (a public key, not a secret): the only one
     // mint_sealed_secret seals a user's secret to (lake#625).
     opts.sealing_public_key = env_or("LAKE_SEALING_PUBLIC_KEY", "");
