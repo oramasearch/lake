@@ -12,6 +12,13 @@ event then ends only the Lake browser sessions bound to it, never API keys, stat
 Additive; numbered after the open `0100` (lake#1155), `0101` (lake#1156) and `0102` (lake#1152).
 Apply before the new binary: the operator vendors the schema and selects the guard first. See
 [Clerk](../docs/api/clerk.md#webhooks) and [schema.md](../docs/control-plane/schema.md).
+Migration `0101_coupons` (lake#1156) adds coupon codes for ads: `billing_coupons`,
+`billing_coupon_redemptions` (one per account and per email digest) and `billing_coupon_attempts`
+(failed redemptions per hashed key), with the guard `coupons_guard`. Additive; the operator vendors
+the schema and selects the guard, after `0100_balance_grants`, before the new binary rolls. See
+[billing.md](../docs/api/billing.md#coupon-codes) and
+[schema.md](../docs/control-plane/schema.md#coupon-codes-migration-0101_coupons).
+
 Migration `0100_balance_grants` (lake#1134) lets `account_balance_credits` hold credits Orama gives
 (kind `grant`): new columns with defaults (`reason`, `granted_by`, `expires_at`,
 `charges_at_grant_micros`, `ended_at`, `end_reason`, `charges_at_end_micros`, `forfeited_micros`),

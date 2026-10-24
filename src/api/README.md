@@ -218,8 +218,15 @@ usage through `usage_over_time`'s handler, not a registry call, so it adds no au
 account. Credits from Orama (lake#1134) are `balance.cpp`'s too: `grant_balance_credit` and
 `revoke_balance_credit` (the operator or the instance administrator), the grant email
 (`balance_grant_email`), and the refresh ending expired grants after a full read
-(`billing.balance.credit_expired`). `billing_capabilities.cpp` issues a topped-up (or granted)
-account's invoice paid by the balance;
+(`billing.balance.credit_expired`). `give_balance_grant` is the one grant path (the credit, its
+email) that `grant_balance_credit` and coupon redemptions both call. Coupon codes for ads
+(lake#1156) are `coupons.cpp`'s: `create_coupon`, `list_coupons` and `disable_coupon` (the operator
+or the instance administrator) and `redeem_coupon` (a person with `admin` on the account), which
+claims the redemption in the store, then gives the grant through `give_balance_grant` (reference
+`coupon:<coupon id>:<customer id>`), with the failed-attempt limit per person and per client and
+refusals audited with a digest of what was typed, never the code. `web_ui.cpp`'s `coupon_note` says
+on the apex picker and order sheet that a `?code=` goes to the chosen region.
+`billing_capabilities.cpp` issues a topped-up (or granted) account's invoice paid by the balance;
 `stripe.cpp` adds the top-up and card-setup Checkouts, the off-session PaymentIntent and the balance
 events; `console_capabilities.cpp`'s `viewer` answers `balance`.
 

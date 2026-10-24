@@ -1375,6 +1375,103 @@ refresh_account_balances(ApiContext& context,
     co_return report;
 }
 
+namespace {
+// The instance's balance runtime, or the defaults (a registry without a server: tests).
+std::shared_ptr<const BalanceRuntime> balance_runtime_of(const ApiContext& context) {
+    static const auto defaults = std::make_shared<const BalanceRuntime>();
+    return context.balance ? context.balance : defaults;
+}
+} // namespace
+
+json balance_credit_json(const control::BalanceCredit& credit, std::int64_t unused_micros) {
+    return credit_json(credit, unused_micros);
+}
+
+std::string balance_usd(std::int64_t micros) {
+    return usd(micros);
+}
+
+std::optional<std::chrono::sys_seconds> balance_utc_seconds(std::string_view text) {
+    return utc_seconds(text);
+}
+
+std::expected<BalanceGrantOutcome, ApiResult> give_balance_grant(ApiContext& context,
+                                                                 const BalanceGrantRequest& grant) {
+    if (!context.store) {
+        return std::unexpected(no_store());
+    }
+    control::BalanceCredit credit;
+    credit.customer_id = grant.customer_id;
+    credit.kind = "grant";
+    credit.amount_micros = grant.amount_micros;
+    credit.provider = "orama";
+    credit.reference = grant.reference;
+    credit.reason = grant.reason;
+    credit.granted_by = control::utf8_prefix(grant.granted_by, 255);
+    credit.expires_at = grant.expires_at;
+    const auto applied = context.store->apply_balance_credit(credit);
+    if (!applied) {
+        return std::unexpected(from_store(applied.error()));
+    }
+    const auto runtime = balance_runtime_of(context);
+    BalanceRuntime shown = *runtime;
+    shown.origin = link_origin(*runtime, context);
+    const BalanceView view =
+        balance_view(applied->balance, runtime->settings, account_exemption(applied->balance));
+    BalanceGrantOutcome outcome;
+    outcome.duplicate = applied->duplicate;
+    outcome.balance = balance_json(applied->balance, view, shown);
+    outcome.balance_micros = view.balance_micros;
+    if (applied->duplicate) {
+        // A retry with the same reference: granted once, emailed once. The earlier credit, when
+        // the account still lists it.
+        if (const auto credits = context.store->balance_credits(grant.customer_id, 0)) {
+            const auto earlier = std::ranges::find_if(*credits, [&](const auto& kept) {
+                return kept.provider == "orama" && kept.reference == grant.reference;
+            });
+            if (earlier != credits->end()) {
+                outcome.credit = *earlier;
+            }
+        }
+        return outcome;
+    }
+    outcome.credit = applied->credit;
+    // The email, once per grant (its id keys the send).
+    const std::string to = balance_email_recipient(*context.store, grant.customer_id);
+    if (!runtime->mailer) {
+        outcome.email_error = runtime->email_unavailable_reason.empty()
+                                  ? "email is not configured on this Lake"
+                                  : runtime->email_unavailable_reason;
+    } else if (to.empty()) {
+        outcome.email_error = "the account has no email address to send to";
+    } else {
+        const Email message = balance_grant_email(
+            grant.amount_micros,
+            grant.expires_at,
+            view,
+            !applied->balance.first_top_up_at.empty(),
+            std::format("{}/billing?customer_id={}", shown.origin, grant.customer_id),
+            {to});
+        const auto sent = runtime->mailer(message, "lake-balance-grant-" + applied->credit.id);
+        if (sent) {
+            outcome.emailed = true;
+            static_cast<void>(record(context,
+                                     grant.customer_id,
+                                     "billing.balance.email",
+                                     context.acting_identity.empty() ? std::string("operator")
+                                                                     : context.acting_identity,
+                                     grant.action,
+                                     "success",
+                                     {{"crossing", "grant"},
+                                      {"credit_id", applied->credit.id},
+                                      {"balance_micros", view.balance_micros}}));
+        } else {
+            outcome.email_error = control::utf8_prefix(sent.error(), 500);
+        }
+    }
+    return outcome;
+}
+
 void register_balance_capabilities(Registry& registry,
                                    std::shared_ptr<PaymentProviders> providers) {
     // The instance's balance runtime, or the defaults (a registry without a server: tests).
@@ -1871,7 +1968,7 @@ void register_balance_capabilities(Registry& registry,
         .object = "billing balance",
         .action = "admin",
         .resolve_object = administrator_only,
-        .handler = [runtime_of](const json& input, ApiContext& context) {
+        .handler = [](const json& input, ApiContext& context) {
             if (!instance_administrator(context)) {
                 return ApiResult::failure("unauthorized",
                                           "the operator or the instance administrator is required");
@@ -1944,91 +2041,46 @@ void register_balance_capabilities(Registry& registry,
                                               "/expires_at");
                 }
             }
-            control::BalanceCredit credit;
-            credit.customer_id = customer_id;
-            credit.kind = "grant";
-            credit.amount_micros = amount;
-            credit.provider = "orama";
-            credit.reference = "grant-" + (reference.empty() ? control::new_uuid_v4() : reference);
-            credit.reason = reason;
-            credit.granted_by = control::utf8_prefix(
-                context.operator_credential ? std::string("operator") : context.acting_identity,
-                255);
-            credit.expires_at = expires_at;
-            const auto applied = context.store->apply_balance_credit(credit);
-            if (!applied) {
-                return from_store(applied.error());
+            BalanceGrantRequest grant;
+            grant.customer_id = customer_id;
+            grant.amount_micros = amount;
+            grant.reason = reason;
+            grant.expires_at = expires_at;
+            grant.reference = "grant-" + (reference.empty() ? control::new_uuid_v4() : reference);
+            grant.granted_by =
+                context.operator_credential ? std::string("operator") : context.acting_identity;
+            const auto given = give_balance_grant(context, grant);
+            if (!given) {
+                return given.error();
             }
-            const auto runtime = runtime_of(context);
-            BalanceRuntime shown = *runtime;
-            shown.origin = link_origin(*runtime, context);
-            const BalanceView view = balance_view(
-                applied->balance, runtime->settings, account_exemption(applied->balance));
             json out{{"customer_id", customer_id},
-                     {"duplicate", applied->duplicate},
-                     {"balance", balance_json(applied->balance, view, shown)}};
-            if (applied->duplicate) {
+                     {"duplicate", given->duplicate},
+                     {"balance", given->balance}};
+            if (given->duplicate) {
                 // A retry with the same reference: granted once, emailed once.
                 audit(context,
                       customer_id,
                       "billing.balance.credit_granted",
-                      {{"duplicate", true}, {"reference", credit.reference}});
+                      {{"duplicate", true}, {"reference", grant.reference}});
                 return ApiResult::success(std::move(out));
             }
-            out["credit"] = credit_json(applied->credit, amount);
-            // The email, once per grant (its id keys the send).
-            bool emailed = false;
-            std::string email_error;
-            const std::string to = balance_email_recipient(*context.store, customer_id);
-            if (!runtime->mailer) {
-                email_error = runtime->email_unavailable_reason.empty()
-                                  ? "email is not configured on this Lake"
-                                  : runtime->email_unavailable_reason;
-            } else if (to.empty()) {
-                email_error = "the account has no email address to send to";
-            } else {
-                const Email message = balance_grant_email(
-                    amount,
-                    expires_at,
-                    view,
-                    !applied->balance.first_top_up_at.empty(),
-                    std::format("{}/billing?customer_id={}", shown.origin, customer_id),
-                    {to});
-                const auto sent =
-                    runtime->mailer(message, "lake-balance-grant-" + applied->credit.id);
-                if (sent) {
-                    emailed = true;
-                    static_cast<void>(record(context,
-                                             customer_id,
-                                             "billing.balance.email",
-                                             context.acting_identity.empty()
-                                                 ? std::string("operator")
-                                                 : context.acting_identity,
-                                             "grant_balance_credit",
-                                             "success",
-                                             {{"crossing", "grant"},
-                                              {"credit_id", applied->credit.id},
-                                              {"balance_micros", view.balance_micros}}));
-                } else {
-                    email_error = control::utf8_prefix(sent.error(), 500);
-                }
-            }
-            out["emailed"] = emailed;
-            if (!email_error.empty()) {
-                out["email_error"] = email_error;
+            out["credit"] = credit_json(given->credit, amount);
+            out["emailed"] = given->emailed;
+            if (!given->email_error.empty()) {
+                out["email_error"] = given->email_error;
             }
             audit(context,
                   customer_id,
                   "billing.balance.credit_granted",
-                  {{"credit_id", applied->credit.id},
+                  {{"credit_id", given->credit.id},
                    {"amount_micros", amount},
-                   {"reason", credit.reason},
+                   {"reason", reason},
                    {"expires_at", expires_at},
-                   {"granted_by", credit.granted_by},
+                   {"granted_by", given->credit.granted_by},
                    {"by_email", !email.empty()},
-                   {"reference", credit.reference},
-                   {"emailed", emailed},
-                   {"balance_micros", view.balance_micros}});
+                   {"reference", grant.reference},
+                   {"emailed", given->emailed},
+                   {"balance_micros", given->balance_micros}});
             return ApiResult::success(std::move(out));
         }});
 

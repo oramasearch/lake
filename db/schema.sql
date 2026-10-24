@@ -5012,6 +5012,56 @@ CREATE INDEX IF NOT EXISTS account_balance_credits_counting_grants
     ON account_balance_credits (customer_id) WHERE kind = 'grant' AND ended_at IS NULL;
 CREATE TABLE IF NOT EXISTS balance_grants_guard (applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0100_balance_grants') ON CONFLICT DO NOTHING;
+-- 0101_coupons (lake#1156, docs/api/billing.md#coupon-codes): codes the operator puts in ads, each
+-- worth an amount of cloud credit. A redemption is an ordinary grant from Orama (0100), with the
+-- reference `coupon:<coupon id>:<customer id>`, so the spending order, expiry and no-overdraft rules
+-- are the grant's. Billing, so in the control plane (decision 56). Codes are stored normalized
+-- (upper case letters and digits). One redemption per account and per verified email (kept as a
+-- SHA-256 digest of the normalized address, never the address); `redemptions` is the count the
+-- total cap is checked against, under the coupon's row lock. Failed attempts are counted per client
+-- and per person in `billing_coupon_attempts` (SHA-256 digests of the keys, never a code). Additive:
+-- three new tables and a guard.
+CREATE TABLE IF NOT EXISTS billing_coupons (
+    id                uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    code              text        NOT NULL UNIQUE CHECK (code ~ '^[A-Z0-9]{4,32}$'),
+    amount_micros     bigint      NOT NULL CHECK (amount_micros BETWEEN 10000 AND 10000000000
+                                                  AND amount_micros % 10000 = 0),
+    credit_days       integer     NOT NULL CHECK (credit_days BETWEEN 1 AND 3650),
+    expires_at        timestamptz,
+    max_redemptions   integer     CHECK (max_redemptions IS NULL OR max_redemptions BETWEEN 1 AND 10000000),
+    new_accounts_only boolean     NOT NULL DEFAULT true,
+    campaign          text        NOT NULL DEFAULT ''
+                                  CHECK (campaign = '' OR campaign ~ '^[a-z0-9][a-z0-9._-]{0,63}$'),
+    redemptions       integer     NOT NULL DEFAULT 0
+                                  CHECK (redemptions >= 0 AND (max_redemptions IS NULL
+                                                               OR redemptions <= max_redemptions)),
+    created_by        text        NOT NULL CHECK (length(created_by) BETWEEN 1 AND 255),
+    created_at        timestamptz NOT NULL DEFAULT now(),
+    disabled_at       timestamptz,
+    disabled_by       text        NOT NULL DEFAULT '' CHECK (length(disabled_by) <= 255)
+);
+CREATE INDEX IF NOT EXISTS billing_coupons_by_campaign ON billing_coupons (campaign, created_at DESC);
+CREATE TABLE IF NOT EXISTS billing_coupon_redemptions (
+    id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    coupon_id    uuid        NOT NULL REFERENCES billing_coupons(id) ON DELETE CASCADE,
+    customer_id  uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    email_sha256 text        NOT NULL CHECK (email_sha256 ~ '^[0-9a-f]{64}$'),
+    redeemed_by  text        NOT NULL CHECK (length(redeemed_by) BETWEEN 1 AND 255),
+    credit_id    uuid        REFERENCES account_balance_credits(id) ON DELETE SET NULL,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (coupon_id, customer_id),
+    UNIQUE (coupon_id, email_sha256)
+);
+CREATE INDEX IF NOT EXISTS billing_coupon_redemptions_by_customer
+    ON billing_coupon_redemptions (customer_id);
+CREATE TABLE IF NOT EXISTS billing_coupon_attempts (
+    key_sha256   text        PRIMARY KEY CHECK (key_sha256 ~ '^[0-9a-f]{64}$'),
+    failures     integer     NOT NULL CHECK (failures >= 0),
+    window_start timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS billing_coupon_attempts_by_window ON billing_coupon_attempts (window_start);
+CREATE TABLE IF NOT EXISTS coupons_guard (applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0101_coupons') ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------------------------
 -- 0103_clerk_session_binding (lake#1163, docs/api/clerk.md#webhooks): each Lake browser session

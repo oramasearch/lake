@@ -671,7 +671,14 @@ work without being on the list. `test_postgres.cpp`'s `*.AccountBalancesFollowTh
 store contract on both stores. `BalanceGrant.*` covers credits from Orama (lake#1134): who may give
 and revoke, the input checks, by id and by email, the email once, no overdraft from a grant alone,
 expiry and revocation forfeiting only the unused part, and the allocation order;
-`*.BalanceGrantsFollowTheContract` run their store contract on both stores.
+`*.BalanceGrantsFollowTheContract` run their store contract on both stores. `test_coupons.cpp`
+covers coupon codes (lake#1156): `Coupon.*` (who may create, list, disable and redeem; the create
+checks and generated codes; a redemption as an ordinary grant with its email and central audit; one
+per account and per inbox; the cap, expiry and disabling; new accounts only; the failed-attempt
+limit and refusals audited without the code; an interrupted redemption finished once; the campaign
+report) and `CouponStore.*FollowsTheContract` on both stores. `test_regions.cpp`'s
+`RegionsApex.ACouponCodeGoesToTheChosenRegion` and `test_orders.cpp`'s
+`OrdersApex.TheOrderSheetCarriesACouponCodeToTheRegion` check the apex carries `?code=`.
 
 The audit split by subject (decision 52, lake#317): `test_workspace_records.cpp`'s
 `AuditEventsAboutAWorkspaceLiveInItsOwnChain` covers the `AuditRecorder` and the readers across two

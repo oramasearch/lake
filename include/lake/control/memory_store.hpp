@@ -440,6 +440,21 @@ public:
                                                           const std::string& at,
                                                           const std::string& revoke_id) override;
     Result<Customer> personal_account_by_email(const std::string& email) override;
+    Result<Coupon> create_coupon(const Coupon& coupon) override;
+    Result<Coupon> coupon_by_code(const std::string& code) override;
+    Result<Coupon> get_coupon(const std::string& coupon_id) override;
+    Result<std::vector<CouponReport>> coupon_reports(const std::string& campaign) override;
+    Result<Coupon> disable_coupon(const std::string& coupon_id, const std::string& by) override;
+    Result<CouponRedemption> coupon_redemption(const std::string& coupon_id,
+                                               const std::string& customer_id) override;
+    Result<CouponClaim> claim_coupon(const CouponRedemption& redemption) override;
+    Result<void> finish_coupon_redemption(const std::string& redemption_id,
+                                          const std::string& credit_id) override;
+    Result<bool> coupon_attempts_exhausted(const std::vector<std::string>& keys,
+                                           int limit,
+                                           int window_seconds) override;
+    Result<void> coupon_attempt_failed(const std::vector<std::string>& keys,
+                                       int window_seconds) override;
     Result<CloudOrder> create_cloud_order(const NewCloudOrder& order) override;
     Result<CloudOrder> get_cloud_order(const std::string& id) override;
     Result<CloudOrder> transition_cloud_order(const CloudOrderTransition& change) override;
@@ -724,6 +739,11 @@ private:
     std::vector<BalanceCredit> balance_credits_;
     std::map<std::pair<std::string, std::string>, BalanceCharge> balance_charges_;
     AccountBalance account_balance_locked(const std::string& customer_id) const;
+    // Coupon codes (migration 0101): the coupons in order, their redemptions, and the failed
+    // attempts per key (failures, when the window started).
+    std::vector<Coupon> coupons_;
+    std::vector<CouponRedemption> coupon_redemptions_;
+    std::map<std::string, std::pair<int, std::chrono::system_clock::time_point>> coupon_attempts_;
     // Cloud orders (migration 0089), their events, and when each order's next email is due.
     std::vector<CloudOrder> cloud_orders_;
     std::vector<CloudOrderEvent> cloud_order_events_;

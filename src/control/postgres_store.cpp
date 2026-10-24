@@ -8212,6 +8212,319 @@ public:
             });
     }
 
+    // Coupon codes (migration 0101, lake#1156, docs/api/billing.md#coupon-codes).
+    static std::string coupon_columns(std::string_view table = "") {
+        const std::string t = table.empty() ? std::string() : std::string(table) + ".";
+        return t + "id::text, " + t + "code, " + t + "amount_micros, " + t + "credit_days, " +
+               "coalesce(to_char(" + t +
+               "expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), " + t +
+               "max_redemptions, " + t + "new_accounts_only, " + t + "campaign, " + t +
+               "redemptions, " + t + "created_by, " + balance_time(t + "created_at") + ", " +
+               balance_time(t + "disabled_at") + ", " + t + "disabled_by";
+    }
+
+    static Coupon coupon_of(const pqxx::row& row) {
+        Coupon coupon;
+        coupon.id = row[0].as<std::string>();
+        coupon.code = row[1].as<std::string>();
+        coupon.amount_micros = row[2].as<std::int64_t>();
+        coupon.credit_days = row[3].as<int>();
+        coupon.expires_at = row[4].as<std::string>();
+        if (!row[5].is_null()) {
+            coupon.max_redemptions = row[5].as<int>();
+        }
+        coupon.new_accounts_only = row[6].as<bool>();
+        coupon.campaign = row[7].as<std::string>();
+        coupon.redemptions = row[8].as<int>();
+        coupon.created_by = row[9].as<std::string>();
+        coupon.created_at = row[10].as<std::string>();
+        coupon.disabled_at = row[11].as<std::string>();
+        coupon.disabled_by = row[12].as<std::string>();
+        return coupon;
+    }
+
+    static std::string redemption_columns() {
+        return "id::text, coupon_id::text, customer_id::text, email_sha256, redeemed_by, "
+               "coalesce(credit_id::text, ''), " +
+               balance_time("created_at");
+    }
+
+    static CouponRedemption redemption_of(const pqxx::row& row) {
+        return {row[0].as<std::string>(),
+                row[1].as<std::string>(),
+                row[2].as<std::string>(),
+                row[3].as<std::string>(),
+                row[4].as<std::string>(),
+                row[5].as<std::string>(),
+                row[6].as<std::string>()};
+    }
+
+    Result<Coupon> create_coupon(const Coupon& coupon) override {
+        if (const auto problem = coupon_problem(coupon)) {
+            return std::unexpected(StoreError{"invalid_input", *problem});
+        }
+        return with_tx<Coupon>([&](pqxx::work& tx) -> Result<Coupon> {
+            const pqxx::result inserted = tx.exec_params(
+                "INSERT INTO billing_coupons (code, amount_micros, credit_days, expires_at, "
+                "max_redemptions, new_accounts_only, campaign, created_by) VALUES ($1, $2, $3, "
+                "$4::timestamptz, $5, $6, $7, $8) ON CONFLICT (code) DO NOTHING RETURNING " +
+                    coupon_columns(),
+                coupon.code,
+                coupon.amount_micros,
+                coupon.credit_days,
+                coupon.expires_at.empty() ? std::nullopt
+                                          : std::optional<std::string>(coupon.expires_at),
+                coupon.max_redemptions,
+                coupon.new_accounts_only,
+                coupon.campaign,
+                coupon.created_by);
+            if (inserted.empty()) {
+                return std::unexpected(
+                    StoreError{"conflict", "the code " + coupon.code + " is taken"});
+            }
+            return coupon_of(inserted[0]);
+        });
+    }
+
+    Result<Coupon> coupon_by_code(const std::string& code) override {
+        return with_tx<Coupon>([&](pqxx::work& tx) -> Result<Coupon> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT " + coupon_columns() + " FROM billing_coupons WHERE code = $1", code);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no such code"});
+            }
+            return coupon_of(rows[0]);
+        });
+    }
+
+    Result<Coupon> get_coupon(const std::string& coupon_id) override {
+        return with_tx<Coupon>([&](pqxx::work& tx) -> Result<Coupon> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT " + coupon_columns() + " FROM billing_coupons WHERE id::text = $1",
+                coupon_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no coupon " + coupon_id});
+            }
+            return coupon_of(rows[0]);
+        });
+    }
+
+    Result<std::vector<CouponReport>> coupon_reports(const std::string& campaign) override {
+        return with_tx<std::vector<CouponReport>>(
+            [&](pqxx::work& tx) -> Result<std::vector<CouponReport>> {
+                // Per redemption: whether its grant was given, whether the account's first paid
+                // top-up came after it, what the account was charged after its grant was given,
+                // and what it paid in top-ups after redeeming. Then summed per coupon.
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT " + coupon_columns("c") +
+                        ", count(r.id) FILTER (WHERE r.credit_id IS NOT NULL), count(r.id) FILTER "
+                        "(WHERE b.first_top_up_at >= r.created_at), coalesce(sum(greatest(ch.total "
+                        "- coalesce(cr.charges_at_grant_micros, 0), 0)), 0)::bigint, "
+                        "coalesce(sum(p.paid), 0)::bigint FROM billing_coupons c LEFT JOIN "
+                        "billing_coupon_redemptions r ON r.coupon_id = c.id LEFT JOIN "
+                        "account_balances b ON b.customer_id = r.customer_id LEFT JOIN "
+                        "account_balance_credits cr ON cr.id = r.credit_id LEFT JOIN LATERAL "
+                        "(SELECT coalesce(sum(amount_micros), 0)::bigint AS total FROM "
+                        "account_balance_charges WHERE customer_id = r.customer_id) ch ON true "
+                        "LEFT JOIN LATERAL (SELECT coalesce(sum(amount_micros), 0)::bigint AS paid "
+                        "FROM account_balance_credits WHERE customer_id = r.customer_id AND kind "
+                        "<> 'grant' AND created_at > r.created_at) p ON true WHERE $1 = '' OR "
+                        "c.campaign = $1 GROUP BY c.id ORDER BY c.created_at DESC, c.id",
+                    campaign);
+                std::vector<CouponReport> out;
+                for (const pqxx::row row : rows) {
+                    CouponReport report{.coupon = coupon_of(row)};
+                    report.redeemed = row[13].as<int>();
+                    report.topped_up = row[14].as<int>();
+                    report.spend_micros = row[15].as<std::int64_t>();
+                    report.paid_micros = row[16].as<std::int64_t>();
+                    out.push_back(std::move(report));
+                }
+                return out;
+            });
+    }
+
+    Result<Coupon> disable_coupon(const std::string& coupon_id, const std::string& by) override {
+        return with_tx<Coupon>([&](pqxx::work& tx) -> Result<Coupon> {
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE billing_coupons SET disabled_at = coalesce(disabled_at, now()), "
+                "disabled_by = CASE WHEN disabled_at IS NULL THEN $2 ELSE disabled_by END WHERE "
+                "id::text = $1 RETURNING " +
+                    coupon_columns(),
+                coupon_id,
+                utf8_prefix(by, 255));
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no coupon " + coupon_id});
+            }
+            return coupon_of(rows[0]);
+        });
+    }
+
+    Result<CouponRedemption> coupon_redemption(const std::string& coupon_id,
+                                               const std::string& customer_id) override {
+        return with_tx<CouponRedemption>([&](pqxx::work& tx) -> Result<CouponRedemption> {
+            const pqxx::result rows =
+                tx.exec_params("SELECT " + redemption_columns() +
+                                   " FROM billing_coupon_redemptions WHERE coupon_id::text = $1 "
+                                   "AND customer_id::text = $2",
+                               coupon_id,
+                               customer_id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "the account has not redeemed this code"});
+            }
+            return redemption_of(rows[0]);
+        });
+    }
+
+    Result<CouponClaim> claim_coupon(const CouponRedemption& redemption) override {
+        if (redemption.email_sha256.size() != 64 || redemption.redeemed_by.empty()) {
+            return std::unexpected(
+                StoreError{"invalid_input", "a redemption names the person and their email"});
+        }
+        return with_tx<CouponClaim>([&](pqxx::work& tx) -> Result<CouponClaim> {
+            // The coupon's row lock orders every claim of one code: the cap and the uniqueness
+            // checks below see every earlier claim.
+            const pqxx::result coupons = tx.exec_params(
+                "SELECT " + coupon_columns() +
+                    ", (expires_at IS NOT NULL AND expires_at <= now()) FROM billing_coupons "
+                    "WHERE id::text = $1 FOR UPDATE",
+                redemption.coupon_id);
+            if (coupons.empty()) {
+                return std::unexpected(StoreError{"not_found", "no such code"});
+            }
+            Coupon coupon = coupon_of(coupons[0]);
+            const bool expired = coupons[0][13].as<bool>();
+            const pqxx::result customer = tx.exec_params(
+                "SELECT (created_at < (SELECT created_at FROM billing_coupons WHERE id::text = "
+                "$2)) FROM customers WHERE id::text = $1",
+                redemption.customer_id,
+                redemption.coupon_id);
+            if (customer.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no customer " + redemption.customer_id});
+            }
+            const auto conflict = [](std::string reason) {
+                return std::unexpected(StoreError{"conflict", std::move(reason)});
+            };
+            for (const pqxx::row row :
+                 tx.exec_params("SELECT " + redemption_columns() +
+                                    " FROM billing_coupon_redemptions WHERE coupon_id = $1::uuid "
+                                    "AND (customer_id::text = $2 OR email_sha256 = $3)",
+                                coupon.id,
+                                redemption.customer_id,
+                                redemption.email_sha256)) {
+                const CouponRedemption kept = redemption_of(row);
+                if (kept.customer_id == redemption.customer_id) {
+                    if (kept.credit_id.empty() && kept.email_sha256 == redemption.email_sha256) {
+                        return CouponClaim{.resumed = true, .redemption = kept, .coupon = coupon};
+                    }
+                    return conflict("already_redeemed");
+                }
+            }
+            if (!tx.exec_params("SELECT 1 FROM billing_coupon_redemptions WHERE coupon_id = "
+                                "$1::uuid AND email_sha256 = $2",
+                                coupon.id,
+                                redemption.email_sha256)
+                     .empty()) {
+                return conflict("email_redeemed");
+            }
+            if (!coupon.disabled_at.empty()) {
+                return conflict("disabled");
+            }
+            if (expired) {
+                return conflict("expired");
+            }
+            if (coupon.max_redemptions && coupon.redemptions >= *coupon.max_redemptions) {
+                return conflict("used_up");
+            }
+            if (coupon.new_accounts_only) {
+                if (customer[0][0].as<bool>()) {
+                    return conflict("not_new_account");
+                }
+                if (!tx.exec_params(
+                           "SELECT 1 FROM account_balance_credits WHERE customer_id::text = $1 "
+                           "UNION ALL SELECT 1 FROM account_balance_charges WHERE "
+                           "customer_id::text = $1 AND amount_micros > 0 UNION ALL SELECT 1 FROM "
+                           "billing_invoices WHERE customer_id::text = $1 AND total_micros > 0 AND "
+                           "state <> 'void' LIMIT 1",
+                           redemption.customer_id)
+                         .empty()) {
+                    return conflict("account_used");
+                }
+            }
+            const pqxx::result inserted = tx.exec_params(
+                "INSERT INTO billing_coupon_redemptions (coupon_id, customer_id, email_sha256, "
+                "redeemed_by) VALUES ($1::uuid, $2::uuid, $3, $4) RETURNING " +
+                    redemption_columns(),
+                coupon.id,
+                redemption.customer_id,
+                redemption.email_sha256,
+                utf8_prefix(redemption.redeemed_by, 255));
+            tx.exec_params(
+                "UPDATE billing_coupons SET redemptions = redemptions + 1 WHERE id = $1::uuid",
+                coupon.id);
+            ++coupon.redemptions;
+            return CouponClaim{
+                .resumed = false, .redemption = redemption_of(inserted[0]), .coupon = coupon};
+        });
+    }
+
+    Result<void> finish_coupon_redemption(const std::string& redemption_id,
+                                          const std::string& credit_id) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            if (tx.exec_params("UPDATE billing_coupon_redemptions SET credit_id = $2::uuid WHERE "
+                               "id::text = $1 RETURNING 1",
+                               redemption_id,
+                               credit_id)
+                    .empty()) {
+                return std::unexpected(StoreError{"not_found", "no redemption " + redemption_id});
+            }
+            return {};
+        });
+    }
+
+    Result<bool> coupon_attempts_exhausted(const std::vector<std::string>& keys,
+                                           int limit,
+                                           int window_seconds) override {
+        return with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            for (const std::string& key : keys) {
+                if (!tx.exec_params("SELECT 1 FROM billing_coupon_attempts WHERE key_sha256 = $1 "
+                                    "AND failures >= $2 AND window_start > now() - make_interval("
+                                    "secs => $3)",
+                                    key,
+                                    limit,
+                                    window_seconds)
+                         .empty()) {
+                    return true;
+                }
+            }
+            return false;
+        });
+    }
+
+    Result<void> coupon_attempt_failed(const std::vector<std::string>& keys,
+                                       int window_seconds) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            // Windows long past are forgotten, so the table holds only recent clients.
+            tx.exec_params("DELETE FROM billing_coupon_attempts WHERE window_start < now() - "
+                           "make_interval(secs => $1) * 24",
+                           window_seconds);
+            for (const std::string& key : keys) {
+                tx.exec_params(
+                    "INSERT INTO billing_coupon_attempts (key_sha256, failures) VALUES ($1, 1) ON "
+                    "CONFLICT (key_sha256) DO UPDATE SET failures = CASE WHEN "
+                    "billing_coupon_attempts.window_start <= now() - make_interval(secs => $2) "
+                    "THEN 1 ELSE billing_coupon_attempts.failures + 1 END, window_start = CASE "
+                    "WHEN billing_coupon_attempts.window_start <= now() - make_interval(secs => "
+                    "$2) THEN now() ELSE billing_coupon_attempts.window_start END",
+                    key,
+                    window_seconds);
+            }
+            return {};
+        });
+    }
+
     // Cloud orders (lake#831, migration 0089, docs/api/orders.md).
     static constexpr const char* cloud_order_columns =
         "id::text, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "

@@ -186,9 +186,49 @@ refresh_account_balances(ApiContext& context,
                          const BalanceRuntime& runtime,
                          std::string customer_id = {});
 
+// One grant from Orama (lake#1134), as grant_balance_credit gives it and as a redeemed coupon code
+// becomes one (lake#1156): the account, the amount (whole cents, $0.01 to $10,000), the reason
+// shown to the account, when it stops counting (UTC, YYYY-MM-DDTHH:MM:SSZ; empty: never), the
+// stored reference (the idempotency key: the same reference grants once) and who gave it.
+struct BalanceGrantRequest {
+    std::string customer_id;
+    std::int64_t amount_micros = 0;
+    std::string reason, expires_at, reference, granted_by;
+    std::string action = "grant_balance_credit"; // the capability giving it, for the email's audit
+};
+// What giving it did: `duplicate` when the reference was used before (nothing more was given or
+// emailed; `credit` is the earlier one when the store has it), the credit, whether the account
+// was emailed and why not, and the account's balance after, as account_balance answers it.
+struct BalanceGrantOutcome {
+    bool duplicate = false;
+    control::BalanceCredit credit;
+    bool emailed = false;
+    std::string email_error;
+    nlohmann::json balance;
+    std::int64_t balance_micros = 0;
+};
+// The one grant path: records the grant (apply_balance_credit: spent before paid money, never
+// unlocking the overdraft, clearing the crossings' marks) and emails the account once, keyed by the
+// grant. The caller checks the input and who may give it, and audits.
+std::expected<BalanceGrantOutcome, ApiResult> give_balance_grant(ApiContext& context,
+                                                                 const BalanceGrantRequest& grant);
+// A credit's row as account_balance lists it (a grant: "Credit from Orama", what is left unused).
+nlohmann::json balance_credit_json(const control::BalanceCredit& credit,
+                                   std::int64_t unused_micros);
+// "$12.34", "-$52.10".
+std::string balance_usd(std::int64_t micros);
+// A whole-second UTC time, "YYYY-MM-DDTHH:MM:SSZ", or nullopt when `text` is not one.
+std::optional<std::chrono::sys_seconds> balance_utc_seconds(std::string_view text);
+
 // account_balance, start_top_up, set_auto_top_up, set_balance_overdraft,
 // refresh_account_balance, grant_balance_credit and revoke_balance_credit, registered by
 // register_billing_capabilities where billing is on.
 void register_balance_capabilities(Registry& registry, std::shared_ptr<PaymentProviders> providers);
+
+// Coupon codes for ads (lake#1156, docs/api/billing.md#coupon-codes): create_coupon,
+// list_coupons and disable_coupon (the operator or the instance administrator) and redeem_coupon
+// (a person, for an account they administer), registered by register_billing_capabilities where
+// billing is on. A redemption is a grant given through give_balance_grant.
+void register_coupon_capabilities(Registry& registry);
 
 } // namespace lake::api
