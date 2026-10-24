@@ -8031,12 +8031,16 @@ struct ApiServer::Impl {
                     }
                     const auto next = std::ranges::min_element(
                         search_jobs, {}, [](const auto& queued) { return std::get<1>(queued); });
-                    if (std::get<1>(*next) <= std::chrono::steady_clock::now()) {
+                    const auto deadline = std::get<1>(*next);
+                    if (deadline <= std::chrono::steady_clock::now()) {
                         job = std::move(std::get<2>(*next));
                         search_jobs.erase(next);
                         break;
                     }
-                    search_jobs_cv.wait_until(lock, std::get<1>(*next));
+                    // A copy of the deadline: wait_until reads it after it took the lock back,
+                    // when another thread may have grown or shrunk search_jobs and moved the
+                    // element `next` pointed at (lake#1176). `next` is not used after the wait.
+                    search_jobs_cv.wait_until(lock, deadline);
                 }
             }
             job();

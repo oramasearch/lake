@@ -1,5 +1,10 @@
 # Control stores
 
+`InMemoryStore` keeps its records in `std::vector`s: never hold an iterator, pointer or reference
+into one across a `push_back`, `emplace_back` or `erase` on the same vector; copy the id first.
+`upsert_scim_group` read the team's policy object through an iterator after pushing member objects
+onto `policy_objects_`, a heap-use-after-free AddressSanitizer found (lake#1175).
+
 Both stores reject disabled or missing users when resolving agent launch, schedule and task
 credentials (lake#951). Creation, claims and renewal serialize with offboarding on the user row
 (or the memory-store mutex), so a cached stream context cannot create fresh authority afterwards.

@@ -6161,6 +6161,9 @@ Result<ScimGroup> InMemoryStore::upsert_scim_group(const NewScimGroup& input) {
     if (team_object == policy_objects_.end()) {
         return std::unexpected(StoreError{"store_error", "team policy object is missing"});
     }
+    // A copy, not the iterator: the erase and push_back on policy_objects_ below move or free the
+    // element it points at (lake#1175, a heap-use-after-free under AddressSanitizer).
+    const std::string team_object_id = team_object->id;
     std::vector<std::string> removed_membership_ids;
     for (const ScimGroupMember& member : scim_group_members_) {
         const bool belongs_to_group = member.provider_id == input.provider_id &&
@@ -6183,7 +6186,7 @@ Result<ScimGroup> InMemoryStore::upsert_scim_group(const NewScimGroup& input) {
         grants_.erase(std::remove_if(grants_.begin(),
                                      grants_.end(),
                                      [&](const Grant& grant) {
-                                         return grant.object_id == team_object->id &&
+                                         return grant.object_id == team_object_id &&
                                                 grant.principal_taap_id ==
                                                     membership->principal_taap_id;
                                      }),
@@ -6243,10 +6246,10 @@ Result<ScimGroup> InMemoryStore::upsert_scim_group(const NewScimGroup& input) {
                               now};
         memberships_.push_back(membership);
         policy_objects_.push_back(
-            PolicyObject{new_uuid_v4(), "member", membership.id, team_object->id, now, now, true});
+            PolicyObject{new_uuid_v4(), "member", membership.id, team_object_id, now, now, true});
         grants_.push_back(Grant{new_uuid_v4(),
                                 lake_user->taap_id,
-                                team_object->id,
+                                team_object_id,
                                 "read",
                                 membership.attestation_digest,
                                 membership.granted_by_taap_id,

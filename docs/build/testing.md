@@ -284,3 +284,32 @@ The existing `SearchBenchmark.BuildAndQueryTenThousandFiles` is disabled in both
 PostgreSQL or optional-client cases skipped in these two runs. The four new regressions also
 passed together with shuffle seed 138, and the organization/policy case passed twice in one
 process. `lake version` and a launched server's `/v1/server_info` passed the binary smoke check.
+
+## AddressSanitizer
+
+A segfault, bus error or abort in any test or in the `lake` binary means an AddressSanitizer run of
+the whole suite, even when the crash does not come back. Build in its own directory and run every
+test under it:
+
+```sh
+cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLAKE_BUILD_TESTS=ON \
+  -DLAKE_LIQUID_SOURCE_DIR=<liquid> -DLAKE_ZETTA_SOURCE_DIR=<zetta> \
+  -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+  -DCMAKE_C_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+  -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address
+cmake --build build-asan -j 4
+ASAN_OPTIONS=detect_leaks=0 LAKE_TEST_DB_URI=... ctest --test-dir build-asan --output-on-failure \
+  > asan.log 2>&1
+grep -c 'ERROR: AddressSanitizer' asan.log   # must be 0
+```
+
+macOS's ASan does not detect leaks, hence `detect_leaks=0`. Every report is fixed or filed with its
+stack. The first run (lake#1168, a null control store in the owner loop) found a
+heap-use-after-free in `InMemoryStore::upsert_scim_group` (lake#1175) and a container-overflow in
+`run_search_jobs` (lake#1176).
+
+`RegistryStore.ALargeLayerIsStreamedNeverHeldWhole` checks the push and the streamed pull under
+ASan and skips only its held-memory bound. ASan's macOS malloc zone reports `size_in_use` as every
+byte ever allocated: in a probe, 64 MiB freed still read 64 MiB and 1 GiB allocated and freed read
+1088 MiB, with the quarantine at its default or at zero, where the system allocator reads 0. The
+304 MiB pull read as 6.2 to 6.7 GiB of growth under ASan and 8 MiB in the normal build.

@@ -1,5 +1,11 @@
 # Tests
 
+`test_api.cpp`'s `StorelessStartup.LakeWithNoControlStoreServesAndStopsCleanly` starts the `lake`
+executable with no control store and checks that it stays live (`/healthz` 200, `/readyz` 503), reports `store: none`,
+survives the owner loop's first pass and exits 0 on SIGTERM, not SIGSEGV (lake#1168). The SCIM
+tests (`Scim.*`, `ScimHttp.*`) and `WorkspaceStoreSearch.*` cover lake#1175 and lake#1176, which
+show only under AddressSanitizer; see [testing](../docs/build/testing.md#addresssanitizer).
+
 `test_workspace_records.cpp` runs `DisablingAUserRevokesAgentDelegation` and
 `DisabledUsersCannotDriveAgentOrMcpStreams` on memory and PostgreSQL (lake#951). They exercise
 retained launch/schedule/task credentials, direct disabled rows, lease renewal and queued claims,

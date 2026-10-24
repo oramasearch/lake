@@ -24,6 +24,13 @@ With `--memory-store` the control plane is `InMemoryStore`; otherwise a non-empt
 selects the Postgres store. `server_info` reports which one as `store` (`memory`, `postgres`, or
 `none` when neither is configured).
 
+With no store, lake still starts and serves what needs none: `/healthz` answers 200 and `/readyz`,
+which is control-store readiness, 503;
+the owner loop skips its store sweeps (app authorization codes, unstarted agent launches and
+methodology runs), and SIGTERM stops it with exit 0. Before lake#1168 the loop called the null
+store on its first pass and lake died with SIGSEGV (exit 139) a moment after start;
+`StorelessStartup.LakeWithNoControlStoreServesAndStopsCleanly` starts the executable this way.
+
 ## Environment
 
 | Variable | Meaning | Owner |
