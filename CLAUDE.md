@@ -854,9 +854,11 @@ dev, accounts are added in the Clerk application `lake`, never through the site.
 
 ## Testing in a browser
 
-Sign in to lake.oramadev.net from a browser, and walk every page, with a one-time Clerk sign-in
-ticket: [`docs/deployment/browser-testing.md`](docs/deployment/browser-testing.md)
-(`tools/e2e/clerk-ticket.sh`, then `tools/e2e/walkthrough.mjs`). Do it after any roll that changes
+Sign in to lake-dev.oramadev.net (dev; `lake.oramadev.net` is retired) from a browser, and walk
+every page, with a one-time Clerk sign-in ticket:
+[`docs/deployment/browser-testing.md`](docs/deployment/browser-testing.md)
+(`tools/e2e/clerk-ticket.sh` with the key from Secret `lake/clerk-lake-dev`, then
+`tools/e2e/walkthrough.mjs`; sign-in lands on `/`). Do it after any roll that changes
 what a person sees, and look at the screenshots before calling a UI change done.
 
 ## Where to read Zetta

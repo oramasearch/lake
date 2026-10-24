@@ -107,8 +107,8 @@ See [deletion.md](deletion.md).
 `npx tsc --noEmit -p .`, `npm test` and `npm run build` from `frontend/` (the build also runs
 `check-effects` and `check-list-errors`). To look at the pages without a lake, serve them with
 `npx vite` and answer `/v1/*` from Playwright's `page.route` with fixtures for the reads above
-(`workspace_query` answers by its `capability`). `tools/e2e/storage.mjs` drives the Storage card
-on a live lake.
+(`workspace_query` answers by its `capability`). `tools/e2e/storage.mjs` drives the Storage tab
+(Data → Drives → Storage, `/storage`) on a live lake.
 
 ## How to change
 

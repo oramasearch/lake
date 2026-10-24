@@ -1,303 +1,358 @@
-// End-to-end browser walkthrough of lake (docs/deployment/browser-testing.md): Clerk sign-in with a
-// one-time ticket, then every Design, Train and Ship page, with a screenshot per step and a
-// log.json. It creates one project and one Postgres service in the signed-in customer's space and
-// deletes both again, with any e2e- projects an earlier run left behind.
+// End-to-end browser walkthrough of lake's console (docs/deployment/browser-testing.md): Clerk
+// sign-in with a one-time ticket, landing on `/` (Ask Orama), then Design, Train and Ship as a
+// person does them, with a screenshot per step, a log.json, and pass/fail checks (exit 1 on any
+// failure).
 //
 //   node tools/e2e/walkthrough.mjs <base-url> <ticket-file> <output-dir>
 //
-// Playwright comes from the sibling orama-website-v2 checkout, as the UI tools do; set PLAYWRIGHT to
-// point at another playwright package. Not C++: keep it out of git clang-format.
-import fs from "node:fs";
+// A new account is blocked until its first top-up: the walkthrough adds the first $20 on Stripe's
+// test Checkout (refused unless the session is test mode) and starts the first workspace from Ask
+// Orama's home. It creates one project, one dataset, one search index and one Postgres service in
+// the signed-in person's workspace, and deletes the project, the service and any e2e- project or
+// service an earlier run left behind. lib.mjs finds Playwright. Not C++: keep it out of git
+// clang-format.
+import { api, args, ensureFunds, ensureWorkspace, errorText, inWorkspace, loadChromium, logger, newPage, shooter, signIn, until } from "./lib.mjs";
 
-const candidates = [
-  process.env.PLAYWRIGHT,
-  "playwright",
-  new URL("../../../../../orama-website-v2/node_modules/playwright/index.mjs", import.meta.url).href,
-].filter(Boolean);
-let chromium;
-for (const spec of candidates) { try { ({ chromium } = await import(spec)); break; } catch {} }
-if (!chromium) { console.error(`Playwright not found. Tried:\n  ${candidates.join("\n  ")}`); process.exit(1); }
+const { base, ticketFile, out } = args("node tools/e2e/walkthrough.mjs <base-url> <ticket-file> <output-dir>");
+const chromium = await loadChromium();
+const log = logger(out);
+const { note, check, failed } = log;
+const { browser, page } = await newPage(chromium, base);
+const shot = shooter(page, out);
+const main = () => page.locator("main");
+const dialog = () => page.getByRole("dialog");
+const h1 = async () => (await main().getByRole("heading", { level: 1 }).first().innerText().catch(() => "")).trim();
+const settle = () => page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+let viewer;
+let workspace = "";
+const ws = (path) => inWorkspace(base, workspace, path);
+const stamp = Date.now().toString(36);
 
-const [base, ticketFile, out] = process.argv.slice(2);
-const ticket = fs.readFileSync(ticketFile, "utf8").trim();
-fs.mkdirSync(out, { recursive: true });
-const log = [];
-const note = (step, detail) => { log.push({ step, ...detail }); console.log(step, JSON.stringify(detail)); };
-
-const browser = await chromium.launch();
-const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
-const page = await context.newPage();
-let n = 0;
-const shot = async (name) => page.screenshot({ path: `${out}/${String(++n).padStart(2, "0")}-${name}.png` });
-const text = async () => (await page.locator("main").innerText()).replace(/\s+/g, " ").slice(0, 400);
-const errorText = async () => (await page.locator("main .error").allInnerTexts()).join(" | ");
-
-try {
-  // 1. Sign in through Clerk's own form, which consumes the ticket, then lake's exchange.
-  await page.goto(`${base}/sign-in?__clerk_ticket=${encodeURIComponent(ticket)}`);
-  await page.waitForURL(`${base}/repositories**`, { timeout: 60000 });
-  await shot("repositories");
-  note("sign-in", { url: page.url(), you: (await page.content()).includes("(you)") || (await page.content()).includes("your personal space") });
-
-  // 2. Design: the workspace gate, then wait for it to be ready.
+/** Design → Projects → New project, then Build pipeline from its intent; the pipeline page: the
+ * graph, a step and an edge added, Approve and Check; then Check and run from the project. */
+async function design() {
+  const project = `e2e-${stamp}`;
   await page.goto(`${base}/design/projects`);
-  await shot("projects-gate");
-  if (await page.getByRole("button", { name: "Start your workspace" }).count()) {
-    await page.getByRole("button", { name: "Start your workspace" }).click();
-    await page.waitForLoadState("load");
-    note("start-workspace", { text: await text() });
-  }
-  const deadline = Date.now() + 8 * 60 * 1000;
-  while (Date.now() < deadline) {
-    await page.goto(`${base}/design/projects`);
-    if (await page.locator("form[action='/design/projects/create']").count()) break;
-    if ((await text()).includes("could not be prepared")) break;
-    await page.waitForTimeout(10000);
-  }
+  await main().getByRole("heading", { level: 1, name: "Projects" }).waitFor();
   await shot("projects");
-  note("workspace", { ready: await page.locator("form[action='/design/projects/create']").count() > 0, text: await text(), error: await errorText() });
+  check("projects page", page.url().startsWith(ws("/design/projects")), { url: page.url() });
 
-  // 3. Create a project and build a pipeline from its intent.
-  const project = `e2e-${Date.now().toString(36)}`;
-  if (await page.locator("form[action='/design/projects/create']").count()) {
-    await page.fill("input[name=name]", project);
-    await page.fill("input[name=description]", "Which enterprise accounts will not renew?");
-    await page.fill("textarea[name=intent]", "Which accounts the team calls first each week");
-    await page.getByRole("button", { name: "Create project" }).click();
-    await page.waitForLoadState("load");
-    await shot("project");
-    note("create-project", { url: page.url(), error: await errorText() });
+  await main().getByRole("button", { name: "New project" }).first().click();
+  await dialog().getByRole("textbox", { name: "Name" }).fill(project);
+  await dialog().getByRole("textbox", { name: "Description" }).fill("Which enterprise accounts will not renew?");
+  await dialog().getByRole("textbox", { name: "The decision it should improve" }).fill("Which accounts the team calls first each week");
+  await dialog().getByRole("button", { name: "Create project" }).click();
+  await page.waitForURL(/\/design\/project\?/, { timeout: 60000 }).catch(() => {});
+  await main().getByRole("heading", { level: 1, name: new RegExp(project) }).waitFor({ timeout: 30000 }).catch(() => {});
+  await shot("project");
+  if (!check("create project", (await h1()).includes(project), { url: page.url(), error: await errorText(page) })) return project;
 
-    if (await page.locator("form[action='/design/project/compile']").count()) {
-      await page.fill("form[action='/design/project/compile'] textarea[name=intent]",
-        "Predict which accounts will churn in the next 90 days, with the reasons");
-      await page.getByRole("button", { name: "Build pipeline" }).click();
-      await page.waitForLoadState("load");
-      await shot("pipeline");
-      note("build-pipeline", { error: await errorText(), pipelines: await page.locator("form[action='/design/project/run'], form[action='/design/project/approve']").count() });
-      // The pipeline page: draw it, add a step and an edge, then approve and check.
-      const pipelineLink = page.locator("main table a[href*='/design/pipeline?']").first();
-      if (await pipelineLink.count()) {
-        await pipelineLink.click();
-        await page.waitForLoadState("load");
-        await shot("pipeline-page");
-        note("pipeline-page", { svg: await page.locator("svg.pipeline-graph").count(), steps: await page.locator("svg.pipeline-graph g.step").count(), error: await errorText() });
-        const addStep = page.locator("form[action='/design/pipeline/edit']:has(input[name=op][value=add_step])");
-        await addStep.locator("select[name=kind]").selectOption("act");
-        await addStep.locator("input[name=name]").fill("Notify the team");
-        await addStep.getByRole("button", { name: "Add step" }).click();
-        await page.waitForLoadState("load");
-        note("pipeline-add-step", { url: page.url(), error: await errorText(), steps: await page.locator("svg.pipeline-graph g.step").count() });
-        const connect = page.locator("form[action='/design/pipeline/edit']:has(input[name=op][value=add_edge]):has(input[name=from])").first();
-        if (await connect.count()) {
-          await connect.getByRole("button", { name: "Connect" }).click().catch(() => {});
-          await page.waitForLoadState("load");
-        }
-        await shot("pipeline-edited");
-        note("pipeline-edited", { error: await errorText(), edges: await page.locator("svg.pipeline-graph line.edge").count() });
-        if (await page.locator("form[action='/design/pipeline/approve']").count()) {
-          await page.getByRole("button", { name: "Approve" }).first().click();
-          await page.waitForLoadState("load");
-        }
-        await page.locator("form[action='/design/pipeline/gate']").getByRole("button", { name: "Check" }).click();
-        await page.waitForLoadState("load");
-        await shot("pipeline-checked");
-        note("pipeline-check", { checks: await page.locator("table.gate-checks tbody tr").count(), error: await errorText() });
-        await page.goto(`${base}/design/project?name=${project}`);
-      }
-      if (await page.locator("form[action='/design/project/approve']").count()) {
-        await page.getByRole("button", { name: "Approve" }).first().click();
-        await page.waitForLoadState("load");
-        await shot("approved");
-        note("approve", { error: await errorText() });
-      }
-      if (await page.locator("form[action='/design/project/run']").count()) {
-        await page.getByRole("button", { name: "Check and run" }).first().click();
-        await page.waitForLoadState("load");
-        await shot("run");
-        note("check-and-run", { url: page.url(), error: await errorText() });
-      }
-    }
+  // Build a pipeline from what it should predict; with no dataset chosen the drawer closes on the
+  // project and the pipeline is listed.
+  await main().getByRole("button", { name: "Build pipeline" }).first().click();
+  await dialog().getByRole("textbox", { name: "What should it predict or answer?" }).fill("Predict which accounts will churn in the next 90 days, with the reasons");
+  await dialog().getByRole("button", { name: "Build pipeline" }).click();
+  await dialog().waitFor({ state: "detached", timeout: 120000 }).catch(() => {});
+  const drawerError = (await dialog().count()) ? (await dialog().getByRole("alert").allInnerTexts()).join(" | ") : "";
+  if (await dialog().count()) await dialog().getByRole("button", { name: "Cancel" }).click();
+  await page.goto(ws(`/design/project?name=${encodeURIComponent(project)}&tab=pipelines`));
+  const pipelines = main().getByRole("table", { name: "Pipelines" });
+  const pipelineLink = pipelines.getByRole("link").first();
+  await pipelineLink.waitFor({ timeout: 60000 }).catch(() => {});
+  await shot("pipeline-built");
+  if (!check("build pipeline", (await pipelineLink.count()) > 0, { error: drawerError || (await errorText(page)) })) return project;
+
+  // The pipeline page: the graph is drawn; add a step, connect it, approve, check.
+  await pipelineLink.click();
+  await page.waitForURL(/\/design\/pipeline\?/);
+  const graphPanel = main().locator(".pipeline-canvas svg").first();
+  await graphPanel.waitFor({ timeout: 30000 }).catch(() => {});
+  const counts = async () => {
+    // The graph panel's label; textContent, since the label is shown in capitals.
+    const label = await main().getByText(/^\d+ steps · \d+ edges$/i).first().textContent().catch(() => "");
+    const [, steps, edges] = (label ?? "").match(/(\d+) steps · (\d+) edges/i) ?? [];
+    return { steps: Number(steps ?? -1), edges: Number(edges ?? -1) };
+  };
+  const before = await counts();
+  await shot("pipeline-page");
+  check("pipeline page", (await graphPanel.count()) > 0 && before.steps > 0, { ...before, error: await errorText(page) });
+
+  const change = main().getByTestId("change-pipeline").or(main().locator("section").filter({ hasText: /^Change the Pipeline/ })).first();
+  await change.getByRole("combobox", { name: "Kind" }).selectOption("act");
+  await change.getByRole("textbox", { name: "Name" }).first().fill("Notify the team");
+  await change.getByRole("button", { name: "Add step" }).click();
+  await until(page, async () => (await counts()).steps === before.steps + 1, { minutes: 1, every: 1000 });
+  const step = new URL(page.url()).searchParams.get("step") ?? "";
+  const added = await counts();
+  check("pipeline add step", added.steps === before.steps + 1 && !!step, { step, ...added, error: await errorText(page) });
+
+  // Connect the step that came before it to the new step.
+  const options = await change.getByRole("combobox", { name: "From" }).evaluate((select) => [...select.options].map((o) => o.value));
+  const from = options.filter((value) => value !== step).at(-1);
+  if (from && step) {
+    await change.getByRole("combobox", { name: "From" }).selectOption(from);
+    await change.getByRole("combobox", { name: "To" }).selectOption(step);
+    await change.getByRole("button", { name: "Add edge" }).click();
+    await until(page, async () => (await counts()).edges === added.edges + 1, { minutes: 1, every: 1000 });
   }
+  const edited = await counts();
+  await shot("pipeline-edited");
+  check("pipeline add edge", edited.edges === added.edges + 1, { from, to: step, ...edited, error: await errorText(page) });
 
-  // 4. Every remaining page.
-  for (const [path, name] of [["/train/data", "data"], ["/train/runs", "runs"], ["/ship/models", "models"],
-                              ["/ship/indexes", "indexes"], ["/deployments", "deployments"], ["/services", "services"],
-                              ["/", "home"]]) {
-    const response = await page.goto(`${base}${path}`);
-    await shot(name);
-    note(`page ${path}`, { status: response.status(), error: await errorText(), text: (await text()).slice(0, 160) });
+  const govern = main().locator("#run");
+  await govern.getByRole("button", { name: "Approve" }).click();
+  await govern.getByRole("button", { name: "Approved" }).waitFor({ timeout: 30000 }).catch(() => {});
+  check("approve", (await govern.getByRole("button", { name: "Approved" }).count()) > 0, { error: await errorText(page) });
+  await govern.getByRole("button", { name: "Check", exact: true }).click();
+  const checks = main().getByRole("table", { name: "Checks" });
+  await checks.waitFor({ timeout: 60000 }).catch(() => {});
+  await shot("pipeline-checked");
+  check("pipeline check", (await checks.count()) > 0, { checks: Math.max(0, (await checks.getByRole("row").count()) - 1), error: await errorText(page) });
+
+  // From the project: Check and run the approved pipeline; a run that starts opens Train → Runs.
+  await page.goto(ws(`/design/project?name=${encodeURIComponent(project)}&tab=pipelines`));
+  const run = main().getByRole("table", { name: "Pipelines" }).getByRole("button", { name: "Check and run" }).first();
+  await run.waitFor({ timeout: 30000 }).catch(() => {});
+  if (await run.count()) {
+    await run.click();
+    await page.waitForURL(/\/train\/runs/, { timeout: 60000 }).catch(() => {});
+    await settle();
+    await shot("run");
+    check("check and run", /\/train\/runs/.test(page.url()), { url: page.url(), error: await errorText(page) });
+  } else {
+    check("check and run", false, { error: "no Check and run button for the approved pipeline" });
   }
-  const runLink = await page.goto(`${base}/train/runs`).then(() => page.locator("a[href^='/train/run?']").first());
-  if (await runLink.count()) {
-    await runLink.click();
-    await page.waitForLoadState("load");
+  return project;
+}
+
+/** Every remaining page opens with its title and no error. */
+async function pages() {
+  for (const [path, title] of [["/train/data", "Datasets"], ["/train/runs", "Runs"], ["/ship/models", "Models"], ["/ship/indexes", "Search Indexes"],
+                               ["/deployments", "Deployments"], ["/services", "Services"], ["/", /^Hello/]]) {
+    await page.goto(`${base}${path}`);
+    await main().getByRole("heading", { level: 1, name: title }).waitFor({ timeout: 30000 }).catch(() => {});
+    await settle();
+    await shot(path === "/" ? "home" : path.split("/").pop());
+    const heading = await h1();
+    const error = await errorText(page);
+    check(`page ${path}`, (typeof title === "string" ? heading === title : title.test(heading)) && !error, { url: page.url(), heading, error, text: (await main().innerText()).replace(/\s+/g, " ").slice(0, 160) });
+  }
+  // The first run's report.
+  await page.goto(`${base}/train/runs`);
+  const report = main().getByRole("link", { name: /^(Report|Why it failed)$/ }).first();
+  await report.waitFor({ timeout: 20000 }).catch(() => {});
+  if (await report.count()) {
+    await report.click();
+    await page.waitForURL(/\/train\/run\?/);
+    await settle();
     await shot("run-report");
-    note("run-report", { url: page.url(), error: await errorText() });
+    check("run report", !!(await h1()), { url: page.url(), heading: await h1(), error: await errorText(page) });
+  } else {
+    note("run report", { skipped: "no run listed" });
+  }
+}
+
+/** Search indexes (#187): upload a small CSV on Data, index it, search, publish, call it from
+ * outside with a key that can only search, unpublish, and check the outside call is refused. */
+async function searchIndex() {
+  const csv = "id,title,body\n1,Renewal risk,Accounts that may not renew this quarter\n2,Expansion,Accounts ready to grow seats\n3,Support load,Tickets per account over time\n";
+  const table = `e2e_docs_${stamp}`;
+  await page.goto(ws("/train/data"));
+  await main().getByRole("button", { name: "Load data" }).first().click();
+  await dialog().locator("input[type=file]").setInputFiles({ name: "docs.csv", mimeType: "text/csv", buffer: Buffer.from(csv) });
+  await dialog().getByRole("textbox", { name: /^Dataset name/ }).fill(table);
+  await dialog().getByRole("button", { name: "Upload", exact: true }).last().click();
+  await dialog().waitFor({ state: "detached", timeout: 60000 }).catch(() => {});
+  await main().getByRole("region", { name: "Datasets" }).getByText(table).first().waitFor({ timeout: 30000 }).catch(() => {});
+  await shot("dataset-uploaded");
+  if (!check("upload dataset", (await main().getByText(table).count()) > 0, { table, error: await errorText(page) })) return;
+
+  await page.goto(ws("/ship/indexes"));
+  await main().getByRole("button", { name: "New index" }).first().click();
+  await dialog().getByRole("combobox", { name: "Dataset" }).selectOption({ label: table });
+  await dialog().getByRole("button", { name: /^Create/ }).click();
+  await page.waitForURL(/\/ship\/index\?/, { timeout: 60000 }).catch(() => {});
+  const indexUrl = page.url();
+  const id = new URL(indexUrl).searchParams.get("id") ?? "";
+  if (!check("create index", /\/ship\/index\?/.test(indexUrl) && !!id, { url: indexUrl, error: await errorText(page) })) return;
+
+  await main().getByRole("textbox", { name: "Search for" }).fill("renewal");
+  await main().getByRole("search").getByRole("button", { name: "Search" }).click();
+  const hits = main().getByRole("list", { name: "Search hits" }).getByRole("listitem");
+  await hits.first().waitFor({ timeout: 30000 }).catch(() => {});
+  await shot("index-search");
+  check("index search", (await hits.count()) > 0, { hits: await hits.count(), error: await errorText(page) });
+
+  await main().getByRole("button", { name: "Publish", exact: true }).click();
+  await main().getByRole("button", { name: "Create a search key" }).click();
+  const keyBlock = main().locator(".copy-block").filter({ hasText: "Your search key" }).locator("code");
+  await keyBlock.waitFor({ timeout: 30000 }).catch(() => {});
+  const key = ((await keyBlock.innerText().catch(() => "")) || "").trim();
+  check("search key", key.length > 20, { length: key.length });
+  const outside = async () => {
+    const url = `${base}/v1/search_index?customer_id=${viewer.customer_id}&workspace_id=${workspace}&index_id=${encodeURIComponent(id)}&query=renewal`;
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${key}` } });
+    const body = await res.json().catch(() => ({}));
+    return { status: res.status, hits: body.value?.hits?.length ?? null, error: body.error?.message ?? "" };
+  };
+  const published = await outside();
+  check("outside search", published.status === 200 && published.hits > 0, published);
+  const other = await fetch(`${base}/v1/list_services?customer_id=${viewer.customer_id}`, { headers: { Authorization: `Bearer ${key}` } });
+  check("key cannot do more", other.status === 401 || other.status === 403, { status: other.status });
+
+  await page.goto(indexUrl);
+  await main().getByRole("button", { name: "Unpublish", exact: true }).click();
+  await dialog().getByRole("button", { name: "Unpublish", exact: true }).click();
+  await main().getByRole("button", { name: "Publish", exact: true }).waitFor({ timeout: 30000 }).catch(() => {});
+  const after = await outside();
+  check("outside search after unpublish", after.status !== 200, after);
+  // The key is revoked again on Tokens (it is named "search <table>").
+  await page.goto(`${base}/tokens`);
+  const row = main().getByRole("row").filter({ hasText: `search ${table}` });
+  if (await row.count()) {
+    await row.getByRole("button", { name: "Revoke" }).click();
+    const confirm = dialog().getByRole("button", { name: "Revoke" });
+    if (await confirm.count()) await confirm.click();
+  }
+}
+
+/** A Postgres service: create, Ready, Show connection, connect it from Data → Connections and pull
+ * a dataset through it (#188), then delete it. Leftover e2e- services go first. */
+async function services() {
+  const table = () => main().getByRole("table", { name: "Services" });
+  const statusOf = async (row) =>
+    (await row.getByTestId("service-status").or(row.getByRole("cell").nth(3)).first().innerText().catch(() => "")).replace(/\s+/g, " ").replace(/^[^A-Za-z]+/, "");
+  const remove = async (name) => {
+    await page.goto(`${base}/services`);
+    await table().waitFor({ timeout: 30000 });
+    const row = table().getByRole("row").filter({ hasText: name });
+    if (!(await row.count())) return true;
+    await row.getByRole("button", { name: `Delete ${name}` }).click();
+    await dialog().getByRole("textbox").fill(name);
+    await dialog().getByRole("button", { name: `Delete ${name}` }).click();
+    // Gone means the table is listed without it (not an error panel in its place).
+    return until(page, async () => (await table().count()) > 0 && (await table().getByRole("row").filter({ hasText: name }).count()) === 0, { minutes: 5, every: 3000 });
+  };
+  await page.goto(`${base}/services`);
+  await table().waitFor({ timeout: 30000 }).catch(() => {});
+  for (const leftover of (await table().locator("strong").allInnerTexts()).filter((name) => name.startsWith("e2e-"))) {
+    note("cleanup-leftover-service", { name: leftover, gone: await remove(leftover) });
   }
 
-  // 4a. Search indexes (#187): upload a small CSV, index it, search, publish, call it from outside
-  // with a key scoped to search_index, unpublish, and check the outside call is refused.
-  {
-    const csv = "id,title,body\n1,Renewal risk,Accounts that may not renew this quarter\n2,Expansion,Accounts ready to grow seats\n3,Support load,Tickets per account over time\n";
-    const table = `e2e_docs_${Date.now().toString(36)}`;
-    await page.goto(`${base}/train/data`);
-    await page.locator("form[action='/train/data/upload']").evaluate((form) => { form.closest("details").open = true; });
-    await page.setInputFiles("form[action='/train/data/upload'] input[type=file]", { name: "docs.csv", mimeType: "text/csv", buffer: Buffer.from(csv) });
-    await page.fill("form[action='/train/data/upload'] input[name=table_name]", table);
-    await page.getByRole("button", { name: "Upload" }).click();
-    await page.waitForLoadState("load");
-    note("upload-dataset", { error: await errorText(), listed: (await text()).length > 0 });
-    await page.goto(`${base}/ship/indexes`);
-    if (await page.locator("form[action='/ship/indexes/create']").count()) {
-      const option = page.locator("form[action='/ship/indexes/create'] select[name=table] option", { hasText: table });
-      await page.selectOption("form[action='/ship/indexes/create'] select[name=table]", await option.first().getAttribute("value") ?? table).catch(() => {});
-      await page.getByRole("button", { name: "Create index" }).click();
-      await page.waitForLoadState("load");
-      const indexUrl = page.url();
-      note("create-index", { url: indexUrl, error: await errorText() });
-      await page.fill("form[action='/ship/index'] input[name=q]", "renewal");
-      await page.getByRole("button", { name: "Search", exact: true }).click();
-      await page.waitForLoadState("load");
-      await shot("index-search");
-      note("index-search", { hits: await page.locator("main table tbody tr").count(), error: await errorText() });
-      await page.getByRole("button", { name: "Publish" }).click();
-      await page.waitForLoadState("load");
-      await page.getByRole("button", { name: "Create a search key" }).click();
-      await page.waitForLoadState("load");
-      const key = ((await page.locator("p.notice code").first().innerText().catch(() => "")) || "").trim();
-      note("search-key", { issued: key.length > 20, url: page.url() });
-      const id = new URL(indexUrl).searchParams.get("id");
-      const customerId = new URL(indexUrl).searchParams.get("customer_id");
-      const outside = async () => {
-        const res = await fetch(`${base}/v1/search_index?customer_id=${customerId}&index=${id}&query=renewal`, { headers: { Authorization: `Bearer ${key}` } });
-        const body = await res.json().catch(() => ({}));
-        return { status: res.status, hits: body.value?.hits?.length ?? null, error: body.error?.message ?? "" };
-      };
-      note("outside-search", await outside());
-      const other = await fetch(`${base}/v1/list_services?customer_id=${customerId}`, { headers: { Authorization: `Bearer ${key}` } });
-      note("key-cannot-do-more", { status: other.status });
-      await page.goto(indexUrl);
-      await page.getByRole("button", { name: "Unpublish" }).click();
-      await page.waitForLoadState("load");
-      note("outside-search-after-unpublish", await outside());
-    }
-  }
-
-  // 4b. Services: create a Postgres service, wait for Ready, show its connection, delete it.
-  // First delete any e2e- service a crashed earlier run left behind.
+  const service = `e2e-${stamp}`;
   await page.goto(`${base}/services`);
-  for (const leftover of await page.locator("tr:has(form[action='/services/delete'])").filter({ hasText: /^e2e-/ }).all()) {
-    const leftoverName = (await leftover.locator("td").first().innerText()).trim().split(/\s/)[0];
-    await leftover.locator("details summary").click();
-    await leftover.locator("input[name=confirm]").fill(leftoverName);
-    await leftover.getByRole("button", { name: `Delete ${leftoverName}` }).click();
-    await page.waitForLoadState("load");
-    note("cleanup-leftover-service", { name: leftoverName, error: await errorText() });
-    await page.goto(`${base}/services`);
-  }
-  const service = `e2e-${Date.now().toString(36)}`;
-  await page.goto(`${base}/services`);
-  await page.selectOption("form[action='/services/create'] select[name=kind]", "postgres");
-  await page.fill("form[action='/services/create'] input[name=name]", service);
-  await page.fill("form[action='/services/create'] input[name=storage_gi]", "1");
-  await page.getByRole("button", { name: "Create service" }).click();
-  await page.waitForLoadState("load");
-  note("create-service", { error: await errorText(), listed: (await text()).includes(service) });
-  const row = () => page.locator("tr", { hasText: service });
-  const serviceDeadline = Date.now() + 10 * 60 * 1000;
-  while (Date.now() < serviceDeadline) {
-    await page.goto(`${base}/services`);
-    const status = (await row().count()) ? await row().locator("td").nth(3).innerText() : "";
-    if (status.startsWith("Ready") || status.startsWith("Failed")) break;
-    await page.waitForTimeout(10000);
-  }
+  await main().getByRole("button", { name: "New service" }).first().click();
+  await dialog().getByRole("combobox", { name: "Kind" }).selectOption("postgres");
+  await dialog().getByRole("textbox", { name: "Name" }).fill(service);
+  await dialog().getByRole("spinbutton", { name: "Storage (GiB)" }).fill("1");
+  await dialog().getByRole("button", { name: "Create service" }).click();
+  await dialog().waitFor({ state: "detached", timeout: 30000 }).catch(() => {});
+  const row = () => table().getByRole("row").filter({ hasText: service });
+  const listed = await until(page, async () => (await row().count()) > 0, { minutes: 1, every: 1000 });
+  check("create service", listed, { error: (await dialog().count()) ? await dialog().innerText() : await errorText(page) });
+  let status = "";
+  await until(page, async () => {
+    status = (await row().count()) ? await statusOf(row()) : "";
+    return /^(Ready|Failed)/.test(status);
+  }, { minutes: 10, every: 3000 });
   await shot("service-ready");
-  note("service-status", { status: (await row().count()) ? (await row().innerText()).replace(/\s+/g, " ") : "missing" });
-  if (await row().locator("form[action='/services/connection']").count()) {
+  const ready = check("service ready", status.startsWith("Ready"), { status });
+
+  if (ready) {
     await row().getByRole("button", { name: "Show connection" }).click();
-    await page.waitForLoadState("load");
+    await dialog().waitFor();
     await shot("service-connection");
     // The URI carries a password: record only that it was shown, never its value.
-    note("service-connection", { shown: (await page.locator("main").innerText()).includes("postgresql://"), url: page.url() });
-  }
-  // 4c. Connect the Postgres service from Train → Data (#188) and pull a dataset through it.
-  await page.goto(`${base}/services`);
-  const serviceReady = (await row().count()) && (await row().locator("td").nth(3).innerText()).startsWith("Ready");
-  if (serviceReady) {
-    await page.goto(`${base}/train/data`);
-    const connectRow = page.locator("tr", { hasText: service }).filter({ has: page.locator("form[action='/train/data/connect-service']") });
-    if (await connectRow.count()) {
-      await connectRow.getByRole("button").click();
-      await page.waitForLoadState("load");
-      note("connect-service", { error: await errorText(), listed: (await page.locator("main table", { hasText: service }).count()) > 0 });
-      const pull = page.locator("form[action='/train/data/pull']");
-      if (await pull.count()) {
-        await pull.evaluate((form) => { form.closest("details").open = true; });
-        await pull.locator("select[name=connection]").selectOption(service);
-        await pull.locator("textarea[name=query]").fill("SELECT 1 AS one, 'lake' AS source");
-        await pull.locator("input[name=table_name]").fill(`e2e_from_${Date.now().toString(36)}`);
-        await page.getByRole("button", { name: "Pull dataset" }).click();
-        await page.waitForLoadState("load");
-        await shot("pulled-from-service");
-        note("pull-from-service", { error: await errorText() });
-      }
-      const disconnect = page.locator("tr", { hasText: service }).locator("form[action='/train/data/disconnect']");
-      if (await disconnect.count()) { await disconnect.getByRole("button").click(); await page.waitForLoadState("load"); }
-    } else {
-      note("connect-service", { error: "no Connect button for the service" });
-    }
-  }
-  await page.goto(`${base}/services`);
-  if (await row().count()) {
-    await row().locator("details summary").click();
-    await row().locator("input[name=confirm]").fill(service);
-    await row().getByRole("button", { name: `Delete ${service}` }).click();
-    await page.waitForLoadState("load");
-    const deleteDeadline = Date.now() + 5 * 60 * 1000;
-    while (Date.now() < deleteDeadline && (await row().count())) {
-      await page.waitForTimeout(10000);
-      await page.goto(`${base}/services`);
-    }
-    await shot("service-deleted");
-    note("service-delete", { gone: (await row().count()) === 0, error: await errorText() });
-  }
+    check("service connection", (await dialog().locator("dl dt").allInnerTexts()).includes("uri") && (await dialog().innerText()).includes("postgresql://"), {});
+    await dialog().getByRole("button", { name: "Close" }).first().click();
 
-  // 4c. Delete this run's project and any earlier e2e- projects, once their runs have finished,
-  // so the tester's workspace does not fill up (#164).
-  await page.goto(`${base}/design/projects`);
-  const projects = (await page.locator("main table a").allInnerTexts()).filter((name) => name.startsWith("e2e-"));
-  for (const name of projects) {
-    const cleanupDeadline = Date.now() + 5 * 60 * 1000;
+    // Data → Connections: Connect One of Your Services, then Load data → From a connection.
+    await page.goto(ws("/connections"));
+    const item = main().getByRole("listitem").filter({ hasText: service });
+    await item.getByRole("button", { name: /^(Connect|Refresh)$/ }).click();
+    const connected = await until(page, async () => (await main().getByRole("table").filter({ hasText: service }).count()) > 0, { minutes: 1, every: 1000 });
+    await shot("service-connected");
+    check("connect service", connected, { error: await errorText(page) });
+    if (connected) {
+      await page.goto(ws("/train/data"));
+      await main().getByRole("button", { name: "Load data" }).first().click();
+      await dialog().getByRole("button", { name: "From a connection" }).click();
+      await dialog().getByRole("combobox", { name: /Connection/ }).selectOption(service).catch(() => {});
+      await dialog().getByRole("textbox", { name: /Query|SELECT/ }).first().fill("SELECT 1 AS one, 'lake' AS source");
+      await dialog().getByRole("textbox", { name: /Dataset name|Table name/ }).first().fill(`e2e_from_${stamp}`);
+      await dialog().getByRole("button", { name: "Pull dataset" }).click();
+      await dialog().waitFor({ state: "detached", timeout: 60000 }).catch(() => {});
+      const pullError = (await dialog().count()) ? (await dialog().getByRole("alert").allInnerTexts()).join(" | ") : await errorText(page);
+      await shot("pulled-from-service");
+      check("pull from service", !(await dialog().count()), { error: pullError.slice(0, 300) });
+      if (await dialog().count()) await dialog().getByRole("button", { name: "Cancel" }).click();
+      await api(page, base, "workspace_act", { customer_id: viewer.customer_id, workspace_id: workspace, capability: "delete_connection", input: { name: service } }, { post: true, workspace })
+        .catch((error) => note("disconnect", { error: error.message }));
+    }
+  }
+  check("service delete", await remove(service), {});
+  await shot("service-deleted");
+}
+
+/** Delete this run's project and any earlier e2e- project, once its runs have finished (#164). */
+async function deleteProjects() {
+  await page.goto(ws("/design/projects"));
+  await settle();
+  const names = (await main().getByRole("link").allInnerTexts()).map((name) => name.trim()).filter((name) => /^e2e-[a-z0-9]+$/.test(name));
+  for (const name of [...new Set(names)]) {
     let error = "";
-    while (Date.now() < cleanupDeadline) {
-      await page.goto(`${base}/design/project?name=${encodeURIComponent(name)}`);
-      if (!(await page.locator("form[action='/design/project/delete']").count())) break;
-      await page.locator("form[action='/design/project/delete']").evaluate((form) => { form.closest("details").open = true; });
-      await page.fill("form[action='/design/project/delete'] input[name=confirm]", name);
-      await page.getByRole("button", { name: "Delete project" }).click();
-      await page.waitForLoadState("load");
-      error = await errorText();
+    const deadline = Date.now() + 5 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await page.goto(ws(`/design/project?name=${encodeURIComponent(name)}`));
+      const button = main().getByRole("button", { name: "Delete project" });
+      await button.waitFor({ timeout: 20000 }).catch(() => {});
+      if (!(await button.count())) { error = "no Delete project button"; break; }
+      await button.click();
+      await dialog().getByRole("textbox").fill(name);
+      await dialog().getByRole("button", { name: "Delete project" }).click();
+      await page.waitForURL(/\/design\/projects/, { timeout: 30000 }).catch(() => {});
+      error = (await dialog().count()) ? (await dialog().getByRole("alert").allInnerTexts()).join(" | ") : "";
       if (!error.includes("pending or running")) break;
+      await dialog().getByRole("button", { name: "Cancel" }).click();
       await page.waitForTimeout(15000);
     }
-    note("delete-project", { name, error });
+    check(`delete project ${name}`, !error, { error });
   }
+}
 
-  // 5. Account menu and sign out (signs out of Clerk too).
-  await page.locator("details.account-menu summary").click();
+try {
+  // 1. Sign in through Clerk's own form; lake lands a signed-in person on `/` (Ask Orama).
+  viewer = await signIn(page, base, ticketFile);
+  await shot("signed-in");
+  check("sign-in", new URL(page.url()).pathname === "/", { url: page.url(), heading: await h1() });
+
+  // 2. A new account's first top-up and first workspace.
+  await ensureFunds(page, base, log);
+  workspace = await ensureWorkspace(page, base, log);
+  if (!workspace) throw new Error("no ready workspace");
+
+  // 3. Design, Train and Ship.
+  await design();
+  await pages();
+  await searchIndex();
+  await services();
+  await deleteProjects();
+
+  // 4. The account menu at the foot of the rail, then Sign out (lake and Clerk both sign out).
+  await page.getByRole("navigation", { name: "Navigation" }).locator("button[aria-haspopup=menu]").click();
   await shot("account-menu");
-  await page.getByRole("button", { name: "Sign out" }).click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
   await page.waitForURL(`${base}/sign-in**`, { timeout: 30000 });
   await page.waitForTimeout(4000);
   await shot("signed-out");
-  const after = await page.goto(`${base}/design/projects`);
-  note("signed-out", { url: page.url(), status: after.status() });
+  await page.goto(`${base}/design/projects`);
+  await page.waitForURL(`${base}/sign-in**`, { timeout: 30000 }).catch(() => {});
+  const signedIn = await api(page, base, "viewer").then((v) => v.signed_in).catch(() => false);
+  check("signed out", !signedIn && /\/sign-in/.test(page.url()), { url: page.url() });
 } catch (error) {
   await shot("failure");
-  note("failure", { message: String(error), url: page.url() });
-  process.exitCode = 1;
+  check("failure", false, { message: String(error).slice(0, 400), url: page.url() });
 } finally {
-  fs.writeFileSync(`${out}/log.json`, JSON.stringify(log, null, 2));
   await browser.close();
+  process.exit(failed() ? 1 : 0);
 }

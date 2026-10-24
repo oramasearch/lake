@@ -1,11 +1,35 @@
-# Live agent scenarios
+# Live end-to-end scripts
+
+Scripts that drive a deployed Lake as a person does. They are not part of the native CTest proof.
+How to get a Clerk test user and ticket, and what each browser script checks, is
+[`docs/deployment/browser-testing.md`](../../docs/deployment/browser-testing.md).
+
+| Script | What it drives |
+|---|---|
+| `clerk-ticket.sh` | Clerk's Backend API, with `CLERK_SECRET_KEY` from the environment: create a test user, mint a one-time sign-in ticket, delete the user. `CLERK_INSTANCE` refuses any other instance |
+| `lib.mjs` | What the browser scripts share: Playwright, the log, ticket sign-in (lake lands on `/`), `/v1` calls with the browser's session, the first top-up on Stripe's test Checkout, the first workspace |
+| `walkthrough.mjs` | The React console's Design, Train and Ship as a person does them |
+| `mcp.mjs` | Developer → MCP: a read-only key, every client's setup, the skill, a fresh Claude Code session |
+| `storage.mjs` | Data → Drives → Storage: each provider Lake can create |
+| `services.mjs` | Ship → Services: every service kind |
+| `agents.py` | The Agent Library over the agent bus (below) |
+| `start-times.py` | How long each service kind takes to start |
+
+## Live agent scenarios
 
 `agents.py` drives the Agent Library through a deployed Lake's public API. T1–T10 cover reads,
-proposals, delegation, agent tasks, and workspace pub/sub. T11 starts Application Agent, validates
-its proposal, sends the exact object back as `context.confirmed_proposal`, waits for deployment,
-and requests the resulting App URL. T12 asks the Experiments Agent for an experiment, confirms the proposal,
-waits for trials and requests the explanation.
+proposals, delegation, agent tasks, and workspace pub/sub (Train → Streams' capabilities). T11
+starts Application Agent, validates its proposal, sends the exact object back as
+`context.confirmed_proposal`, waits for deployment, and requests the resulting App URL. T12 asks the
+Experiments Agent for an experiment, confirms the proposal, waits for trials and requests the
+explanation.
 
-The suite changes the live customer only in scenarios whose descriptions say so. Pass the base
-URL, a file containing the person's Lake token, the customer id, and optional scenario names. Do
-not run it as part of the native CTest proof.
+```sh
+tools/e2e/agents.py <base-url> <token-file> <customer-id> <workspace-id> [scenario ...]
+```
+
+Pass the base URL, a file containing a Lake key with every tool, the customer id and the workspace
+id (`/v1/viewer` answers both), and optional scenario names. Every call names the workspace. When the
+workspace lacks the scenarios' data, the suite uploads `datasets.ux_review_churn` and
+`datasets.ux_review_at_risk` first and says so. It changes the live customer only there and in
+scenarios whose descriptions say so.
