@@ -116,7 +116,7 @@ their `title`, `summary` and `description` strings change.
 
 - Pages of the console other than the frame, sign-in and Ask still have Lake or Orama in their own
   copy (Design → Solutions' "Orama's catalogue", the agent pages, Developer → MCP's help, the Docs).
-  Follow-up: lake#1135's follow-up issue linked from lake#1158.
+  Follow-up: lake#1170.
 - Runtime error messages ("ask Orama") and stored data (the Agent Library's agent names) are not
   rewritten.
 - The operator half: rendering the variables above from the Lake resource, and the sender domain's
