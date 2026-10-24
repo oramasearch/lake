@@ -182,7 +182,11 @@ if(NOT EXISTS "${LAKE_ZETTA_SOURCE_DIR}/include/zetta/connect/http_transport.hpp
 endif()
 add_library(zetta-api STATIC
   "${LAKE_ZETTA_SOURCE_DIR}/src/core/connect/http_transport.cpp"
+  "${LAKE_ZETTA_SOURCE_DIR}/src/core/connect/egress_policy.cpp"
+  "${LAKE_ZETTA_SOURCE_DIR}/src/core/connect/connector_destinations.cpp"
+  "${LAKE_ZETTA_SOURCE_DIR}/src/core/connect/destination_policy.cpp"
   "${LAKE_ZETTA_SOURCE_DIR}/src/core/api/native_http_transport.cpp"
+  "${LAKE_ZETTA_SOURCE_DIR}/src/core/api/system_trust_store.cpp"
   "${LAKE_ZETTA_SOURCE_DIR}/src/core/runtime.cpp")
 target_compile_features(zetta-api PUBLIC cxx_std_26)
 target_include_directories(zetta-api PUBLIC "${LAKE_ZETTA_SOURCE_DIR}/include")
