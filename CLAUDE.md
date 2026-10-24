@@ -943,6 +943,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
   `cloud_order_entitlements_guard` in the source tree, versioned by content hash).
+  `authentication_attempts_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means
