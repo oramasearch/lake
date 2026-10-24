@@ -1520,11 +1520,19 @@ public:
         return call("recover_with_code",
                     [&] { return store_->recover_with_code(pool_id, email, code, device_name); });
     }
-    control::Result<control::RecoveryAttempt> begin_email_recovery(const std::string& pool_id,
-                                                                   const std::string& email,
-                                                                   int cooling_seconds) override {
-        return call("begin_email_recovery",
-                    [&] { return store_->begin_email_recovery(pool_id, email, cooling_seconds); });
+    control::Result<control::RecoveryAttempt>
+    begin_email_recovery(const std::string& pool_id,
+                         const std::string& email,
+                         int cooling_seconds,
+                         const std::string& client_address) override {
+        return call("begin_email_recovery", [&] {
+            return store_->begin_email_recovery(pool_id, email, cooling_seconds, client_address);
+        });
+    }
+    control::Result<control::RecoveryAttempt>
+    cancel_recovery(const std::string& user_id, const std::string& recovery_id) override {
+        return call("cancel_recovery",
+                    [&] { return store_->cancel_recovery(user_id, recovery_id); });
     }
     control::Result<control::RecoveryAttempt>
     begin_admin_recovery(const std::string& organization_id,

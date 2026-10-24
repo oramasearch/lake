@@ -1,4 +1,13 @@
+#include "identity_proof_test_support.hpp"
+#include "lake/control/postgres_store.hpp"
+#include "lake/telemetry/metrics.hpp"
 #include "personal_customer_test_support.hpp"
+#include "postgres_fixture.hpp"
+
+#include <barrier>
+#include <future>
+#include <memory>
+#include <pqxx/pqxx>
 
 #include <gtest/gtest.h>
 
@@ -276,5 +285,278 @@ TEST(RepositoryRecovery, MissingContactIsPlainAndWrappedKeyIsContactOnly) {
         registry.call("recover_repository_key", {{"repository_id", repository->id}}, owner_context);
     EXPECT_EQ(refused.error.code, "unauthorized");
 }
+
+// One contract suite runs against both stores; each PostgreSQL case has its own database.
+class EmailRecoveryLimits : public testing::TestWithParam<bool> {
+protected:
+    void SetUp() override {
+        if (GetParam()) {
+            const char* configured = lake::test::postgres_uri();
+            if (!configured) {
+                GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+            }
+            uri = configured;
+            store = lake::control::make_postgres_store(
+                uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+        } else {
+            store = std::make_unique<InMemoryStore>();
+        }
+        store = lake::telemetry::instrument_store(std::move(store), metrics);
+        lake::api::register_core_capabilities(registry, "test");
+        target = account("recovery-limits");
+        anonymous.store = store.get();
+        anonymous.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        anonymous.recovery_client_address = "192.0.2.1";
+    }
+    Account account(const std::string& label) {
+        lake::control::NewPasswordUser input{"lake",
+                                             label + "@example.test",
+                                             "correct horse battery staple",
+                                             label,
+                                             label + " device",
+                                             ""};
+        if (GetParam()) {
+            auto identity = lake::test::test_identity(label);
+            input.identity_document = identity.document;
+            input.identity_proof = lake::test::prove_identity(*store, "lake", identity);
+        }
+        const auto issued = store->sign_up_password(input);
+        EXPECT_TRUE(issued) << (issued ? "" : issued.error().message);
+        if (!issued)
+            return {};
+        const auto principal = store->context_for(issued->secret);
+        EXPECT_TRUE(principal);
+        return {*issued, principal ? *principal : lake::control::Principal{}};
+    }
+    ApiContext context(const Account& owner) {
+        ApiContext ctx;
+        ctx.store = store.get();
+        ctx.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        ctx.authorized = true;
+        ctx.session_credential = true;
+        ctx.acting_identity = owner.principal.taap_id;
+        ctx.acting_user_id = owner.principal.user_id;
+        ctx.credential_kind = owner.principal.kind;
+        ctx.scopes = owner.principal.scopes;
+        return ctx;
+    }
+    ApiResult begin(const std::string& email = "recovery-limits@example.test") {
+        return registry.call("begin_email_recovery", {{"email", email}}, anonymous);
+    }
+    lake::telemetry::Metrics metrics;
+    std::shared_ptr<lake::control::Store> store;
+    Registry registry;
+    Account target;
+    ApiContext anonymous;
+    std::string uri;
+};
+
+TEST_P(EmailRecoveryLimits, RepeatedAndConcurrentStartsKeepOneDeliveryAndNotice) {
+    // Store concurrency avoids coupling this invariant to the audit appender's retry budget.
+    // The API checks stay sequential and compare the public accepted body and status.
+    const auto first = begin("first-unknown@example.test");
+    ASSERT_TRUE(first.ok) << first.error.message;
+    const auto unknown = begin("unknown@example.test");
+    ASSERT_TRUE(unknown.ok);
+    EXPECT_EQ(lake::api::rest_status(first), lake::api::rest_status(unknown));
+    EXPECT_EQ(first.value, unknown.value);
+    std::barrier start(9);
+    std::vector<std::future<std::string>> calls;
+    for (int i = 0; i < 8; ++i) {
+        calls.push_back(std::async(std::launch::async, [&] {
+            start.arrive_and_wait();
+            const auto result = store->begin_email_recovery("lake",
+                                                            "RECOVERY-LIMITS@example.test",
+                                                            24 * 60 * 60,
+                                                            anonymous.recovery_client_address);
+            EXPECT_TRUE(result) << (result ? "" : result.error().message);
+            return result ? result->id : std::string();
+        }));
+    }
+    start.arrive_and_wait();
+    std::string recovery_id;
+    for (auto& call : calls) {
+        const auto result = call.get();
+        ASSERT_FALSE(result.empty());
+        if (recovery_id.empty())
+            recovery_id = result;
+        EXPECT_EQ(result, recovery_id);
+    }
+    const auto known = begin();
+    ASSERT_TRUE(known.ok) << known.error.message;
+    EXPECT_EQ(known.value, first.value);
+    EXPECT_EQ(lake::api::rest_status(known), lake::api::rest_status(first));
+    const auto deliveries = store->claim_recovery_deliveries(100);
+    ASSERT_TRUE(deliveries);
+    ASSERT_EQ(deliveries->size(), 1U);
+    const auto attempt = store->get_recovery_attempt(deliveries->front().recovery_id);
+    ASSERT_TRUE(attempt);
+    const auto repeated = store->begin_email_recovery("lake", "recovery-limits@example.test", 3600);
+    ASSERT_TRUE(repeated);
+    EXPECT_EQ(repeated->id, attempt->id);
+    EXPECT_EQ(repeated->ready_at, attempt->ready_at);
+    EXPECT_EQ(repeated->expires_at, attempt->expires_at);
+    EXPECT_TRUE(store->claim_recovery_deliveries(100)->empty());
+    const auto notices = store->list_recovery_notifications(target.principal.user_id);
+    ASSERT_TRUE(notices);
+    ASSERT_EQ(notices->size(), 1U);
+    EXPECT_EQ(lake::control::to_json(notices->front())["cancel_action"]["input"]["recovery_id"],
+              attempt->id);
+}
+
+TEST_P(EmailRecoveryLimits, CancellationIsOwnerOnlyAndKeepsTheAccountBudget) {
+    ASSERT_TRUE(begin().ok);
+    const auto deliveries = store->claim_recovery_deliveries(10);
+    ASSERT_TRUE(deliveries);
+    ASSERT_EQ(deliveries->size(), 1U);
+    const auto delivery = deliveries->front();
+    const auto other = account("another-recovery-holder");
+    auto other_context = context(other);
+    const json input = {{"recovery_id", delivery.recovery_id}};
+    EXPECT_FALSE(registry.call("cancel_recovery", input, anonymous).ok);
+    EXPECT_FALSE(registry.call("cancel_recovery", input, other_context).ok);
+    EXPECT_FALSE(store->cancel_recovery(other.principal.user_id, delivery.recovery_id));
+    auto owner = context(target);
+    owner.application_session =
+        target.principal; // exercise the application-pool admission path too
+    EXPECT_TRUE(registry.call("list_recovery_notifications", json::object(), owner).ok);
+    const auto cancelled = registry.call("cancel_recovery", input, owner);
+    ASSERT_TRUE(cancelled.ok) << cancelled.error.message;
+    EXPECT_EQ(cancelled.value["status"], "cancelled");
+    if (GetParam()) {
+        // Once the cooling time passes, the previously delivered token must still fail.
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec("UPDATE offline_recovery_attempts SET ready_at = now() - interval '1 second' "
+                "WHERE id = $1::uuid",
+                pqxx::params{delivery.recovery_id});
+        tx.commit();
+    }
+    const auto completion =
+        store->complete_recovery(delivery.recovery_id, delivery.token, "cancel bypass");
+    ASSERT_FALSE(completion);
+    EXPECT_EQ(completion.error().code, "unauthorized");
+    EXPECT_TRUE(store->context_for(target.issued.secret));
+    anonymous.recovery_client_address = "192.0.2.2";
+    const auto suppressed = begin();
+    EXPECT_TRUE(suppressed.ok);
+    EXPECT_EQ(suppressed.value, begin("unknown@example.test").value);
+    EXPECT_TRUE(store->claim_recovery_deliveries(100)->empty());
+    EXPECT_EQ(store->list_recovery_notifications(target.principal.user_id)->size(), 1U);
+    if (GetParam()) {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec("UPDATE offline_recovery_attempts SET created_at = now() - interval '25 hours' "
+                "WHERE id = $1::uuid",
+                pqxx::params{delivery.recovery_id});
+        tx.commit();
+        ASSERT_TRUE(begin().ok);
+        const auto later = store->claim_recovery_deliveries(100);
+        ASSERT_TRUE(later);
+        ASSERT_EQ(later->size(), 1U);
+        EXPECT_NE(later->front().recovery_id, delivery.recovery_id);
+        EXPECT_FALSE(store->complete_recovery(delivery.recovery_id, delivery.token, "old token"));
+    }
+}
+
+TEST_P(EmailRecoveryLimits, CancellationRemovesUnclaimedMail) {
+    const auto attempt = store->begin_email_recovery("lake", "recovery-limits@example.test", 3600);
+    ASSERT_TRUE(attempt);
+    ASSERT_FALSE(attempt->id.empty());
+    ASSERT_TRUE(store->cancel_recovery(target.principal.user_id, attempt->id));
+    EXPECT_TRUE(store->claim_recovery_deliveries(100)->empty());
+}
+
+TEST_P(EmailRecoveryLimits, CancelledAdminRecoveryCannotBeApprovedAgain) {
+    const auto first = account("cancel-admin-one");
+    const auto second = account("cancel-admin-two");
+    const auto organization =
+        store->create_organization({"taap:1:ed25519:cancel-org", "Cancel org", ""});
+    ASSERT_TRUE(organization);
+    const auto add = [&](const Account& who, const std::string& role) {
+        return store->create_membership({organization->id,
+                                         "",
+                                         "user",
+                                         who.principal.user_id,
+                                         who.principal.taap_id,
+                                         role,
+                                         "recovery-membership-attestation",
+                                         "admin",
+                                         "recovery-test"});
+    };
+    ASSERT_TRUE(add(target, "member"));
+    ASSERT_TRUE(add(first, "admin"));
+    ASSERT_TRUE(add(second, "admin"));
+    const auto pending = store->begin_admin_recovery(
+        organization->id, target.principal.user_id, first.principal.taap_id);
+    ASSERT_TRUE(pending);
+    ASSERT_TRUE(store->cancel_recovery(target.principal.user_id, pending->id));
+    EXPECT_FALSE(store->approve_admin_recovery(pending->id, second.principal.taap_id));
+    EXPECT_TRUE(store->claim_recovery_deliveries(100)->empty());
+}
+
+TEST_P(EmailRecoveryLimits, UnknownAddressesSpendClientAndGlobalBudgets) {
+    const auto accepted = begin("unknown@example.test");
+    ASSERT_TRUE(accepted.ok);
+    for (int i = 1; i < 30; ++i) {
+        EXPECT_EQ(begin("unknown@example.test").value, accepted.value);
+    }
+    EXPECT_EQ(begin().value, accepted.value);
+    EXPECT_TRUE(store->claim_recovery_deliveries(100)->empty());
+    anonymous.recovery_client_address = "192.0.2.2";
+    EXPECT_EQ(begin().value, accepted.value);
+    ASSERT_EQ(store->claim_recovery_deliveries(100)->size(), 1U);
+    // The throttled 31st request of 192.0.2.1 spent no global budget: 31 are spent so far,
+    // and 269 more distinct clients spend the rest of the 300.
+    const auto second = account("global-recovery-target");
+    for (int i = 31; i < 300; ++i) {
+        anonymous.recovery_client_address = "client-" + std::to_string(i);
+        EXPECT_EQ(begin("unknown@example.test").value, accepted.value);
+    }
+    anonymous.recovery_client_address = "fresh-client";
+    EXPECT_EQ(begin("global-recovery-target@example.test").value, accepted.value);
+    EXPECT_TRUE(store->claim_recovery_deliveries(100)->empty());
+    if (GetParam()) {
+        // Budgets survive a new store instance, then recover when their hour expires.
+        store = lake::control::make_postgres_store(
+            uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+        store = lake::telemetry::instrument_store(std::move(store), metrics);
+        anonymous.store = store.get();
+        EXPECT_EQ(begin("global-recovery-target@example.test").value, accepted.value);
+        EXPECT_TRUE(store->claim_recovery_deliveries(100)->empty());
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec("UPDATE offline_recovery_budgets SET started_at = now() - interval '2 hours'");
+        tx.commit();
+        ASSERT_TRUE(begin("global-recovery-target@example.test").ok);
+        EXPECT_EQ(store->claim_recovery_deliveries(100)->size(), 1U);
+    }
+}
+
+TEST_P(EmailRecoveryLimits, OneClientExhaustingItsBudgetLeavesAnotherClientAbleToRecover) {
+    // One client sends more than the whole instance's hourly budget. Only the 30 requests its
+    // own budget admits spend the global budget, so another client can still start recovery.
+    const auto accepted = begin("unknown@example.test");
+    ASSERT_TRUE(accepted.ok) << accepted.error.message;
+    for (int i = 1; i < 400; ++i) {
+        EXPECT_EQ(begin("unknown@example.test").value, accepted.value);
+    }
+    EXPECT_EQ(begin().value, accepted.value);
+    EXPECT_TRUE(store->claim_recovery_deliveries(100)->empty());
+    anonymous.recovery_client_address = "198.51.100.7";
+    const auto other = begin();
+    ASSERT_TRUE(other.ok) << other.error.message;
+    EXPECT_EQ(other.value, accepted.value);
+    const auto deliveries = store->claim_recovery_deliveries(100);
+    ASSERT_TRUE(deliveries);
+    ASSERT_EQ(deliveries->size(), 1U);
+    const auto attempt = store->get_recovery_attempt(deliveries->front().recovery_id);
+    ASSERT_TRUE(attempt);
+    EXPECT_EQ(attempt->user_id, target.principal.user_id);
+}
+
+INSTANTIATE_TEST_SUITE_P(Stores, EmailRecoveryLimits, testing::Bool(), [](const auto& info) {
+    return info.param ? "Postgres" : "Memory";
+});
 
 } // namespace

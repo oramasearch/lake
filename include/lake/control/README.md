@@ -313,3 +313,6 @@ adds the chunked artifact bounds (8 MiB chunks, 1 GiB in all) and the predict ro
 and HTTP client admission (lake#969). Full tables fail closed without evicting active budgets.
 The store's protected account admission uses resolved user ids across all password/MFA/recovery
 verification paths; see [the contract](../../../docs/api/identity.md#authentication-attempt-limits).
+`begin_email_recovery` accepts trusted transport client metadata and returns an empty attempt
+for unknown accounts or exhausted budgets. `cancel_recovery` takes the signed-in user id and
+checks ownership again in the store. Contracts: [recovery](../../../docs/api/recovery.md).

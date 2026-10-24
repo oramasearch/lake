@@ -371,6 +371,7 @@ struct ApiContext {
     std::string request_id;
     std::string client_address; // the ingress-derived client address; keys authentication budgets
     std::string request_path;  // the page route, for web UI navigation; never used to authorize
+    std::string recovery_client_address; // ingress-derived client address; never capability input
     std::string request_query; // its query string, for the same; never used to authorize
     // Set by the HTTP server for a request: gives its request worker back, counted against the
     // long-request caps for `principal` (empty: the client's address). False when a cap is full.

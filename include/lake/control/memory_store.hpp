@@ -574,7 +574,10 @@ public:
                                             const std::string& device_name) override;
     Result<RecoveryAttempt> begin_email_recovery(const std::string& pool_id,
                                                  const std::string& email,
-                                                 int cooling_seconds) override;
+                                                 int cooling_seconds,
+                                                 const std::string& client_address = {}) override;
+    Result<RecoveryAttempt> cancel_recovery(const std::string& user_id,
+                                            const std::string& recovery_id) override;
     Result<RecoveryAttempt> begin_admin_recovery(const std::string& organization_id,
                                                  const std::string& user_id,
                                                  const std::string& requested_by) override;
@@ -824,7 +827,13 @@ private:
         std::vector<std::string> approvals;
         std::chrono::system_clock::time_point ready_at;
         std::chrono::system_clock::time_point expires_at;
+        std::chrono::system_clock::time_point created_at = std::chrono::system_clock::now();
     };
+    struct RecoveryBudget {
+        std::chrono::system_clock::time_point started_at;
+        int requests = 0;
+    };
+    std::map<std::string, RecoveryBudget> recovery_budgets_;
     std::vector<RecoveryRecord> recovery_attempts_;
     std::vector<RecoveryDelivery> recovery_deliveries_;
     std::vector<RecoveryNotification> recovery_notifications_;

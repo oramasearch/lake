@@ -921,3 +921,11 @@ sign-up in the in-memory control store to prove account administrators cannot cl
 lower storage through either setter, using synchronous and asynchronous registry calls, while
 non-storage limits remain editable. `UsageLimits.OperatorAndInstanceAdministratorCanChangeBothStorageSetters`
 checks both privileged callers can set and clear storage (lake#976, LSR-109).
+`Stores/EmailRecoveryLimits.*` in `test_offline_recovery.cpp` repeats the email recovery abuse
+and cancellation contract on memory and PostgreSQL: concurrent first starts, case variants,
+delivery/notice deduplication, account/client/global budgets, persisted budget reset and owner-only
+cancellation, including refusal of later administrator approval. See
+[recovery.md](../docs/api/recovery.md#email-recovery-budgets).
+`Stores/ClerkRevocation.SuspensionAlsoStopsEmailRecovery` in `test_clerk_webhooks.cpp` checks
+that a suspended account's email recovery is accepted but queues no mail until the suspension is
+lifted, on both stores.

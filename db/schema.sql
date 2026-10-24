@@ -4822,3 +4822,18 @@ BEGIN
 END
 $model_token_prices$;
 INSERT INTO schema_migrations (version) VALUES ('0095_model_token_prices') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0096_email_recovery_limits (LSR-102, lake#968): durable anonymous budgets and owner cancellation.
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE offline_recovery_attempts DROP CONSTRAINT IF EXISTS offline_recovery_attempts_status_check;
+ALTER TABLE offline_recovery_attempts ADD CONSTRAINT offline_recovery_attempts_status_check
+    CHECK (status IN ('cooling', 'pending_approval', 'approved', 'completed', 'cancelled'));
+CREATE TABLE IF NOT EXISTS offline_recovery_budgets (
+    id text PRIMARY KEY,
+    started_at timestamptz NOT NULL,
+    requests integer NOT NULL CHECK (requests > 0)
+);
+CREATE TABLE IF NOT EXISTS email_recovery_limits_guard (id integer PRIMARY KEY CHECK (id = 1));
+INSERT INTO email_recovery_limits_guard (id) VALUES (1) ON CONFLICT DO NOTHING;
+INSERT INTO schema_migrations (version) VALUES ('0096_email_recovery_limits') ON CONFLICT DO NOTHING;

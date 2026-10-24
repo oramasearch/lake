@@ -1371,3 +1371,12 @@ checks persisted rates and invoice lines, the migration marker and guard, and th
 The [gateway contract](../api/model-gateway.md#configuration) explains the allowlist and required
 input/output prices. Change model entitlement in Lake configuration and published prices; changing
 class syntax also requires updating the API schema and both database checks.
+
+## Email Recovery Limits Migration
+
+`0096_email_recovery_limits` (lake#968, LSR-102) extends the recovery status check with
+`cancelled` and adds `offline_recovery_budgets` (`id`, `started_at`, `requests`). The global
+bucket and hashed client buckets admit bounded hourly requests across replicas; account starts
+lock the user and reuse an unexpired attempt before inserting. No address is persisted.
+The operator must vendor this schema and select `email_recovery_limits_guard` before rollout.
+The [recovery contract](../api/recovery.md#email-recovery-budgets) lists limits and verification.

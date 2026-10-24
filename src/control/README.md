@@ -345,3 +345,7 @@ unban/unlock permits only new credentials. See [the contract](../../docs/api/cle
 Clerk suspension and permanent disablement use `User::may_act()` for bearer issuance,
 delegation and stream authority. Suspended users' agent credentials are withdrawn just as on
 offboarding; a later unban permits new work without restoring old credentials (lake#948).
+Email recovery (lake#968, LSR-102) reuses pending attempts and enforces account, client and global
+budgets inside both stores before queuing mail or device notices. PostgreSQL keeps atomic budgets
+in `offline_recovery_budgets` (migration `0096_email_recovery_limits`); cancellation clears the
+token and removes unclaimed deliveries. See [recovery.md](../../docs/api/recovery.md).

@@ -733,3 +733,6 @@ Storage quota writes in `metering_capabilities.cpp` and the `storage` branch of
 `set_usage_limit` in `usage_capabilities.cpp` require the operator credential or instance
 administrator before either persistence write (lake#976, LSR-109). Other usage dimensions keep
 customer-admin authorization; REST and MCP share the registry handlers.
+Email recovery (lake#968, LSR-102) receives ingress-derived client metadata in the shared HTTP
+context for REST and MCP. `cancel_recovery` authorizes the signed-in account and device notices
+link its capability and POST URL. Cancellation stays in the central identity audit log. See [recovery.md](../../docs/api/recovery.md).

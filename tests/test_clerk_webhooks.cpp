@@ -497,6 +497,35 @@ TEST_P(ClerkRevocation, SuspensionAlsoRefusesLinkedPasswordAuthentication) {
     EXPECT_TRUE(store->sign_in_password({"lake", identity.email, password, "", "test"}));
     EXPECT_FALSE(store->context_for(native->secret));
 }
+// A suspended account starts no email recovery: the request is accepted as for any address, but
+// no token, mail or notice is created until the suspension is lifted (lake#948, lake#968).
+TEST_P(ClerkRevocation, SuspensionAlsoStopsEmailRecovery) {
+    const auto identity = sign_in("user_recovery_alias", "recovery-alias@example.test");
+    lake::control::NewPasswordUser input{.pool_id = "lake",
+                                         .email = identity.email,
+                                         .password = "long-native-test-password",
+                                         .custodial_taap_id = identity.custodial_taap_id,
+                                         .custodial_public_key = identity.custodial_public_key,
+                                         .custodial_wrapped_seed = identity.custodial_wrapped_seed};
+    ASSERT_TRUE(store->sign_up_password(input));
+    ASSERT_TRUE(store->sign_in_clerk(identity));
+    ASSERT_TRUE(store->apply_clerk_user_state({identity.subject, 100, true, false}));
+    const auto suspended =
+        store->begin_email_recovery("lake", identity.email, 24 * 60 * 60, "192.0.2.7");
+    ASSERT_TRUE(suspended) << suspended.error().message;
+    EXPECT_TRUE(suspended->id.empty());
+    const auto none = store->claim_recovery_deliveries(10);
+    ASSERT_TRUE(none);
+    EXPECT_TRUE(none->empty());
+    ASSERT_TRUE(store->apply_clerk_user_state({identity.subject, 101, false, false}));
+    const auto restored =
+        store->begin_email_recovery("lake", identity.email, 24 * 60 * 60, "192.0.2.7");
+    ASSERT_TRUE(restored) << restored.error().message;
+    EXPECT_FALSE(restored->id.empty());
+    const auto queued = store->claim_recovery_deliveries(10);
+    ASSERT_TRUE(queued);
+    EXPECT_EQ(queued->size(), 1U);
+}
 TEST_P(ClerkRevocation, LinkedSubjectsShareSuspensionAndRevocation) {
     auto first = sign_in("user_alias_a", "alias@example.test");
     auto second = sign_in("user_alias_b", "alias@example.test");

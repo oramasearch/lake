@@ -255,3 +255,6 @@ outlives the callable, so disconnects cannot release capacity early (lake#969).
 `ApiContext::client_address` is the address the trusted ingress hop decided (the HTTP server's
 `order_client_address`, `direct` without one), and the registry shares
 its client attempt table across transports. See [the contract](../../../docs/api/identity.md#authentication-attempt-limits).
+`ApiContext::recovery_client_address` carries ingress-derived transport metadata for anonymous
+recovery limits. It is never capability input; empty addresses share a bucket. See
+[recovery.md](../../../docs/api/recovery.md#email-recovery-budgets).

@@ -11655,11 +11655,18 @@ public:
 
     Result<RecoveryAttempt> begin_email_recovery(const std::string& pool_id,
                                                  const std::string& email,
-                                                 int cooling_seconds) override {
+                                                 int cooling_seconds,
+                                                 const std::string& client_address) override {
         if (cooling_seconds < 3600) {
             return std::unexpected(
                 StoreError{"invalid_input", "email recovery cooling period is too short"});
         }
+        const std::string client_hash = identity_crypto::sha256_hex(client_address);
+        if (client_hash.empty()) {
+            return std::unexpected(StoreError{"store_error", "could not hash recovery client"});
+        }
+        // The token is hashed before the transaction (lake#969), so no budget or user row stays
+        // locked while Argon2id runs.
         const std::string token = identity_crypto::random_secret();
         const std::string token_hash = identity_crypto::hash_secret(token);
         if (token.empty() || token_hash.empty()) {
@@ -11667,22 +11674,83 @@ public:
         }
         return with_authentication_tx<RecoveryAttempt>([&](pqxx::work& tx)
                                                            -> Result<RecoveryAttempt> {
+            // Atomic upserts serialize budgets across replicas. Spend before account lookup,
+            // and commit even unknown/throttled requests, so they cannot evade the client cap.
+            // The client's budget is spent first and the global budget only for a request the
+            // client's budget admits, so one client cannot spend the instance's budget alone.
+            const auto spend = [&](const std::string& key, int limit) {
+                return !tx.exec_params(
+                              "INSERT INTO offline_recovery_budgets AS budget (id, started_at, "
+                              "requests) "
+                              "VALUES ($1, clock_timestamp(), 1) ON CONFLICT (id) DO UPDATE SET "
+                              "started_at = CASE WHEN budget.started_at <= clock_timestamp() - "
+                              "interval "
+                              "'1 hour' THEN clock_timestamp() ELSE budget.started_at END, "
+                              "requests = CASE WHEN budget.started_at <= clock_timestamp() - "
+                              "interval "
+                              "'1 hour' THEN 1 ELSE budget.requests + 1 END "
+                              "WHERE budget.started_at <= clock_timestamp() - interval '1 hour' "
+                              "OR budget.requests < $2 RETURNING id",
+                              key,
+                              limit)
+                            .empty();
+            };
+            // While the global budget is spent, no client row is created, so varying addresses
+            // cannot grow the table past the global cap.
+            if (!tx.exec("SELECT 1 FROM offline_recovery_budgets WHERE id = 'global' "
+                         "AND requests >= 300 "
+                         "AND started_at > clock_timestamp() - interval '1 hour'")
+                     .empty()) {
+                return RecoveryAttempt{};
+            }
+            tx.exec("DELETE FROM offline_recovery_budgets WHERE id <> 'global' "
+                    "AND started_at <= clock_timestamp() - interval '1 hour'");
+            if (!spend("client/" + client_hash, 30)) {
+                return RecoveryAttempt{};
+            }
+            if (!spend("global", 300)) {
+                return RecoveryAttempt{};
+            }
             const pqxx::result users = tx.exec_params(
-                "SELECT user_id::text FROM credentials WHERE pool_id = $1 AND kind = 'password' "
-                "AND subject = lower($2) AND revoked_at IS NULL",
+                "SELECT users.id::text FROM users JOIN credentials ON credentials.user_id = "
+                "users.id "
+                "WHERE credentials.pool_id = $1 AND credentials.kind = 'password' "
+                "AND credentials.subject = lower($2) AND credentials.revoked_at IS NULL "
+                "AND users.disabled_at IS NULL AND users.deleted_at IS NULL "
+                "AND NOT users.clerk_suspended FOR UPDATE OF users",
                 pool_id,
                 email);
             if (users.empty()) {
-                return std::unexpected(StoreError{"not_found", "account not found"});
+                return RecoveryAttempt{};
+            }
+            const std::string user_id = users[0][0].as<std::string>();
+            // The user row serializes all pools and spellings of this account before any side
+            // effect. Reuse does not replace the token, extend its window or enqueue mail.
+            const auto pending = tx.exec_params(
+                std::string("SELECT ") + recovery_attempt_columns +
+                    " FROM offline_recovery_attempts WHERE user_id = $1::uuid AND method = 'email' "
+                    "AND status = 'cooling' AND expires_at > clock_timestamp() "
+                    "ORDER BY created_at DESC LIMIT 1",
+                user_id);
+            if (!pending.empty()) {
+                return recovery_attempt_of(pending[0]);
+            }
+            if (!tx.exec_params("SELECT 1 FROM offline_recovery_attempts WHERE user_id = $1::uuid "
+                                "AND method = 'email' AND created_at > clock_timestamp() - "
+                                "interval '24 hours' LIMIT 1",
+                                user_id)
+                     .empty()) {
+                return RecoveryAttempt{};
             }
             const pqxx::result rows = tx.exec_params(
                 std::string("INSERT INTO offline_recovery_attempts ") +
-                    "(user_id, method, status, token_hash, ready_at, expires_at) "
+                    "(user_id, method, status, token_hash, ready_at, expires_at, created_at) "
                     "VALUES ($1::uuid, 'email', 'cooling', $2, "
-                    "now() + make_interval(secs => $3), "
-                    "now() + make_interval(secs => $3) + interval '24 hours') RETURNING " +
+                    "clock_timestamp() + make_interval(secs => $3), "
+                    "clock_timestamp() + make_interval(secs => $3) + interval '24 "
+                    "hours', clock_timestamp()) RETURNING " +
                     recovery_attempt_columns,
-                users[0][0].as<std::string>(),
+                user_id,
                 token_hash,
                 cooling_seconds);
             const RecoveryAttempt attempt = recovery_attempt_of(rows[0]);
@@ -11694,6 +11762,32 @@ public:
                            token);
             notify_devices(tx, attempt, "email_recovery_started");
             return attempt;
+        });
+    }
+
+    Result<RecoveryAttempt> cancel_recovery(const std::string& user_id,
+                                            const std::string& recovery_id) override {
+        if (user_id.empty()) {
+            return std::unexpected(StoreError{"unauthorized", "signed-in account is required"});
+        }
+        return with_tx<RecoveryAttempt>([&](pqxx::work& tx) -> Result<RecoveryAttempt> {
+            // Completion and cancellation lock the same attempt. Whichever commits first wins.
+            const auto rows = tx.exec_params(
+                std::string("UPDATE offline_recovery_attempts SET status = 'cancelled', ") +
+                    "token_hash = NULL WHERE id = $1::uuid AND user_id = $2::uuid "
+                    "AND status IN ('cooling', 'pending_approval', 'approved', 'cancelled') "
+                    "AND expires_at > clock_timestamp() RETURNING " +
+                    recovery_attempt_columns,
+                recovery_id,
+                user_id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "pending recovery attempt not found"});
+            }
+            tx.exec_params("DELETE FROM offline_recovery_deliveries WHERE recovery_id = $1::uuid "
+                           "AND delivered_at IS NULL",
+                           recovery_id);
+            return recovery_attempt_of(rows[0]);
         });
     }
 
@@ -11835,7 +11929,8 @@ public:
                     }
                     const std::string method = attempts[0][1].as<std::string>();
                     const std::string status = attempts[0][2].as<std::string>();
-                    if (status == "completed" || (method == "admin" && status != "approved")) {
+                    if ((method == "email" && status != "cooling") ||
+                        (method == "admin" && status != "approved")) {
                         return std::unexpected(
                             StoreError{"conflict", "recovery is not completable"});
                     }
