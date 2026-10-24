@@ -295,10 +295,12 @@ async function services() {
 }
 
 /** Delete this run's project and any earlier e2e- project, once its runs have finished (#164). */
-async function deleteProjects() {
+async function deleteProjects(project) {
   await page.goto(ws("/design/projects"));
-  await settle();
+  // The list arrives after the page: wait for this run's own project to be listed.
+  await main().getByRole("link", { name: project, exact: true }).waitFor({ timeout: 30000 }).catch(() => {});
   const names = (await main().getByRole("link").allInnerTexts()).map((name) => name.trim()).filter((name) => /^e2e-[a-z0-9]+$/.test(name));
+  check("projects to delete", names.includes(project), { names });
   for (const name of [...new Set(names)]) {
     let error = "";
     const deadline = Date.now() + 5 * 60 * 1000;
@@ -332,11 +334,11 @@ try {
   if (!workspace) throw new Error("no ready workspace");
 
   // 3. Design, Train and Ship.
-  await design();
+  const project = await design();
   await pages();
   await searchIndex();
   await services();
-  await deleteProjects();
+  await deleteProjects(project);
 
   // 4. The account menu at the foot of the rail, then Sign out (lake and Clerk both sign out).
   await page.getByRole("navigation", { name: "Navigation" }).locator("button[aria-haspopup=menu]").click();
