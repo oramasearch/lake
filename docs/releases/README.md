@@ -3,6 +3,8 @@
 One page per tagged release, newest first. A page states what the release includes, what it
 does not, what is knowingly still broken, and how it was verified.
 
+- [v0.5.2](v0.5.2.md) — 2026-10-24. A patch: request headers up to 1 MiB, so people can sign in with
+  Google (#1108).
 - [v0.5.1](v0.5.1.md) — 2026-10-24. A patch: lake installs the operator's `ZETTA_EGRESS_ALLOW`, so it
   reaches its Zettas (#1097). Needs orama-operator v0.9.2.
 - [v0.5.0](v0.5.0.md) — 2026-10-24. The rest of the pre-launch security review and the liquid#383
