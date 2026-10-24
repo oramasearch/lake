@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
+#include <zetta/connect/egress_policy.hpp>
 #include <zetta/connect/http_transport.hpp>
 
 #include "experiment_fixture.hpp"
@@ -166,6 +167,29 @@ struct Workspaces {
 };
 
 } // namespace
+
+// lake#1097: zetta's client refuses all but loopback until lake installs the operator's list.
+TEST(Workspaces, TheOperatorsEgressListLetsLakeReachItsZettasAndNothingElse) {
+    const auto previous = zetta::connect::egress_policy();
+    ASSERT_FALSE(lake::control::install_zetta_egress_policy(
+        "lake-dev-zetta-zetta.lake-dev.svc.cluster.local:4800,*.svc.cluster.local:4800"));
+    const auto policy = zetta::connect::egress_policy();
+    EXPECT_TRUE(policy.allows_name("lake-dev-zetta-zetta.lake-dev.svc.cluster.local", 4800));
+    EXPECT_TRUE(policy.allows_name("dev-ws-c09a130ddef7-zetta.prod-ws-c09a130ddef7.svc.cluster.local", 4800));
+    EXPECT_FALSE(policy.allows_name("lake-dev-controldb-rw.lake-dev.svc.cluster.local", 5432));
+    EXPECT_FALSE(policy.allows_name("example.com", 443));
+    EXPECT_TRUE(policy.allows_name("127.0.0.1", 4800));
+
+    // A malformed list is refused and the installed policy is left as it was.
+    EXPECT_TRUE(lake::control::install_zetta_egress_policy("lake-dev-zetta:99999"));
+    EXPECT_TRUE(zetta::connect::egress_policy().allows_name("lake-dev-zetta-zetta.lake-dev.svc.cluster.local", 4800));
+
+    // Empty is zetta's default: loopback only.
+    ASSERT_FALSE(lake::control::install_zetta_egress_policy(""));
+    EXPECT_FALSE(zetta::connect::egress_policy().allows_name("lake-dev-zetta-zetta.lake-dev.svc.cluster.local", 4800));
+    EXPECT_TRUE(zetta::connect::egress_policy().allows_name("localhost", 4800));
+    zetta::connect::set_egress_policy(previous);
+}
 
 TEST(Workspaces, SlugIsDerivedFromTheCustomerId) {
     EXPECT_EQ(lake::control::workspace_slug(customer), "ws-0f1e2d3c4b5a");
