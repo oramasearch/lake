@@ -6,6 +6,10 @@ own fonts without a runtime asset directory; the hosted application sign-in page
 the stylesheet. The source files, licensing, update procedure, and HTTP contract are documented in
 [`docs/ui/design-system.md`](../docs/ui/design-system.md).
 
+`embed_schema.cmake` embeds `db/schema.sql` as one raw string (`lake::control::embedded_schema_sql`),
+which `lake migrate` applies and `lake manifest` describes (lake#1119,
+[`docs/deployment/operator-interface.md`](../docs/deployment/operator-interface.md)).
+
 `embed_guide.cmake` embeds the Docs guides (`docs/guide/*.md`) in reading order; the `list_docs`
 and `get_doc` capabilities read them, and the web app renders them.
 

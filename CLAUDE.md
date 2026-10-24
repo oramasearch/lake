@@ -951,7 +951,11 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   bootstrapped, so treat an empty value as "not yet"), and `LAKE_ADMIN_TOKEN` from the
   minted-once `lake-<name>-admin` Secret. **Data plane: Zetta.** Recorded in the
   bridge `decisions.md` §6; "for now" is deliberate.
-- **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
+- **Schema.** `db/schema.sql` is the source of truth and is compiled into the binary; `lake migrate`
+  applies it (one transaction, advisory lock, the `PostgresSchema` Job's checks) and `lake manifest`
+  publishes it with the Stripe events and environment the image needs (lake#1119,
+  `docs/deployment/operator-interface.md`). Until orama-operator#936 runs them from the image, the
+  operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
   `account_balances_guard` in the source tree, versioned by content hash).
@@ -1075,7 +1079,11 @@ cluster runs that image. `v0.1.0` is `oramasearch/lake:20261012a`, also tagged `
 
 ## Never
 
-- Never run schema migrations from lake pods (the operator's PostgresSchema Job does, once).
+- Never run schema migrations from the lake server process (the operator does, once per image:
+  today its PostgresSchema Job, after orama-operator#936 a Job running `lake migrate`).
+- Never read an environment variable without declaring it in `environment_variables()`
+  (`src/api/manifest.cpp`), nor handle a Stripe event not in `stripe_webhook_events`; the operator
+  renders and subscribes from those lists.
 - Never add an auth path the API does not have; the UI session is the API bearer.
 - Never add a second attestation or signing framework. TAAP/1 is the security model.
 - Never make this repository public.

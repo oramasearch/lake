@@ -86,6 +86,8 @@ target_sources(lake-tests PRIVATE test_orders.cpp)
 target_sources(lake-tests PRIVATE test_identity_proof.cpp)
 # The version and its release page (root CLAUDE.md, *Cutting a release*).
 target_sources(lake-tests PRIVATE test_release_version.cpp)
+# `lake manifest`: the schema, Stripe events and environment the operator reads (lake#1119).
+target_sources(lake-tests PRIVATE test_manifest.cpp)
 target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx OpenSSL::Crypto
   Boost::beast2 Boost::http Boost::corosio GTest::gtest
   # zetta-api for a fake Zetta HTTP transport under ZettaWorkspaceCaller (test_workspaces.cpp).
@@ -103,10 +105,14 @@ add_dependencies(lake-tests lake)
 include(GoogleTest)
 gtest_discover_tests(lake-tests)
 
-add_executable(lake-postgres-tests test_main.cpp test_postgres.cpp test_operator_contract.cpp test_network.cpp)
+add_executable(lake-postgres-tests test_main.cpp test_postgres.cpp test_operator_contract.cpp test_network.cpp
+  # `lake migrate` against empty, current and concurrent databases (lake#1119).
+  test_migrate.cpp)
 target_link_libraries(lake-postgres-tests PRIVATE lake-control-postgres pqxx OpenSSL::Crypto GTest::gtest)
 target_compile_definitions(lake-postgres-tests PRIVATE
-  LAKE_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+  LAKE_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+  LAKE_TEST_SERVER_PATH="$<TARGET_FILE:lake>")
+add_dependencies(lake-postgres-tests lake)
 gtest_discover_tests(lake-postgres-tests)
 
 add_executable(lake-debug-fixture debug_fixture.cpp)

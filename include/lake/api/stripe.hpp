@@ -6,6 +6,7 @@
 // exchange is the server's outbound client, injected as a StripeHttp the tests replace with a
 // fake.
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <expected>
@@ -35,6 +36,32 @@ inline constexpr std::chrono::seconds stripe_signature_tolerance{300};
 inline constexpr std::string_view stripe_usage_product = "lake_usage";
 inline constexpr std::string_view stripe_private_warehouse_product = "lake_private_warehouse";
 inline constexpr std::string_view stripe_dedicated_cluster_product = "lake_dedicated_cluster";
+
+// The Stripe webhook events lake handles (lake#1119, orama-operator#936), sorted: exactly the event
+// types parse_stripe_event dispatches on. `lake manifest` and server_info publish this list, and
+// the operator subscribes a Lake's webhook endpoint to exactly these, so a new event is a lake
+// change only. StripeWebhookEvents.* fails when stripe.cpp compares an event type not listed here,
+// or one listed here is compared nowhere.
+inline constexpr std::array<std::string_view, 18> stripe_webhook_events = {
+    "checkout.session.async_payment_failed",
+    "checkout.session.async_payment_succeeded",
+    "checkout.session.completed",
+    "checkout.session.expired",
+    "customer.subscription.created",
+    "customer.subscription.deleted",
+    "customer.subscription.paused",
+    "customer.subscription.resumed",
+    "customer.subscription.updated",
+    "invoice.marked_uncollectible",
+    "invoice.paid",
+    "invoice.payment_action_required",
+    "invoice.payment_failed",
+    "invoice.updated",
+    "invoice.voided",
+    "payment_intent.payment_failed",
+    "payment_intent.succeeded",
+    "setup_intent.succeeded",
+};
 
 // The product of an order sheet offer paid through Checkout; empty for any other (on_prem is
 // ordered by form).

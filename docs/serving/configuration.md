@@ -8,6 +8,8 @@ same list. Every value below is read once at startup; SIGINT and SIGTERM stop th
 | Flag | Meaning |
 |---|---|
 | `lake version` (or `--version`) | print the version and exit |
+| `lake migrate [--control-db URI] [--wait-seconds N]` | apply the schema built into the binary to the control database (default `$LAKE_CONTROL_DB_URI`) idempotently, in one transaction under an advisory lock, print what it applied as JSON and exit 0 (applied or current), 1 (failed, rolled back), 2 (usage) or 3 (unreachable within `--wait-seconds`, default 0). Reads no other setting; the server never migrates ([`../deployment/operator-interface.md`](../deployment/operator-interface.md), lake#1119) |
+| `lake manifest` | print, as JSON, what this image needs from the operator: version, revision, schema (latest migration, guard tables), Stripe webhook events and products, and every environment variable with `required` and `secret` ([`../deployment/operator-interface.md`](../deployment/operator-interface.md#lake-manifest)) |
 | `--listen HOST:PORT` | the bind address; the default port is 4900 (Zetta is 4800) |
 | `--node NAME` | names the node; in a replicated deployment it is the stable region name ([`../control-plane/replication.md`](../control-plane/replication.md)) |
 | `--control-db URI` | Postgres URI of the control plane (default `$LAKE_CONTROL_DB_URI`) |
@@ -135,6 +137,9 @@ needs them ([`../api/billing.md`](../api/billing.md#balance), lake#1114).
 ## Change
 
 A new flag or variable is added to `usage()` and the table above in the same change, with its
-default, and the page that owns the behavior links back here.
+default, and the page that owns the behavior links back here. A new variable is also declared in
+`environment_variables()` (`src/api/manifest.cpp`), with whether a Lake cannot run without it and
+whether it is a secret, so `lake manifest` tells the operator to render it;
+`LakeManifest.DeclaresExactlyTheEnvironmentLakeReads` fails until it is.
 
 `LAKE_ORDER_ENTITLEMENT_GRACE_SECONDS` (lake#972) sets the grace on signed order subscription events and initial paid Checkout: default `259200` (three days), integer `0` through `2592000` (30 days). Invalid values stop startup. The policy is captured while entitled or on positive entitlement evidence; a negative event cannot extend an expired order. See [orders](../api/orders.md#recurring-entitlement-lsr-105-lake972).
