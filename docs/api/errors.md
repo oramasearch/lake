@@ -41,7 +41,7 @@ Every capability answers a failure the same way on REST and MCP:
 | `unauthorized` | 403 | The credential is valid but does not grant this call on this object. |
 | `mfa_required` | 403 | The account must finish multi-factor verification first. |
 | `identity_proof_required` | 403 | An identity document becomes an account's identity only with a fresh signature by its key: sign `begin_identity_proof`'s challenge and send `identity_proof` ([identity.md](identity.md#proving-you-hold-the-key)). |
-| `forbidden` | 403 | The object is read-only for everyone: one of Orama's catalogue solutions cannot be edited or deleted ([solutions](solutions.md)). The message says why and what to do instead, such as `duplicate_solution`. |
+| `forbidden` | 403 | The object is read-only for everyone: one of Orama's catalogue solutions cannot be edited or deleted ([solutions](solutions.md)); or the entry is off on this Lake for everyone, as Lake's own password sign-up and sign-in are under Clerk ([clerk.md](clerk.md), lake#1098). The message says why and what to do instead, such as `duplicate_solution`. |
 | `consent_required` | 403 | The workspace requires an approval before it reaches an outside source, which lake cannot give. |
 | `not_found` | 404 | The addressed object does not exist, or the caller cannot see it. |
 | `unknown_capability` | 404 | No capability has this name. |

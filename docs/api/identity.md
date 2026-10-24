@@ -64,6 +64,11 @@ the same row-resolved session or operator credential as every other protected ca
 The session and device lists authorize the authenticated principal through the registry's batched
 authorization path before returning any row.
 
+**Under Clerk the `lake` pool's password entries are off** (lake#1098). With a Clerk publishable
+key configured, `sign_up_password`, `sign_in_password`, `verify_mfa` and `recover_with_code` in the
+`lake` pool answer `403 forbidden` and issue no session; `viewer` reports the same rule as
+`password_sign_up: false` ([clerk.md](clerk.md)). Application pools are unaffected.
+
 `sign_up_password` and `sign_in_password` issue browser sessions. Passwords use OpenSSL 3.6.3
 `EVP_KDF` `ARGON2ID` with 64 MiB memory, three iterations, one lane, and a unique 128-bit salt.
 A user with an enrolled TOTP factor receives `mfa_required` from password sign-in and must use

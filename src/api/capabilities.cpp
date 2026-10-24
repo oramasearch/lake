@@ -3197,7 +3197,8 @@ void register_identity_capabilities(Registry& registry) {
                        "managed key for the account, which the person can later replace with "
                        "their own identity (use_own_identity). With it, identity_proof is "
                        "required: a signature by the document's key over begin_identity_proof's "
-                       "challenge.",
+                       "challenge. Refused (forbidden) in the Lake pool when the Lake signs people "
+                       "in through Clerk (viewer password_sign_up false).",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"pool_id", {{"type", "string"}}},
@@ -3220,6 +3221,9 @@ void register_identity_capabilities(Registry& registry) {
             if (!context.store)
                 co_return no_store();
             const std::string pool_id = input.value("pool_id", "lake");
+            if (auto refused = lake_pool_password_refusal(context, pool_id)) {
+                co_return std::move(*refused);
+            }
             if (const ApiResult origin =
                     origin_answer(co_await authorize_application_origin(context, pool_id));
                 !origin.ok) {
@@ -3257,7 +3261,9 @@ void register_identity_capabilities(Registry& registry) {
         Capability{.name = "sign_in_password",
                    .title = "Sign in with password",
                    .description = "Verify a password credential. A user with enrolled MFA "
-                                  "receives mfa_required until TOTP is verified.",
+                                  "receives mfa_required until TOTP is verified. Refused "
+                                  "(forbidden) in the Lake pool when the Lake signs people in "
+                                  "through Clerk.",
                    .input_schema = {{"type", "object"},
                                     {"properties",
                                      {{"pool_id", {{"type", "string"}}},
@@ -3277,6 +3283,9 @@ void register_identity_capabilities(Registry& registry) {
                        if (!context.store)
                            co_return no_store();
                        const std::string pool_id = input.value("pool_id", "lake");
+                       if (auto refused = lake_pool_password_refusal(context, pool_id)) {
+                           co_return std::move(*refused);
+                       }
                        if (const ApiResult origin = origin_answer(
                                co_await authorize_application_origin(context, pool_id));
                            !origin.ok) {
@@ -3388,6 +3397,9 @@ void register_identity_capabilities(Registry& registry) {
                        if (!context.store)
                            co_return no_store();
                        const std::string pool_id = input.value("pool_id", "lake");
+                       if (auto refused = lake_pool_password_refusal(context, pool_id)) {
+                           co_return std::move(*refused);
+                       }
                        if (const ApiResult origin = origin_answer(
                                co_await authorize_application_origin(context, pool_id));
                            !origin.ok) {

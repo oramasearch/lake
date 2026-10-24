@@ -411,6 +411,9 @@ The sign-up registry contract includes personal customer provisioning, with atom
 retry semantics shared by all transports. See `docs/api/provisioning.md`.
 The web app's sign-up calls `sign_up_password`, which sets the browser session, and creates a
 repository with `create_repository`. See `docs/api/provisioning.md` and `docs/ui/identity.md`.
+Under Clerk the Lake pool's password entries (`sign_up_password`, `sign_in_password`, `verify_mfa`,
+`recover_with_code`) refuse with `lake_pool_password_refusal` (`app_capabilities.cpp`), whose rule
+`lake_pool_password_sign_in` (`clerk.cpp`) is also `viewer`'s `password_sign_up` (lake#1098).
 
 The web app builds its navigation from the `viewer` read (`console_capabilities.cpp`); a protected
 download without a credential redirects to `/sign-in`. OpenAPI describes account tokens. The

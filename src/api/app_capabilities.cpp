@@ -1,5 +1,6 @@
 #include "lake/api/apps.hpp"
 #include "lake/api/authentication_work.hpp"
+#include "lake/api/clerk.hpp"
 
 #include <algorithm>
 #include <array>
@@ -740,6 +741,17 @@ application_session_result(control::Result<control::IssuedSession> issued,
         co_return started;
     }
     co_return ApiResult::success(std::move(output));
+}
+
+std::optional<ApiResult> lake_pool_password_refusal(const ApiContext& context,
+                                                    std::string_view pool_id) {
+    if ((!pool_id.empty() && pool_id != "lake") ||
+        lake_pool_password_sign_in(context.clerk_publishable_key)) {
+        return std::nullopt;
+    }
+    return ApiResult::failure("forbidden",
+                              "This Lake signs people in through Clerk, so its own password "
+                              "sign-up and sign-in are off. Sign up or sign in at /sign-in.");
 }
 
 liquid::runtime::task<ApiResult> sign_up_password_session(control::NewPasswordUser user,

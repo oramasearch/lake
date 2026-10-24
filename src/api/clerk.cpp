@@ -63,6 +63,10 @@ std::optional<ClerkConfig> clerk_config(std::string_view publishable_key) {
     return std::nullopt;
 }
 
+bool lake_pool_password_sign_in(std::string_view clerk_publishable_key) {
+    return !clerk_config(clerk_publishable_key).has_value();
+}
+
 std::expected<ClerkUserStatus, std::string>
 clerk_user_status(const std::string& subject, const std::string& secret_key, const ClerkGet& get) {
     if (secret_key.empty() || !get) {
