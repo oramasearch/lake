@@ -242,7 +242,7 @@ As: owner
 Expect:
 - Breadcrumb Account › Tokens. Eyebrow "Account", title "API Tokens", sub "Create named, scoped
   sessions and revoke them here." and the primary **New token**.
-- With tokens: stats "Tokens", "Active" and "Never expire" ("survive sign-out"); a search "Search
+- With tokens: stats "Tokens", "Active" and "Never expire" ("no expiry"); a search "Search
   tokens…" and chips "Any state", "Active <n>", "Revoked <n>"; the table "Token" (name and kind),
   "Scopes", "Expires", "Status", **Revoke**.
 - With none: no stats, and "No API tokens" / "A token lets a script, an agent or Liquid act with

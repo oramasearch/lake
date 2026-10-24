@@ -2303,7 +2303,8 @@ std::expected<control::NewToken, ApiError> attenuated_token(const json& input,
         }
     }
     if (input.value("never_expires", false)) {
-        // A standing token (lake#234): no expiry and no parent, so signing out does not end it.
+        // A standing token (lake#234): no expiry and no parent, so not even the issuing browser
+        // session's expiry ends it. Signing out ends no key at all (lake#1163).
         // Its authority is still the person's live grants on every request, and revoking it,
         // revoking the person's sessions or suspending them still stops it.
         if (input.value("reason", "").empty() || std::ranges::find(scopes, "*") != scopes.end()) {
@@ -3896,7 +3897,7 @@ void register_identity_capabilities(Registry& registry) {
                            {"never_expires",
                             {{"type", "boolean"},
                              {"description",
-                              "a standing token with no expiry that survives sign-out; needs a "
+                              "a standing token with no expiry; needs a "
                               "reason and named scopes, and the account's opt-in (lake#234)"}}},
                            {"reason", {{"type", "string"}}}}},
                          {"required", json::array({"name", "scopes"})},

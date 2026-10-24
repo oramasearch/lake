@@ -334,8 +334,8 @@ durable identity.
   When omitted, the lifetime is the lesser of 30 days and that remaining lifetime. The store caps
   the persisted expiry at the parent’s exact timestamp, including time spent handling issuance.
 - **Tokens that never expire** (lake#234). `create_token` with `never_expires: true` from a
-  signed-in person issues a **standing** token: static, no expiry, and **no parent**, so signing out
-  or the browser session expiring does not end it. It needs a non-empty `reason` and named scopes
+  signed-in person issues a **standing** token: static, no expiry, and **no parent**, so neither
+  signing out (which ends no key, below) nor the browser session's expiry ends it. It needs a non-empty `reason` and named scopes
   (never `*`) within the issuer's scopes, the person's personal account must have
   `allow_non_expiring_credentials` on (`set_customer_credential_policy`), and the instance must not
   set `LAKE_ALLOW_NON_EXPIRING_CREDENTIALS=false`. Its authority is still the person's live grants on
@@ -349,10 +349,22 @@ durable identity.
   token capability adds no static-authority bootstrap flow.
 - Every session-derived token retains `parent_session_id`, the issuer’s immutable row ID. The
   store verifies that issuer belongs to the same user and pool and is still active before issue.
-  Every subsequent authentication verifies the entire ancestor chain, including each ancestor’s
-  expiry, revocation and linked device. Revoking a parent, any ancestor, or its device makes all
-  descendants unusable on their next request. Children do **not** survive their parent.
-  Parent deletion cascades to descendants. Ancestry revocation is evaluated at authentication;
+  Every subsequent authentication verifies the ancestor chain **up to the first sign-in session**
+  (a `browser` or `taap` session): each key ancestor's expiry, revocation and linked device.
+  Revoking a key, or any key it descends from, makes all its descendants unusable on their next
+  request; children do not survive a revoked parent key.
+- **Signing out never ends a key** (lake#1163; Steve, 2026-10-24: *"don't revoke api keys on
+  signout"*). A sign-in ancestor ends the walk without being checked, except that it must belong
+  to the same user and pool: when the browser or TAAP session a key was made from is revoked
+  (`/logout`, a Clerk session event, `revoke_session` on it), expires, or loses its device, the
+  key and its descendants keep working. A key made in a browser still keeps the expiry it was
+  issued with, capped at that browser session's expiry at issue time; a key that must outlive that
+  is made with *Never expires*. Keys end when they are revoked themselves, through
+  `sign_out_everywhere` or `revoke_user_sessions`, or when the account is banned, locked,
+  deprovisioned, deleted or disabled. Verify:
+  `HttpServer/HttpResponseIsolation.AKeyMadeInABrowserOutlivesThatBrowsersSignOut` and
+  `Stores/ClerkRevocation.SessionEventsEndOnlyBrowserSessions`.
+- Parent deletion cascades to descendants. Ancestry revocation is evaluated at authentication;
   a child’s own `revoked_at` need not change when an ancestor is revoked.
 - Application-pool API-token issuance returns only the derived session bearer, with its usual
   session lifecycle event. It does not also issue an independent application JWT.

@@ -115,9 +115,8 @@ The sign-out ends only the walkthrough's own browser session (lake#1163): Clerk'
 names the Clerk session that ended, and lake ends just the Lake browser session bound to it. The
 tester's API keys, MCP keys, devices and other browsers keep working, so scripts with their own
 browser session or key may run before, after or beside it; only the session saved in
-`LAKE_E2E_STATE` ends with it. (Before lake#1163 a Clerk
-sign-out revoked every session, key and device of the account.) A key made *in the walkthrough's
-own browser* without *Never expires* still ends with that browser, as on any sign-out.
+`LAKE_E2E_STATE` ends with it. (Before lake#1163 a Clerk sign-out revoked every session, key and
+device of the account.) Keys made in the walkthrough's own browser survive its sign-out too.
 
 Read `log.json` and **look at the screenshots**: a page can show its title and still show an empty
 state that should not be empty.

@@ -204,7 +204,8 @@ searching in Lake keeps working.
 Once the index is published, the **Search Key** card offers **Create a search key**. The key's only
 scope is `search_index`, so it can search published indexes and nothing else. It is shown once:
 copy it then. It keeps working for your other published indexes until you revoke it on **Tokens**,
-and lasts as long as the sign-in that made it, at most 30 days.
+and expires no later than the sign-in that made it would have, at most 30 days; signing out does
+not end it.
 
 - REST: `POST /v1/create_token`:
 
@@ -266,8 +267,9 @@ be undone.
   and 10,000 steps at once. Counts can lag by up to ten seconds, and a Lake that stops abruptly can
   lose its last ten seconds of counts.
 - Workspace reads time out after 15 seconds and actions after 60.
-- A key lasts as long as the sign-in that made it, at most 30 days, unless your account allows keys
-  that never expire ([Tokens and Keys](/docs/tokens)).
+- A key expires no later than the sign-in that made it would have, at most 30 days, unless your
+  account allows keys that never expire ([Tokens and Keys](/docs/tokens)). Signing out does not
+  end it.
 
 ## Permissions
 

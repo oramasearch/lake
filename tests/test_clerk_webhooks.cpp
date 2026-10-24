@@ -307,7 +307,7 @@ void expect_upstream_revocation(lake::control::Store& store) {
     const auto principal = store.context_for(first->secret);
     ASSERT_TRUE(principal);
     const std::string user_id = principal->user_id;
-    // Keys made in the browser that signs out descend from it and end with it, as on /logout.
+    // Keys made in the browser that signs out, and a key derived from one: they survive it.
     const auto child =
         store.create_token({user_id, "lake", "child", "", {"*"}, 3600, false, first->session.id});
     ASSERT_TRUE(child) << child.error().message;
@@ -339,11 +339,11 @@ void expect_upstream_revocation(lake::control::Store& store) {
     const auto revoked = deliver(store, delivery_of("msg_revoke", revoked_event));
     ASSERT_EQ(revoked.status, 200) << revoked.body;
     EXPECT_EQ(revoked.body.value("applied", false), true);
-    // The browser bound to the ended Clerk session ends, with what descends from it.
+    // The browser bound to the ended Clerk session ends; keys made in it do not (lake#1163).
     EXPECT_FALSE(store.context_for(first->secret));
     EXPECT_FALSE(store.context_for(second_exchange->secret));
-    EXPECT_FALSE(store.context_for(child->secret));
-    EXPECT_FALSE(store.context_for(grandchild->secret));
+    EXPECT_TRUE(store.context_for(child->secret)) << "a key made in the signed-out browser";
+    EXPECT_TRUE(store.context_for(grandchild->secret)) << "and a key derived from it";
     EXPECT_FALSE(store.context_for(legacy->secret))
         << "an unbound browser session cannot be told apart, so it ends too";
     // Nothing else of the account ends (lake#1163): not another browser, not a key, not a device.
@@ -363,7 +363,11 @@ void expect_upstream_revocation(lake::control::Store& store) {
         {user_id, "lake", "after", "", {"*"}, 600, false, api_key->session.id}))
         << "a surviving key still derives";
     EXPECT_FALSE(store.create_token(
-        {user_id, "lake", "after", "", {"*"}, 3600, false, first->session.id}));
+        {user_id, "lake", "after", "", {"*"}, 3600, false, first->session.id}))
+        << "the ended browser itself issues nothing more";
+    EXPECT_TRUE(store.create_token(
+        {user_id, "lake", "after child", "", {"*"}, 600, false, child->session.id}))
+        << "a surviving key made in it still derives";
     // The watermark still refuses every template minted at or before the event.
     EXPECT_FALSE(store.sign_in_clerk(identity))
         << "an unexpired JWT cannot be exchanged after revocation";
@@ -390,17 +394,24 @@ void expect_upstream_revocation(lake::control::Store& store) {
         << "a delayed event still ends the browser of the Clerk session it names";
     EXPECT_TRUE(store.context_for(recovered->secret));
     EXPECT_TRUE(store.context_for(other_browser->secret));
-    // The other two event types behave the same and touch no key of their own.
+    // The other two event types behave the same and touch no key.
     for (const std::string type : {"session.ended", "session.removed"}) {
         auto fresh_event = event(type, {{"id", "sess_other"}, {"user_id", "user_recovered"}});
         fresh_event["timestamp"] = revoked_event.at("timestamp").get<std::int64_t>() + 1000;
         ASSERT_EQ(deliver(store, delivery_of("msg_other_" + type, fresh_event)).status, 200);
         EXPECT_FALSE(store.context_for(other_browser->secret)) << type;
-        EXPECT_FALSE(store.context_for(api_key->secret))
-            << type << ": a key derived from the ended browser ends with it (lake#234)";
+        EXPECT_TRUE(store.context_for(api_key->secret))
+            << type << ": a key made in the ended browser keeps working";
+        EXPECT_TRUE(store.context_for(api_key_child->secret)) << type;
         EXPECT_TRUE(store.context_for(mcp_key->secret)) << type;
         EXPECT_TRUE(store.context_for(mcp_key_child->secret)) << type;
     }
+
+    // Revoking a key itself still ends that key's own descendants.
+    ASSERT_TRUE(store.revoke_session(user_id, child->session.id));
+    EXPECT_FALSE(store.context_for(child->secret));
+    EXPECT_FALSE(store.context_for(grandchild->secret));
+    EXPECT_TRUE(store.context_for(api_key->secret));
 
     // Revocation is retained when it precedes every exchange and even provisioning.
     for (const std::string type : {"session.revoked", "session.ended", "session.removed"}) {

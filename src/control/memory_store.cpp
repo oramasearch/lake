@@ -4019,6 +4019,11 @@ bool active_session_lineage(const std::vector<Session>& sessions,
     const Session* current = &session;
     std::set<std::string> visited;
     while (current) {
+        // A sign-in ancestor (browser or TAAP) ends the walk unchecked: signing out never ends a
+        // key made from it (lake#1163). It must still belong to the same user and pool.
+        if (current != &session && (current->kind == "browser" || current->kind == "taap")) {
+            return current->user_id == session.user_id && current->pool_id == session.pool_id;
+        }
         if (!visited.insert(current->id).second || !current->revoked_at.empty() ||
             current->user_id != session.user_id || current->pool_id != session.pool_id ||
             (!current->expires_at.empty() && std::stoll(current->expires_at) <= now)) {

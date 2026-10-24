@@ -177,10 +177,11 @@ account is disabled.
   derived from them: they end when the person revokes them (`revoke_session`, `revoke_device`,
   `sign_out_everywhere`), when an operator runs `revoke_user_sessions`, or when the account is
   banned, locked, deprovisioned or deleted (above). Another browser bound to another Clerk session
-  stays signed in. A token **derived from the browser session that ended** (an ordinary key made
-  in that browser without *Never expires*, whose `parent_session_id` is that session) ends with it,
-  exactly as it does when that browser posts `/logout` ([identity.md](identity.md#token-derivation-and-revocation),
-  lake#234); a key that must outlive the browser is made with *Never expires*.
+  stays signed in. A key **made in the browser that ended** keeps working too, with its
+  descendants: a key's validity stops at its sign-in ancestor, so ending a browser session never
+  cascades to the keys made from it, through a Clerk event or `/logout` alike
+  ([identity.md](identity.md#token-derivation-and-revocation)). Revoking a key still ends that
+  key's own descendants.
 
   The event's millisecond `timestamp` is still a monotonic revocation watermark: it only moves
   forward, and a template minted in the revocation's second or earlier cannot be exchanged again,
@@ -304,8 +305,8 @@ account linking, a suspended account's email recovery queueing no mail, and a de
 another subject's newer profile on memory and PostgreSQL stores.
 `Stores/ClerkRevocation.SessionEventsEndOnlyBrowserSessions` pins lake#1163: each of the three
 session events ends the browser bound to its Clerk session (and unbound browsers) while another
-browser, API keys and their descendants, MCP keys and their descendants, and every device keep
-working; a delayed event still ends its own browser but not a newer unbound sign-in; the watermark
+browser, keys made in the ended browser itself, API keys and their descendants, MCP keys and their
+descendants, and every device keep working, and revoking a key still ends its descendants; a delayed event still ends its own browser but not a newer unbound sign-in; the watermark
 still refuses old templates. `Stores/ClerkRevocation.SignOutKeepsKeysAndBansStillEndEverything`
 checks a ban, a lock and a deletion still end keys, derived keys and devices.
 `Clerk.TheSessionTokenBindsTheBrowserToItsClerkSession` runs the exchange route with a session token

@@ -1705,20 +1705,26 @@ std::optional<std::string> session_lookup_id(std::string_view bearer) {
     return std::string(bearer.substr(4, 36));
 }
 
+// The session itself and every ancestor up to the first sign-in session (browser or TAAP) must
+// be live. A sign-in ancestor ends the walk without being checked: signing out never ends a key
+// made from that sign-in (lake#1163, Steve: "don't revoke api keys on signout"); it still must
+// belong to the same user and pool. Revoking a key still ends that key's own descendants.
 bool active_session_lineage(pqxx::work& tx,
                             const std::string& session_id,
                             const std::string& user_id,
                             const std::string& pool_id) {
     const auto rows = tx.exec_params(
         "WITH RECURSIVE lineage AS ("
-        "SELECT id, parent_session_id, user_id, pool_id, device_id, expires_at, revoked_at "
-        "FROM sessions WHERE id = $1::uuid AND user_id = $2::uuid AND pool_id = $3 "
+        "SELECT id, parent_session_id, user_id, pool_id, device_id, expires_at, revoked_at, "
+        "false AS sign_in FROM sessions WHERE id = $1::uuid AND user_id = $2::uuid AND "
+        "pool_id = $3 "
         "UNION SELECT p.id, p.parent_session_id, p.user_id, p.pool_id, p.device_id, "
-        "p.expires_at, p.revoked_at FROM sessions p JOIN lineage c ON p.id = c.parent_session_id) "
-        "SELECT count(*) > 0 AND bool_or(parent_session_id IS NULL) AND "
-        "bool_and(lineage.user_id = $2::uuid AND lineage.pool_id = $3 AND "
+        "p.expires_at, p.revoked_at, p.kind IN ('browser', 'taap') FROM sessions p "
+        "JOIN lineage c ON p.id = c.parent_session_id WHERE NOT c.sign_in) "
+        "SELECT count(*) > 0 AND bool_or(parent_session_id IS NULL OR sign_in) AND "
+        "bool_and(lineage.user_id = $2::uuid AND lineage.pool_id = $3 AND (sign_in OR ("
         "lineage.revoked_at IS NULL AND (expires_at IS NULL OR expires_at > clock_timestamp()) "
-        "AND (devices.id IS NULL OR devices.revoked_at IS NULL)) "
+        "AND (devices.id IS NULL OR devices.revoked_at IS NULL)))) "
         "FROM lineage LEFT JOIN devices ON devices.id = lineage.device_id",
         session_id,
         user_id,
@@ -9327,7 +9333,7 @@ public:
                 // The user lock also serializes every other issuance path with this revocation.
                 tx.exec_params("SELECT id FROM users WHERE id = $1::uuid FOR UPDATE", *user_id);
                 // Browser sessions only (lake#1163): API keys, static tokens, TAAP sessions and
-                // devices stay; tokens derived from a revoked browser session end with it.
+                // devices stay, and keys made from a revoked browser session keep working.
                 tx.exec_params("UPDATE sessions SET revoked_at = coalesce(revoked_at, now()) "
                                "WHERE user_id = $1::uuid AND pool_id = 'lake' AND kind = "
                                "'browser' AND revoked_at IS NULL AND (clerk_session_id = $2 OR "

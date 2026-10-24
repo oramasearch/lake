@@ -1324,6 +1324,44 @@ TEST_P(HttpResponseIsolation, ATokenIsIssuedAndRevokedWithTheBrowserSession) {
     EXPECT_FALSE(after.starts_with("HTTP/1.1 200")) << "a revoked token no longer authenticates";
 }
 
+// lake#1163 (Steve: "don't revoke api keys on signout"): a key made in a browser keeps working
+// after that browser signs out through /logout, and a key derived from it too. Revoking the key
+// itself still ends its descendant.
+TEST_P(HttpResponseIsolation, AKeyMadeInABrowserOutlivesThatBrowsersSignOut) {
+    auto connection = connect();
+    const std::string cookie = sign_in(*connection);
+    const auto [created_response, created] =
+        post_v1(*connection, cookie, "create_token", {{"name", "agent key"}, {"scopes", {"*"}}});
+    ASSERT_TRUE(created.value("ok", false)) << created_response.substr(0, 300);
+    const std::string key = created["value"]["secret"];
+    const std::string key_id = created["value"]["session"]["id"];
+    const auto [derived_response, derived] = post_v1(
+        *connection,
+        "lake_session=" + key,
+        "create_token",
+        {{"name", "derived"}, {"scopes", {"list_sessions"}}, {"expires_in_seconds", 300}});
+    ASSERT_TRUE(derived.value("ok", false)) << derived_response.substr(0, 300);
+    const std::string child = derived["value"]["secret"];
+
+    const std::string signed_out = connection->request("POST", "/logout", {}, cookie);
+    ASSERT_TRUE(signed_out.starts_with("HTTP/1.1 302"));
+    EXPECT_TRUE(connection->request("GET", "/v1/list_sessions", {}, cookie)
+                    .starts_with("HTTP/1.1 401"))
+        << "the browser is signed out";
+    EXPECT_TRUE(connection->request("GET", "/v1/list_sessions", {}, "lake_session=" + key)
+                    .starts_with("HTTP/1.1 200"))
+        << "the key made in that browser keeps working";
+    EXPECT_TRUE(connection->request("GET", "/v1/list_sessions", {}, "lake_session=" + child)
+                    .starts_with("HTTP/1.1 200"));
+
+    const auto [revoked_response, revoked] =
+        post_v1(*connection, "lake_session=" + key, "revoke_session", {{"id", key_id}});
+    ASSERT_TRUE(revoked.value("ok", false)) << revoked_response.substr(0, 300);
+    EXPECT_FALSE(connection->request("GET", "/v1/list_sessions", {}, "lake_session=" + child)
+                     .starts_with("HTTP/1.1 200"))
+        << "revoking the key ends its descendant";
+}
+
 // lake#18: every call to a capability route is audited, a body lake cannot read included. A
 // malformed body and a well-formed one each leave exactly one signed failure event under their
 // request id, with the error and the body's size but never its contents.

@@ -2468,8 +2468,8 @@ public:
     // watermark, retained before exchange too, so a template minted at or before it cannot be
     // exchanged. Revokes only Lake browser sessions: those bound to `session_id` always, and
     // unbound browser sessions of the account unless the event is older than the watermark.
-    // API keys, static tokens, TAAP sessions and devices are never touched; tokens derived from
-    // a revoked browser session end with it, as on POST /logout.
+    // API keys, static tokens, TAAP sessions and devices are never touched, and keys made from a
+    // revoked browser session keep working: a key's lineage stops at its sign-in ancestor.
     virtual Result<void> revoke_clerk_sessions(const std::string& subject,
                                                const std::string& session_id,
                                                std::int64_t revoked_at) = 0;

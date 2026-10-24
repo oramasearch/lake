@@ -93,7 +93,7 @@ function Rules() {
   const rules: [string, string][] = [
     ["Your permissions, nothing more", "A key acts as you and can never do more than the credential that made it. A 403 means you may not; the pages would refuse it too."],
     ["Read-only keys", "A read-only key names every read tool and is refused every write. Give a program that only reports a read-only key."],
-    ["Expiry and revocation", "A key lasts as long as the sign-in that made it, at most 30 days, unless it is a standing key. Revoking it, or the sign-in behind it, stops it at once."],
+    ["Expiry and revocation", "A key expires no later than the sign-in that made it would have, at most 30 days, unless it is a standing key. Signing out does not end it. Revoking it, or Sign out everywhere, stops it at once."],
     ["Every call is audited", "Each call is recorded under your name in the audit log, as if you had made it on the site."],
     ["One envelope", "Every answer is {ok, value, duration_ms} or {ok: false, error: {code, message, path}}; path points at the input field at fault."],
     ["No secrets come back", "A key's secret is shown once, when it is made. No read returns a credential, a token or another person's key."],
