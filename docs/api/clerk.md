@@ -236,8 +236,8 @@ needs a real Clerk instance: sign in at `/sign-in` with an invited address and c
 
 `Stores/ClerkRevocation.*` runs signed session events, bans, locks, Directory Sync deprovisioning, ordered unban/unlock,
 pre-exchange delivery, old-template replay, token descendants, provisioning retries and suspended
-account linking, and a delayed ban after another subject's newer profile on memory and
-PostgreSQL stores.
+account linking, a suspended account's email recovery queueing no mail, and a delayed ban after
+another subject's newer profile on memory and PostgreSQL stores.
 `Clerk.BackendStatusFailsClosedAndUsesOnlyTheFixedApiOrigin` checks malformed and failed Backend
 API responses; `ClerkWebhooks.MigrationRevokesLegacyCredentialsOnceAndRejectsOldTemplates`
 checks the one-time upgrade, native-account isolation, old-template rejection and repeatability.

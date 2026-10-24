@@ -49,6 +49,8 @@ Both stores enforce these limits before creating a token, delivery or notice:
   admits. A client past its 30 spends nothing more, so one client cannot use up the instance's
   300 and block email recovery for every other account. While the global budget is spent, a
   request spends nothing and creates no client bucket.
+- Start nothing for a disabled, deleted or suspended account (lake#948, Clerk suspension): the
+  request spends its budgets and gets the same accepted body, but no token, mail or notice.
 
 The HTTP adapter supplies the existing ingress-derived address (`order_client_address`) to
 REST and MCP; capability inputs cannot supply it. Deployments must keep ingress-nginx's
@@ -61,7 +63,9 @@ the SHA-256 address digest and expires idle client buckets after an hour; the gl
 new rows even when a caller varies addresses, because no client row is created while it is spent. Budgets persist across store instances and replicas.
 
 PostgreSQL serializes account starts by locking the user row; budget upserts are atomic.
-The memory store uses its mutex. Cancellation and completion serialize on the attempt, so a
+The memory store uses its mutex. Both run on the bounded authentication worker (lake#969) and
+hash the new token before taking any lock, so no budget or user row is held while Argon2id runs;
+completion checks the token there too and refuses a cancelled attempt before any hash work. Cancellation and completion serialize on the attempt, so a
 cancelled token cannot complete or gain a later administrator approval. A mail delivery already
 claimed by a worker cannot be recalled, but cancellation invalidates its token immediately.
 

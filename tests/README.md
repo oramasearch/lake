@@ -926,3 +926,6 @@ and cancellation contract on memory and PostgreSQL: concurrent first starts, cas
 delivery/notice deduplication, account/client/global budgets, persisted budget reset and owner-only
 cancellation, including refusal of later administrator approval. See
 [recovery.md](../docs/api/recovery.md#email-recovery-budgets).
+`Stores/ClerkRevocation.SuspensionAlsoStopsEmailRecovery` in `test_clerk_webhooks.cpp` checks
+that a suspended account's email recovery is accepted but queues no mail until the suspension is
+lifted, on both stores.
