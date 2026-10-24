@@ -547,6 +547,100 @@ public:
         return result;
     }
 
+    // A Checkout for the account's prepaid balance (lake#1114) on its Stripe customer: a top-up in
+    // payment mode, one line of Lake's usage product (a top-up prepays usage) at the amount inline;
+    // or saving a card for auto top-up in setup mode, with the SetupIntent tagged so its
+    // setup_intent.succeeded names the account. Each attempt has its own key.
+    std::expected<CheckoutSession, std::string>
+    create_balance_checkout(const PaymentAccount& account,
+                            const BalanceCheckoutRequest& request) override {
+        const bool top_up = request.purpose == "top_up";
+        if (account.provider_customer_id.empty() || account.customer_id.empty() ||
+            (!top_up && request.purpose != "card_setup") || (top_up && request.amount_cents <= 0) ||
+            request.success_url.empty() || request.cancel_url.empty() || request.attempt.empty()) {
+            return std::unexpected(
+                std::string("a balance checkout needs an account, an amount and its URLs"));
+        }
+        std::vector<std::pair<std::string, std::string>> fields{
+            {"customer", account.provider_customer_id},
+            {"client_reference_id", account.customer_id},
+            {"success_url", request.success_url},
+            {"cancel_url", request.cancel_url},
+            {"metadata[lake_customer_id]", account.customer_id},
+            {"metadata[lake_balance]", request.purpose}};
+        if (top_up) {
+            fields.insert(
+                fields.end(),
+                {{"mode", "payment"},
+                 {"line_items[0][quantity]", "1"},
+                 {"line_items[0][price_data][currency]", "usd"},
+                 {"line_items[0][price_data][product]", std::string(stripe_usage_product)},
+                 {"line_items[0][price_data][unit_amount]", std::to_string(request.amount_cents)},
+                 {"payment_intent_data[description]", "Lake balance top-up"}});
+        } else {
+            fields.insert(fields.end(),
+                          {{"mode", "setup"},
+                           {"currency", "usd"},
+                           {"payment_method_types[0]", "card"},
+                           {"setup_intent_data[description]", "Lake auto top-up card"},
+                           {"setup_intent_data[metadata][lake_customer_id]", account.customer_id},
+                           {"setup_intent_data[metadata][lake_balance]", "card_setup"}});
+            tag(fields, "setup_intent_data[metadata]", instance_);
+        }
+        tag(fields, "metadata", instance_);
+        auto session = post("/v1/checkout/sessions",
+                            fields,
+                            std::format("lake-{}-{}-{}",
+                                        top_up ? "top-up" : "card-setup",
+                                        account.customer_id,
+                                        request.attempt),
+                            top_up ? "start the top-up" : "start saving the card");
+        if (!session) {
+            return std::unexpected(session.error());
+        }
+        CheckoutSession result{session->value("id", ""), session->value("url", "")};
+        if (!result.id.starts_with("cs_") || !result.url.starts_with("https://")) {
+            return std::unexpected(std::string("Stripe answered a checkout without an id or URL"));
+        }
+        return result;
+    }
+
+    // POST /v1/payment_intents with the saved card, off_session and confirm: an auto top-up with
+    // nobody present. A decline (Stripe's 402 card_error) or a charge that needs the person to
+    // authenticate is an error; the credit comes from payment_intent.succeeded.
+    std::expected<OffSessionResult, std::string>
+    charge_saved_payment_method(const PaymentAccount& account,
+                                const OffSessionCharge& charge) override {
+        if (account.provider_customer_id.empty() || charge.payment_method.empty() ||
+            charge.amount_cents <= 0 || charge.idempotency_key.empty()) {
+            return std::unexpected(
+                std::string("an auto top-up needs a customer, a card and an amount"));
+        }
+        std::vector<std::pair<std::string, std::string>> fields{
+            {"amount", std::to_string(charge.amount_cents)},
+            {"currency", "usd"},
+            {"customer", account.provider_customer_id},
+            {"payment_method", charge.payment_method},
+            {"off_session", "true"},
+            {"confirm", "true"},
+            {"description", "Lake balance auto top-up"},
+            {"metadata[lake_customer_id]", account.customer_id},
+            {"metadata[lake_balance]", "auto_top_up"}};
+        tag(fields, "metadata", instance_);
+        auto intent =
+            post("/v1/payment_intents", fields, charge.idempotency_key, "charge the saved card");
+        if (!intent) {
+            return std::unexpected(intent.error());
+        }
+        OffSessionResult result{intent->value("id", ""), intent->value("status", "")};
+        if (result.status != "succeeded" && result.status != "processing") {
+            return std::unexpected(
+                std::format("the saved card needs you to confirm the payment (Stripe status {})",
+                            result.status.empty() ? std::string("unknown") : result.status));
+        }
+        return result;
+    }
+
     std::expected<PaymentNotice, NoticeRejection>
     read_notice(std::string_view body,
                 std::string_view signature,
@@ -766,6 +860,66 @@ std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_vie
                              ? event["data"]["object"]
                              : no_object;
     notice.reference = stripe_text(object, "id");
+    // The prepaid balance (lake#1114): a top-up Checkout, a card saved for auto top-up, and an
+    // auto top-up's PaymentIntent, each tagged lake_customer_id and lake_balance.
+    const std::string balance_purpose = stripe_text(stripe_metadata(object), "lake_balance");
+    const bool balance_event =
+        (notice.event_type.starts_with("checkout.session.") && !balance_purpose.empty()) ||
+        notice.event_type == "setup_intent.succeeded" ||
+        notice.event_type == "payment_intent.succeeded" ||
+        notice.event_type == "payment_intent.payment_failed";
+    if (balance_event) {
+        notice.foreign =
+            foreign_object(object, "lake_customer_id", instance) || balance_purpose.empty();
+        if (notice.foreign) {
+            return notice;
+        }
+        PaymentNotice::Balance about;
+        about.customer_id = stripe_text(stripe_metadata(object), "lake_customer_id");
+        about.reference = notice.reference;
+        const auto cents = [&](const char* key) -> std::int64_t {
+            const auto found = object.find(key);
+            return found != object.end() && found->is_number_integer() && *found > 0
+                       ? found->get<std::int64_t>()
+                       : 0;
+        };
+        if (notice.event_type.starts_with("checkout.session.")) {
+            const std::string payment_status = stripe_text(object, "payment_status");
+            const bool paid =
+                (notice.event_type == "checkout.session.completed" && payment_status == "paid") ||
+                notice.event_type == "checkout.session.async_payment_succeeded";
+            if (balance_purpose != "top_up" || !paid) {
+                return notice; // a card setup session, or a payment not in yet: nothing to do
+            }
+            about.kind = "credit";
+            about.credit_kind = "top_up";
+            about.amount_cents = cents("amount_total");
+        } else if (notice.event_type == "setup_intent.succeeded") {
+            if (balance_purpose != "card_setup") {
+                return notice;
+            }
+            about.kind = "card_saved";
+            about.payment_method = stripe_id(object, "payment_method");
+        } else if (balance_purpose != "auto_top_up") {
+            return notice;
+        } else if (notice.event_type == "payment_intent.succeeded") {
+            about.kind = "credit";
+            about.credit_kind = "auto_top_up";
+            about.amount_cents =
+                cents("amount_received") > 0 ? cents("amount_received") : cents("amount");
+        } else {
+            about.kind = "auto_top_up_failed";
+            const auto error = object.find("last_payment_error");
+            about.message = error != object.end() && error->is_object()
+                                ? stripe_text(*error, "message")
+                                : std::string();
+            if (about.message.empty()) {
+                about.message = "the card was declined";
+            }
+        }
+        notice.balance = std::move(about);
+        return notice;
+    }
     if (notice.event_type.starts_with("checkout.session.")) {
         // The apex order sheet's Checkout (lake#831): the session is the reference, and its
         // client_reference_id is lake's order id. Paid once Stripe says the payment is in; a

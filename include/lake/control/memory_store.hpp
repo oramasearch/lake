@@ -426,6 +426,15 @@ public:
     Result<PaymentEventResult> apply_payment_event(const PaymentEvent& event) override;
     Result<std::optional<BillingContact>> billing_contact(const std::string& customer_id) override;
     Result<BillingContact> set_billing_contact(const BillingContact& contact) override;
+    Result<AccountBalance> account_balance(const std::string& customer_id) override;
+    Result<AccountBalance> update_account_balance(const AccountBalance& next,
+                                                  std::int64_t expected_version) override;
+    Result<BalanceCreditResult> apply_balance_credit(const BalanceCredit& credit) override;
+    Result<void> set_balance_charge(const BalanceCharge& charge) override;
+    Result<std::vector<BalanceCredit>> balance_credits(const std::string& customer_id,
+                                                       int limit) override;
+    Result<std::vector<BalanceCharge>> balance_charges(const std::string& customer_id) override;
+    Result<std::vector<std::string>> balance_customers() override;
     Result<CloudOrder> create_cloud_order(const NewCloudOrder& order) override;
     Result<CloudOrder> get_cloud_order(const std::string& id) override;
     Result<CloudOrder> transition_cloud_order(const CloudOrderTransition& change) override;
@@ -703,6 +712,12 @@ private:
     std::map<std::pair<std::string, std::string>, std::string> billing_provider_customers_;
     std::set<std::pair<std::string, std::string>> payment_events_;
     std::map<std::string, BillingContact> billing_contacts_; // by customer
+    // Account balances (migration 0099): each account's row (sums are worked out on read), its
+    // credits in order, and its charges by month.
+    std::map<std::string, AccountBalance> balances_;
+    std::vector<BalanceCredit> balance_credits_;
+    std::map<std::pair<std::string, std::string>, BalanceCharge> balance_charges_;
+    AccountBalance account_balance_locked(const std::string& customer_id) const;
     // Cloud orders (migration 0089), their events, and when each order's next email is due.
     std::vector<CloudOrder> cloud_orders_;
     std::vector<CloudOrderEvent> cloud_order_events_;

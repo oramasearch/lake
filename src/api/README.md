@@ -196,6 +196,17 @@ limit, `resend.cpp` the Resend client, `web_ui.cpp` its pages (`web_ui_order_*`,
 and the `checkout.session.*` events, and `http_server.cpp` its routes on the apex host and the order
 pass (email and audit) on the maintenance thread.
 
+The prepaid balance (lake#1114, decision 67): `balance.cpp` registers `account_balance`,
+`start_top_up`, `set_auto_top_up`, `set_balance_overdraft` and `refresh_account_balance` (from
+`register_billing_capabilities`, so billing on only), holds the one list of capabilities that start
+paid work, the 402 gate and the answer warning that `registry.cpp` calls in `Registry::call`, the
+provider's balance notices, the emails once per crossing and the refresh the store root's owner
+runs (`ApiServer::Impl::run_balance_pass`, every `LAKE_BALANCE_REFRESH_SECONDS`). A refresh reads
+usage through `usage_over_time`'s handler, not a registry call, so it adds no audit event per
+account. `billing_capabilities.cpp` issues a topped-up account's invoice paid by the balance;
+`stripe.cpp` adds the top-up and card-setup Checkouts, the off-session PaymentIntent and the balance
+events; `console_capabilities.cpp`'s `viewer` answers `balance`.
+
 `datasets.cpp` holds the workspace dataset rules lake applies on top of Zetta (lake#447): engine
 result databases, SQL-queryable names, CSV row checks with line numbers, and the one
 `<database>/<name>` id. `workspace_query`/`workspace_act` apply them to `list_datasets`,

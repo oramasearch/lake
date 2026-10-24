@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "lake/api/balance.hpp"
 #include "lake/api/billing.hpp"
 #include "lake/api/clerk.hpp"
 #include "lake/api/oidc_jwks.hpp"
@@ -263,6 +264,13 @@ struct ServerOptions {
     StripeKeys stripe_keys;
     std::string billing_instructions;
     std::string stripe_api_base = "https://api.stripe.com";
+    // The prepaid balance where billing is on (lake#1114, docs/api/billing.md#balance): the
+    // first and minimum top-up, the overdraft, how close counts as close and how often the store
+    // root's owner refreshes the charges (LAKE_BALANCE_*, LAKE_AUTO_TOP_UPS_PER_DAY). Its emails
+    // go through `resend`. `balance_pass_interval` shortens the refresh in tests (zero: the
+    // settings' refresh interval).
+    BalanceSettings balance;
+    std::chrono::milliseconds balance_pass_interval{0};
     // The operator-provided PersistentVolume mount. Customer stores live at
     // <root>/<customer id>/store and instance log objects at
     // <root>/<node name>/log. Empty disables data-plane storage.

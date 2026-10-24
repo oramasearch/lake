@@ -15,6 +15,8 @@ namespace {
 // whole instance: their events stay in the central log (decision 52). Sorted.
 constexpr std::array central = std::to_array<std::string_view>({
     "accept_invitation",
+    // The prepaid balance is billing, in the control plane (lake#1114, decision 56).
+    "account_balance",
     // Which key an account signs with is identity (lake#762).
     "account_identity",
     // ACME (RFC 8555): lake's certificate authority for workload identity.
@@ -144,6 +146,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "record_invoice_payment",
     "recover_repository_key",
     "recover_with_code",
+    "refresh_account_balance",
     "register_oauth_provider",
     "register_passkey",
     "register_sso_provider",
@@ -184,6 +187,8 @@ constexpr std::array central = std::to_array<std::string_view>({
     "search",
     "server_info",
     "set_audit_retention",
+    "set_auto_top_up",
+    "set_balance_overdraft",
     // An account's billing contact is billing configuration (lake#857).
     "set_billing_contact",
     "set_customer_credential_policy",
@@ -202,6 +207,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "start_oauth",
     "start_sso_oidc",
     "start_sso_saml",
+    "start_top_up",
     "start_workspace",
     "test_sso_provider",
     "timestamp_checkpoint",

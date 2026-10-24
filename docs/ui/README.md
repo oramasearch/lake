@@ -24,6 +24,8 @@ can do nothing the API cannot.
 - Data → Drives, one file manager over repository, workspace-files, virtual and storage drives,
   and its Storage tab (lake#656; New storage asks each provider for what it needs, lake#664): [drives.md](drives.md).
 - Data → Connections, the databases a workspace reads (lake#651): [connections.md](connections.md).
+- The prepaid balance's banner on every page, Add funds and the Billing page's Balance and Auto
+  Top-Up cards (lake#1114): [balance.md](balance.md).
 - A database's or connection's safe mode, in the query editor's status bar and on each connection,
   and the dialog a warning opens (lake#906): [safe-mode.md](safe-mode.md).
 - Network, a workspace's connections, developer access (tunnels), private networks, egress and DNS,
@@ -251,6 +253,7 @@ Workspaces)
 | `/usage?ws=&range=&dimension=` | `usage/UsagePage.tsx` | Usage: every dimension over time across the chosen workspaces, against the period before, charted by workspace or kind, with limits and CSV ([usage.md](usage.md), lake#564) | `usage_over_time`, `usage_limits`, `set_usage_limit` |
 | `/usage/accounts` | `usage/AccountsPage.tsx` | the operator's usage across every account | `list_customers`, `usage_over_time` |
 | `/billing?customer_id=` | `billing/BillingPage.tsx` | Billing, only where the lake bills: this month's usage × rate = cost so far and the invoices, with no plan to choose; the operator issues an invoice ([billing.md](billing.md), lake#564, lake#635) | `billing_account`, `price_list`, `bill_preview`, `list_invoices`, `issue_invoice` |
+| `/billing/add-funds?customer_id=` | `billing/AddFundsPage.tsx` | Add funds to the prepaid balance: the balance, its limit and the suggested amount, and a Stripe Checkout; the page every balance email, the banner and every 402 answer link to ([balance.md](balance.md), lake#1114) | `account_balance`, `start_top_up` |
 | `/billing/invoices/:invoiceId` | `billing/InvoicePage.tsx` | one invoice, printable; the operator records a payment or voids it | `get_invoice`, `record_invoice_payment`, `void_invoice` |
 | `/billing/plans` | `billing/PriceListPage.tsx` | the operator's price list editor: dimension, GPU and model input/output rates, preserving published model classes when edited; published from a month | `price_list`, `set_price_list` |
 | `/metering?customer_id=` | `admin/MeteringPage.tsx` | Repository Usage by Hour: repository transfer and build time, the storage limit | `metering_usage`, `set_storage_quota` |

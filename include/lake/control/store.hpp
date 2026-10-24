@@ -453,6 +453,68 @@ struct BillingContact {
     std::string customer_id, email, name, line1, line2, city, postal_code, state, country;
     std::string updated_at;
 };
+// A prepaid account balance (migration 0099, lake#1114, liquid-bridge decision 67,
+// docs/api/billing.md#balance): billing, so in the control plane. Credits are paid top-ups; charges
+// are the account's usage priced at the list in force, one row a month (usage stays in each
+// workspace Zetta: only the priced amount is kept). The balance is credits minus charges. Amounts
+// are millionths of a US dollar. Timestamps are RFC 3339 UTC text, empty when unset.
+struct AccountBalance {
+    std::string customer_id;
+    std::int64_t credits_micros = 0; // every credit, summed
+    std::int64_t charges_micros = 0; // every month's charge, summed
+    std::int64_t credit_count = 0;
+    std::string first_top_up_at; // empty: the account has never topped up
+    // The operator's overdraft for this account, replacing the instance's; nullopt: the instance's.
+    std::optional<std::int64_t> overdraft_limit_micros;
+    // The last refresh of the charges that read every workspace, and the last one that could not
+    // (its reason), which held the balance as it was.
+    std::string charges_refreshed_at, refresh_error, refresh_failed_at;
+    // When each crossing's email went (empty: not sent since the last credit).
+    std::string limit_warning_notified_at, negative_notified_at, blocked_notified_at;
+    // Auto top-up (off by default): when the balance falls below the threshold, Lake charges the
+    // saved payment method (Stripe's pm_ id; Lake never sees the card) off-session.
+    bool auto_top_up = false;
+    std::int64_t auto_top_up_threshold_micros = 5'000'000;
+    std::int64_t auto_top_up_amount_micros = 20'000'000;
+    std::string auto_top_up_payment_method;
+    // The idempotency key of the charge in flight (empty: none) and when it started; the count of
+    // charges started, which names the next key; the UTC day and how many started that day.
+    std::string auto_top_up_pending, auto_top_up_started_at;
+    std::int64_t auto_top_up_sequence = 0;
+    std::string auto_top_up_day;
+    int auto_top_ups_today = 0;
+    // Why auto top-up turned itself off (a declined charge), and whether the owner was told.
+    std::string auto_top_up_off_reason, auto_top_up_failure_notified_at;
+    // The account's organization has a paid cloud order whose credit covers it (exempt).
+    bool paid_order = false;
+    // Compare-and-swap version of the row; 0 while the account has no row.
+    std::int64_t version = 0;
+    std::string updated_at;
+
+    std::int64_t balance_micros() const {
+        return credits_micros - charges_micros;
+    }
+};
+// One credit: a paid top-up, recorded once per (provider, reference), the Checkout Session or the
+// PaymentIntent that paid it.
+struct BalanceCredit {
+    std::string id, customer_id;
+    std::string kind = "top_up"; // top_up | auto_top_up
+    std::int64_t amount_micros = 0;
+    std::string provider, reference, event_id, created_at;
+};
+struct BalanceCreditResult {
+    bool duplicate = false; // the event or the reference was recorded before; nothing changed
+    BalanceCredit credit;
+    AccountBalance balance; // after the credit
+};
+// One month's charge: the account's usage that month at the list in force for it, refreshed every
+// few minutes; frozen to the invoice's total once one is issued (`invoice_id`).
+struct BalanceCharge {
+    std::string customer_id, period;
+    std::int64_t amount_micros = 0;
+    std::string price_list_id, invoice_id, refreshed_at;
+};
 // A field billing_contacts refuses, and what it must be.
 struct FieldProblem {
     std::string field, message;
@@ -460,6 +522,10 @@ struct FieldProblem {
 // The first field of `contact` billing_contacts' checks refuse (lengths in characters, as
 // PostgreSQL counts them), or nullopt when it keeps them all.
 std::optional<FieldProblem> billing_contact_problem(const BillingContact& contact);
+// What account_balances' and account_balance_credits' checks refuse in a balance row or a credit,
+// or nullopt when they keep it (both stores apply them).
+std::optional<std::string> account_balance_problem(const AccountBalance& balance);
+std::optional<std::string> balance_credit_problem(const BalanceCredit& credit);
 // At most `bytes` bytes of `text`, never cut inside a UTF-8 sequence, so a bounded column is never
 // sent invalid UTF-8 (an order's event detail and email error, lake#833).
 inline std::string utf8_prefix(std::string_view text, std::size_t bytes) {
@@ -2191,6 +2257,25 @@ public:
     virtual Result<std::optional<BillingContact>>
     billing_contact(const std::string& customer_id) = 0;
     virtual Result<BillingContact> set_billing_contact(const BillingContact& contact) = 0;
+    // Account balances (migration 0099, lake#1114, docs/api/billing.md#balance).
+    // account_balance answers the account's balance (defaults and version 0 while it has no row;
+    // not_found for an unknown customer). update_account_balance writes the row's own fields
+    // (everything but the sums, credit_count, first_top_up_at and paid_order) only while its
+    // version is `expected_version` (0: no row yet), else conflict, and answers it after.
+    // apply_balance_credit records a credit once per event id (billing_payment_events) and once
+    // per (provider, reference), in one transaction: the first one sets first_top_up_at, every one
+    // clears the crossings' email marks, and an auto_top_up credit clears the charge in flight.
+    // set_balance_charge replaces a month's charge, except one frozen by an invoice, which only
+    // another invoice's total replaces. balance_customers lists every account with a balance row.
+    virtual Result<AccountBalance> account_balance(const std::string& customer_id) = 0;
+    virtual Result<AccountBalance> update_account_balance(const AccountBalance& next,
+                                                          std::int64_t expected_version) = 0;
+    virtual Result<BalanceCreditResult> apply_balance_credit(const BalanceCredit& credit) = 0;
+    virtual Result<void> set_balance_charge(const BalanceCharge& charge) = 0;
+    virtual Result<std::vector<BalanceCredit>> balance_credits(const std::string& customer_id,
+                                                               int limit) = 0;
+    virtual Result<std::vector<BalanceCharge>> balance_charges(const std::string& customer_id) = 0;
+    virtual Result<std::vector<std::string>> balance_customers() = 0;
     // Cloud orders (lake#831, migration 0089, docs/api/orders.md).
     // Records a new order and its first event (actor lake).
     virtual Result<CloudOrder> create_cloud_order(const NewCloudOrder& order) = 0;

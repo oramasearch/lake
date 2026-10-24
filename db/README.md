@@ -1,5 +1,13 @@
 # Database schema
 
+Migration `0099_account_balances` (lake#1114, liquid-bridge decision 67) adds the prepaid balance:
+`account_balances` (each account's settings, last refresh, email marks and auto top-up, with a
+compare-and-swap `version`), `account_balance_credits` (paid top-ups, unique per provider reference)
+and `account_balance_charges` (each month's usage charge, frozen by its invoice), and the guard
+`account_balances_guard`. Additive; apply before the new binary, and have the operator vendor the
+schema and select the guard. See [billing.md](../docs/api/billing.md#balance) and
+[schema.md](../docs/control-plane/schema.md#account-balances-migration-0099_account_balances).
+
 Migration `0095_model_token_prices` (LSR-095, lake#961) permits exact `<model>/input` and
 `<model>/output` classes for `model_tokens` prices and frozen invoice lines. Existing GPU-style
 classes retain their constraints. It seeds the default gateway models' input and output prices

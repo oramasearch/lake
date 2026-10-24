@@ -38,6 +38,7 @@ import { currentNav, matchScreen, navFor, sectionLabel, workspacePath, isWorkspa
 import { CommandPalette } from "./CommandPalette";
 import { ScreenBoundary } from "./ScreenBoundary";
 import { WorkspacePicker } from "./WorkspacePicker";
+import { BalanceBanner } from "./BalanceBanner";
 import { RegionMenu } from "./Region";
 import { LakeMark } from "./LakeMark";
 import { resizingAsk, useAskWidth } from "@/lib/askWidth";
@@ -406,6 +407,7 @@ export function Shell({ children }: { children: ReactNode }) {
             <SessionActions onAsk={toggleAsk} askOpen={ask && !askHome} />
           </header>
           <main id="main-content" tabIndex={-1}>
+            <BalanceBanner />
             <ScreenBoundary>
               <Suspense fallback={<div className="page-container"><Skeleton /></div>}>{children}</Suspense>
             </ScreenBoundary>

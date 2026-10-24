@@ -3,6 +3,7 @@
  * workspaces the person can choose, whether sign-in is Clerk). The workspace in the URL
  * (`/w/<id>/…`) is the context for Design, Train and Ship; the server enforces scope regardless. */
 import { createContext, type ReactNode, useContext, useEffect, useMemo, useRef } from "react";
+import type { Balance } from "@/pages/billing/balance";
 import { useLocation, useNavigate } from "react-router-dom";
 import { resolveWorkspace } from "./workspacePicker";
 import { prefetchRead, setSignedIn, setWorkspace, useRead } from "./api";
@@ -39,6 +40,9 @@ export type Viewer = {
   billing?: boolean;
   /** How invoices are paid where it bills (lake#620): Stripe, or invoice only and why. */
   billing_payment?: { provider: string; title: string; online_payment: boolean; reason: string } | null;
+  /** The current account's prepaid balance where the lake bills (lake#1114): the banner reads it on
+   * every page. Null for the operator, and where billing is off. */
+  balance?: Balance | null;
   /** Lake configuration the forms need (the agent models offered by "Create an Agent"). */
   config?: { base_agent_model?: string; frontier_model?: string };
   version?: string;

@@ -317,6 +317,7 @@ add_library(lake-core STATIC
   src/api/usage_recorder.cpp
   src/api/usage_capabilities.cpp
   src/api/billing_capabilities.cpp
+  src/api/balance.cpp
   src/api/stripe.cpp
   src/api/audit_routing.cpp
   src/api/audit_logs.cpp

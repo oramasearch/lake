@@ -404,6 +404,18 @@ new publication for the current month on a fresh and an existing instance.
 Not deployed; the operator must vendor the schema and select `model_token_prices_guard`.
 See [`docs/api/model-gateway.md`](docs/api/model-gateway.md).
 
+lake.live is prepaid (lake#1114, liquid-bridge decision 67, migration `0099_account_balances`): a
+balance per account, credits (Stripe Checkout top-ups, the first exactly `LAKE_BALANCE_FIRST_TOP_UP_USD`
+$20, and auto top-ups off a saved card, off by default) minus charges (each month's bill, refreshed
+every few minutes by the store root's owner; a failed read holds the balance; an issued invoice is
+paid by the balance). One list, `paid_work_capabilities()` in `src/api/balance.cpp`, marks
+`Capability::starts_paid_work`, and `Registry::call` answers those `402 payment_required` past the
+overdraft ($50) or before the first top-up; every outermost answer carries `warnings` while the
+balance is not ok; emails go once per crossing; `viewer.balance` drives the banner and
+`/billing/add-funds`. Billing on only. Not deployed; the operator must vendor the schema, select
+`account_balances_guard` and register `setup_intent.succeeded`, `payment_intent.succeeded` and
+`payment_intent.payment_failed`. See [`docs/api/billing.md#balance`](docs/api/billing.md#balance).
+
 Billing follows, for Orama Cloud only (lake#564, decision 56, migration `0073_billing`): billing
 records live in PostgreSQL as multitenancy (`billing_plans`, `billing_plan_prices`,
 `billing_invoices`, `billing_invoice_lines`) and usage stays in each workspace Zetta, read through
@@ -942,8 +954,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `cloud_order_entitlements_guard` in the source tree, versioned by content hash).
-  `authentication_attempts_guard` in the source tree, versioned by content hash).
+  `account_balances_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

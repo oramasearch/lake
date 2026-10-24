@@ -10,6 +10,7 @@
 // lines. Every call is
 // policy-checked and audited in the central log (decision 52): billing is account configuration.
 
+#include "lake/api/balance.hpp"
 #include "lake/api/billing.hpp"
 #include "lake/api/stripe.hpp"
 
@@ -354,10 +355,14 @@ std::uint64_t whole(double value) {
     return static_cast<std::uint64_t>(std::llround(value));
 }
 
+// `audited` false reads usage_over_time's handler directly, with no capability call of its own:
+// the balance's refresh (lake#1114) reads every account every few minutes as the store root's
+// owner, and a central audit event for each read would bury the log.
 liquid::runtime::task<Measured> measure(ApiContext& context,
                                         const std::string& customer_id,
                                         const Month& month,
-                                        const PriceList& list) {
+                                        const PriceList& list,
+                                        bool audited = true) {
     Measured measured;
     json dimensions = json::array();
     std::set<std::string> asked;
@@ -381,7 +386,18 @@ liquid::runtime::task<Measured> measure(ApiContext& context,
                      {"to", month.next().start()},
                      {"granularity", "day"},
                      {"dimensions", std::move(dimensions)}};
-    auto done = co_await context.registry->call_async("usage_over_time", input, inner);
+    std::expected<ApiResult, liquid::error> done;
+    if (audited) {
+        done = co_await context.registry->call_async("usage_over_time", input, inner);
+    } else {
+        const auto usage = context.registry->find("usage_over_time");
+        if (!usage || !usage->async_handler) {
+            measured.failure =
+                ApiResult::failure("store_unavailable", "this Lake has no usage_over_time");
+            co_return measured;
+        }
+        done = co_await usage->async_handler(input, inner);
+    }
     if (!done) {
         measured.failure = ApiResult::failure("store_error", done.error().message);
         co_return measured;
@@ -825,6 +841,59 @@ json payment_status_json(const ApiContext& context) {
             {"reason", status.reason}};
 }
 
+std::expected<PaymentAccount, ApiResult> billing_payment_account(ApiContext& context,
+                                                                 PaymentProvider& provider,
+                                                                 const control::Customer& customer,
+                                                                 std::uint64_t attempt) {
+    return payment_account(context, provider, customer, attempt);
+}
+
+liquid::runtime::task<std::expected<MonthBill, ApiResult>> account_month_bill(
+    ApiContext& context, const std::string& customer_id, std::string period, bool audited) {
+    using Answer = std::expected<MonthBill, ApiResult>;
+    if (!context.store) {
+        co_return Answer(std::unexpect, no_store());
+    }
+    const auto month = month_of(period);
+    if (!month) {
+        co_return Answer(std::unexpect,
+                         ApiResult::failure("invalid_input", "period is YYYY-MM", "/period"));
+    }
+    auto list = list_for(context, *month);
+    if (!list) {
+        co_return Answer(std::unexpect, list.error());
+    }
+    auto measured = co_await measure(context, customer_id, *month, *list, audited);
+    if (!measured) {
+        co_return Answer(std::unexpect,
+                         ApiResult::failure("store_error", measured.error().message));
+    }
+    if (measured->failure) {
+        co_return Answer(std::unexpect, *measured->failure);
+    }
+    MonthBill bill;
+    bill.period = month->name();
+    bill.price_list_id = list->id;
+    for (const control::InvoiceLine& line : bill_lines(*list, measured->quantities)) {
+        bill.total_micros = add_capped(bill.total_micros, line.amount_micros);
+    }
+    bill.complete = measured->complete;
+    for (const json& workspace : measured->unread) {
+        bill.unread += (bill.unread.empty() ? "" : ", ") + workspace.value("name", "");
+    }
+    co_return Answer(std::move(bill));
+}
+
+liquid::runtime::task<std::expected<std::shared_ptr<PaymentProvider>, ApiResult>>
+current_payment_provider(PaymentProviders& providers, ApiContext& context) {
+    using Answer = std::expected<std::shared_ptr<PaymentProvider>, ApiResult>;
+    auto resolved = co_await resolve(providers, context);
+    if (!resolved || !resolved->provider) {
+        co_return Answer(std::unexpect, unresolved(resolved));
+    }
+    co_return Answer(resolved->provider);
+}
+
 std::uint64_t price_of(std::uint64_t billable, std::uint64_t unit_micros, std::uint64_t per) {
     if (billable == 0 || unit_micros == 0) {
         return 0;
@@ -1070,6 +1139,11 @@ liquid::runtime::task<NoticeOutcome> receive_payment_notice(PaymentProviders& pr
         // endpoint receives every event of its types, so it is acknowledged with nothing recorded,
         // neither a payment event row nor an audit event.
         co_return NoticeOutcome{200, {{"received", true}, {"ignored", true}}};
+    }
+    if (notice->balance) {
+        // A top-up paid, a card saved for auto top-up, or an auto top-up that failed (lake#1114):
+        // applied once per event id and once per payment, audited centrally.
+        co_return apply_balance_notice(context, name, *notice);
     }
     if (notice->order_subscription) {
         notice->order_subscription->grace_seconds = context.order_entitlement_grace_seconds;
@@ -1714,6 +1788,51 @@ void register_billing_capabilities(Registry& registry,
             for (const control::InvoiceLine& line : invoice.lines) {
                 invoice.total_micros = add_capped(invoice.total_micros, line.amount_micros);
             }
+            // A prepaid account (lake#1114, docs/api/billing.md#balance) has paid for its usage
+            // from its balance as it went: the invoice records what the balance paid, issued paid,
+            // and freezes the month's charge to its total. Nothing is collected again.
+            const auto balance = context.store->account_balance(customer_id);
+            if (!balance) {
+                co_return from_store(balance.error());
+            }
+            if (!balance->first_top_up_at.empty()) {
+                invoice.provider = "balance";
+                invoice.instructions = "Paid from your Lake account balance as you used it. "
+                                       "Nothing more is due for this month.";
+                invoice.provider_status = "paid";
+                const auto stored = context.store->create_invoice(invoice);
+                if (!stored) {
+                    co_return from_store(stored.error());
+                }
+                const auto paid =
+                    context.store->set_invoice_state(stored->id, "paid", "balance", "");
+                if (!paid) {
+                    co_return from_store(paid.error());
+                }
+                if (const auto frozen = context.store->set_balance_charge(
+                        {customer_id,
+                         paid->period,
+                         static_cast<std::int64_t>(paid->total_micros),
+                         paid->plan_id,
+                         paid->id,
+                         {}});
+                    !frozen) {
+                    co_return from_store(frozen.error());
+                }
+                audit(context,
+                      customer_id,
+                      "billing.invoice.issue",
+                      {{"invoice_id", paid->id},
+                       {"number", paid->number},
+                       {"period", paid->period},
+                       {"price_list_id", paid->plan_id},
+                       {"total_micros", paid->total_micros},
+                       {"currency", paid->currency},
+                       {"provider", paid->provider},
+                       {"provider_reference", paid->provider_reference},
+                       {"send", "none"}});
+                co_return ApiResult::success(invoice_json(*paid));
+            }
             auto resolved = co_await resolve(*providers, context);
             if (!resolved || !resolved->provider) {
                 co_return unresolved(resolved);
@@ -1950,7 +2069,7 @@ void register_billing_capabilities(Registry& registry,
             // invoice issued by the manual provider stays recordable after Stripe is set up, and a
             // Stripe invoice is paid through Stripe, whichever provider is in use now.
             const bool by_hand =
-                invoice->provider == "manual" ||
+                invoice->provider == "manual" || invoice->provider == "balance" ||
                 (invoice->provider == provider.name() && provider.records_payments_by_hand());
             if (state == "paid" && !by_hand) {
                 co_return ApiResult::failure("conflict",
@@ -2021,6 +2140,9 @@ void register_billing_capabilities(Registry& registry,
         .action = "admin",
         .resolve_object = administrator_only,
         .async_handler = settle("void")});
+
+    // The prepaid balance (lake#1114): billing's, so registered only where billing is on.
+    register_balance_capabilities(registry, providers);
 }
 
 } // namespace lake::api

@@ -23,6 +23,27 @@ Metis is not billed here. It is enterprise software priced by Orama's sales team
 | **Stripe** | Where invoices are paid on Orama Cloud: each invoice has a page on Stripe, and Stripe tells Lake when it is paid. |
 | **Storage on a bill** | The average of each day's storage reading over the month, across your workspaces. |
 
+## Your Balance
+
+Lake on Orama Cloud is prepaid. Your account has a balance: what you add (top-ups) minus what your
+usage costs at the rates below, worked out every few minutes. **Organization → Billing → Balance**
+shows it, with every top-up and each month's usage.
+
+- **Start with $20.** A new account adds $20 before it can start anything that costs money (apps,
+  services, runs, training, agents, model calls, storing data). Press **Add funds** in the banner or
+  on the Billing page; you pay on Stripe's page.
+- **Add more any time**, any amount from $20.
+- **Low or below $0**: a banner on every page says how much to add, and answers from the API and MCP
+  carry a warning. You also get an email when the balance passes $0, when it is close to its limit,
+  and when paid work stops, once each time.
+- **The limit is $50 below zero.** Past it, Lake answers anything that costs money with
+  `402 payment_required` and the Add funds link. Reading, signing in, stopping and deleting still
+  work, and what is already running keeps running.
+- **Auto top-up** (off until you turn it on): Lake adds an amount (from $20) from a saved card
+  whenever the balance falls below a threshold (from $5). If the card is declined it turns itself
+  off and emails you.
+- Each month's invoice records what your balance paid; nothing is charged twice.
+
 ## See the Rates
 
 The rates apply to every account; there is nothing to choose or sign up for.
