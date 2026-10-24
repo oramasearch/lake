@@ -930,6 +930,14 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.call("set_balance_overdraft",
               {{"customer_id", customer.id}, {"overdraft_micros", 75'000'000}});
     http.call("set_balance_overdraft", {{"customer_id", customer.id}});
+    // Credits from Orama (lake#1134): given, then its unused remainder revoked.
+    const auto granted = http.call("grant_balance_credit",
+                                   {{"customer_id", customer.id},
+                                    {"amount_micros", 5'000'000},
+                                    {"reason", "schema conformance"},
+                                    {"expires_at", "2030-01-01T00:00:00Z"}});
+    http.call("revoke_balance_credit",
+              {{"credit_id", granted.at("credit").at("id")}, {"reason", "schema conformance"}});
     http.call("start_top_up", {{"customer_id", customer.id}, {"amount_micros", 25'000'000}});
     http.call("set_auto_top_up", {{"customer_id", customer.id}, {"enabled", true}});
     http.call("set_auto_top_up", {{"customer_id", customer.id}, {"enabled", false}});

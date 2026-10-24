@@ -75,6 +75,21 @@ Expect:
   the customers `owner` can see, its own account and `TD-ORG`'s.
 - G-103 expects "Not Available" here; record which one the page shows (suspected defect 2).
 
+#### ADM-047 · Give credit by a person's email from Customers · billing on · P1
+As: operator · Needs: billing on
+
+1. Open **Administration → Customers** and press **Give credit**.
+2. Enter `owner`'s email in capitals, **Amount (USD)** `5`, **Reason** `qa-<MMDD> prize`, and press
+   **Give credit**.
+3. Enter `nobody-<MMDD>@<test inbox domain>` instead and press **Give credit**.
+
+Expect:
+- **Give credit** shows only where the Lake bills, and only for the operator.
+- Step 2: a toast with `owner`'s new balance; `owner`'s Billing page lists **Credit from Orama**
+  +$5.00 with the reason.
+- Step 3: the dialog stays open with "no person with that email has a personal account on this
+  Lake"; nothing is given.
+
 ## Applications
 
 #### ADM-005 · Applications with none registered · P2

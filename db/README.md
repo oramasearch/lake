@@ -12,6 +12,13 @@ event then ends only the Lake browser sessions bound to it, never API keys, stat
 Additive; numbered after the open `0100` (lake#1155), `0101` (lake#1156) and `0102` (lake#1152).
 Apply before the new binary: the operator vendors the schema and selects the guard first. See
 [Clerk](../docs/api/clerk.md#webhooks) and [schema.md](../docs/control-plane/schema.md).
+Migration `0100_balance_grants` (lake#1134) lets `account_balance_credits` hold credits Orama gives
+(kind `grant`): new columns with defaults (`reason`, `granted_by`, `expires_at`,
+`charges_at_grant_micros`, `ended_at`, `end_reason`, `charges_at_end_micros`, `forfeited_micros`),
+the kind check widened once, `account_balance_credits_grant_check`, a partial index and the guard
+`balance_grants_guard`. Additive; the operator vendors the schema and selects the guard before the
+new binary rolls. See [billing.md](../docs/api/billing.md#credits-from-orama) and
+[schema.md](../docs/control-plane/schema.md#credits-from-orama-migration-0100_balance_grants).
 
 Migration `0099_account_balances` (lake#1114, liquid-bridge decision 67) adds the prepaid balance:
 `account_balances` (each account's settings, last refresh, email marks and auto top-up, with a

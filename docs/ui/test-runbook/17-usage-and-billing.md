@@ -602,6 +602,39 @@ Expect:
 - The figures stack; **Invoices** and **Billing Contact** drop below **This Month So Far**.
 - The lines table scrolls inside its box; the contact form's fields are one per row.
 
+#### BILL-050 · Give credit and revoke it from an account's Billing page · billing on · P0
+As: operator, then owner · Needs: billing on, an email inbox for `owner`
+
+1. As `operator`, open `/billing?customer_id=<owner's account id>` and press **Give credit**.
+2. Enter **Amount (USD)** `25`, **Reason** `qa-<MMDD> credit`, a **Last day it counts** next month,
+   and press **Give credit**.
+3. As `owner`, open **Organization → Billing**, then check `owner`'s inbox.
+4. As `operator`, press **Revoke** on the credit's row and confirm.
+
+Expect:
+- Step 1: the dialog "Give Credit" says the credit is spent before paid money, is not cash and does
+  not unlock the overdraft. **Give credit** stays disabled until the amount and reason are valid.
+- Step 2: a toast with the new balance and "the account was emailed"; the history has **Credit from
+  Orama** +$25.00 with "qa-<MMDD> credit · expires <date> · $25.00 left".
+- Step 3: `owner` sees the same row, no **Revoke**, and **Added** reads "Top-ups and credits from
+  Orama". One email "Orama added $25.00 of credit to your Lake account", with no reason in it.
+- Step 4: toast "Credit revoked: $25.00 unused stopped counting" (less what was used since); a row
+  **Credit from Orama revoked** (−) appears and the credit's row has no **Revoke**.
+- *API* `audit` shows `billing.balance.credit_granted` and `billing.balance.credit_revoked` on
+  `customer/<id>/billing`.
+
+#### BILL-051 · A credit alone does not unlock the overdraft · billing on · P1
+As: operator, then a new account · Needs: billing on
+
+1. Sign up a new test account `qa-<MMDD>-credit`. As `operator`, give it $1 from **Customers → Give
+   credit** by its email.
+2. As the new account, start a workspace, and use it until the balance reaches $0.
+
+Expect:
+- Before the credit: **Add Funds to Start**. After it: no banner; paid work starts.
+- At $0: the banner **Your Credit Is Used Up**, and starting paid work answers "…credit from Orama
+  is used up. Add $20.00 to go on". The **Limit** reads $0.00, never -$50.00.
+
 ## Billing off
 
 #### BILL-048 · No Billing where the Lake does not bill · billing off · P0

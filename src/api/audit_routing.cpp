@@ -90,6 +90,8 @@ constexpr std::array central = std::to_array<std::string_view>({
     "get_team",
     "get_user",
     "get_workspace",
+    // Credits from Orama are billing, in the control plane (lake#1134, decision 56).
+    "grant_balance_credit",
     "identity",
     "initialize_tuf",
     "issue_agent_certificate",
@@ -163,6 +165,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "resolve_model",
     "revoke_agent_certificate",
     "revoke_agent_session",
+    "revoke_balance_credit",
     "revoke_device",
     "revoke_dynamic_secret",
     "revoke_grant",

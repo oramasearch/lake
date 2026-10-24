@@ -415,6 +415,11 @@ balance is not ok; emails go once per crossing; `viewer.balance` drives the bann
 `/billing/add-funds`. Billing on only. Not deployed; the operator must vendor the schema, select
 `account_balances_guard` and register `setup_intent.succeeded`, `payment_intent.succeeded` and
 `payment_intent.payment_failed`. See [`docs/api/billing.md#balance`](docs/api/billing.md#balance).
+Orama can give an account a credit (lake#1134, migration `0100_balance_grants`):
+`grant_balance_credit` / `revoke_balance_credit`, the operator or the instance administrator only,
+a credit of kind `grant` spent before paid money, never unlocking the overdraft, its unused part
+stopping at expiry or revocation. See
+[`docs/api/billing.md#credits-from-orama`](docs/api/billing.md#credits-from-orama).
 
 Billing follows, for Orama Cloud only (lake#564, decision 56, migration `0073_billing`): billing
 records live in PostgreSQL as multitenancy (`billing_plans`, `billing_plan_prices`,

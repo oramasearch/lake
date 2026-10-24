@@ -150,15 +150,26 @@ Email balance_email(BalanceCrossing crossing,
                     const BalanceView& view,
                     std::string_view link,
                     const std::vector<std::string>& to);
+// The email telling an account Orama gave it a credit (lake#1134): the amount, the balance after,
+// the expiry (empty: none), that it is spent before paid money and is not cash, and a link to the
+// Billing page. Plain text with nothing a person typed in it: the grant's reason is shown on the
+// Billing page, never mailed.
+Email balance_grant_email(std::int64_t amount_micros,
+                          std::string_view expires_at,
+                          const BalanceView& view,
+                          bool paid_before,
+                          std::string_view link,
+                          const std::vector<std::string>& to);
 // Where an account's balance emails go: its billing contact's email, else its owner's (the
 // person's own, or an organization owner's). Empty when it has none.
 std::string balance_email_recipient(control::Store& store, const std::string& customer_id);
 
 // One refresh of every account's charges (or only `customer_id`'s), by the store root's owner:
-// each month from the first top-up's to this one at the list in force, read through the usage
-// capabilities without auditing each read; a month an invoice froze stays. A failed read holds the
-// balance and records why. Then the crossings' emails and auto top-ups. `context` acts as the
-// operator, with the registry and workspaces set.
+// each month from the first top-up's or the first grant's to this one at the list in force, read
+// through the usage capabilities without auditing each read; a month an invoice froze stays. A
+// failed read holds the balance and records why. After a full read, the grants past their expiry
+// end (their unused part stops counting, lake#1134). Then the crossings' emails and auto top-ups.
+// `context` acts as the operator, with the registry and workspaces set.
 struct BalanceRefreshReport {
     int accounts = 0;
     int refreshed = 0;
@@ -167,6 +178,7 @@ struct BalanceRefreshReport {
     int email_failures = 0;
     int auto_top_ups = 0;
     int auto_top_up_failures = 0;
+    int grants_expired = 0; // grants from Orama past their expiry, ended after a full read
 };
 liquid::runtime::task<BalanceRefreshReport>
 refresh_account_balances(ApiContext& context,
@@ -174,8 +186,9 @@ refresh_account_balances(ApiContext& context,
                          const BalanceRuntime& runtime,
                          std::string customer_id = {});
 
-// account_balance, start_top_up, set_auto_top_up, set_balance_overdraft and
-// refresh_account_balance, registered by register_billing_capabilities where billing is on.
+// account_balance, start_top_up, set_auto_top_up, set_balance_overdraft,
+// refresh_account_balance, grant_balance_credit and revoke_balance_credit, registered by
+// register_billing_capabilities where billing is on.
 void register_balance_capabilities(Registry& registry, std::shared_ptr<PaymentProviders> providers);
 
 } // namespace lake::api

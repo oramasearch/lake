@@ -7774,6 +7774,51 @@ public:
                            column);
     }
 
+    // A credit's columns, in the order credit_of reads them (grants' own columns: lake#1134).
+    static std::string credit_columns() {
+        return "id::text, kind, amount_micros, provider, reference, event_id, " +
+               balance_time("created_at") +
+               ", reason, granted_by, coalesce(to_char(expires_at AT TIME ZONE 'UTC', "
+               "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), charges_at_grant_micros, " +
+               balance_time("ended_at") + ", end_reason, charges_at_end_micros, forfeited_micros";
+    }
+
+    static BalanceCredit credit_of(const pqxx::row& row, const std::string& customer_id) {
+        BalanceCredit credit;
+        credit.id = row[0].as<std::string>();
+        credit.customer_id = customer_id;
+        credit.kind = row[1].as<std::string>();
+        credit.amount_micros = row[2].as<std::int64_t>();
+        credit.provider = row[3].as<std::string>();
+        credit.reference = row[4].as<std::string>();
+        credit.event_id = row[5].as<std::string>();
+        credit.created_at = row[6].as<std::string>();
+        credit.reason = row[7].as<std::string>();
+        credit.granted_by = row[8].as<std::string>();
+        credit.expires_at = row[9].as<std::string>();
+        credit.charges_at_grant_micros = row[10].as<std::int64_t>();
+        credit.ended_at = row[11].as<std::string>();
+        credit.end_reason = row[12].as<std::string>();
+        credit.charges_at_end_micros = row[13].as<std::int64_t>();
+        credit.forfeited_micros = row[14].as<std::int64_t>();
+        return credit;
+    }
+
+    // The account's grants in `tx`, oldest first; locked for the transaction with `lock`.
+    static std::vector<BalanceCredit>
+    grants_in(pqxx::work& tx, const std::string& customer_id, bool lock) {
+        std::vector<BalanceCredit> out;
+        for (const pqxx::row row : tx.exec_params(
+                 "SELECT " + credit_columns() +
+                     " FROM account_balance_credits WHERE customer_id = $1::uuid AND kind = "
+                     "'grant' ORDER BY created_at, id" +
+                     (lock ? " FOR UPDATE" : ""),
+                 customer_id)) {
+            out.push_back(credit_of(row, customer_id));
+        }
+        return out;
+    }
+
     // The account's balance in `tx`: its row's fields, the sums of its credits and charges, and
     // whether its organization has a paid order whose subscription is current.
     static Result<AccountBalance> balance_in(pqxx::work& tx, const std::string& customer_id) {
@@ -7828,15 +7873,22 @@ public:
             balance.version = row[19].as<std::int64_t>();
             balance.updated_at = row[20].as<std::string>();
         }
+        // A grant counts what has not stopped counting (lake#1134).
         const pqxx::result sums = tx.exec_params(
-            "SELECT (SELECT coalesce(sum(amount_micros), 0)::bigint FROM account_balance_credits "
-            "WHERE customer_id = $1::uuid), (SELECT count(*) FROM account_balance_credits WHERE "
-            "customer_id = $1::uuid), (SELECT coalesce(sum(amount_micros), 0)::bigint FROM "
-            "account_balance_charges WHERE customer_id = $1::uuid)",
+            "SELECT (SELECT coalesce(sum(amount_micros - forfeited_micros), 0)::bigint FROM "
+            "account_balance_credits WHERE customer_id = $1::uuid), (SELECT count(*) FROM "
+            "account_balance_credits WHERE customer_id = $1::uuid), (SELECT "
+            "coalesce(sum(amount_micros), 0)::bigint FROM account_balance_charges WHERE "
+            "customer_id = $1::uuid)",
             customer_id);
         balance.credits_micros = sums[0][0].as<std::int64_t>();
         balance.credit_count = sums[0][1].as<std::int64_t>();
         balance.charges_micros = sums[0][2].as<std::int64_t>();
+        const std::vector<BalanceCredit> grants = grants_in(tx, customer_id, false);
+        if (!grants.empty()) {
+            balance.first_grant_at = grants.front().created_at;
+            balance.grants_unused_micros = grants_unused(grants, balance.charges_micros);
+        }
         const std::string organization = customer[0][0].as<std::string>();
         if (!organization.empty()) {
             balance.paid_order =
@@ -7945,27 +7997,38 @@ public:
                 result.duplicate = true;
             }
             if (!result.duplicate) {
+                // A grant records the account's charges now: it pays only for later usage
+                // (lake#1134).
                 const pqxx::result inserted = tx.exec_params(
                     "INSERT INTO account_balance_credits (customer_id, kind, amount_micros, "
-                    "provider, reference, event_id) VALUES ($1::uuid, $2, $3, $4, $5, $6) ON "
-                    "CONFLICT (provider, reference) DO NOTHING RETURNING id::text, " +
-                        balance_time("created_at"),
+                    "provider, reference, event_id, reason, granted_by, expires_at, "
+                    "charges_at_grant_micros) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, "
+                    "$9::timestamptz, CASE WHEN $2 = 'grant' THEN (SELECT "
+                    "coalesce(sum(amount_micros), 0)::bigint FROM account_balance_charges WHERE "
+                    "customer_id = $1::uuid) ELSE 0 END) ON CONFLICT (provider, reference) DO "
+                    "NOTHING RETURNING " +
+                        credit_columns(),
                     credit.customer_id,
                     credit.kind,
                     credit.amount_micros,
                     credit.provider,
                     credit.reference,
-                    credit.event_id);
+                    credit.event_id,
+                    credit.reason,
+                    credit.granted_by,
+                    credit.expires_at.empty() ? std::nullopt
+                                              : std::optional<std::string>(credit.expires_at));
                 if (inserted.empty()) {
                     result.duplicate = true;
                 } else {
-                    result.credit = credit;
-                    result.credit.id = inserted[0][0].as<std::string>();
-                    result.credit.created_at = inserted[0][1].as<std::string>();
+                    result.credit = credit_of(inserted[0], credit.customer_id);
+                    // A grant is not a payment: the overdraft waits for the first paid top-up.
                     tx.exec_params(
                         "INSERT INTO account_balances (customer_id, first_top_up_at) VALUES "
-                        "($1::uuid, now()) ON CONFLICT (customer_id) DO UPDATE SET "
-                        "first_top_up_at = coalesce(account_balances.first_top_up_at, now()), "
+                        "($1::uuid, CASE WHEN $2 = 'grant' THEN NULL ELSE now() END) ON CONFLICT "
+                        "(customer_id) DO UPDATE SET first_top_up_at = "
+                        "coalesce(account_balances.first_top_up_at, CASE WHEN $2 = 'grant' THEN "
+                        "NULL ELSE now() END), "
                         "limit_warning_notified_at = NULL, negative_notified_at = NULL, "
                         "blocked_notified_at = NULL, auto_top_up_pending = CASE WHEN $2 = "
                         "'auto_top_up' THEN '' ELSE account_balances.auto_top_up_pending END, "
@@ -8021,22 +8084,14 @@ public:
         return with_tx<std::vector<BalanceCredit>>(
             [&](pqxx::work& tx) -> Result<std::vector<BalanceCredit>> {
                 const pqxx::result rows = tx.exec_params(
-                    "SELECT id::text, kind, amount_micros, provider, reference, event_id, " +
-                        balance_time("created_at") +
+                    "SELECT " + credit_columns() +
                         " FROM account_balance_credits WHERE customer_id = $1::uuid ORDER BY "
                         "created_at DESC, id LIMIT $2",
                     customer_id,
                     limit <= 0 ? 1000 : limit);
                 std::vector<BalanceCredit> out;
                 for (const pqxx::row row : rows) {
-                    out.push_back({row[0].as<std::string>(),
-                                   customer_id,
-                                   row[1].as<std::string>(),
-                                   row[2].as<std::int64_t>(),
-                                   row[3].as<std::string>(),
-                                   row[4].as<std::string>(),
-                                   row[5].as<std::string>(),
-                                   row[6].as<std::string>()});
+                    out.push_back(credit_of(row, customer_id));
                 }
                 return out;
             });
@@ -8061,6 +8116,87 @@ public:
                                row[4].as<std::string>()});
             }
             return out;
+        });
+    }
+
+    Result<BalanceCredit> balance_credit(const std::string& credit_id) override {
+        return with_tx<BalanceCredit>([&](pqxx::work& tx) -> Result<BalanceCredit> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT " + credit_columns() +
+                    ", customer_id::text FROM account_balance_credits WHERE id::text = $1",
+                credit_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no credit " + credit_id});
+            }
+            return credit_of(rows[0], rows[0][15].as<std::string>());
+        });
+    }
+
+    Result<std::vector<BalanceCredit>> end_balance_grants(const std::string& customer_id,
+                                                          const std::string& at,
+                                                          const std::string& revoke_id) override {
+        return with_tx<std::vector<BalanceCredit>>(
+            [&](pqxx::work& tx) -> Result<std::vector<BalanceCredit>> {
+                if (tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", customer_id)
+                        .empty()) {
+                    return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+                }
+                // Locked, so two refreshes, or a refresh and a revocation, end each grant once.
+                const std::vector<BalanceCredit> grants = grants_in(tx, customer_id, true);
+                const std::int64_t charges =
+                    tx.exec_params("SELECT coalesce(sum(amount_micros), 0)::bigint FROM "
+                                   "account_balance_charges WHERE customer_id = $1::uuid",
+                                   customer_id)[0][0]
+                        .as<std::int64_t>();
+                const std::vector<BalanceCredit> ending =
+                    grants_ending(grants, charges, at, revoke_id);
+                if (!revoke_id.empty() && std::ranges::none_of(ending, [&](const BalanceCredit& g) {
+                        return g.id == revoke_id;
+                    })) {
+                    return std::unexpected(StoreError{
+                        "conflict", "no grant " + revoke_id + " of this account still counts"});
+                }
+                for (const BalanceCredit& ended : ending) {
+                    tx.exec_params("UPDATE account_balance_credits SET ended_at = "
+                                   "$2::timestamptz, end_reason = $3, charges_at_end_micros = $4, "
+                                   "forfeited_micros = $5 WHERE id = $1::uuid AND ended_at IS NULL",
+                                   ended.id,
+                                   ended.ended_at,
+                                   ended.end_reason,
+                                   ended.charges_at_end_micros,
+                                   ended.forfeited_micros);
+                }
+                if (!ending.empty()) {
+                    tx.exec_params("UPDATE account_balances SET version = version + 1, "
+                                   "updated_at = now() WHERE customer_id = $1::uuid",
+                                   customer_id);
+                }
+                // As stored (ended_at in the store's own format).
+                std::vector<BalanceCredit> out;
+                for (const BalanceCredit& ended : ending) {
+                    for (const BalanceCredit& kept : grants_in(tx, customer_id, false)) {
+                        if (kept.id == ended.id) {
+                            out.push_back(kept);
+                        }
+                    }
+                }
+                return out;
+            });
+    }
+
+    Result<Customer> personal_account_by_email(const std::string& email) override {
+        return with_tx<Customer>([&](pqxx::work& tx) -> Result<Customer> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + customer_columns +
+                    " FROM customers WHERE customer_type = 'individual' AND deleted_at IS NULL "
+                    "AND user_id = (SELECT id FROM users WHERE pool_id = 'lake' AND lower(email) "
+                    "= lower($1) AND email IS NOT NULL)",
+                email);
+            if (email.empty() || rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no personal account has that email"});
+            }
+            return customer_of(rows[0]);
         });
     }
 

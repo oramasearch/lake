@@ -1449,3 +1449,24 @@ prepaid balance's billing records (decision 56), every row cascading with its cu
 A credit and its `billing_payment_events` row are written in one transaction. Lake alone writes the
 tables. Additive and idempotent; guard `account_balances_guard`. The operator vendors the schema and
 selects that guard before a lake with this change is rolled.
+
+## Credits from Orama (migration `0100_balance_grants`)
+
+`0100_balance_grants` (lake#1134, [`../api/billing.md#credits-from-orama`](../api/billing.md#credits-from-orama))
+lets `account_balance_credits` hold credits Orama gives, beside the paid top-ups:
+
+- `kind` may be `grant` (the 0099 check `account_balance_credits_kind_check` is replaced once, by a
+  `DO` block keyed on the new `account_balance_credits_grant_check`);
+- new columns, all with defaults, so existing rows are unchanged: `reason` (≤ 1000), `granted_by`
+  (≤ 255), `expires_at`, `charges_at_grant_micros` (the account's charges when it was given),
+  `ended_at`, `end_reason` (`''`, `expired` or `revoked`), `charges_at_end_micros` and
+  `forfeited_micros` (the unused part that stopped counting);
+- `account_balance_credits_grant_check`: a grant has provider `orama`, a reason, at most
+  $10,000, a forfeited part no larger than its amount, and is either still counting (no end, nothing
+  forfeited) or ended with a reason; a top-up has none of the grant columns set;
+- the partial index `account_balance_credits_counting_grants` (an account's grants that still count).
+
+The balance sums `amount_micros - forfeited_micros`. Additive and idempotent (reapplied, it changes
+nothing); guard `balance_grants_guard`. The orama-operator vendors lake's schema today, so an
+operator release carrying it, with that guard selected, rolls before a lake image that writes grants
+(unless lake#1119's `lake migrate` has taken the schema over by then).

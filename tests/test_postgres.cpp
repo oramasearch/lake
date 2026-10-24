@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -3576,6 +3577,162 @@ TEST(PostgresBilling, AccountBalancesFollowTheContract) {
         pqxx::work tx(connection);
         EXPECT_THROW(tx.exec_params(statement, customer->id), pqxx::check_violation) << statement;
     }
+}
+
+// Grants from Orama (migration 0100, lake#1134), on either store: a grant is a credit that never
+// sets first_top_up_at, records the charges when it was given, is found by id, ends once (revoked
+// or expired) with only its unused part forfeited, and a person's email finds their own account.
+void balance_grant_contract(lake::control::Store& store,
+                            const std::string& customer_id,
+                            const std::string& email) {
+    lake::control::BalanceCredit grant;
+    grant.customer_id = customer_id;
+    grant.kind = "grant";
+    grant.amount_micros = 25'000'000;
+    grant.provider = "orama";
+    grant.reference = "grant-contract-1";
+    grant.reason = "design partner";
+    grant.granted_by = "operator";
+    grant.expires_at = "2030-01-01T00:00:00Z";
+    ASSERT_TRUE(store.set_balance_charge({customer_id, "2026-09", 3'000'000, "usage-a", {}, {}}));
+    auto applied = store.apply_balance_credit(grant);
+    ASSERT_TRUE(applied) << applied.error().message;
+    EXPECT_FALSE(applied->duplicate);
+    EXPECT_EQ(applied->credit.kind, "grant");
+    EXPECT_EQ(applied->credit.reason, "design partner");
+    EXPECT_EQ(applied->credit.expires_at, "2030-01-01T00:00:00Z");
+    EXPECT_EQ(applied->credit.charges_at_grant_micros, 3'000'000);
+    EXPECT_TRUE(applied->balance.first_top_up_at.empty()) << "a grant is not a payment";
+    EXPECT_FALSE(applied->balance.first_grant_at.empty());
+    EXPECT_EQ(applied->balance.charges_since(), applied->balance.first_grant_at);
+    EXPECT_EQ(applied->balance.balance_micros(), 22'000'000);
+    EXPECT_EQ(applied->balance.grants_unused_micros, 25'000'000)
+        << "the $3 charged before it is not its to pay";
+    EXPECT_TRUE(store.apply_balance_credit(grant)->duplicate) << "once per reference";
+    const std::string id = applied->credit.id;
+    const auto found = store.balance_credit(id);
+    ASSERT_TRUE(found) << found.error().message;
+    EXPECT_EQ(found->customer_id, customer_id);
+    EXPECT_EQ(found->granted_by, "operator");
+    EXPECT_EQ(store.balance_credit(lake::control::new_uuid_v4()).error().code, "not_found");
+
+    // $10 used after it, then revoked: $15 stops counting.
+    ASSERT_TRUE(store.set_balance_charge({customer_id, "2026-10", 10'000'000, "usage-a", {}, {}}));
+    EXPECT_EQ(store.account_balance(customer_id)->grants_unused_micros, 15'000'000);
+    auto ended = store.end_balance_grants(customer_id, "2026-10-24T12:00:00Z", id);
+    ASSERT_TRUE(ended) << ended.error().message;
+    ASSERT_EQ(ended->size(), 1U);
+    EXPECT_EQ((*ended)[0].end_reason, "revoked");
+    EXPECT_EQ((*ended)[0].forfeited_micros, 15'000'000);
+    EXPECT_EQ((*ended)[0].charges_at_end_micros, 13'000'000);
+    EXPECT_EQ((*ended)[0].ended_at.substr(0, 19), "2026-10-24T12:00:00");
+    auto balance = store.account_balance(customer_id);
+    ASSERT_TRUE(balance);
+    EXPECT_EQ(balance->credits_micros, 10'000'000);
+    EXPECT_EQ(balance->balance_micros(), -3'000'000);
+    EXPECT_EQ(balance->grants_unused_micros, 0);
+    EXPECT_EQ(store.end_balance_grants(customer_id, "2026-10-24T12:00:01Z", id).error().code,
+              "conflict")
+        << "a grant ends once";
+
+    // An expiring grant ends at its expiry, not before; nothing else ends with it.
+    grant.reference = "grant-contract-2";
+    grant.expires_at = "2026-11-01T00:00:00Z";
+    applied = store.apply_balance_credit(grant);
+    ASSERT_TRUE(applied) << applied.error().message;
+    ended = store.end_balance_grants(customer_id, "2026-10-31T23:59:59Z", "");
+    ASSERT_TRUE(ended);
+    EXPECT_TRUE(ended->empty());
+    ended = store.end_balance_grants(customer_id, "2026-11-01T00:00:00Z", "");
+    ASSERT_TRUE(ended);
+    ASSERT_EQ(ended->size(), 1U);
+    EXPECT_EQ((*ended)[0].end_reason, "expired");
+    EXPECT_EQ((*ended)[0].forfeited_micros, 25'000'000) << "nothing was used after it";
+    EXPECT_EQ(store.account_balance(customer_id)->credits_micros, 10'000'000);
+
+    // The store's checks refuse what the table refuses.
+    grant.reference = "grant-contract-3";
+    grant.amount_micros = lake::control::balance_grant_most_micros + 10'000;
+    EXPECT_EQ(store.apply_balance_credit(grant).error().code, "invalid_input");
+    grant.amount_micros = 1'000'000;
+    grant.reason.clear();
+    EXPECT_EQ(store.apply_balance_credit(grant).error().code, "invalid_input");
+    auto top_up = grant;
+    top_up.kind = "top_up";
+    top_up.provider = "stripe";
+    top_up.reason = "not a grant";
+    EXPECT_EQ(store.apply_balance_credit(top_up).error().code, "invalid_input");
+
+    const auto person = store.personal_account_by_email(email);
+    ASSERT_TRUE(person) << person.error().message;
+    EXPECT_EQ(person->id, customer_id);
+    std::string shouted = email;
+    for (char& c : shouted) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    EXPECT_EQ(store.personal_account_by_email(shouted)->id, customer_id);
+    EXPECT_EQ(store.personal_account_by_email("nobody@example.com").error().code, "not_found");
+    EXPECT_EQ(store.personal_account_by_email("").error().code, "not_found");
+}
+
+TEST(MemoryBilling, BalanceGrantsFollowTheContract) {
+    lake::control::InMemoryStore store;
+    const auto user = store.create_user({"taap:1:ed25519:grant", "grant@example.com", "Grant"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store.create_customer({"individual", user->id, "", "grant"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    balance_grant_contract(store, customer->id, "grant@example.com");
+}
+
+TEST(PostgresBilling, BalanceGrantsFollowTheContract) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        EXPECT_FALSE(tx.exec("SELECT to_regclass('balance_grants_guard')")[0][0].is_null());
+        EXPECT_FALSE(
+            tx.exec("SELECT 1 FROM schema_migrations WHERE version = '0100_balance_grants'")
+                .empty());
+    }
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const std::string email = "grant-" + suffix + "@example.com";
+    const auto user = store->create_user({"taap:1:ed25519:grant-" + suffix, email, "Grant"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "grant-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    balance_grant_contract(*store, customer->id, email);
+
+    // The table's own checks hold for a writer other than lake's store; a top-up row is valid as
+    // before the migration.
+    pqxx::connection connection(uri);
+    for (const char* statement :
+         {"INSERT INTO account_balance_credits (customer_id, kind, amount_micros, provider, "
+          "reference) VALUES ($1::uuid, 'grant', 1, 'orama', 'no-reason')",
+          "INSERT INTO account_balance_credits (customer_id, kind, amount_micros, provider, "
+          "reference, reason) VALUES ($1::uuid, 'grant', 1, 'stripe', 'not-orama', 'x')",
+          "INSERT INTO account_balance_credits (customer_id, kind, amount_micros, provider, "
+          "reference, reason) VALUES ($1::uuid, 'grant', 10000000001, 'orama', 'too-much', 'x')",
+          "INSERT INTO account_balance_credits (customer_id, kind, amount_micros, provider, "
+          "reference, reason) VALUES ($1::uuid, 'top_up', 1, 'stripe', 'with-reason', 'x')",
+          "INSERT INTO account_balance_credits (customer_id, kind, amount_micros, provider, "
+          "reference, reason, forfeited_micros) VALUES ($1::uuid, 'grant', 1, 'orama', "
+          "'forfeit-open', 'x', 1)",
+          "UPDATE account_balance_credits SET forfeited_micros = amount_micros + 1 WHERE "
+          "customer_id = $1::uuid AND kind = 'grant'"}) {
+        pqxx::work tx(connection);
+        EXPECT_THROW(tx.exec_params(statement, customer->id), pqxx::check_violation) << statement;
+    }
+    pqxx::work tx(connection);
+    EXPECT_NO_THROW(tx.exec_params("INSERT INTO account_balance_credits (customer_id, kind, "
+                                   "amount_micros, provider, reference) VALUES ($1::uuid, "
+                                   "'top_up', 1, 'stripe', 'plain-top-up')",
+                                   customer->id));
 }
 
 TEST(MemoryBilling, BillingContactsFollowTheContract) {

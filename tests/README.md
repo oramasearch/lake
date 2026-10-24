@@ -668,7 +668,10 @@ gate and its exemptions, the answer warning, the emails once per crossing (a fak
 auto top-up (off by default, one charge per crossing, the daily limit, a decline turning it off),
 the Stripe requests and events, and `PaidWorkContract`, which fails on a capability that starts paid
 work without being on the list. `test_postgres.cpp`'s `*.AccountBalancesFollowTheContract` run the
-store contract on both stores.
+store contract on both stores. `BalanceGrant.*` covers credits from Orama (lake#1134): who may give
+and revoke, the input checks, by id and by email, the email once, no overdraft from a grant alone,
+expiry and revocation forfeiting only the unused part, and the allocation order;
+`*.BalanceGrantsFollowTheContract` run their store contract on both stores.
 
 The audit split by subject (decision 52, lake#317): `test_workspace_records.cpp`'s
 `AuditEventsAboutAWorkspaceLiveInItsOwnChain` covers the `AuditRecorder` and the readers across two
