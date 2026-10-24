@@ -117,6 +117,16 @@
   }
 }
 
+/* The terms and privacy sentence under every sign-up and sign-in form (liquid-bridge#15). */
+.auth-legal {
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.auth-legal a {
+  text-decoration: underline;
+}
+
 /* The Clerk component sits where the server page mounted it. */
 .clerk-mount {
   margin: 8px 0;

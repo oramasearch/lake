@@ -9,6 +9,7 @@ import { Button, Field, fieldError, Form, Notice, Page } from "@/lib/ui";
 import { useSession } from "@/lib/session";
 import { AuthFrame, useSignedInRedirect } from "./AuthFrame";
 import { ClerkSignIn } from "./ClerkSignIn";
+import { LegalNotice } from "./LegalNotice";
 import { AccountRegionNote } from "@/components/Region";
 import { landingAfterSignIn, leaveFor, messageOf, NO_WORKSPACE, returnQuery, returnTarget } from "./signIn";
 
@@ -77,6 +78,7 @@ function NativeSignUp() {
             </Button>
           </div>
         </Form>
+        <LegalNotice mode="sign-up" />
         <p className="muted">
           Already registered? <Link to={`/sign-in${returnQuery(location.search)}`}>Sign in</Link>.
         </p>

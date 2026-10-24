@@ -1,7 +1,8 @@
 # Deployment
 
 - [Sign-in](sign-in.md): Clerk instances, social-provider setup, production Microsoft ownership,
-  legal links, publisher-verification blockers and browser steps.
+  legal links, publisher-verification blockers and browser steps, and the terms and privacy links on
+  every sign-up and sign-in form (`LAKE_TERMS_URL`, `LAKE_PRIVACY_URL`).
 - [Users](users.md): invitations and access removal.
 - [Secrets](secrets.md): platform and workspace credential storage.
 - [AKS](aks.md): build, roll and deployment checks.

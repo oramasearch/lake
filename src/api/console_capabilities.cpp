@@ -127,6 +127,9 @@ json viewer_schema() {
                          {"frontend_api", string_schema()}},
                         json::array({"enabled", "publishable_key", "frontend_api"}))},
          {"password_sign_up", {{"type", "boolean"}}},
+         {"legal",
+          object_schema({{"terms_url", string_schema()}, {"privacy_url", string_schema()}},
+                        json::array({"terms_url", "privacy_url"}))},
          {"external_origin", string_schema()},
          {"public_host", string_schema()},
          {"config",
@@ -142,6 +145,7 @@ json viewer_schema() {
                      "spaces",
                      "clerk",
                      "password_sign_up",
+                     "legal",
                      "external_origin",
                      "public_host",
                      "config",
@@ -183,6 +187,9 @@ ApiResult viewer(const json& input, ApiContext& context, const std::string& vers
         // Under Clerk, sign-up is Clerk's (docs/api/clerk.md); the password entries refuse by the
         // same rule (lake#1098).
         {"password_sign_up", lake_pool_password_sign_in(context.clerk_publishable_key)},
+        // The terms and privacy policy sign-up and sign-in link to (LAKE_TERMS_URL,
+        // LAKE_PRIVACY_URL; liquid-bridge#15); empty when the instance shows no link.
+        {"legal", {{"terms_url", context.terms_url}, {"privacy_url", context.privacy_url}}},
         {"external_origin", public_origin(context)},
         {"public_host", context.public_host},
         {"config", {{"frontier_model", ""}}},

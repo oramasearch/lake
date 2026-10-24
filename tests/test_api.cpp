@@ -9659,6 +9659,50 @@ TEST(Identity, ClerkTurnsOffLakePoolPasswordSignUpAndSignIn) {
     EXPECT_EQ(s.call("sign_in_password", outsider).error.code, "unauthenticated");
 }
 
+// Sign-up and sign-in link to the instance's terms and privacy policy (liquid-bridge#15): viewer
+// reports them to anyone, signed in or not, and an empty URL means no link.
+TEST(WebApp, ViewerReportsTheTermsAndPrivacyLinks) {
+    Surface s;
+    s.ctx.authorized = false;
+    s.ctx.acting_identity.clear();
+    s.ctx.operator_credential = false;
+    s.ctx.terms_url = "https://example.test/terms";
+    s.ctx.privacy_url = "https://example.test/privacy";
+    const ApiResult visitor = s.call("viewer");
+    ASSERT_TRUE(visitor.ok) << visitor.error.message;
+    EXPECT_EQ(visitor.value["legal"]["terms_url"], "https://example.test/terms");
+    EXPECT_EQ(visitor.value["legal"]["privacy_url"], "https://example.test/privacy");
+
+    s.ctx.terms_url.clear();
+    s.ctx.privacy_url.clear();
+    const ApiResult none = s.call("viewer");
+    ASSERT_TRUE(none.ok) << none.error.message;
+    EXPECT_EQ(none.value["legal"], (json{{"terms_url", ""}, {"privacy_url", ""}}));
+}
+
+TEST(WebApp, LegalUrlSettingsKeepTheDefaultTurnOffOrRefuse) {
+    using lake::api::legal_url_setting;
+    const std::string_view fallback = lake::api::default_terms_url;
+    EXPECT_EQ(fallback, "https://www.orama.com/legal/terms");
+    EXPECT_EQ(lake::api::default_privacy_url, "https://www.orama.com/legal/privacy");
+    EXPECT_EQ(legal_url_setting("LAKE_TERMS_URL", nullptr, fallback).value(), fallback);
+    EXPECT_EQ(legal_url_setting("LAKE_TERMS_URL", "", fallback).value(), fallback);
+    EXPECT_EQ(legal_url_setting("LAKE_TERMS_URL", "off", fallback).value(), "");
+    EXPECT_EQ(legal_url_setting("LAKE_TERMS_URL", "https://acme.example/legal/terms?v=2#top", fallback).value(),
+              "https://acme.example/legal/terms?v=2#top");
+    EXPECT_EQ(legal_url_setting("LAKE_PRIVACY_URL", "http://localhost:3000/privacy", fallback).value(),
+              "http://localhost:3000/privacy");
+    for (const char* bad : {"javascript:alert(1)", "/legal/terms", "www.orama.com/legal/terms", "https://",
+                            "https://a.example/x y", "https://a.example/\"x", "https://a.example/<b>",
+                            "ftp://a.example/terms"}) {
+        const auto refused = legal_url_setting("LAKE_TERMS_URL", bad, fallback);
+        ASSERT_FALSE(refused.has_value()) << bad;
+        EXPECT_TRUE(refused.error().starts_with("LAKE_TERMS_URL ")) << refused.error();
+    }
+    const std::string long_url = "https://a.example/" + std::string(2048, 'a');
+    EXPECT_FALSE(legal_url_setting("LAKE_PRIVACY_URL", long_url.c_str(), fallback).has_value());
+}
+
 TEST(WebApp, ViewerNamesClerkAndAnOrganizationNamesItsSpace) {
     Surface s;
     s.ctx.clerk_publishable_key = "pk_test_YWJvdmUtc2VhaG9yc2UtNzUzNS5jbGVyay5hY2NvdW50cy5kZXYk";

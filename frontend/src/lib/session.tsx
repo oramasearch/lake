@@ -33,6 +33,9 @@ export type Viewer = {
   spaces: SpaceChoice[];
   clerk: { enabled: boolean; publishable_key?: string; frontend_api?: string };
   password_sign_up: boolean;
+  /** The terms of service and privacy policy sign-up and sign-in link to (LAKE_TERMS_URL,
+   * LAKE_PRIVACY_URL, liquid-bridge#15); an empty URL means no link. */
+  legal?: { terms_url: string; privacy_url: string };
   /** The origin repositories are cloned from and packages installed from. */
   external_origin?: string;
   public_host?: string;

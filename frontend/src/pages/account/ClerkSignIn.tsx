@@ -11,6 +11,7 @@ import { Actions, Button, Notice, Page } from "@/lib/ui";
 import { useSession } from "@/lib/session";
 import { clerkPageSub, exchangeAutomatically, signUpModeOf, type ClerkEnvironmentHolder, type SignUpMode } from "@/lib/clerkSignIn";
 import { AuthFrame } from "./AuthFrame";
+import { LegalNotice } from "./LegalNotice";
 import { AccountRegionNote } from "@/components/Region";
 import { returnQuery, returnTarget } from "./signIn";
 
@@ -238,6 +239,7 @@ export function ClerkSignIn({ mode }: { mode: "sign-in" | "sign-up" }) {
           </Actions>
         )}
         <div ref={mount} className="clerk-mount" />
+        <LegalNotice mode={signUp ? "sign-up" : "sign-in"} />
         <p className="muted" role="status" aria-live="polite">
           {status}
         </p>

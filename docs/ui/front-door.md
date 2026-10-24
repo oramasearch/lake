@@ -21,6 +21,13 @@ invitation sentence. Until clerk-js has answered, the page offers Sign in and th
 Without Clerk, which is what an on-prem install uses, password sign-up is open and the visitor is
 offered **Create account** too.
 
+**Terms and privacy.** Every sign-up and sign-in form, Clerk's and lake's own, ends with *By
+creating an account, you agree to the Terms of Service and acknowledge the Privacy Policy.* (*By
+signing in, …* on sign-in), both linked from `viewer.legal` and opening in a new tab
+(`LegalNotice`, liquid-bridge#15). The instance sets the URLs (`LAKE_TERMS_URL`, `LAKE_PRIVACY_URL`,
+default Orama's published pages) or turns either off; see
+[`../deployment/sign-in.md`](../deployment/sign-in.md#terms-and-privacy).
+
 ## Landing copy
 
 Every bold phrase in this section is quoted word for word from `frontend/src/pages/home/HomePage.tsx`

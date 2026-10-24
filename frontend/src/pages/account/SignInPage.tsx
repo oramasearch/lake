@@ -10,6 +10,7 @@ import { type IdentityProofChallenge, looksSigned, signCommand, signedOutput } f
 import { useSession } from "@/lib/session";
 import { AuthFrame, useSignedInRedirect } from "./AuthFrame";
 import { ClerkSignIn } from "./ClerkSignIn";
+import { LegalNotice } from "./LegalNotice";
 import { AccountRegionNote } from "@/components/Region";
 import { landingAfterSignIn, leaveFor, messageOf, NO_WORKSPACE, returnQuery, returnTarget } from "./signIn";
 
@@ -32,6 +33,7 @@ function NativeSignIn() {
           <PasswordPanel />
           <OAuthPanel />
         </div>
+        <LegalNotice mode="sign-in" />
         <p className="muted">
           <Link to={`/sign-up${kept}`}>Create an account</Link> · <Link to="/login">Operator sign-in</Link>
         </p>

@@ -513,6 +513,10 @@ struct ApiContext {
     std::string external_origin;
     // LAKE_CLERK_PUBLISHABLE_KEY as configured; `viewer` derives Clerk's frontend host from it.
     std::string clerk_publishable_key;
+    // LAKE_TERMS_URL and LAKE_PRIVACY_URL as configured (ServerOptions); `viewer` reports them as
+    // `legal` for the sign-up and sign-in pages. Empty: no link.
+    std::string terms_url;
+    std::string privacy_url;
     // The instance registries' catalog (npm, Python, one-component OCI) as {available, oci, npm,
     // python}, read from the store root by the HTTP server (list_packages). Empty outside HTTP.
     std::function<nlohmann::json()> artifact_catalog;
