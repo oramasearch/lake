@@ -10,7 +10,7 @@ struct version {
 };
 
 [[nodiscard]] constexpr version current_version() noexcept {
-    return {0, 5, 2};
+    return {0, 6, 0};
 }
 [[nodiscard]] std::string_view version_string() noexcept;
 [[nodiscard]] std::string_view build_revision_string() noexcept;

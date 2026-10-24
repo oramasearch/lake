@@ -7911,6 +7911,9 @@ struct ApiServer::Impl {
     std::shared_ptr<OutboundHttpClient> outbound_http = std::make_shared<OutboundHttpClient>();
     // How invoices are paid where billing is on (docs/api/billing.md#payment-providers).
     std::shared_ptr<PaymentProviders> payments;
+    // The prepaid balance's runtime where billing is on (lake#1114): null with billing off.
+    std::shared_ptr<const BalanceRuntime> balance_runtime;
+    std::chrono::steady_clock::time_point next_balance_pass{};
     // The apex order sheet (lake#831, docs/api/orders.md): the anonymous form's limit, the key its
     // status links are signed with (LAKE_INSTANCE_KEK, else one made at start), when the order
     // pass runs next, and whether an order asked for it sooner.
@@ -8894,6 +8897,36 @@ struct ApiServer::Impl {
                     });
             }
             register_billing_capabilities(registry, payments);
+            // The balance's emails go through Resend with Orama's key, under a key per crossing
+            // (docs/api/billing.md#emails); without the key they wait.
+            auto runtime = std::make_shared<BalanceRuntime>();
+            runtime->settings = options.balance;
+            runtime->origin =
+                !options.external_origin.empty()
+                    ? options.external_origin
+                    : (options.public_host.empty() ? std::string()
+                                                   : "https://" + options.public_host);
+            if (!options.resend.api_key.empty()) {
+                runtime->mailer =
+                    [this](const Email& email,
+                           std::string_view key) -> std::expected<std::string, std::string> {
+                    const ResendHttp http =
+                        options.resend_http
+                            ? options.resend_http
+                            : ResendHttp([this](const ResendRequest& request) {
+                                  OutboundResponse response = outbound_http->request(
+                                      {request.method, request.url, request.body, request.headers});
+                                  return ResendResponse{response.status,
+                                                        std::move(response.body),
+                                                        std::move(response.error)};
+                              });
+                    return send_resend_email(
+                        options.resend, email, key, http, options.resend_api_base);
+                };
+            } else {
+                runtime->email_unavailable_reason = options.resend.unavailable_reason();
+            }
+            balance_runtime = std::move(runtime);
         }
         order_limiter = std::make_unique<OrderRateLimiter>(
             options.order_sheet.orders_per_client_per_hour, options.order_sheet.orders_per_hour);
@@ -9447,6 +9480,7 @@ struct ApiServer::Impl {
         ctx.model_gateway_models = options.model_gateway_models;
         ctx.payments = payments;
         ctx.order_entitlement_grace_seconds = options.order_entitlement_grace_seconds;
+        ctx.balance = balance_runtime;
         ctx.object_transport = object_transport;
         ctx.artifact_catalog = [this] {
             nlohmann::json catalog = artifacts.catalog();
@@ -10728,19 +10762,57 @@ struct ApiServer::Impl {
         }
         const std::string audience(clerk_token_template);
         std::optional<control::identity_crypto::OidcClaims> claims;
+        std::string refusal = "no token";
         if (!token.empty()) {
             auto ran = co_await run_blocking(
                 [cache = oidc_jwks, fetch = jwks_fetch(), token, config = *clerk, audience] {
-                    return cache->verify(
-                        token, config.jwks_url, config.issuer, audience, "", false, fetch, true);
+                    std::string reason;
+                    auto verified = cache->verify(token,
+                                                  config.jwks_url,
+                                                  config.issuer,
+                                                  audience,
+                                                  "",
+                                                  false,
+                                                  fetch,
+                                                  true,
+                                                  &reason);
+                    return std::pair{std::move(verified), std::move(reason)};
                 });
             if (ran) {
-                claims = std::move(*ran);
+                claims = std::move(ran->first);
+                refusal = std::move(ran->second);
+            } else {
+                refusal = "verification did not run: " + ran.error().message;
+            }
+            if (claims && claims->issued_at <= 0) {
+                refusal = "no iat";
             }
         }
         ApiContext context = context_for(route);
         context.authentication_method = "clerk";
         if (!claims || claims->issued_at <= 0) {
+            // Why it was refused, and what the token claimed, never the token itself (lake#1115).
+            const auto summary = summarize_token(token);
+            nlohmann::json claim_types = nlohmann::json::object();
+            for (const auto& [name, type] : summary.claim_types) {
+                claim_types[name] = type;
+            }
+            std::cerr << nlohmann::json{{"event", "clerk_sign_in_refused"},
+                                        {"reason", refusal},
+                                        {"expected_issuer", clerk->issuer},
+                                        {"expected_audience", audience},
+                                        {"jwks_url", clerk->jwks_url},
+                                        {"alg", summary.algorithm},
+                                        {"kid", summary.key_id},
+                                        {"iss", summary.issuer},
+                                        {"aud", summary.audience},
+                                        {"azp", summary.authorized_party},
+                                        {"iat", summary.issued_at},
+                                        {"nbf", summary.not_before},
+                                        {"exp", summary.expires_at},
+                                        {"claim_types", claim_types}}
+                             .dump()
+                      << '\n';
             (void)record_direct_event(context,
                                       audit::EventDraft{
                                           .kind = "authentication",
@@ -13868,6 +13940,53 @@ struct ApiServer::Impl {
         }
     }
 
+    // The prepaid balance's refresh (lake#1114, docs/api/billing.md#balance), on the maintenance
+    // thread by the store root's owner: every account's charges from the usage capabilities, a
+    // failed read holding the balance, then the crossings' emails and auto top-ups.
+    void run_balance_pass() {
+        if (!balance_runtime || !options.store) {
+            return;
+        }
+        ApiContext context;
+        context.store = options.store.get();
+        context.workspaces = options.workspaces.get();
+        context.registry = &registry;
+        context.sync_store = &sync_store;
+        context.instance_kek = options.instance_kek;
+        context.identity_seed = options.identity_seed;
+        context.usage_recorder = usage_recorder.get();
+        context.metering_recorder = metering_recorder.get();
+        context.payments = payments;
+        context.balance = balance_runtime;
+        context.public_host = options.public_host;
+        context.external_origin = options.external_origin;
+        context.authorized = true;
+        context.operator_credential = true;
+        context.acting_identity = "admin";
+        context.authentication_method = "balance";
+        const auto report = liquid::runtime::block_on(
+            refresh_account_balances(context, payments, *balance_runtime));
+        if (!report) {
+            metrics.increment_counter("lake_balance_refresh_errors_total");
+            return;
+        }
+        metrics.increment_counter("lake_balance_refreshes_total");
+        metrics.set_gauge("lake_balance_accounts", {}, static_cast<double>(report->accounts));
+        metrics.increment_counter("lake_balance_held_total", {}, static_cast<double>(report->held));
+        metrics.increment_counter("lake_balance_emails_total",
+                                  {{"outcome", "sent"}},
+                                  static_cast<double>(report->emails));
+        metrics.increment_counter("lake_balance_emails_total",
+                                  {{"outcome", "failed"}},
+                                  static_cast<double>(report->email_failures));
+        metrics.increment_counter("lake_balance_auto_top_ups_total",
+                                  {{"outcome", "started"}},
+                                  static_cast<double>(report->auto_top_ups));
+        metrics.increment_counter("lake_balance_auto_top_ups_total",
+                                  {{"outcome", "failed"}},
+                                  static_cast<double>(report->auto_top_up_failures));
+    }
+
     // A file of the embedded web app (docs/ui/web-app.md); 404 when the build has no such file.
     // The app's index.html with the `viewer` answer for this request embedded in it
     // (docs/ui/web-app.md#the-first-paint): the same capability the app would call first, so the
@@ -16662,6 +16781,21 @@ void ApiServer::drain() {
         impl_->next_order_pass = now + impl_->options.order_pass_interval;
         Impl* impl = impl_.get();
         impl_->schedule_maintenance("cloud orders", [impl] { impl->run_order_pass(); });
+    }
+    // The prepaid balance's refresh (lake#1114): the store root's owner alone, so two lakes never
+    // email one crossing twice or start two auto top-ups.
+    if (impl_->balance_runtime && impl_->options.store &&
+        (impl_->options.store_root.empty() ||
+         impl_->store_root_state.load() == StoreRootState::open) &&
+        now >= impl_->next_balance_pass) {
+        impl_->next_balance_pass =
+            now + (impl_->options.balance_pass_interval.count() > 0
+                       ? std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                             impl_->options.balance_pass_interval)
+                       : std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                             impl_->options.balance.refresh_interval));
+        Impl* impl = impl_.get();
+        impl_->schedule_maintenance("account balances", [impl] { impl->run_balance_pass(); });
     }
     if (impl_->options.store && impl_->options.workspaces && !impl_->options.instance_kek.empty() &&
         now >= impl_->next_secret_lease_sweep) {

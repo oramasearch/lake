@@ -263,6 +263,12 @@ The stores' `assign_legacy_audit_events` reruns migration `0063`'s assignment wi
 workspace actions and `legacy_audit_events` pages the assigned central events in append order, for
 the copy only.
 
+Both stores keep the prepaid balance (migration `0099_account_balances`, lake#1114): an account's
+row is written only against the `version` read (the memory store counts from its own row, PostgreSQL
+creates the row at version 1), a credit is recorded once per event id (`billing_payment_events`)
+and once per provider reference and resets the crossings' email marks, sums are worked out on read,
+and a paid order is read from the organization's orders (`cloud_order_desired_state`).
+
 `oci_records.cpp` keeps a tenant image's manifests and tags in its routed workspace (lake#383
 phase A): the codecs (manifests, tags marked `copied` when the copy wrote them, and the blobs a
 workspace received), a manifest put `if_absent` (a conflict answers the stored bytes, which a

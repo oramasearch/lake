@@ -28,8 +28,10 @@ Expect:
 - Eyebrow "Lake by Orama", title "Design, train, and ship AI on your own data.", sub "Load your
   data into your own workspace, train models on it, and call them from your code, in Orama's cloud
   or your own."
-- Buttons **Sign in** (primary, → `/sign-in`) and **Read the docs** (→ `/docs`), then "Accounts are
-  added by invitation while Lake is in development."
+- Under restricted Clerk sign-up: buttons **Sign in** (primary, → `/sign-in`) and **Read the docs**
+  (→ `/docs`), then "Accounts are added by invitation while Lake is in development." Under public
+  sign-up (lake.live): **Create an account** (primary, → `/sign-up`), **Sign in** and **Read the
+  docs**, and no invitation sentence (lake#1116).
 - Three cards: "Design" ("Start from the business question and the decision it should improve. A
   project turns it into a pipeline you can read, change and approve."), "Train" ("Your data lives
   in your workspace: upload a file, connect a database or generate a dataset, then train on it and

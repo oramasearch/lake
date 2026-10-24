@@ -158,6 +158,19 @@ instance KEK.
 `parse_lake_secret_ref`, `lake_secret_ref`) and `register_sealed_delivery_capabilities`
 (`mint_sealed_secret`). See [secrets](../../../docs/api/secrets.md#projections).
 
+`balance.hpp` declares the prepaid balance (lake#1114, decision 67): `BalanceSettings` from the
+`LAKE_BALANCE_*` variables, `BalanceRuntime` (settings, the Resend mailer, the link origin) that
+`ApiContext::balance` carries where billing is on, `balance_view` (states, `add_micros`),
+`add_funds_link`, `paid_work_capabilities()` (the one list `Registry::add` marks as
+`Capability::starts_paid_work`), `balance_refusal` (the 402 gate `Registry::call` applies) and
+`balance_warning` (the `warnings` entry on the outermost answer), `apply_balance_notice` (a top-up
+paid, a card saved, an auto top-up failed), `balance_email`, `refresh_account_balances` (the owner
+loop's refresh, emails and auto top-ups) and `register_balance_capabilities`. `billing.hpp` adds
+`PaymentProvider::create_balance_checkout` and `charge_saved_payment_method`, `PaymentNotice::balance`,
+`billing_payment_account`, `account_month_bill` and `current_payment_provider`. `registry.hpp`
+adds `ApiResult::warnings`, `ApiContext::balance` and `registry_depth`, and
+`Capability::starts_paid_work`. See [billing](../../../docs/api/billing.md#balance).
+
 `forge.hpp` declares `BranchProtectionRecords` and `load_branch_protection`: the rules, reviews and
 releases a push needs, read from the repository's workspace before the push (lake#341), and
 `evaluate_branch_protection` over that snapshot. `verified_release_changes` contains only changes

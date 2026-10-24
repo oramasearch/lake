@@ -380,8 +380,10 @@ Contract: [orders.md](orders.md#paying).
 
 **Endpoint to register in the Stripe dashboard:** `https://<lake host>/billing/stripe/webhook`
 (on dev, `https://lake.oramadev.net/billing/stripe/webhook`), with the events `invoice.paid`,
-`invoice.payment_failed` and `invoice.voided`, and on the Lake that serves the apex order sheet the
-four `checkout.session.*` events above. Its signing secret (`whsec_...`) is the `webhook_secret`
+`invoice.payment_failed` and `invoice.voided`, on the Lake that serves the apex order sheet the
+four `checkout.session.*` events above, and for the [balance](#stripe-1) `checkout.session.completed`,
+`checkout.session.async_payment_succeeded`, `setup_intent.succeeded`, `payment_intent.succeeded` and
+`payment_intent.payment_failed`. Its signing secret (`whsec_...`) is the `webhook_secret`
 below. A restricted key (`rk_`) must also be allowed to write Checkout Sessions.
 
 ## Where the keys live
@@ -410,6 +412,246 @@ Stripe keys are the first kind and never go in a user's secret store or a secret
   the Billing page (the operator sees the reason; an account sees "Card payment is not set up"), in
   `billing_account`, `viewer.billing_payment` and `server_info`.
 - **Billing off** (an enterprise install): no provider, no route, nothing read.
+
+## Balance
+
+[lake#1114](https://github.com/oramasearch/lake/issues/1114), [liquid-bridge decision
+67](https://github.com/oramasearch/liquid-bridge/blob/main/docs/decisions.md), Steve, 2026-10-24:
+*"let's add an account balance... they can add $20 to start... it will nag them and stop them from
+creating things when it's too far over their balance (default $50 over)"*, and *"it should send them
+emails when they're about to hit their limits or face interruptions"*, then *"the email should link
+to a place where they can top up ... and auto top up (default off)"*.
+
+**lake.live is prepaid.** Each account (a person's or an organization's) has a balance in US
+dollars, kept in millionths:
+
+- **Credits** are paid top-ups: a Stripe Checkout the account's owner starts (`start_top_up`), or an
+  [auto top-up](#auto-top-up) off a saved card.
+- **Charges** are the account's usage at the price list in force, one per month, refreshed every few
+  minutes ([below](#charges)).
+- **The balance is credits minus charges.**
+
+It exists only where billing is on (`LAKE_BILLING`); an enterprise install has none of it, and no
+call is gated or warned.
+
+**Where it lives** (decision 56). The balance is billing, so it is in lake's control PostgreSQL
+(migration `0099_account_balances`, guard `account_balances_guard`): `account_balances` (each
+account's row: its settings, the last refresh, which crossings' emails went, auto top-up),
+`account_balance_credits` (one row per payment, unique on the provider and its Checkout Session or
+PaymentIntent) and `account_balance_charges` (one row per account and month, with the price list
+and, once invoiced, the invoice). Usage stays in each workspace Zetta: only the priced amount of a
+month reaches PostgreSQL, as an invoice's lines do.
+
+### States
+
+| State | When | What happens |
+|---|---|---|
+| `ok` | the balance is at or above the warning amount (`LAKE_BALANCE_WARNING_USD`, $10) | nothing |
+| `low` | from $0 to under the warning amount | the banner and the API warning |
+| `negative` | below $0, above the overdraft limit | the banner, the warning, and the emails below |
+| `blocked` | at or past the overdraft limit (`LAKE_BALANCE_OVERDRAFT_USD`, $50 below zero), or the account has never topped up | paid work answers `402 payment_required` |
+
+**New accounts start at $0 and add their first top-up before any paid action** (`blocked`, reason
+`first_top_up`). The overdraft is credit Orama extends only to accounts that have paid once. This is
+the default chosen for lake#1114: Steve said "add $20 to start", and it denies free usage to unpaid
+sign-ups. **The first top-up is exactly `LAKE_BALANCE_FIRST_TOP_UP_USD` ($20)**; later ones are any
+amount from `LAKE_BALANCE_MINIMUM_TOP_UP_USD` ($20), in whole cents, at most $10,000 at a time.
+
+`add_micros` is how much to add: the first top-up, else what brings the balance back over the
+warning amount, rounded up to a whole dollar and at least the minimum. Every link to add funds is
+one console page, **`/billing/add-funds?customer_id=<account>`**, under the Lake's origin
+(`LAKE_EXTERNAL_ORIGIN`, else `https://<LAKE_PUBLIC_HOST>`). It signs a visitor in first.
+
+**Exempt** from the gate, the warning and the emails: the operator credential and the instance
+administrator (callers), and an account whose organization has a paid cloud order (`paid`,
+`provisioning` or `ready`, with its subscription current: `cloud_order_desired_state`) whose
+credit covers it (`exempt: "paid_order"`; such an account reads `ok`).
+
+### Charges
+
+The store root's owner refreshes every account with a balance row every
+`LAKE_BALANCE_REFRESH_SECONDS` (300). For each month from the first top-up's to this one it works
+out the month's bill as `bill_preview` does, from `usage_over_time` at the list in force for the
+month, and keeps its total as the month's charge. It reads usage without a capability call of its
+own (the handler directly), so a refresh every few minutes does not put an audit event per account
+in the central log.
+
+- **A month's charge is its bill.** The same lines and rounding as the invoice: a month's charge
+  and the month's invoice agree to the micro.
+- **A failed read holds the balance.** If any workspace's usage cannot be read, nothing is written:
+  every month keeps its last charge, `refresh_error` says which workspace, `refresh_failed_at` when.
+  Lake never guesses.
+- A month whose charge was read after it ended (an hour's margin) is final and not read again. A
+  month without a price list is charged $0.
+- Usage between refreshes can pass the limit by a few minutes' worth (decision 67's cost).
+
+### Invoices and the balance
+
+**An issued invoice records what the balance paid.** For an account that has topped up,
+`issue_invoice` freezes the month's lines as before, then issues the invoice **paid** with provider
+`balance` (`provider_status` `paid`, instructions "Paid from your Lake account balance"), asks no
+provider for payment and sends no email. The month's charge is frozen to the invoice's total
+(`account_balance_charges.invoice_id`), and a refresh never moves it again. A balance below $0 is
+money the account owes, collected by its next top-up, never by a second bill. An account that has
+never topped up (an existing account from before the balance, or one a paid order covers) is
+invoiced as before, through Stripe.
+
+### The gate
+
+Every capability that creates, starts or grows something that costs money is marked
+`Capability::starts_paid_work`. **One list** marks them, `paid_work_capabilities()` in
+`src/api/balance.cpp`, applied by `Registry::add`, so the engine's capabilities registered from its
+schema are marked too:
+
+- apps: `create_app`, `deploy_app`, `start_app`, `restart_app`, `scale_app`, `rollback_app`,
+  `build_app`;
+- services and stores: `create_service`, `create_service_and_bind_to_app`, `connect_service`,
+  `create_store`, `set_workspace_storage`; workspaces: `create_workspace`, `start_workspace`,
+  `update_workspace`;
+- models and indexes: `train_model`, `retrain_model`, `register_model`, `load_drive_model`,
+  `expose_model`, `create_index`, `expose_index`;
+- runs, training and experiments: `start_run`, `run_pipeline`, `deploy_pipeline`, `run_solution`,
+  `start_solution`, `run_methodology`, `validate_methodology`, `start_experiment`;
+- agents: `launch_agent`, `schedule_agent`, `agent_run`, `agent_turn`, `chat_with_agent`,
+  `send_ask_message`, `create_mcp_connection_agent`;
+- image builds: `build_image` (and `build_app`); the model gateway: `model_completion`; speech:
+  `transcribe`, `create_transcript`;
+- storage growth: `upload_dataset`, `generate_dataset`, `create_dataset_from_query`,
+  `load_drive_dataset`, `begin_drive_upload`, `upload_drive_files`, `upload_drive_entries`,
+  `import_repository`, `import_github_repository`, `push`.
+
+`Registry::call` checks the mark after authorization and before the handler, in one place: no
+handler checks the balance. While the account the call charges is `blocked`, it answers **`402
+payment_required`** with `error.details` `{customer_id, balance_micros, overdraft_micros,
+add_micros, add_funds_url, reason}` and a message that says the balance, the limit, how much to add
+and where. The refusal is audited like any refused call. The account a call charges is the
+workspace it acts on, else its `customer_id`, `repository_id` or `organization_id`, else the
+caller's personal account.
+
+**Reading, signing in, stopping and deleting stay open**, so an account can always lower its spend;
+**running things keep running** (stopping them for an unpaid balance is a later step, sleep never
+delete, orama-operator#897). `PaidWorkContract.EveryCapabilityThatStartsPaidWorkIsMarked` fails when
+a capability whose name says it creates, starts, runs, deploys, trains, launches, builds, imports
+or uploads something is neither on the list nor classified as free in the test, with why.
+
+### The warning
+
+While the account a call acted on is `low`, `negative` or `blocked`, the answer carries
+`warnings: [{code, message, customer_id, balance_micros, add_micros, add_funds_url}]`, `code`
+`balance_low`, `balance_negative` or `balance_blocked`, beside its value or error. It is added in
+the one shared answer path, `Registry::call` for the outermost call, so every capability carries it
+on REST and MCP alike and none adds it itself ([errors.md](errors.md)). The operator is never
+warned. `viewer.balance` gives the web app the current account's balance for the banner.
+
+### Emails
+
+Through the Resend client (`LAKE_RESEND_API_KEY`, from `LAKE_RESEND_FROM`, by default
+`Lake <orders@lake.live>`), by the refresh, to the account's [billing contact](#billing-contact),
+else its owner's email (the person's own, or an organization owner's):
+
+| Crossing | When | Subject |
+|---|---|---|
+| near the limit | the balance is within the warning amount ($10) of the overdraft limit | Your Lake balance is close to its limit |
+| below $0 | the balance passes $0 | Your Lake balance is below $0 |
+| blocked | the balance reaches the limit: paid work is refused | Lake has stopped starting paid work on your account |
+| auto top-up off | a declined or failed auto top-up turned it off | Your Lake auto top-up was turned off |
+
+- **Once per crossing.** The crossing is marked on the account (`*_notified_at`) before the send,
+  so an overlapping refresh never sends it twice, and unmarked when the send fails, so the next
+  refresh tries again. The most serious crossing not yet told is sent, and covers the milder ones.
+  The Resend idempotency key is `lake-balance-<account>-<crossing>-<credits so far>`.
+- **Reset when funds are added.** Every credit clears the three balance marks.
+- Each says the balance, how much to add and the Add funds link. **It carries nothing a person
+  typed**: no account, person or workspace name. An account that has never topped up gets none.
+- Each sent email is audited centrally, `billing.balance.email`, with the crossing.
+
+### Auto top-up
+
+**Off by default.** The account's owners and admins turn it on in Billing → Auto Top-Up
+(`set_auto_top_up`) with a threshold (default: when the balance falls below $5) and an amount
+(default $20, never less than the minimum top-up):
+
+1. **Saving a card.** Turning it on without a saved card answers a Stripe Checkout in `setup` mode
+   on the account's Stripe customer (`checkout_url`); the row waits (`awaiting_card`). Stripe's
+   `setup_intent.succeeded`, tagged with the account, saves the payment method's id (`pm_...`) and
+   turns auto top-up on. Lake never sees the card. `replace_card: true` saves another.
+2. **Charging.** When a refresh finds the balance below the threshold, Lake claims the crossing on
+   the row (one charge in flight, at most `LAKE_AUTO_TOP_UPS_PER_DAY`, 5, a UTC day) and charges the
+   card off-session: `POST /v1/payment_intents` with `customer`, `payment_method`, `off_session=true`,
+   `confirm=true`, under the idempotency key `lake-auto-top-up-<account>-<n>`, one per account and
+   crossing, so a refresh never charges twice.
+3. **The credit comes from the webhook**, exactly like a top-up: `payment_intent.succeeded` credits
+   it once and clears the charge in flight. One that never answers is given up after a day.
+4. **A decline turns it off.** A refused charge, one that needs the person to authenticate
+   (`requires_action`), or `payment_intent.payment_failed` turns auto top-up off with the reason
+   (`off_reason`), emails the owner once with the Add funds link, and leaves the nag and the limit
+   in force.
+
+Starting, saving, crediting and failing are audited centrally (`billing.balance.auto_top_up_set`,
+`billing.balance.auto_top_up_on`, `billing.balance.auto_top_up_started`,
+`billing.balance.auto_top_up_failed`, `billing.balance.credit`).
+
+### Stripe
+
+- **Top-up.** `POST /v1/checkout/sessions`, `mode=payment`, on the account's Stripe customer (made
+  as for an invoice), one line of the `lake_usage` [product](#stripe) at the amount inline (a top-up
+  prepays usage, so no new product is needed), `client_reference_id` and
+  `metadata[lake_customer_id]` the account, `metadata[lake_balance]=top_up`, and the tags. It
+  returns to `/billing/add-funds?customer_id=…&top_up=done` or `&top_up=cancelled`. The key is
+  `lake-top-up-<account>-<uuid>`, a new one per attempt.
+- **Card setup.** `mode=setup`, `payment_method_types[0]=card`, the same tags on the session and on
+  `setup_intent_data[metadata]` with `lake_balance=card_setup`; it returns to
+  `/billing?customer_id=…&auto_top_up=saved` or `cancelled`.
+- **Events.** `checkout.session.completed` with `payment_status=paid`, and
+  `checkout.session.async_payment_succeeded`, credit a top-up once per event id
+  (`billing_payment_events`) and once per session (`account_balance_credits`); a session not paid
+  yet is acknowledged and waits. `setup_intent.succeeded`, `payment_intent.succeeded` and
+  `payment_intent.payment_failed` carry auto top-up. An event whose object has no
+  `lake_customer_id` and `lake_balance`, or whose `lake_instance` is another Lake's, is foreign:
+  acknowledged with nothing recorded, as for invoices (lake#855).
+- **The events to register** for lake.live's endpoint, added by the operator's
+  `lakeStripeWebhookEvents`: `setup_intent.succeeded`, `payment_intent.succeeded`,
+  `payment_intent.payment_failed`, beside the `checkout.session.completed` and
+  `checkout.session.async_payment_succeeded` the order sheet registers.
+
+### Balance capabilities
+
+| Capability | Kind | Who | Input | What it does |
+|---|---|---|---|---|
+| `account_balance` | read | `read` on the customer | `customer_id` | `{customer_id, currency, balance_micros, credits_micros, charges_micros, overdraft_micros, limit_micros, state, reason, add_micros, add_funds_url, first_top_up_micros, minimum_top_up_micros, first_top_up_at, exempt, refreshed_at, refresh_error, auto_top_up, credits, charges}`; `credits` (the last 50) and `charges` (by month) newest first. |
+| `start_top_up` | action | `admin` on the customer (owners, admins), operator | `customer_id`, `amount_micros?` | A Stripe Checkout that adds the amount: `{customer_id, amount_micros, checkout_url, session_id}`. The first top-up is exactly the first amount; later ones at least the minimum, whole cents. `conflict` where card payment is not set up. |
+| `set_auto_top_up` | action | `admin` on the customer, operator | `customer_id`, `enabled`, `threshold_micros?`, `amount_micros?`, `replace_card?` | Turns auto top-up on or off and sets its threshold and amount; `checkout_url` when a card must be saved first. |
+| `set_balance_overdraft` | action | operator, instance administrator | `customer_id`, `overdraft_micros?` | One account's overdraft in place of the instance's; left out, the instance's again. |
+| `refresh_account_balance` | action | operator, instance administrator | `customer_id` | Refreshes one account now as the owner loop does, and answers `{balance, refresh}`. |
+
+All are audited centrally on `customer/<id>/billing` (`billing.balance.read`,
+`billing.balance.top_up_started`, `billing.balance.auto_top_up_set`,
+`billing.balance.overdraft_set`, `billing.balance.refresh`).
+
+### Verify the balance
+
+- `Balance.*` (`tests/test_balance.cpp`): the view and its math (states, the first top-up, the
+  overdraft and the operator's, `add_micros`, the settings from the environment); a top-up credited
+  once per payment from signed Stripe events (a replay and the async event credit nothing more,
+  another Lake's is ignored); the first top-up exactly $20 and later ones at least $20 in whole
+  cents, the manual provider refusing; a month's charge equal to `bill_preview`, a failed usage read
+  holding the balance with the reason; an issued invoice paid by the balance and freezing its
+  month; the gate (402 before the first top-up and past the limit with its details, reads, stops
+  and deletes open, the operator exempt, the operator's overdraft, billing off ungated, a paid order
+  exempt); the warning on answers while low, negative and blocked, once, and `viewer.balance`; the
+  emails once per crossing, to the owner then the billing contact, reset by a credit, retried after
+  a failed send, with no name in them (a fake Resend sender); auto top-up off by default, one charge
+  per crossing with its key, credited only from the webhook, the daily limit, a decline turning it
+  off with one email, and a webhook failure doing the same.
+- `StripeBalance.CheckoutsChargesAndEventsAreLakesOwn` (`tests/test_balance.cpp`, a fake Stripe):
+  the top-up and card-setup sessions' fields and keys, the off-session PaymentIntent, a decline and
+  a `requires_action` answer as failures, and each event's notice, foreign ones included.
+- `PaidWorkContract.EveryCapabilityThatStartsPaidWorkIsMarked`: the list, the marks and the names.
+- `MemoryBilling.AccountBalancesFollowTheContract` and `PostgresBilling.AccountBalancesFollowTheContract`
+  (`tests/test_postgres.cpp`): the migration's tables and guard, the compare-and-swap row, credits
+  once per event and per payment, charges frozen by an invoice, and the tables' checks.
+- `frontend/tests/balance.test.ts`: the banner, the Add funds link, the amounts, the history and
+  the return from Stripe.
 
 ## Order sheet subscriptions
 
@@ -672,6 +914,8 @@ pre-filled with these rates.
 
 ## Capabilities
 
+The prepaid balance's five capabilities are in [Balance capabilities](#balance-capabilities).
+
 | Capability | Kind | Who | Input | What it does |
 |---|---|---|---|---|
 | `price_list` | read | anyone signed in | `period?` (`YYYY-MM`; default this month), `include_history?` | `{period, list, next, history?}`: the list in force for the month (null before one is published), a list published for a later month (or null), and, for the operator with `include_history`, every publication, newest first. A list is `{id, effective_from, published_at, currency, prices}`, each price `{dimension, class, title, unit, unit_micros, per, priced}` (`class` empty but for a GPU class rate; `priced` false for a dimension a list from before lake#643 rated and a new list may not). |
@@ -831,6 +1075,12 @@ POST /v1/resend_invoice
   (`src/api/stripe.cpp`) when Stripe should have it, and the [table above](#billing-contact).
 - A new kind of Stripe object lake creates: tag it with `tag` in `src/api/stripe.cpp`
   (`orama_app`, `lake_instance`) and give it a `lake_*` key, never one of Cloud v1's bare keys.
+- A capability that starts paid work: add it to `paid_work_capabilities()` (`src/api/balance.cpp`)
+  and the [gate's list](#the-gate); one that only looks like it does goes in `free_to_start` in
+  `tests/test_balance.cpp`, with why. `PaidWorkContract.*` fails until one of them has it.
+- Another balance threshold or amount: an environment variable in `balance_settings_from_environment`
+  and `docs/serving/configuration.md`; a per-account one: a column on `account_balances` in a new
+  migration, `AccountBalance`, both stores and `account_balance_problem`.
 - A new product (a new paid offer, say): add its id to `include/lake/api/stripe.hpp` (and
   `stripe_offer_product` for an offer), the [table above](#stripe), and orama-operator's catalog in
   the same change, so every account has it before a Lake names it.

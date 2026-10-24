@@ -914,6 +914,34 @@ public:
     set_billing_contact(const control::BillingContact& contact) override {
         return call("set_billing_contact", [&] { return store_->set_billing_contact(contact); });
     }
+    control::Result<control::AccountBalance>
+    account_balance(const std::string& customer_id) override {
+        return call("account_balance", [&] { return store_->account_balance(customer_id); });
+    }
+    control::Result<control::AccountBalance>
+    update_account_balance(const control::AccountBalance& next,
+                           std::int64_t expected_version) override {
+        return call("update_account_balance",
+                    [&] { return store_->update_account_balance(next, expected_version); });
+    }
+    control::Result<control::BalanceCreditResult>
+    apply_balance_credit(const control::BalanceCredit& credit) override {
+        return call("apply_balance_credit", [&] { return store_->apply_balance_credit(credit); });
+    }
+    control::Result<void> set_balance_charge(const control::BalanceCharge& charge) override {
+        return call("set_balance_charge", [&] { return store_->set_balance_charge(charge); });
+    }
+    control::Result<std::vector<control::BalanceCredit>>
+    balance_credits(const std::string& customer_id, int limit) override {
+        return call("balance_credits", [&] { return store_->balance_credits(customer_id, limit); });
+    }
+    control::Result<std::vector<control::BalanceCharge>>
+    balance_charges(const std::string& customer_id) override {
+        return call("balance_charges", [&] { return store_->balance_charges(customer_id); });
+    }
+    control::Result<std::vector<std::string>> balance_customers() override {
+        return call("balance_customers", [&] { return store_->balance_customers(); });
+    }
     control::Result<control::CloudOrder>
     create_cloud_order(const control::NewCloudOrder& order) override {
         return call("create_cloud_order", [&] { return store_->create_cloud_order(order); });

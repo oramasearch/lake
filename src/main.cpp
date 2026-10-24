@@ -101,6 +101,11 @@ int usage() {
     std::println(
         "  LAKE_BILLING=on turns billing on (Orama Cloud); unset or off, as on an enterprise "
         "install, billing is absent. LAKE_BILLING_INSTRUCTIONS tells accounts how to pay");
+    std::println(
+        "  LAKE_BALANCE_FIRST_TOP_UP_USD (20), LAKE_BALANCE_MINIMUM_TOP_UP_USD (20), "
+        "LAKE_BALANCE_OVERDRAFT_USD (50), LAKE_BALANCE_WARNING_USD (10), "
+        "LAKE_BALANCE_REFRESH_SECONDS (300) and LAKE_AUTO_TOP_UPS_PER_DAY (5) set the prepaid "
+        "balance where billing is on");
     std::println("  LAKE_STRIPE_SECRET_KEY, LAKE_STRIPE_WEBHOOK_SECRET Stripe's keys (lake's own "
                  "platform credentials); either unset, invoices are paid outside lake");
     std::println("  LAKE_ORDER_ENTITLEMENT_GRACE_SECONDS subscription expiry grace (default "
@@ -249,6 +254,22 @@ int main(int argc, char** argv) {
     // enterprise install leaves it unset and has no billing capability or page.
     opts.billing = lake::api::billing_enabled(env_or("LAKE_BILLING", ""));
     opts.billing_instructions = env_or("LAKE_BILLING_INSTRUCTIONS", "");
+    // The prepaid balance (lake#1114, docs/api/billing.md#balance): whole US dollars, read only
+    // where billing is on. Invalid values stop startup, naming the variable.
+    if (opts.billing) {
+        auto balance = lake::api::balance_settings_from_environment(
+            env_or("LAKE_BALANCE_FIRST_TOP_UP_USD", ""),
+            env_or("LAKE_BALANCE_MINIMUM_TOP_UP_USD", ""),
+            env_or("LAKE_BALANCE_OVERDRAFT_USD", ""),
+            env_or("LAKE_BALANCE_WARNING_USD", ""),
+            env_or("LAKE_BALANCE_REFRESH_SECONDS", ""),
+            env_or("LAKE_AUTO_TOP_UPS_PER_DAY", ""));
+        if (!balance) {
+            std::println(stderr, "lake: {}", balance.error());
+            return 2;
+        }
+        opts.balance = *balance;
+    }
     // Stripe (decision 57, lake#628): lake's own platform credentials, environment variables of
     // the hosting platform (Railway; spec.env with a secretKeyRef on the dev cluster), never a
     // user's secret store. Read once here and never logged; a new key takes a restart.

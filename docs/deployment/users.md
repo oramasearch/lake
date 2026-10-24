@@ -9,7 +9,7 @@ sign-in design behind it is [`../api/clerk.md`](../api/clerk.md) (liquid-bridge 
 | Environment | URL | Sign-in | Who creates the account |
 |---|---|---|---|
 | **Dev (AKS)**, `Lake/prod` on `orama-production-cluster-01` | https://lake.oramadev.net | Clerk, application `lake`, **development** instance `above-seahorse-7535` | An Orama admin, in Clerk; sign-up on the site is restricted |
-| **lake.live** | https://lake.live (`eu.lake.live`, `us.lake.live`) | Clerk, application `Orama Lake` (`app_3Kq02xRIBqet27addrsP0tGAjTG`), **production** instance `ins_3Kq0xJzpNiRB38AIhYHon8uoCYb`, sign-up restricted | An Orama admin, in Clerk ([lake.live](#lakelive) below) |
+| **lake.live** | https://lake.live (`eu.lake.live`, `us.lake.live`) | Clerk, application `Orama Lake` (`app_3Kq02xRIBqet27addrsP0tGAjTG`), **production** instance `ins_3Kq0xJzpNiRB38AIhYHon8uoCYb`, **sign-up public since 2026-10-24** | The person, at `/sign-up`; an admin can still add people in Clerk ([lake.live](#lakelive) below) |
 | **Local** (`./build/lake`) | http://127.0.0.1:4900 | lake's own pages, unless started with `--clerk-publishable-key` | The person, at `/sign-up` |
 | **On-prem / without Clerk** | the customer's host | lake's own pages | The person, at `/sign-up`, or the customer's SSO |
 | **Operator access** (any environment) | `/login` | The instance admin token | Not a user; the token is minted by the operator |
@@ -56,44 +56,46 @@ Accounts created so far: `steve@orama.com` (linked to the existing lake account,
 
 ## lake.live
 
-The same flow as dev, in the production instance of the `Orama Lake` application. With sign-up
-restricted, Clerk refuses anyone it does not know ("New sign-ups are currently restricted").
+Sign-up on the production instance is **public since 2026-10-24** (Steve: *"let's drop the signin
+restrictions"*, *"it's fine to open up without a paywall"*; set with `clerk config patch`,
+`auth_access_control.sign_up_mode: public`). Anyone can create an account at
+https://lake.live/sign-up with an email code or a social account; lake creates their account and
+personal space on first sign-in.
 
-1. Create the person in that instance, with its secret key (the managing cluster's Secret
-   `lake/clerk-lake-prod`, key `secretKey`; never printed): `POST https://api.clerk.com/v1/users`
-   with `{"email_address": ["person@example.com"], "first_name": ..., "last_name": ...}`, or
-   `clerk users create` with the CLI linked to `app_3Kq02xRIBqet27addrsP0tGAjTG` and that instance.
-   The address is marked verified.
-2. They sign in at https://lake.live with that email and an emailed code; lake creates their
-   account and personal space on first sign-in.
+An admin can still add someone in advance, with the instance's secret key (the managing cluster's
+Secret `lake/clerk-lake-prod`, key `secretKey`; never printed): `POST https://api.clerk.com/v1/users`
+with `{"email_address": ["person@example.com"], "first_name": ..., "last_name": ...}`, or
+`clerk users create` with the CLI linked to `app_3Kq02xRIBqet27addrsP0tGAjTG` and that instance. The
+address is marked verified.
 
-Accounts created so far: `steve.sperandeo@gmail.com` (Clerk user `user_3L7lEqk8A5xojV3anlcvmoiqaqB`,
-2026-10-24, at launch; lake#755).
+A person need not have a name in Clerk. The `lake` template's `name` claim is
+`{{user.full_name}}`, which Clerk renders as `null` for a person without one; lake treats a `null`
+`name` or `email` as absent (lake#1115: through v0.5.2 such a person could not sign in, and the
+sign-in page retried once a second into the rate limit).
 
-### Letting anyone sign up (not the current setting)
+Accounts created by an admin so far: `steve.sperandeo@gmail.com` (Clerk user
+`user_3L7lEqk8A5xojV3anlcvmoiqaqB`, 2026-10-24, at launch; lake#755).
 
-Set the instance's sign-up mode to public and change the invitation wording on the web app's
-sign-up page (`INVITATION_NOTE` in `frontend/src/pages/account/signIn.ts`) in the same change:
+## What the pages say about sign-up
+
+The web app follows each Clerk instance's own sign-up mode, which clerk-js fetches from the
+instance's Frontend API (`userSettings.signUp.mode`, `frontend/src/lib/clerkSignIn.ts`, lake#1116).
+There is no second setting in lake to keep in step:
+
+| Mode | Sign-in and sign-up pages | Visitor homepage |
+|---|---|---|
+| `restricted` or `waitlist` | *Sign in with the email address you were invited with.* and `INVITATION_NOTE` (*Accounts are added by invitation while Lake is in development.*) | Sign in and Read the docs, then `INVITATION_NOTE` |
+| `public` | an invitation-free line | **Create an account**, Sign in and Read the docs |
+| not known yet (clerk-js loading or unreachable) | the invitation-free line | Sign in and Read the docs |
+
+As of 2026-10-24, clerk-js reports `public` for lake.live and for the dev instance
+(`above-seahorse-7535`, whose sign-ups are still limited by its allowlist, `*@agentcity.app`), and
+`restricted` for testing and staging. To change who may sign up, change the instance:
 
 ```sh
-echo '{"auth_access_control": {"sign_up_mode": "public"}}' > patch.json
+echo '{"auth_access_control": {"sign_up_mode": "public"}}' > patch.json   # or "restricted"
 clerk config patch --file patch.json --yes
 ```
-
-## lake.live
-
-Not deployed yet (https://github.com/oramasearch/liquid-bridge/issues/17). When it is:
-
-1. Create the **production** instance of the `lake` Clerk application (`clerk deploy`, which
-   needs the lake.live domain and its DNS records) and set the same configuration as dev: email
-   sign-in with verification, `restricted` sign-up, and the `lake` JWT template with `aud: lake`
-   (`docs/api/clerk.md`, Configuration).
-2. Set the `pk_live_…` key as `LAKE_CLERK_PUBLISHABLE_KEY` in that `Lake`'s `spec.env`.
-3. Create users exactly as for dev, against the production instance: `clerk users --instance prod
-   create --email person@example.com` (the `--instance` option belongs to `clerk users`), or the
-   Clerk dashboard. Dev and production are separate instances with separate user lists.
-
-Update this page when lake.live exists.
 
 ## Local development
 

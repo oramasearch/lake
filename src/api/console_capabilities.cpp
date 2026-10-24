@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "lake/api/agent_docs.hpp"
+#include "lake/api/balance.hpp"
 #include "lake/api/billing.hpp"
 #include "lake/api/clerk.hpp"
 #include "lake/api/markdown.hpp"
@@ -132,6 +133,7 @@ json viewer_schema() {
           object_schema({{"frontier_model", string_schema()}}, json::array({"frontier_model"}))},
          {"billing", {{"type", "boolean"}}},
          {"billing_payment", {{"type", json::array({"object", "null"})}}},
+         {"balance", {{"type", json::array({"object", "null"})}}},
          {"version", string_schema()},
          {"revision", string_schema()}},
         json::array({"signed_in",
@@ -272,6 +274,24 @@ ApiResult viewer(const json& input, ApiContext& context, const std::string& vers
     }
     if (!workspace_id.empty()) {
         out["workspace_id"] = workspace_id;
+    }
+    // The current account's prepaid balance where billing is on (lake#1114): the web app's banner
+    // reads it on every page. Null for the operator and where billing is off.
+    out["balance"] = nullptr;
+    if (context.balance && billing_registered(context.registry) && !customer_id.empty() &&
+        balance_caller_exemption(context).empty()) {
+        if (const auto balance = context.store->account_balance(customer_id)) {
+            BalanceRuntime shown = *context.balance;
+            if (shown.origin.empty()) {
+                shown.origin = context.external_origin;
+            }
+            out["balance"] =
+                balance_json(*balance,
+                             balance_view(*balance,
+                                          context.balance->settings,
+                                          balance->paid_order ? "paid_order" : std::string()),
+                             shown);
+        }
     }
     out["spaces"] = std::move(spaces);
     return ApiResult::success(std::move(out));

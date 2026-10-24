@@ -6,7 +6,8 @@ import { Link, Navigate, useLocation } from "react-router-dom";
 import { useSession } from "@/lib/session";
 import { useTrail } from "@/lib/trail";
 import { Actions, Button, Page } from "@/lib/ui";
-import { INVITATION_NOTE } from "@/pages/account/signIn";
+import { INVITATION_NOTE, signUpByInvitation } from "@/lib/clerkSignIn";
+import { useClerkSignUpMode } from "@/pages/account/ClerkSignIn";
 import AskHome from "@/pages/ask/AskHome";
 import { homeView } from "@/pages/ask/home";
 
@@ -23,6 +24,8 @@ function Landing() {
   useTrail([{ label: "Home", to: "/" }, { label: "Welcome to Lake" }], "design, train, and ship AI");
   const { viewer } = useSession();
   const signedIn = viewer.signed_in;
+  const clerkVisitor = !signedIn && viewer.clerk.enabled;
+  const signUpMode = useClerkSignUpMode(clerkVisitor ? viewer.clerk.publishable_key : undefined, clerkVisitor ? viewer.clerk.frontend_api : undefined);
   return (
     <Page
       eyebrow="Lake by Orama"
@@ -37,15 +40,32 @@ function Landing() {
           <Button to="/train/data">Load your data</Button>
         </Actions>
       ) : viewer.clerk.enabled ? (
-        <>
+        signUpByInvitation(signUpMode) ? (
+          <>
+            <Actions>
+              <Button to="/sign-in" variant="primary">
+                Sign in
+              </Button>
+              <Button to="/docs">Read the docs</Button>
+            </Actions>
+            <p className="muted">{INVITATION_NOTE}</p>
+          </>
+        ) : signUpMode === "public" ? (
+          <Actions>
+            <Button to="/sign-up" variant="primary">
+              Create an account
+            </Button>
+            <Button to="/sign-in">Sign in</Button>
+            <Button to="/docs">Read the docs</Button>
+          </Actions>
+        ) : (
           <Actions>
             <Button to="/sign-in" variant="primary">
               Sign in
             </Button>
             <Button to="/docs">Read the docs</Button>
           </Actions>
-          <p className="muted">{INVITATION_NOTE}</p>
-        </>
+        )
       ) : viewer.password_sign_up ? (
         <Actions>
           <Button to="/sign-up" variant="primary">

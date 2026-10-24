@@ -17,7 +17,13 @@ Every capability answers a failure the same way on REST and MCP:
   otherwise. It is never put in the message. See [Where `path` comes from](#where-path-comes-from).
 - `operation_result` appears when a completed operation could not be audited; it preserves the original success value or failure envelope. An outer failure does not mean the operation was rolled back.
 - `reason` and `help` appear on `unauthenticated` only.
-- `details` appears on `safe_mode_warning` only: what the database's safe mode would run and the
+- `warnings`, on a success or a failure, appears while the account the call acted on has a low,
+  negative or blocked prepaid balance where billing is on: `[{code, message, customer_id,
+  balance_micros, add_micros, add_funds_url}]`, `code` `balance_low`, `balance_negative` or
+  `balance_blocked` ([balance](billing.md#the-warning), lake#1114). It is added once, by
+  `Registry::call` for the outermost call, so every capability carries it on REST and MCP alike.
+- `details` appears on `payment_required` (the balance, the limit and the Add funds link) and on
+  `safe_mode_warning`: what the database's safe mode would run and the
   confirmation that runs it ([safe mode](safe-mode.md), lake#906).
 
 ## Codes
@@ -31,6 +37,7 @@ Every capability answers a failure the same way on REST and MCP:
 | `invalid_digest` | 400 | An archive or record does not match the digest it carries, so it was changed or damaged. |
 | `invalid_signature` | 400 | A signature does not verify against its key. |
 | `unauthenticated` | 401 | No credential was accepted. Bearer refusals carry `reason` (`missing`, `invalid` or `expired`) and `help` (`/developer/mcp`). Password/MFA/recovery credential failures and account cooldowns share `invalid credentials`, without account-discovery details. |
+| `payment_required` | 402 | The account's prepaid balance is past its overdraft limit, or it has not made its first top-up, and the call starts something that costs money ([balance](billing.md#the-gate), lake#1114). `details` is `{customer_id, balance_micros, overdraft_micros, add_micros, add_funds_url, reason}` (`reason` `first_top_up` or `overdraft`). Reading, signing in, stopping and deleting are never refused this way. |
 | `unauthorized` | 403 | The credential is valid but does not grant this call on this object. |
 | `mfa_required` | 403 | The account must finish multi-factor verification first. |
 | `identity_proof_required` | 403 | An identity document becomes an account's identity only with a fresh signature by its key: sign `begin_identity_proof`'s challenge and send `identity_proof` ([identity.md](identity.md#proving-you-hold-the-key)). |

@@ -3145,6 +3145,222 @@ Result<BillingContact> InMemoryStore::set_billing_contact(const BillingContact& 
     return stored;
 }
 
+std::optional<std::string> account_balance_problem(const AccountBalance& balance) {
+    constexpr std::int64_t most = 1'000'000'000'000; // a million dollars
+    if (balance.overdraft_limit_micros &&
+        (*balance.overdraft_limit_micros < 0 || *balance.overdraft_limit_micros > most)) {
+        return "the overdraft limit is between $0 and $1,000,000";
+    }
+    if (balance.auto_top_up_threshold_micros < 0 || balance.auto_top_up_threshold_micros > most) {
+        return "the auto top-up threshold is between $0 and $1,000,000";
+    }
+    if (balance.auto_top_up_amount_micros <= 0 || balance.auto_top_up_amount_micros > most) {
+        return "the auto top-up amount is more than $0 and at most $1,000,000";
+    }
+    if (balance.auto_top_up_payment_method.size() > 255 ||
+        balance.auto_top_up_pending.size() > 255 || balance.refresh_error.size() > 1024 ||
+        balance.auto_top_up_off_reason.size() > 1024 || balance.auto_top_ups_today < 0 ||
+        balance.auto_top_up_sequence < 0) {
+        return "a balance field is too long or negative";
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> balance_credit_problem(const BalanceCredit& credit) {
+    if (credit.kind != "top_up" && credit.kind != "auto_top_up") {
+        return "a credit is a top_up or an auto_top_up";
+    }
+    if (credit.amount_micros <= 0) {
+        return "a credit is more than $0";
+    }
+    if (credit.provider.empty() || credit.provider.size() > 32 || credit.reference.empty() ||
+        credit.reference.size() > 255 || credit.event_id.size() > 255) {
+        return "a credit needs its provider and the provider's reference";
+    }
+    return std::nullopt;
+}
+
+AccountBalance InMemoryStore::account_balance_locked(const std::string& customer_id) const {
+    const auto row = balances_.find(customer_id);
+    AccountBalance balance = row == balances_.end() ? AccountBalance{} : row->second;
+    balance.customer_id = customer_id;
+    balance.credits_micros = 0;
+    balance.charges_micros = 0;
+    balance.credit_count = 0;
+    for (const BalanceCredit& credit : balance_credits_) {
+        if (credit.customer_id == customer_id) {
+            balance.credits_micros += credit.amount_micros;
+            ++balance.credit_count;
+        }
+    }
+    for (const auto& [key, charge] : balance_charges_) {
+        if (key.first == customer_id) {
+            balance.charges_micros += charge.amount_micros;
+        }
+    }
+    // A paid cloud order of the account's organization covers it (lake#1114): one being paid for,
+    // provisioned or running, whose subscription is current (an order form has none).
+    balance.paid_order = false;
+    const auto customer = std::ranges::find(customers_, customer_id, &Customer::id);
+    if (customer != customers_.end() && !customer->organization_id.empty()) {
+        const std::int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                                     std::chrono::system_clock::now().time_since_epoch())
+                                     .count();
+        balance.paid_order = std::ranges::any_of(cloud_orders_, [&](const CloudOrder& order) {
+            if (order.organization_id != customer->organization_id ||
+                (order.state != "paid" && order.state != "provisioning" &&
+                 order.state != "ready")) {
+                return false;
+            }
+            if (order.path != "checkout") {
+                return true;
+            }
+            const std::string state = cloud_order_entitlement_state(order.entitlement, now);
+            return state == "active" || state == "grace";
+        });
+    }
+    return balance;
+}
+
+Result<AccountBalance> InMemoryStore::account_balance(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(customers_, [&](const Customer& c) { return c.id == customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+    }
+    return account_balance_locked(customer_id);
+}
+
+Result<AccountBalance> InMemoryStore::update_account_balance(const AccountBalance& next,
+                                                             std::int64_t expected_version) {
+    if (const auto problem = account_balance_problem(next)) {
+        return std::unexpected(StoreError{"invalid_input", *problem});
+    }
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(customers_,
+                             [&](const Customer& c) { return c.id == next.customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + next.customer_id});
+    }
+    const auto found = balances_.find(next.customer_id);
+    const std::int64_t version = found == balances_.end() ? 0 : found->second.version;
+    if (version != expected_version) {
+        return std::unexpected(
+            StoreError{"conflict", "the account's balance changed meanwhile; read it again"});
+    }
+    AccountBalance row = next;
+    row.first_top_up_at = found == balances_.end() ? std::string() : found->second.first_top_up_at;
+    row.version = version + 1;
+    row.updated_at = now_iso8601();
+    balances_[next.customer_id] = row;
+    return account_balance_locked(next.customer_id);
+}
+
+Result<BalanceCreditResult> InMemoryStore::apply_balance_credit(const BalanceCredit& credit) {
+    if (const auto problem = balance_credit_problem(credit)) {
+        return std::unexpected(StoreError{"invalid_input", *problem});
+    }
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(customers_,
+                             [&](const Customer& c) { return c.id == credit.customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + credit.customer_id});
+    }
+    BalanceCreditResult result;
+    if (!credit.event_id.empty() && payment_events_.contains({credit.provider, credit.event_id})) {
+        result.duplicate = true;
+        result.balance = account_balance_locked(credit.customer_id);
+        return result;
+    }
+    if (std::ranges::any_of(balance_credits_, [&](const BalanceCredit& kept) {
+            return kept.provider == credit.provider && kept.reference == credit.reference;
+        })) {
+        if (!credit.event_id.empty()) {
+            payment_events_.insert({credit.provider, credit.event_id});
+        }
+        result.duplicate = true;
+        result.balance = account_balance_locked(credit.customer_id);
+        return result;
+    }
+    if (!credit.event_id.empty()) {
+        payment_events_.insert({credit.provider, credit.event_id});
+    }
+    BalanceCredit stored = credit;
+    stored.id = new_uuid_v4();
+    stored.created_at = now_iso8601();
+    balance_credits_.push_back(stored);
+    AccountBalance& row = balances_[credit.customer_id];
+    row.customer_id = credit.customer_id;
+    if (row.first_top_up_at.empty()) {
+        row.first_top_up_at = stored.created_at;
+    }
+    row.limit_warning_notified_at.clear();
+    row.negative_notified_at.clear();
+    row.blocked_notified_at.clear();
+    if (credit.kind == "auto_top_up") {
+        row.auto_top_up_pending.clear();
+        row.auto_top_up_started_at.clear();
+    }
+    ++row.version;
+    row.updated_at = stored.created_at;
+    result.credit = stored;
+    result.balance = account_balance_locked(credit.customer_id);
+    return result;
+}
+
+Result<void> InMemoryStore::set_balance_charge(const BalanceCharge& charge) {
+    if (charge.amount_micros < 0 || charge.period.size() != 7 || charge.period[4] != '-') {
+        return std::unexpected(StoreError{
+            "invalid_input", "a charge is a month (YYYY-MM) and an amount of $0 or more"});
+    }
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(customers_,
+                             [&](const Customer& c) { return c.id == charge.customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + charge.customer_id});
+    }
+    const std::pair<std::string, std::string> key{charge.customer_id, charge.period};
+    const auto found = balance_charges_.find(key);
+    if (found != balance_charges_.end() && !found->second.invoice_id.empty() &&
+        charge.invoice_id.empty()) {
+        return {}; // frozen by its invoice
+    }
+    BalanceCharge stored = charge;
+    stored.refreshed_at = now_iso8601();
+    balance_charges_[key] = stored;
+    return {};
+}
+
+Result<std::vector<BalanceCredit>> InMemoryStore::balance_credits(const std::string& customer_id,
+                                                                  int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<BalanceCredit> out;
+    for (auto it = balance_credits_.rbegin(); it != balance_credits_.rend(); ++it) {
+        if (it->customer_id == customer_id &&
+            (limit <= 0 || out.size() < static_cast<std::size_t>(limit))) {
+            out.push_back(*it);
+        }
+    }
+    return out;
+}
+
+Result<std::vector<BalanceCharge>> InMemoryStore::balance_charges(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<BalanceCharge> out;
+    for (const auto& [key, charge] : balance_charges_) {
+        if (key.first == customer_id) {
+            out.push_back(charge);
+        }
+    }
+    std::ranges::sort(out, std::greater<>{}, &BalanceCharge::period);
+    return out;
+}
+
+Result<std::vector<std::string>> InMemoryStore::balance_customers() {
+    std::lock_guard lock(mutex_);
+    std::vector<std::string> out;
+    for (const auto& [customer_id, row] : balances_) {
+        out.push_back(customer_id);
+    }
+    return out;
+}
+
 void InMemoryStore::cloud_order_event_locked(const std::string& id,
                                              const std::string& from,
                                              const std::string& to,

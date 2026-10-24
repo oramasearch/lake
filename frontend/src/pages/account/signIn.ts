@@ -1,12 +1,11 @@
 /** Where a sign-in page goes once lake's `lake_session` cookie is set, and the identity calls'
  * shared options. Sign-in pages navigate with a full `location.assign`, so the whole app (and the
  * `viewer` read) starts again as the new session. */
-import { ApiError } from "@/lib/api";
+import {ApiError} from "@/lib/api";
 
-export { landingAfterSignIn } from "@/pages/ask/home";
-
-/** web_ui_invitation_note: Clerk's sign-up is restricted while lake is in development. */
-export const INVITATION_NOTE = "Accounts are added by invitation while Lake is in development.";
+/** The invitation sentence, shown only where Clerk's sign-up is by invitation (lake#1116). */
+export {INVITATION_NOTE} from "@/lib/clerkSignIn";
+export {landingAfterSignIn} from "@/pages/ask/home";
 
 /** Identity capabilities belong to no workspace: call them unprefixed. */
 export const NO_WORKSPACE = { workspace: null } as const;

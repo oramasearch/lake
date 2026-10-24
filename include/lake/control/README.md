@@ -241,6 +241,13 @@ copy. `lake/audit/audit.hpp` adds `PendingEvent` (an event whose id and instant 
 call finishes and whose predecessor and signature are added when it is written), `sign_pending`
 and `verify_event` (one event checked alone).
 
+`store.hpp`'s `AccountBalance`, `BalanceCredit`, `BalanceCreditResult` and `BalanceCharge`, with
+`account_balance`, `update_account_balance` (compare-and-swap on `version`), `apply_balance_credit`
+(once per event id and per provider reference, in one transaction), `set_balance_charge` (a month
+an invoice froze stays), `balance_credits`, `balance_charges` and `balance_customers`, are the
+prepaid balance's records (migration `0099_account_balances`, lake#1114); `account_balance_problem`
+and `balance_credit_problem` are the checks both stores apply.
+
 
 `oci_records.hpp` holds a tenant image's manifests and tags in its routed workspace (lake#383
 phase A): `lake_oci_manifests`, keyed by the blind index of the digest and written `if_absent`, and

@@ -818,19 +818,42 @@ std::optional<OidcClaims> verify_oidc_id_token(std::string_view token,
                        std::chrono::system_clock::now().time_since_epoch())
                        .count();
     }
-    const long expires_at = claims.value("exp", 0L);
-    const long not_before = claims.value("nbf", 0L);
-    const long issued_at = claims.value("iat", 0L);
-    const std::string subject = claims.value("sub", "");
-    const nlohmann::json audience = claims.value("aud", nlohmann::json());
-    const bool authorized_party_valid =
-        !audience.is_array() || audience.size() <= 1 || claims.value("azp", "") == client_id;
-    if (claims.value("iss", "") != issuer || !audience_contains(audience, client_id) ||
-        !authorized_party_valid || expires_at <= now_unix || not_before > now_unix + 60 ||
-        issued_at > now_unix + 60 || subject.empty() || claims.value("nonce", "") != nonce) {
+    if (!claims.is_object()) {
         return std::nullopt;
     }
-    return OidcClaims{subject, claims.value("email", ""), claims.value("name", ""), issued_at};
+    // A string claim, or empty. Issuers render an unset template value as null (Clerk's
+    // `{{user.full_name}}` for a person without a name, lake#1115); `value()` would throw on it.
+    const auto text = [&](const char* name) {
+        return claims.contains(name) && claims[name].is_string() ? claims[name].get<std::string>()
+                                                                 : std::string();
+    };
+    const auto number = [&](const char* name) {
+        return claims.contains(name) && claims[name].is_number_integer() ? claims[name].get<long>()
+                                                                         : 0L;
+    };
+    for (const auto* name : {"iss", "sub", "nonce", "azp", "email", "name"}) {
+        if (claims.contains(name) && !claims[name].is_null() && !claims[name].is_string()) {
+            return std::nullopt;
+        }
+    }
+    for (const auto* name : {"exp", "nbf", "iat"}) {
+        if (claims.contains(name) && !claims[name].is_number_integer()) {
+            return std::nullopt;
+        }
+    }
+    const long expires_at = number("exp");
+    const long not_before = number("nbf");
+    const long issued_at = number("iat");
+    const std::string subject = text("sub");
+    const nlohmann::json audience = claims.value("aud", nlohmann::json());
+    const bool authorized_party_valid =
+        !audience.is_array() || audience.size() <= 1 || text("azp") == client_id;
+    if (text("iss") != issuer || !audience_contains(audience, client_id) ||
+        !authorized_party_valid || expires_at <= now_unix || not_before > now_unix + 60 ||
+        issued_at > now_unix + 60 || subject.empty() || text("nonce") != nonce) {
+        return std::nullopt;
+    }
+    return OidcClaims{subject, text("email"), text("name"), issued_at};
 }
 
 std::expected<VerifiedPasskeyRegistration, std::string>
@@ -7708,6 +7731,316 @@ public:
             stored.updated_at = rows[0][0].as<std::string>();
             return stored;
         });
+    }
+
+    // ---- account balances (migration 0099, lake#1114, docs/api/billing.md#balance) ----
+
+    static std::string balance_time(std::string_view column) {
+        return std::format("coalesce(to_char({} AT TIME ZONE 'UTC', "
+                           "'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'), '')",
+                           column);
+    }
+
+    // The account's balance in `tx`: its row's fields, the sums of its credits and charges, and
+    // whether its organization has a paid order whose subscription is current.
+    static Result<AccountBalance> balance_in(pqxx::work& tx, const std::string& customer_id) {
+        const pqxx::result customer = tx.exec_params(
+            "SELECT coalesce(organization_id::text, '') FROM customers WHERE id = $1::uuid",
+            customer_id);
+        if (customer.empty()) {
+            return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+        }
+        AccountBalance balance;
+        balance.customer_id = customer_id;
+        const std::string columns = std::format(
+            "{}, overdraft_limit_micros, {}, refresh_error, {}, {}, {}, {}, auto_top_up, "
+            "auto_top_up_threshold_micros, auto_top_up_amount_micros, auto_top_up_payment_method, "
+            "auto_top_up_pending, {}, auto_top_up_sequence, coalesce(auto_top_up_day::text, ''), "
+            "auto_top_ups_today, auto_top_up_off_reason, {}, version, {}",
+            balance_time("first_top_up_at"),
+            balance_time("charges_refreshed_at"),
+            balance_time("refresh_failed_at"),
+            balance_time("limit_warning_notified_at"),
+            balance_time("negative_notified_at"),
+            balance_time("blocked_notified_at"),
+            balance_time("auto_top_up_started_at"),
+            balance_time("auto_top_up_failure_notified_at"),
+            balance_time("updated_at"));
+        const pqxx::result rows = tx.exec_params(
+            "SELECT " + columns + " FROM account_balances WHERE customer_id = $1::uuid",
+            customer_id);
+        if (!rows.empty()) {
+            const pqxx::row row = rows[0];
+            balance.first_top_up_at = row[0].as<std::string>();
+            if (!row[1].is_null()) {
+                balance.overdraft_limit_micros = row[1].as<std::int64_t>();
+            }
+            balance.charges_refreshed_at = row[2].as<std::string>();
+            balance.refresh_error = row[3].as<std::string>();
+            balance.refresh_failed_at = row[4].as<std::string>();
+            balance.limit_warning_notified_at = row[5].as<std::string>();
+            balance.negative_notified_at = row[6].as<std::string>();
+            balance.blocked_notified_at = row[7].as<std::string>();
+            balance.auto_top_up = row[8].as<bool>();
+            balance.auto_top_up_threshold_micros = row[9].as<std::int64_t>();
+            balance.auto_top_up_amount_micros = row[10].as<std::int64_t>();
+            balance.auto_top_up_payment_method = row[11].as<std::string>();
+            balance.auto_top_up_pending = row[12].as<std::string>();
+            balance.auto_top_up_started_at = row[13].as<std::string>();
+            balance.auto_top_up_sequence = row[14].as<std::int64_t>();
+            balance.auto_top_up_day = row[15].as<std::string>();
+            balance.auto_top_ups_today = row[16].as<int>();
+            balance.auto_top_up_off_reason = row[17].as<std::string>();
+            balance.auto_top_up_failure_notified_at = row[18].as<std::string>();
+            balance.version = row[19].as<std::int64_t>();
+            balance.updated_at = row[20].as<std::string>();
+        }
+        const pqxx::result sums = tx.exec_params(
+            "SELECT (SELECT coalesce(sum(amount_micros), 0)::bigint FROM account_balance_credits "
+            "WHERE customer_id = $1::uuid), (SELECT count(*) FROM account_balance_credits WHERE "
+            "customer_id = $1::uuid), (SELECT coalesce(sum(amount_micros), 0)::bigint FROM "
+            "account_balance_charges WHERE customer_id = $1::uuid)",
+            customer_id);
+        balance.credits_micros = sums[0][0].as<std::int64_t>();
+        balance.credit_count = sums[0][1].as<std::int64_t>();
+        balance.charges_micros = sums[0][2].as<std::int64_t>();
+        const std::string organization = customer[0][0].as<std::string>();
+        if (!organization.empty()) {
+            balance.paid_order =
+                !tx.exec_params(
+                       "SELECT 1 FROM cloud_order_desired_state WHERE organization_id::text "
+                       "= $1 AND state IN ('paid', 'provisioning', 'ready') AND "
+                       "desired_state IN ('present', 'unmanaged') LIMIT 1",
+                       organization)
+                     .empty();
+        }
+        return balance;
+    }
+
+    Result<AccountBalance> account_balance(const std::string& customer_id) override {
+        return with_tx<AccountBalance>(
+            [&](pqxx::work& tx) -> Result<AccountBalance> { return balance_in(tx, customer_id); });
+    }
+
+    Result<AccountBalance> update_account_balance(const AccountBalance& next,
+                                                  std::int64_t expected_version) override {
+        if (const auto problem = account_balance_problem(next)) {
+            return std::unexpected(StoreError{"invalid_input", *problem});
+        }
+        return with_tx<AccountBalance>([&](pqxx::work& tx) -> Result<AccountBalance> {
+            if (tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", next.customer_id)
+                    .empty()) {
+                return std::unexpected(StoreError{"not_found", "no customer " + next.customer_id});
+            }
+            const auto conflict = [] {
+                return std::unexpected(StoreError{
+                    "conflict", "the account's balance changed meanwhile; read it again"});
+            };
+            const auto ts = [](const std::string& text) -> std::optional<std::string> {
+                return text.empty() ? std::nullopt : std::optional<std::string>(text);
+            };
+            if (expected_version == 0) {
+                // Only a row this call creates may be written as the first; one that is there
+                // already changed meanwhile.
+                const pqxx::result created =
+                    tx.exec_params("INSERT INTO account_balances (customer_id) VALUES ($1::uuid) "
+                                   "ON CONFLICT DO NOTHING RETURNING version",
+                                   next.customer_id);
+                if (created.empty()) {
+                    return conflict();
+                }
+                expected_version = created[0][0].as<std::int64_t>();
+            }
+            const pqxx::result changed = tx.exec_params(
+                "UPDATE account_balances SET overdraft_limit_micros = $3, charges_refreshed_at = "
+                "$4::timestamptz, refresh_error = $5, refresh_failed_at = $6::timestamptz, "
+                "limit_warning_notified_at = $7::timestamptz, negative_notified_at = "
+                "$8::timestamptz, blocked_notified_at = $9::timestamptz, auto_top_up = $10, "
+                "auto_top_up_threshold_micros = $11, auto_top_up_amount_micros = $12, "
+                "auto_top_up_payment_method = $13, auto_top_up_pending = $14, "
+                "auto_top_up_started_at = $15::timestamptz, auto_top_up_sequence = $16, "
+                "auto_top_up_day = $17::date, auto_top_ups_today = $18, auto_top_up_off_reason = "
+                "$19, auto_top_up_failure_notified_at = $20::timestamptz, version = version + 1, "
+                "updated_at = now() WHERE customer_id = $1::uuid AND version = $2 RETURNING 1",
+                next.customer_id,
+                expected_version,
+                next.overdraft_limit_micros,
+                ts(next.charges_refreshed_at),
+                next.refresh_error,
+                ts(next.refresh_failed_at),
+                ts(next.limit_warning_notified_at),
+                ts(next.negative_notified_at),
+                ts(next.blocked_notified_at),
+                next.auto_top_up,
+                next.auto_top_up_threshold_micros,
+                next.auto_top_up_amount_micros,
+                next.auto_top_up_payment_method,
+                next.auto_top_up_pending,
+                ts(next.auto_top_up_started_at),
+                next.auto_top_up_sequence,
+                ts(next.auto_top_up_day),
+                next.auto_top_ups_today,
+                next.auto_top_up_off_reason,
+                ts(next.auto_top_up_failure_notified_at));
+            if (changed.empty()) {
+                return conflict();
+            }
+            return balance_in(tx, next.customer_id);
+        });
+    }
+
+    Result<BalanceCreditResult> apply_balance_credit(const BalanceCredit& credit) override {
+        if (const auto problem = balance_credit_problem(credit)) {
+            return std::unexpected(StoreError{"invalid_input", *problem});
+        }
+        return with_tx<BalanceCreditResult>([&](pqxx::work& tx) -> Result<BalanceCreditResult> {
+            if (tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", credit.customer_id)
+                    .empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no customer " + credit.customer_id});
+            }
+            BalanceCreditResult result;
+            if (!credit.event_id.empty() &&
+                tx.exec_params("INSERT INTO billing_payment_events (provider, event_id, "
+                               "event_type, reference) VALUES ($1, $2, $3, $4) ON CONFLICT DO "
+                               "NOTHING RETURNING 1",
+                               credit.provider,
+                               credit.event_id,
+                               "balance." + credit.kind,
+                               credit.reference)
+                    .empty()) {
+                result.duplicate = true;
+            }
+            if (!result.duplicate) {
+                const pqxx::result inserted = tx.exec_params(
+                    "INSERT INTO account_balance_credits (customer_id, kind, amount_micros, "
+                    "provider, reference, event_id) VALUES ($1::uuid, $2, $3, $4, $5, $6) ON "
+                    "CONFLICT (provider, reference) DO NOTHING RETURNING id::text, " +
+                        balance_time("created_at"),
+                    credit.customer_id,
+                    credit.kind,
+                    credit.amount_micros,
+                    credit.provider,
+                    credit.reference,
+                    credit.event_id);
+                if (inserted.empty()) {
+                    result.duplicate = true;
+                } else {
+                    result.credit = credit;
+                    result.credit.id = inserted[0][0].as<std::string>();
+                    result.credit.created_at = inserted[0][1].as<std::string>();
+                    tx.exec_params(
+                        "INSERT INTO account_balances (customer_id, first_top_up_at) VALUES "
+                        "($1::uuid, now()) ON CONFLICT (customer_id) DO UPDATE SET "
+                        "first_top_up_at = coalesce(account_balances.first_top_up_at, now()), "
+                        "limit_warning_notified_at = NULL, negative_notified_at = NULL, "
+                        "blocked_notified_at = NULL, auto_top_up_pending = CASE WHEN $2 = "
+                        "'auto_top_up' THEN '' ELSE account_balances.auto_top_up_pending END, "
+                        "auto_top_up_started_at = CASE WHEN $2 = 'auto_top_up' THEN NULL ELSE "
+                        "account_balances.auto_top_up_started_at END, version = "
+                        "account_balances.version + 1, updated_at = now()",
+                        credit.customer_id,
+                        credit.kind);
+                }
+            }
+            auto balance = balance_in(tx, credit.customer_id);
+            if (!balance) {
+                return std::unexpected(balance.error());
+            }
+            result.balance = std::move(*balance);
+            return result;
+        });
+    }
+
+    Result<void> set_balance_charge(const BalanceCharge& charge) override {
+        if (charge.amount_micros < 0 || charge.period.size() != 7) {
+            return std::unexpected(StoreError{
+                "invalid_input", "a charge is a month (YYYY-MM) and an amount of $0 or more"});
+        }
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            if (tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", charge.customer_id)
+                    .empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no customer " + charge.customer_id});
+            }
+            const std::optional<std::string> invoice =
+                charge.invoice_id.empty() ? std::nullopt
+                                          : std::optional<std::string>(charge.invoice_id);
+            // A month an invoice froze changes only with another invoice's total.
+            tx.exec_params(
+                "INSERT INTO account_balance_charges (customer_id, period, amount_micros, "
+                "price_list_id, invoice_id) VALUES ($1::uuid, $2, $3, $4, $5::uuid) ON CONFLICT "
+                "(customer_id, period) DO UPDATE SET amount_micros = EXCLUDED.amount_micros, "
+                "price_list_id = EXCLUDED.price_list_id, invoice_id = EXCLUDED.invoice_id, "
+                "refreshed_at = now() WHERE account_balance_charges.invoice_id IS NULL OR "
+                "EXCLUDED.invoice_id IS NOT NULL",
+                charge.customer_id,
+                charge.period,
+                charge.amount_micros,
+                charge.price_list_id,
+                invoice);
+            return {};
+        });
+    }
+
+    Result<std::vector<BalanceCredit>> balance_credits(const std::string& customer_id,
+                                                       int limit) override {
+        return with_tx<std::vector<BalanceCredit>>(
+            [&](pqxx::work& tx) -> Result<std::vector<BalanceCredit>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT id::text, kind, amount_micros, provider, reference, event_id, " +
+                        balance_time("created_at") +
+                        " FROM account_balance_credits WHERE customer_id = $1::uuid ORDER BY "
+                        "created_at DESC, id LIMIT $2",
+                    customer_id,
+                    limit <= 0 ? 1000 : limit);
+                std::vector<BalanceCredit> out;
+                for (const pqxx::row row : rows) {
+                    out.push_back({row[0].as<std::string>(),
+                                   customer_id,
+                                   row[1].as<std::string>(),
+                                   row[2].as<std::int64_t>(),
+                                   row[3].as<std::string>(),
+                                   row[4].as<std::string>(),
+                                   row[5].as<std::string>(),
+                                   row[6].as<std::string>()});
+                }
+                return out;
+            });
+    }
+
+    Result<std::vector<BalanceCharge>> balance_charges(const std::string& customer_id) override {
+        return with_tx<std::vector<BalanceCharge>>([&](pqxx::work& tx)
+                                                       -> Result<std::vector<BalanceCharge>> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT period, amount_micros, price_list_id, coalesce(invoice_id::text, ''), " +
+                    balance_time("refreshed_at") +
+                    " FROM account_balance_charges WHERE customer_id = $1::uuid ORDER BY "
+                    "period DESC",
+                customer_id);
+            std::vector<BalanceCharge> out;
+            for (const pqxx::row row : rows) {
+                out.push_back({customer_id,
+                               row[0].as<std::string>(),
+                               row[1].as<std::int64_t>(),
+                               row[2].as<std::string>(),
+                               row[3].as<std::string>(),
+                               row[4].as<std::string>()});
+            }
+            return out;
+        });
+    }
+
+    Result<std::vector<std::string>> balance_customers() override {
+        return with_tx<std::vector<std::string>>(
+            [&](pqxx::work& tx) -> Result<std::vector<std::string>> {
+                std::vector<std::string> out;
+                for (const pqxx::row row : tx.exec(
+                         "SELECT customer_id::text FROM account_balances ORDER BY customer_id")) {
+                    out.push_back(row[0].as<std::string>());
+                }
+                return out;
+            });
     }
 
     // Cloud orders (lake#831, migration 0089, docs/api/orders.md).

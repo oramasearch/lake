@@ -11,15 +11,19 @@ Dashboard (`/dashboard`; lake#600, [README.md](README.md#the-shell)).
 
 **Sign-in.** When `LAKE_CLERK_PUBLISHABLE_KEY` is set (`viewer.clerk.enabled`), Sign in opens
 Clerk's form and lake's own password, TOTP and passkey pages leave the navigation; see
-[`../api/clerk.md`](../api/clerk.md). Clerk's sign-up is restricted while lake is in development,
-so a visitor is offered **Sign in** only, never Create account, and the homepage and `/sign-up`
-say the same sentence about invitations. Without Clerk, which is what an on-prem install uses,
-password sign-up is open and the visitor is offered **Create account** too.
+[`../api/clerk.md`](../api/clerk.md). What a visitor is offered follows the Clerk instance's own
+sign-up mode, which the page reads from clerk-js (`userSettings.signUp.mode`, lake#1116), never a
+second setting: where it is `restricted` (or `waitlist`), the visitor is offered Sign in only and
+the homepage and `/sign-up` say the same sentence about invitations; where it is `public`
+(lake.live since 2026-10-24), the visitor is offered **Create an account** as well, with no
+invitation sentence. Until clerk-js has answered, the page offers Sign in and the docs only.
+Without Clerk, which is what an on-prem install uses, password sign-up is open and the visitor is
+offered **Create account** too.
 
 ## Landing copy
 
 Every bold phrase in this section is quoted word for word from `frontend/src/pages/home/HomePage.tsx`
-(the invitation sentence is `INVITATION_NOTE` in `frontend/src/pages/account/signIn.ts`). Change
+(the invitation sentence is `INVITATION_NOTE` in `frontend/src/lib/clerkSignIn.ts`). Change
 the page and this section together; the check is under [Verify and change](#verify-and-change).
 
 **Lake by Orama**
@@ -29,8 +33,9 @@ the page and this section together; the check is under [Verify and change](#veri
 **Load your data into your own workspace, train models on it, and call them from your code, in
 Orama's cloud or your own.**
 
-Under Clerk the visitor actions are **Sign in** and **Read the docs**, followed by
-**Accounts are added by invitation while Lake is in development.** Without Clerk they are
+Under Clerk with restricted sign-up the visitor actions are **Sign in** and **Read the docs**,
+followed by **Accounts are added by invitation while Lake is in development.** Under Clerk with
+public sign-up they are **Create an account**, Sign in and Read the docs. Without Clerk they are
 **Create account**, Sign in and Read the docs. The operator instead gets **Getting started** (the Docs) and **Load your data**.
 
 Three cards follow, one per verb. Each states only what Lake does today:

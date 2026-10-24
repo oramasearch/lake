@@ -148,6 +148,72 @@ Development instances (dev, staging) need none.
 3. **Record the secret's expiry** (at most 24 months) under *Open questions*. When it lapses,
    Microsoft sign-in stops.
 
+### Production Microsoft registration, checked 2026-10-24
+
+The existing app is **Orama Lake Authentication**, client ID
+`16386f7a-d8e9-4781-9cd4-c463992034ec`, in Orama's tenant
+`84cd5a26-6547-4641-b005-5ad20eb26efd` (`Oramasearch.onmicrosoft.com`). Juan Jaramillo
+administers this setup through `juan@orama.com`; the directory represents that account as
+an external guest. A directory read returned no explicitly assigned application owners.
+Tenant ownership and the operating account are recorded here; a named app-owner assignment
+has not been established.
+
+It serves the **Orama Lake production** Clerk instance from §1. The primary callback is
+`https://clerk.lake.live/v1/oauth_callback`; use that callback for the shared application's
+post-migration Cloud v1 satellites too. This setup does not alter the current Prod 1 Firebase
+application. The Microsoft client secret is held by Clerk; it expires **2027-04-22 00:00 UTC**.
+Rotate before that date, save the replacement in the same Clerk connection, verify sign-in,
+then retire the old secret. Never put its value in this document.
+
+Juan directed use of the policies already published on orama.com. Both the Microsoft app's
+Branding & properties and Clerk production's Legal settings now contain:
+
+- Terms: <https://orama.com/legal/terms>
+- Privacy: <https://orama.com/legal/privacy>
+
+The pages loaded in Chrome, and both settings were read again after saving; Clerk was
+reloaded before the second read. Clerk remains invite-only and its express-consent checkbox
+remains off. No app image or cluster configuration changed.
+
+**Microsoft is still unverified.** The app's publisher domain remains
+`Oramasearch.onmicrosoft.com`, and the tenant lists only that verified domain. Entra explicitly
+refuses this domain for publisher verification. In the current Partner Center session,
+Identifiers and Legal info exposed no Partner Global ID or partner profile tabs; Programs
+listed other programs, but no verified Cloud Partner account. This does not prove Orama has
+no account under another sign-in. Reuse Orama's existing account; do not create a duplicate.
+
+To finish in the browser:
+
+1. Sign in to Orama's existing [Partner Center](https://partner.microsoft.com/) account.
+   Account settings → Organization profile → Identifiers must show a verified **Partner
+   Global** ID, not a location ID. Record its verification status and primary contact domain.
+2. In the same Orama Entra tenant, verify a custom domain that matches that contact domain.
+   Entra → Custom domain names → Add custom domain supplies a DNS proof. Add only the supplied
+   ownership record in Orama's DNS, then Verify. Do not change mail routing, the default domain,
+   federation or the current Prod 1 app.
+3. App registrations → Orama Lake Authentication → Branding & properties → Update domain →
+   select that verified domain. Then Add MPN ID to verify publisher → enter the verified
+   Partner Global ID → Verify and save. A badge must appear on readback.
+4. Test an invited account from a genuinely separate work tenant through lake.live, then
+   sign out and back in. Confirm the consent screen's badge and legal links. Steve's account
+   in Orama's own tenant does not prove external-tenant acceptance. Record the outcome without
+   tokens, authorization codes or customer data.
+
+The saved Clerk connection has fixed, disabled-to-edit default scope chips:
+`openid`, `email`, `profile`, `offline_access`, `User.Read`. No extra scope was added.
+`offline_access` has not been removed: the standard connection's dashboard does not offer its
+removal. Clerk's [social connection scope documentation](https://clerk.com/docs/guides/configure/auth-strategies/social-connections/overview)
+describes essential provider scopes as preconfigured; Microsoft's
+[scope documentation](https://learn.microsoft.com/en-us/entra/identity-platform/scopes-oidc#the-offline_access-scope)
+explains its refresh-token purpose. This is an observed configuration constraint, not proof
+that Lake needs ongoing Microsoft data access. Confirm a supported way to reduce the default
+scope with Clerk before changing the integration. No broad permission or tenant-wide admin
+consent was granted in this follow-up.
+
+The configuration checks above do not complete the new-account, approval and returning-login
+acceptance tests in [lake#756](https://github.com/oramasearch/lake/issues/756).
+Publisher verification requirements: [Microsoft guide](https://learn.microsoft.com/en-us/entra/identity-platform/mark-app-as-publisher-verified).
+
 ### Apple
 
 1. In Apple Developer → Certificates, Identifiers & Profiles, create:

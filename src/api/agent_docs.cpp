@@ -183,10 +183,20 @@ constexpr std::array group_rules{
               "model tokens, instance and volume time, storage), from each workspace; usage "
               "limits; and the bill. Lake is priced by usage only, one rate per dimension on the "
               "price list; bill_preview works out a month's bill, invoices are issued monthly and "
-              "paid through Stripe. An enterprise install has no billing, and these answer "
-              "not_found.",
+              "paid through Stripe. lake.live is prepaid: account_balance is the balance "
+              "(top-ups minus usage charges), start_top_up adds funds through Stripe Checkout, "
+              "set_auto_top_up tops up from a saved card, and past the overdraft every call that "
+              "starts paid work answers 402 payment_required. An enterprise install has no "
+              "billing, and these answer not_found.",
               [](std::string_view n) {
-                  return contains_any(n, {"usage", "invoice", "price_list", "bill", "metering"}) ||
+                  return contains_any(n,
+                                      {"usage",
+                                       "invoice",
+                                       "price_list",
+                                       "bill",
+                                       "metering",
+                                       "balance",
+                                       "top_up"}) ||
                          n == "set_storage_quota";
               }},
     GroupRule{"Streams",
@@ -548,8 +558,7 @@ const std::vector<Flow>& flows() {
            "one edit per call: `op: \"add_step\"` with `step`, `kind`, `name`; `op: \"add_edge\"` "
            "with `from`, `to`; also rename_step, kind_step, remove_step, remove_edge, rename"},
           {"get_pipeline", "read the graph back: steps, edges, approval"},
-          {"approve_pipeline",
-           "`project`, `graph`: an edited pipeline must be approved again"},
+          {"approve_pipeline", "`project`, `graph`: an edited pipeline must be approved again"},
           {"run_pipeline", "runs the checks, then the pipeline; answers {gate, run}"}}},
         {"Load a dataset",
          "A dataset is a table in your workspace. Upload a CSV or JSONL file's text (up to 16 "
@@ -562,8 +571,7 @@ const std::vector<Flow>& flows() {
            "the dataset's `id`. A name is letters, digits "
            "and underscores; a taken name answers `conflict` unless `if_exists: \"rename\"`; a "
            "CSV row whose field count differs from the header is refused with its line"},
-          {"get_dataset",
-           "`id` (the `<database>/<name>` from `list_datasets`): its columns"},
+          {"get_dataset", "`id` (the `<database>/<name>` from `list_datasets`): its columns"},
           {"workspace_sql", "`statement: \"SELECT … LIMIT 20\"` to look at it"}}},
         {"Train a model and call it",
          "Train from a dataset, read the report, publish the model and score new rows.",
@@ -613,8 +621,9 @@ const std::vector<Flow>& flows() {
          {{"workspace_act",
            "`capability: \"create_connection\"`, `input: {name, connector: {type: \"postgres\", "
            "host, port, user, database, token}}`"},
-          {"workspace_query", "`capability: \"list_connections\"`: each with its connector and "
-                              "`credential` state"},
+          {"workspace_query",
+           "`capability: \"list_connections\"`: each with its connector and "
+           "`credential` state"},
           {"workspace_query",
            "`capability: \"list_source_tables\"`, `input: {connection, include_columns: true}`"},
           {"workspace_act",
@@ -631,10 +640,12 @@ const std::vector<Flow>& flows() {
           {"store_connection", "the claim, namespace, size and storage class to mount"},
           {"create_service",
            "`kind: \"sqlite\"` (or duckdb, polars), `stores: [{store_id, mount_path: "
-           "\"/mnt/uploads\"}]`; set_service_stores or set_app_stores mounts it into one that exists "
+           "\"/mnt/uploads\"}]`; set_service_stores or set_app_stores mounts it into one that "
+           "exists "
            "(a volume into one service or app)"},
-          {"list_stores", "`mounted_by` names the services and apps that mount it, `used_bytes` "
-                          "what is used (null until measured)"}}},
+          {"list_stores",
+           "`mounted_by` names the services and apps that mount it, `used_bytes` "
+           "what is used (null until measured)"}}},
         {"Open a bucket as a drive",
          "A bucket or filesystem store opens as a drive, browsed in place: nothing is copied, an "
          "item's id is its path in the store, and deleting the drive never deletes the store. A "
@@ -714,7 +725,11 @@ const std::vector<Flow>& flows() {
           {"usage_limits", "`customer_id`: each limit with what is used this month and its state"},
           {"price_list", "the rates in force, one per usage dimension"},
           {"bill_preview", "`customer_id`, optional `period` (YYYY-MM): this month's bill so far"},
-          {"list_invoices", "`customer_id`: issued invoices, newest first, with payment state"}}},
+          {"list_invoices", "`customer_id`: issued invoices, newest first, with payment state"},
+          {"account_balance",
+           "`customer_id`: the prepaid balance, its state (ok, low, negative, blocked), how much "
+           "to add and the history of credits and charges"},
+          {"start_top_up", "`customer_id`, optional `amount_micros`: a Stripe Checkout link"}}},
         {"Search a published index",
          "A search index is BM25F over a dataset; outside callers can search it once it is "
          "published.",
