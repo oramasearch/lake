@@ -25,7 +25,9 @@ using nlohmann::json;
 // providers and regions are the clouds Orama runs on or can be asked for; only Azure is `checkout`,
 // because the operator creates clusters on Azure only today (orama-operator#634), and only in the
 // Azure regions it can reach (orama-operator#635, cloudRegionLocations): the Asia regions are
-// listed but ordered with the order form.
+// listed but ordered with the order form. Private Warehouse and every offer above it list their
+// own domain, white-labelled (lake#1129); the shared option does not. It is on request until the
+// white-labelled warehouse is delivered (the gaps linked from lake#1129).
 constexpr std::string_view default_sheet = R"json({
   "enabled": true,
   "url": "",
@@ -49,7 +51,8 @@ constexpr std::string_view default_sheet = R"json({
       "features": [
         "Your own warehouse, isolated from other customers",
         "Backups included",
-        "Provisioned automatically once paid"
+        "Provisioned automatically once paid",
+        "Your own domain, white-labelled (available on request)"
       ],
       "monthly_usd": 1000,
       "starting_from": false,
@@ -62,7 +65,8 @@ constexpr std::string_view default_sheet = R"json({
       "features": [
         "Your own Kubernetes cluster",
         "Choose the cloud provider and the region",
-        "Backups included"
+        "Backups included",
+        "Your own domain, white-labelled (available on request)"
       ],
       "monthly_usd": 5000,
       "starting_from": false,
@@ -76,7 +80,8 @@ constexpr std::string_view default_sheet = R"json({
         "Any cloud provider or bare metal, with any accelerators (GPUs and others)",
         "Any region, and multi-region deployments with geo-based load balancing and failover",
         "Full service (Metis)",
-        "Backups included"
+        "Backups included",
+        "Your own domain, white-labelled (available on request)"
       ],
       "monthly_usd": 10000,
       "starting_from": true,

@@ -33,7 +33,9 @@ can do nothing the API cannot.
 - The Organization, Administration and Account pages: [organization.md](organization.md).
 - Regions: the top bar's region and its links to the other regions, the region on sign-in and
   sign-up, and on Workspaces (lake#757): [regions.md](regions.md). The apex host's region picker is
-  server-rendered: [../api/regions.md](../api/regions.md#the-apex-picker).
+  server-rendered: [../api/regions.md](../api/regions.md#the-apex-picker). Its order sheet's cards
+  (the paid ones list their own domain, white-labelled, on request: lake#1129) are in
+  [regions.md](regions.md#the-order-sheet).
 - Deleting and revoking (organizations, invitations, grants, secret mounts, datasets, models,
   runs, search indexes, Ask Orama conversations): one typed confirmation that first lists what
   goes, [deletion.md](deletion.md).

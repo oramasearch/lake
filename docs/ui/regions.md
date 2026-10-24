@@ -44,7 +44,9 @@ lake#831. The apex host is the order sheet, server-rendered by `web_ui_order_she
   - **Private Warehouse**, **Dedicated Cluster**, **On-Prem**: the monthly price in USD ("Starting
     from" for on-prem), the included usage credit and that usage beyond it is billed at the price
     list, the summary, the providers and regions (dedicated cluster), the features (each with
-    backups included), and **Order** (or **Send an order form** for on-prem) to the offer's form.
+    backups included, and each with "Your own domain, white-labelled (available on request)",
+    which the shared card does not carry: lake#1129,
+    [orders.md](../api/orders.md#what-exists)), and **Order** (or **Send an order form** for on-prem) to the offer's form.
 - **Contact us** under the cards opens the dedicated cluster's form with "Another provider, hardware
   or region" chosen.
 - **The order form** (`/order/<offer>`, `web_ui_order_form`): where it runs (a select of the shared

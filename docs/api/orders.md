@@ -24,6 +24,18 @@ The apex host (`LAKE_APEX_HOST`, `lake.live`) shows every way to get Lake, with 
 Every offer says backups are included. Usage beyond the credit is billed at the published price
 list; how a bill applies the credit is in [billing.md](billing.md#order-sheet-subscriptions).
 
+**Your own domain, white-labelled.** Private Warehouse and every offer above it (Dedicated
+Cluster, On-Prem) list *"Your own domain, white-labelled (available on request)"* as a feature;
+the shared option does not (lake#1129, Steve, 2026-10-24). A customer on one of those offers can
+have their Lake serve their own brand at their own address (for example `data.example.com`)
+instead of `lake.live`. It is a line of plan data in each offer's `features`, not page copy, and it
+says *on request* because it is arranged with support, not self-serve: Lake has custom domains for
+**applications** today (`create_domain`), not yet for a whole warehouse. What a white-labelled
+warehouse still needs (the customer's domain and TLS on a zone they own, branding with no Orama or
+Lake marks, sign-in on their domain, the agent surfaces on their domain) is filed and linked from
+https://github.com/oramasearch/lake/issues/1129. Drop *"(available on request)"* only when that is
+delivered.
+
 **Two paths, one table.** Every order is a row of `cloud_orders` in lake's control-plane
 PostgreSQL (orders are multitenancy and billing, decision 56; nothing from a workspace is in it):
 
