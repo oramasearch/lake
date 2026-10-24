@@ -803,3 +803,9 @@ recovery and registration work (lake#969). Registry admission uses the shared St
 reservations across REST, MCP and hosted forms, keyed by the trusted ingress address from
 `order_client_address`. See [authentication limits](../../docs/api/identity.md#authentication-attempt-limits)
 (lake#966).
+
+`white_label.cpp` reads a white-labelled Lake's host settings (`LAKE_HOST_ALIASES`,
+`LAKE_CONTROL_HOST`) and SSO-only sign-in (`LAKE_SIGN_IN_SSO_PROVIDER`), builds the redirect of a
+browser page on an alias to the public host (the `host_alias` middleware in `http_server.cpp`), and
+decides which sign-in capabilities the registry's `gate_instance_sign_in` refuses. See
+[white-label sign-in](../../docs/deployment/white-label-sign-in.md) (lake#1136).

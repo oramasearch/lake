@@ -284,3 +284,7 @@ recovery limits. It is never capability input; empty addresses share a bucket. S
 to the shared Store-backed registry reservations across REST, MCP and hosted forms. Non-HTTP
 calls share an in-process client bucket. See [the contract](../../../docs/api/identity.md#authentication-attempt-limits)
 (lake#966).
+`white_label.hpp` declares a white-labelled Lake's hosts (`InstanceHosts`: public host, aliases, control
+host) and SSO-only sign-in (`sso_only_refusal`). `ServerOptions` carries `host_aliases` and
+`sign_in_sso_provider`; `ApiContext` carries `sign_in_sso_provider`. See
+[white-label sign-in](../../../docs/deployment/white-label-sign-in.md) (lake#1136).

@@ -110,6 +110,15 @@ struct ServerOptions {
     // Public hostname used in OAuth callbacks, as the WebAuthn RP ID, and as
     // the HTTPS repository-command origin when external_origin is unset.
     std::string public_host;
+    // Other hosts that are this Lake too (LAKE_HOST_ALIASES, lake#1136): on a white-labelled Lake
+    // the Orama host it was created on, while public_host is the customer's. Browser pages opened
+    // on one are redirected to public_host; every other request is served as on public_host.
+    // Lowercased, without ports.
+    std::vector<std::string> host_aliases;
+    // The enterprise SSO provider that is the only way in for people (LAKE_SIGN_IN_SSO_PROVIDER,
+    // lake#1136): Lake's own password, passkey, social and email-recovery sign-in are refused in its
+    // own pool, and the sign-in page offers that provider alone. Empty: Lake's usual sign-in.
+    std::string sign_in_sso_provider;
     // Configured browser-facing HTTP(S) origin, including any non-default port.
     // It takes precedence over public_host. When both are empty, repository
     // terminal instructions are suppressed; request headers never supply it.

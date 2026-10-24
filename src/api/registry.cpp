@@ -12,6 +12,7 @@
 #include <thread>
 
 #include "lake/api/audit_routing.hpp"
+#include "lake/api/white_label.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/store.hpp"
 #include "lake/transparency/log.hpp"
@@ -1459,6 +1460,29 @@ void gate_paid_work(CallState& state,
     }
 }
 
+// SSO-only sign-in (lake#1136, docs/api/sso.md#the-customers-provider-as-the-only-way-in): with
+// LAKE_SIGN_IN_SSO_PROVIDER set, Lake's own sign-in methods in its own pool are refused before their
+// handlers, audited like any refusal. One place, so no handler has to remember it.
+void gate_instance_sign_in(CallState& state,
+                           const Capability& capability,
+                           const nlohmann::json& input,
+                           ApiContext& context) {
+    if (!state.proceed || context.sign_in_sso_provider.empty()) {
+        return;
+    }
+    std::string provider_pool;
+    if (names_sso_provider(capability.name) && context.store != nullptr && input.is_object() &&
+        input.contains("provider_id") && input.at("provider_id").is_string()) {
+        const auto provider = context.store->get_sso_provider(input.at("provider_id").get<std::string>());
+        // A provider that cannot be read is treated as Lake's own: refused unless it is the one.
+        provider_pool = provider ? provider->pool_id : std::string("lake");
+    }
+    if (auto refused = sso_only_refusal(context.sign_in_sso_provider, capability.name, input, provider_pool)) {
+        state.result = ApiResult::failure("unauthorized", std::move(*refused));
+        state.proceed = false;
+    }
+}
+
 // The balance warning on the outermost answer while the account is low, negative or blocked.
 void warn_about_balance(CallState& state, const nlohmann::json& input, ApiContext& context) {
     if (!context.balance || context.registry_depth != 1 ||
@@ -1500,6 +1524,7 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
     const DepthGuard registry_depth(context);
     CallState state = prepare_call(capability, call_input, context);
     gate_paid_work(state, *capability, call_input, context);
+    gate_instance_sign_in(state, *capability, call_input, context);
     if (state.proceed) {
         const auto start = std::chrono::steady_clock::now();
         try {
@@ -1588,6 +1613,7 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
     const DepthGuard registry_depth(context);
     CallState state = prepare_call(capability, call_input, context);
     gate_paid_work(state, *capability, call_input, context);
+    gate_instance_sign_in(state, *capability, call_input, context);
     if (state.proceed) {
         // A long poll (`wait_ms`) parks on the bus: it gives its HTTP worker back so parked
         // callers never fill the short-request workers (lake#534). Only a capability declared a

@@ -328,6 +328,25 @@ exchange route with signed template tokens and an isolated HTTP double. Run
 - Keep the verifier strict: any change to the claims lake reads belongs in both the template and
   `serve_clerk_session`, with a test in `tests/test_clerk.cpp`.
 
+## A white-labelled Lake (lake#1136)
+
+A Lake on a customer's own domain signs people in there in one of two ways, chosen per offer
+([`../deployment/white-label-sign-in.md`](../deployment/white-label-sign-in.md)):
+
+- **A Clerk production instance for the customer's domain** (Private Warehouse, Dedicated Cluster):
+  its Frontend API is `clerk.<customer domain>`. Nothing in Lake changes for it: the issuer and
+  JWKS are derived from that instance's publishable key, `lake_session` is a host-only cookie, and
+  every redirect is a same-origin path. The operator gives the Lake the instance's keys, allows the
+  customer's origin, and publishes the instance's DNS records for the customer to create
+  (operator#947).
+- **The customer's own identity provider as the only way in** (On-Prem, or a customer who requires
+  it), with Clerk off: [`sso.md`](sso.md#the-customers-provider-as-the-only-way-in). Lake refuses to
+  start with both.
+
+Once the customer's host is routed, `LAKE_PUBLIC_HOST` is that host and the Orama host is in
+`LAKE_HOST_ALIASES`: a browser page opened on the Orama host is redirected to the customer's before
+any Clerk script loads, so sign-in never runs on a host the customer's instance does not allow.
+
 ## Bounded key refresh (lake#956, LSR-090)
 
 Clerk and generic OIDC share `OidcJwks`. Before any network request, it rejects tokens over

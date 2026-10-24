@@ -1010,3 +1010,9 @@ The Stripe ownership fixture in `test_stripe.cpp` includes the event timestamp, 
 `PostgresProvisioning.MfaVerificationLocksTheAccountBeforeItsFactors` holds an account row
 as deletion does and checks that authentication waits without holding its factor rows,
 then succeeds when the account transaction releases its lock (lake#966).
+
+`test_white_label.cpp` (lake#1136) covers a white-labelled Lake: `LAKE_HOST_ALIASES` and
+`LAKE_CONTROL_HOST` parsing and their startup errors, SSO-only sign-in never combined with Clerk, the
+redirect of browser pages on an alias to the public host while the API is served there
+(`WhiteLabelAliases.*`, a real server), and the registry refusing Lake's own sign-in methods in its
+own pool while `viewer` names the provider (`WhiteLabelSsoOnly.*`).

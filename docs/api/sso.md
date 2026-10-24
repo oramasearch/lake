@@ -152,6 +152,37 @@ SHA-256 hash, the device name, TAAP id and return path, ten-minute expiry, `used
 both cascading with their provider, and the guard `saml_sign_in_guard`
 ([schema.md](../control-plane/schema.md#saml-sign-in-migration)).
 
+## The customer's provider as the only way in
+
+**lake#1136.** A white-labelled Lake can make one enterprise provider the only way in for people:
+`LAKE_SIGN_IN_SSO_PROVIDER=<provider id>`. It is an instance setting the operator renders from the
+Lake's `spec.env`; startup stops when it is not a provider id, or when a Clerk publishable key is
+also set (a Lake signs in through Clerk or through the customer's provider, never both).
+
+- **The registry refuses the rest** before any handler, one gate for every entry point
+  (`gate_instance_sign_in` in `src/api/registry.cpp`, `sso_only_refusal` in `src/api/white_label.cpp`):
+  in Lake's own pool (`pool_id` `lake` or absent) `sign_up_password`, `sign_in_password`,
+  `verify_mfa`, `sign_in_taap`, `begin_passkey_sign_in`, `sign_in_passkey`, `start_oauth` and
+  `begin_email_recovery` answer `unauthorized`, *"this Lake signs people in through its
+  organization's identity provider only"*. `start_sso_oidc`, `start_sso_saml` and `sign_in_saml`
+  are refused for any provider of Lake's own pool but the configured one; the SAML sign-on route
+  `GET /v1/saml/<id>/start` gives the same refusal. Each refusal is audited like any other.
+- **Not affected:** operator sign-in with the admin token (the instance's administrators), and
+  applications' own pools, whose users and sign-in methods are the customer's applications'.
+- **`viewer`** answers `password_sign_up: false` and `sign_in_sso: {provider_id, protocol, name}`
+  (null without the setting). The web app's sign-in and sign-up pages then offer one button, named
+  for the provider (`frontend/src/pages/account/SsoSignIn.tsx`): SAML opens the sign-on URL with the
+  page's same-origin `return_to`, OIDC calls `start_sso_oidc`.
+- **Users must be provisioned through SCIM for now.** A first sign-in creates a user only with
+  just-in-time provisioning and a TAAP id in the sign-in, which a person from the customer's IdP
+  does not carry. Minting a managed key for such a person, as a Clerk sign-in does (decision 65), is
+  the follow-up filed from lake#1136. Enterprise OIDC also waits for
+  [lake#1022](https://github.com/oramasearch/lake/issues/1022) on Postgres; SAML works.
+
+The runbook, with the Clerk alternative, is
+[`../deployment/white-label-sign-in.md`](../deployment/white-label-sign-in.md). Tests:
+`WhiteLabelSsoOnly.*` in `tests/test_white_label.cpp`, `frontend/tests/sso-sign-in.test.ts`.
+
 ## How to verify
 
 ```sh

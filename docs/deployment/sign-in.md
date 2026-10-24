@@ -18,6 +18,7 @@ provider's console and in a Kubernetes Secret. This page names where it lives, n
 |---|---|---|
 | **Hosted** (`lake-dev`, `lake-testing`, `lake-staging`, `lake.live`) | **Clerk**: email code, and social connections (Google, GitHub, Microsoft, Apple) | The Clerk instance is created once by hand and the operator keeps it configured ([§1](#1-a-clerk-instance)); social connections by hand ([§2](#2-social-connections-on-a-clerk-instance)) |
 | **Without Clerk** (on-prem, air-gapped, [private-install.md](private-install.md)) | Lake's own: password + TOTP, passkeys, TAAP identity, and **Lake OAuth** (Google, GitHub, and an OIDC issuer that serves Lake's fixed paths) | Lake's administrator ([§3](#3-lake-oauth-without-clerk)) |
+| **A white-labelled Lake** (the customer's own domain) | A Clerk instance for that domain, or the customer's IdP as the only way in | [`white-label-sign-in.md`](white-label-sign-in.md) (lake#1136) |
 | **A customer organization's own IdP** | **Enterprise SSO**: SAML 2.0 or OIDC, plus SCIM provisioning. **Not ready to offer** ([§4](#4-enterprise-sso-and-scim)) | The organization's administrator ([§4](#4-enterprise-sso-and-scim)) |
 
 Under Clerk, Lake turns its own password entries off in the `lake` pool, so on a hosted Lake **every
