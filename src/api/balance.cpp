@@ -23,6 +23,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "lake/api/brand.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/policy.hpp"
 
@@ -876,6 +877,10 @@ Email balance_email(BalanceCrossing crossing,
                              opening,
                              add,
                              link);
+    // In the instance brand's words (lake#1135): unchanged for Lake's own.
+    const Brand& brand = instance_brand();
+    email.subject = brand.apply(email.subject);
+    email.text = brand.apply(email.text);
     return email;
 }
 

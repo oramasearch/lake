@@ -1,5 +1,9 @@
 # Public API types
 
+`brand.hpp` declares `Brand`, the instance brand of a white-labelled Lake (`LAKE_BRAND_FILE`,
+`LAKE_BRAND_*`, lake#1135), `brand_from_sources` (validation at start) and `instance_brand()`. See
+[brand](../../../docs/serving/brand.md).
+
 `pipeline.hpp` defines shared limits of 50,000 steps, 100,000 edges and 256 edits per batch,
 including a JSON shape/count guard used before graph copies and engine saves (lake#967).
 

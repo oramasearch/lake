@@ -8317,6 +8317,153 @@ TEST(ReplicationStartup,TheReplicationCredentialNeverDefaultsToTheAdminToken) {
     EXPECT_EQ(refused_status, 2) << refused_output;
 }
 
+// lake#1135, lake#1137: the lake binary reads the brand at start. An invalid brand stops it with
+// exit status 2; a custom brand is served by the running process on the console's first paint,
+// llms.txt, the skill under the brand's short name, MCP initialize and server_info.
+TEST(BrandStartup, AnInvalidBrandStopsLakeAndACustomOneIsServed) {
+    TemporarySyncRoot temporary;
+    const auto arguments_for = [&](unsigned short port) {
+        return std::vector<std::string>{
+            "--memory-store",
+            "--listen",
+            "127.0.0.1:" + std::to_string(port),
+            "--store-root",
+            (temporary.path() / "root").string(),
+            "--instance-kek",
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"};
+    };
+    const std::vector<std::string> unset{"LAKE_BRAND_FILE",
+                                         "LAKE_BRAND_SHORT_NAME",
+                                         "LAKE_BRAND_COMPANY",
+                                         "LAKE_BRAND_ASSISTANT_NAME",
+                                         "LAKE_BRAND_CONSOLE_TITLE",
+                                         "LAKE_BRAND_BY_ORAMA",
+                                         "LAKE_BRAND_LOGO",
+                                         "LAKE_BRAND_LOGO_DARK",
+                                         "LAKE_BRAND_FAVICON",
+                                         "LAKE_BRAND_ACCENT_DARK",
+                                         "LAKE_BRAND_LEGAL_NAME",
+                                         "LAKE_BRAND_TERMS_URL",
+                                         "LAKE_BRAND_PRIVACY_URL",
+                                         "LAKE_RESEND_FROM",
+                                         "LAKE_SUPPORT_EMAIL",
+                                         "LAKE_PUBLIC_HOST",
+                                         "LAKE_EXTERNAL_ORIGIN"};
+    for (const std::vector<std::string>& invalid :
+         {std::vector<std::string>{"LAKE_BRAND_ACCENT=#123456"},
+          std::vector<std::string>{"LAKE_BRAND_NAME=Acme Data",
+                                   "LAKE_BRAND_SUPPORT_EMAIL=help@acme.example"},
+          std::vector<std::string>{"LAKE_BRAND_NAME=Acme Data",
+                                   "LAKE_BRAND_SUPPORT_EMAIL=help@acme.example",
+                                   "LAKE_BRAND_EMAIL_FROM=hello@acme.example",
+                                   "LAKE_BRAND_ACCENT=blue"}}) {
+        const unsigned short port = unused_loopback_port();
+        ASSERT_NE(port, 0);
+        std::vector<std::string> environment = unset;
+        for (const char* name : {"LAKE_BRAND_NAME",
+                                 "LAKE_BRAND_SUPPORT_EMAIL",
+                                 "LAKE_BRAND_EMAIL_FROM",
+                                 "LAKE_BRAND_ACCENT"}) {
+            environment.emplace_back(name);
+        }
+        environment.insert(environment.end(), invalid.begin(), invalid.end());
+        const auto [status, output] = run_lake_until_ready(
+            arguments_for(port), environment, port, temporary.path() / "invalid.log");
+        EXPECT_EQ(status, 2) << invalid.back() << "\n" << output;
+    }
+
+    const unsigned short port = unused_loopback_port();
+    ASSERT_NE(port, 0);
+    std::vector<std::string> environment = unset;
+    environment.insert(environment.end(),
+                       {"LAKE_BRAND_NAME=Acme Data",
+                        "LAKE_BRAND_SUPPORT_EMAIL=help@acme.example",
+                        "LAKE_BRAND_EMAIL_FROM=Acme Data <hello@acme.example>",
+                        "LAKE_BRAND_ACCENT=#aa3300",
+                        "LAKE_PUBLIC_HOST=data.acme.example"});
+    // Started by hand, not by run_lake_until_ready (which stops it once ready), to read its
+    // surfaces while it runs.
+    std::vector<std::string> argv{LAKE_TEST_SERVER_PATH};
+    for (const std::string& argument : arguments_for(port)) {
+        argv.push_back(argument);
+    }
+    std::vector<std::string> variables;
+    for (char** entry = environ; *entry != nullptr; ++entry) {
+        const std::string_view variable(*entry);
+        const std::string name(variable.substr(0, variable.find('=')));
+        if (std::ranges::none_of(environment, [&name](const std::string& given) {
+                return given == name || given.starts_with(name + "=");
+            })) {
+            variables.emplace_back(variable);
+        }
+    }
+    for (const std::string& given : environment) {
+        if (given.find('=') != std::string::npos) {
+            variables.push_back(given);
+        }
+    }
+    std::vector<char*> raw_argv;
+    for (std::string& argument : argv) {
+        raw_argv.push_back(argument.data());
+    }
+    raw_argv.push_back(nullptr);
+    std::vector<char*> raw_environment;
+    for (std::string& variable : variables) {
+        raw_environment.push_back(variable.data());
+    }
+    raw_environment.push_back(nullptr);
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    const std::string log = (temporary.path() / "served.log").string();
+    posix_spawn_file_actions_addopen(
+        &actions, STDOUT_FILENO, log.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    pid_t pid = -1;
+    ASSERT_EQ(
+        ::posix_spawn(
+            &pid, raw_argv.front(), &actions, nullptr, raw_argv.data(), raw_environment.data()),
+        0);
+    posix_spawn_file_actions_destroy(&actions);
+    bool ready = false;
+    for (int attempt = 0; attempt < 200 && !ready; ++attempt) {
+        ready = http_request(port, "GET", "/readyz", "", "application/json").find(" 200 ") !=
+                std::string::npos;
+        if (!ready) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+    ASSERT_TRUE(ready);
+    const std::string llms = http_request(port, "GET", "/llms.txt", "", "text/plain");
+    const std::string skill =
+        http_request(port, "GET", "/skills/acme-data/SKILL.md", "", "text/plain");
+    const std::string console = http_request(
+        port, "GET", "/", "", "text/plain", {}, {}, "localhost", {{"Accept", "text/html"}});
+    const std::string initialize =
+        http_request(port,
+                     "POST",
+                     "/mcp",
+                     R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})",
+                     "application/json");
+    const std::string info = http_request(port, "GET", "/v1/server_info", "", "application/json");
+    ::kill(pid, SIGTERM);
+    static_cast<void>(::waitpid(pid, nullptr, 0));
+
+    EXPECT_NE(llms.find(" 200 "), std::string::npos) << llms.substr(0, 300);
+    EXPECT_NE(llms.find("# Acme Data\n"), std::string::npos);
+    EXPECT_NE(llms.find("https://data.acme.example/skills/acme-data/SKILL.md"), std::string::npos);
+    EXPECT_EQ(llms.find("Orama"), std::string::npos);
+    EXPECT_EQ(llms.find("lake.live"), std::string::npos);
+    EXPECT_NE(skill.find(" 200 "), std::string::npos) << skill.substr(0, 300);
+    EXPECT_NE(skill.find("name: acme-data\n"), std::string::npos);
+    EXPECT_NE(console.find("<title>Acme Data Console</title>"), std::string::npos)
+        << console.substr(0, 600);
+    EXPECT_NE(console.find("--orama-action-default:#aa3300"), std::string::npos);
+    EXPECT_NE(console.find(R"("console_title":"Acme Data Console")"), std::string::npos);
+    EXPECT_NE(initialize.find(R"("serverInfo":{"name":"acme-data","title":"Acme Data")"),
+              std::string::npos)
+        << initialize;
+    EXPECT_NE(info.find(R"("name":"acme-data")"), std::string::npos) << info;
+}
+
 TEST(SyncHttp, StorageQuotaThrottlesNewWritesAndKeepsExistingContentReadable) {
     TemporarySyncRoot temporary;
     auto control = std::make_shared<lake::control::InMemoryStore>();

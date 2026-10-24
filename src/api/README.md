@@ -26,6 +26,12 @@ See [quickstart.md](../../docs/api/quickstart.md).
 (`ApiContext::caller_origin`), within its calls a minute (`Store::admit_browser_key_call`), before
 any handler; `restrict_cors_to_browser_key` in `http_server.cpp` answers its CORS to those origins
 alone. See [browser-keys.md](../../docs/api/browser-keys.md).
+`brand.cpp` reads and validates the instance brand of a white-labelled Lake (lake#1135, lake#1137,
+[brand](../../docs/serving/brand.md)) and holds `instance_brand()`, which the server installs from
+`ServerOptions::brand`. `Brand::apply` rewrites lake's own copy in the brand's names; the order and
+balance emails (`orders.cpp`, `balance.cpp`), the pages of `web_ui.cpp`, `agent_docs.cpp`'s
+`llms.txt`, `llms-full.txt` and skill, `mcp.cpp`'s `initialize` and tools, `rest.cpp`'s OpenAPI
+document, `viewer` and `server_info` read it. Lake's own brand changes nothing.
 
 `stream_person` in `agent_stream_triggers.cpp` is shared with `mcp_connection_streams.cpp` and
 requires a present, enabled account (lake#951). Disabled/missing principals trigger idempotent

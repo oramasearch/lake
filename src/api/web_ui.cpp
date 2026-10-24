@@ -10,6 +10,8 @@
 
 #include "modules/frontends/common/syntax.hpp"
 
+#include "lake/api/brand.hpp"
+
 // What lake still renders on the server (docs/ui/web-app.md): the hosted sign-in pages an
 // identity application shows its own users, the stylesheet and fonts they use, and a few pure
 // helpers the capabilities share. The console is the web app in frontend/.
@@ -194,6 +196,39 @@ std::string coupon_note(std::string_view target) {
     return {};
 }
 
+// Lake's own copy in the instance brand's words (lake#1135, docs/serving/brand.md); unchanged for
+// Lake's brand. Never applied to anything a person or an application configured.
+std::string lake_words(std::string_view text) {
+    return instance_brand().apply(text);
+}
+
+// The brand's favicon and colours for a page lake renders itself; empty for Lake's brand.
+std::string brand_head() {
+    return instance_brand().head_markup();
+}
+
+// The brand's legal footer; empty unless configured.
+std::string brand_footer() {
+    return instance_brand().footer_markup();
+}
+
+// The header's brand: the brand's logo (light and dark) when it has one, else the mark and name.
+std::string brand_mark() {
+    const Brand& brand = instance_brand();
+    if (brand.logo.empty()) {
+        return "<span class=\"hosted-brand-mark\" aria-hidden=\"true\"></span>" +
+               web_ui_escape(brand.name);
+    }
+    std::string out = "<img class=\"hosted-brand-logo\" src=\"" + web_ui_escape(brand.logo) +
+                      "\" alt=\"" + web_ui_escape(brand.name) + "\"";
+    if (!brand.logo_dark.empty()) {
+        out = "<picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"" +
+              web_ui_escape(brand.logo_dark) + "\">" + out + "></picture>";
+        return out;
+    }
+    return out + ">";
+}
+
 std::string theme_color(const control::Application& application,
                         std::string_view key,
                         std::string_view fallback) {
@@ -267,15 +302,19 @@ std::string web_ui_error(std::string_view code, std::string_view message) {
     return std::format(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        "<meta name=\"color-scheme\" content=\"light dark\"><title>Lake — error</title>{}{}"
+        "<meta name=\"color-scheme\" content=\"light dark\"><title>{} — error</title>{}{}{}"
         "</head><body class=\"hosted-shell\"><main class=\"hosted-main\" id=\"main-content\">"
         "<div class=\"hosted-card\" role=\"alert\"><p class=\"eyebrow\">{}</p>"
         "<h1>We Could Not Load This Page</h1><p class=\"sub\">{}</p>"
-        "<p><a class=\"button primary\" href=\"/\">Back to Lake</a></p></div></main></body></html>",
+        "<p><a class=\"button primary\" href=\"/\">Back to {}</a></p></div></main>{}</body></html>",
+        web_ui_escape(instance_brand().name),
         theme_preference_script,
         stylesheet_link(),
+        brand_head(),
         web_ui_escape(code),
-        web_ui_escape(message));
+        web_ui_escape(message),
+        web_ui_escape(instance_brand().name),
+        brand_footer());
 }
 
 std::string web_ui_application_sign_up(const control::Application& application,
@@ -432,27 +471,31 @@ std::string web_ui_region_picker(const Regions& regions,
     return std::format(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        "<meta name=\"color-scheme\" content=\"light dark\"><title>Lake — Choose a Region</title>"
+        "<meta name=\"color-scheme\" content=\"light dark\"><title>{} — Choose a Region</title>"
         "{}{}<style>:root{{--app-accent:var(--lake-action);--app-background:var(--lake-canvas)}}"
-        "</style></head><body class=\"hosted-shell\">"
+        "</style>{}</head><body class=\"hosted-shell\">"
         "<a class=\"skip-link\" href=\"#main-content\">Skip to content</a>"
-        "<header class=\"hosted-header\"><span class=\"hosted-brand\"><span "
-        "class=\"hosted-brand-mark\" aria-hidden=\"true\"></span>Lake</span></header>"
+        "<header class=\"hosted-header\"><span class=\"hosted-brand\">{}</span></header>"
         "<main class=\"hosted-main\" id=\"main-content\" tabindex=\"-1\"><div "
         "class=\"hosted-card\">"
-        "<p class=\"eyebrow\">Lake by Orama</p><h1>Choose a Region</h1>"
-        "<p class=\"sub\">Each region is a separate Lake with its own accounts. Your workspaces "
-        "stay "
-        "in the region you create them in.</p>{}"
+        "<p class=\"eyebrow\">{}</p><h1>Choose a Region</h1>"
+        "<p class=\"sub\">{}</p>{}"
         "<form class=\"stack\" method=\"post\" action=\"{}\"><fieldset class=\"region-choices\">"
         "<legend>Region</legend>{}</fieldset>"
         "<button class=\"primary\" type=\"submit\">Continue</button></form></div></main>"
-        "</body></html>",
+        "{}</body></html>",
+        web_ui_escape(instance_brand().name),
         theme_preference_script,
         stylesheet_link(),
+        brand_head(),
+        brand_mark(),
+        web_ui_escape(instance_brand().eyebrow()),
+        web_ui_escape(lake_words("Each region is a separate Lake with its own accounts. Your "
+                                 "workspaces stay in the region you create them in.")),
         error_markup(error) + coupon_note(target),
         action,
-        choices);
+        choices,
+        brand_footer());
 }
 
 namespace {
@@ -465,17 +508,19 @@ std::string apex_page(std::string_view title, std::string_view content, bool wid
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<meta name=\"color-scheme\" content=\"light dark\"><title>{}</title>"
         "{}{}<style>:root{{--app-accent:var(--lake-action);--app-background:var(--lake-canvas)}}"
-        "</style></head><body class=\"hosted-shell\">"
+        "</style>{}</head><body class=\"hosted-shell\">"
         "<a class=\"skip-link\" href=\"#main-content\">Skip to content</a>"
-        "<header class=\"hosted-header\"><a class=\"hosted-brand\" href=\"/\"><span "
-        "class=\"hosted-brand-mark\" aria-hidden=\"true\"></span>Lake</a></header>"
+        "<header class=\"hosted-header\"><a class=\"hosted-brand\" href=\"/\">{}</a></header>"
         "<main class=\"hosted-main{}\" id=\"main-content\" tabindex=\"-1\">{}</main>"
-        "</body></html>",
-        web_ui_escape(title),
+        "{}</body></html>",
+        web_ui_escape(lake_words(title)),
         theme_preference_script,
         stylesheet_link(),
+        brand_head(),
+        brand_mark(),
         wide ? " order-sheet-main" : "",
-        content);
+        content,
+        brand_footer());
 }
 
 std::string region_choices(const Regions& regions, const Region& selected) {
@@ -647,13 +692,14 @@ std::string web_ui_order_sheet(const OrderSheet& sheet,
             offer.checkout ? "Order" : "Send an order form");
     }
     std::string content = std::format(
-        "<p class=\"eyebrow\">Lake by Orama</p><h1>Get Lake</h1>"
-        "<p class=\"sub\">Every way to run Lake, with its price. Prices are in US dollars (USD). "
-        "Each region is a separate Lake with its own accounts; your workspaces stay in the region "
-        "you create them in.</p>{}{}<div class=\"order-sheet\">{}</div>"
+        "{}{}{}<div class=\"order-sheet\">{}</div>"
         "<p class=\"order-contact\">Need a cloud provider, hardware or region that is not listed, "
         "or a larger order? <a href=\"/order/dedicated-cluster?location=other\">Contact us</a> "
         "with the order form.</p>",
+        lake_words("<p class=\"eyebrow\">Lake by Orama</p><h1>Get Lake</h1>"
+                   "<p class=\"sub\">Every way to run Lake, with its price. Prices are in US "
+                   "dollars (USD). Each region is a separate Lake with its own accounts; your "
+                   "workspaces stay in the region you create them in.</p>"),
         trust,
         error_markup(error),
         cards);
@@ -737,7 +783,7 @@ std::string web_ui_order_form(const OrderSheet& sheet,
     }
     const std::string quantity = values.quantity.empty() ? "1" : values.quantity;
     std::string content = std::format(
-        "<p class=\"eyebrow\"><a href=\"/#{}\">Get Lake</a></p><h1>{}</h1>{}{}"
+        "<p class=\"eyebrow\"><a href=\"/#{}\">Get {}</a></p><h1>{}</h1>{}{}"
         "<p class=\"muted\">{}</p>{}"
         "<form class=\"stack order-form\" method=\"post\" action=\"/order\" novalidate>"
         "<input type=\"hidden\" name=\"offer\" value=\"{}\">{}"
@@ -754,6 +800,7 @@ std::string web_ui_order_form(const OrderSheet& sheet,
         "<input name=\"website\" tabindex=\"-1\" autocomplete=\"off\"></label></div>"
         "{}<p class=\"order-actions\">{}</p><p class=\"muted\">{}</p></form>",
         web_ui_escape(offer_slug(offer.id)),
+        web_ui_escape(instance_brand().name),
         web_ui_escape(offer.title),
         offer_price(offer),
         offer_credit(offer),
@@ -889,8 +936,8 @@ std::string web_ui_price_list(const std::vector<PriceListRow>& rows,
             table);
     }
     return apex_page("Lake — Price List",
-                     "<div class=\"hosted-card\"><p class=\"eyebrow\"><a href=\"/\">Get "
-                     "Lake</a></p><h1>Price List</h1>" +
+                     "<div class=\"hosted-card\"><p class=\"eyebrow\"><a href=\"/\">Get " +
+                         web_ui_escape(instance_brand().name) + "</a></p><h1>Price List</h1>" +
                          body + "</div>");
 }
 

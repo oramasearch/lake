@@ -84,7 +84,11 @@ Streams (`docs/ui/apps.md`).
 Lake answers a page request with `index.html` and this request's `viewer` answer embedded as
 `<script id="lake-viewer" type="application/json">`. It is the same capability the app would
 call first, so the shell and the page start without a round trip. Because the answer is personal,
-the page is sent `Cache-Control: private, no-store`. Three more things keep later steps short:
+the page is sent `Cache-Control: private, no-store`. On a white-labelled Lake the answer's `brand`
+names the console, and lake also writes the brand's console title into `<title>` and its favicon
+and colours into `<head>`, so the first paint is the brand's with no build per brand
+([`../serving/brand.md`](../serving/brand.md), lake#1135). Three more things keep later steps
+short:
 
 - **The workspace status starts with the page's code.** A workspace page's gate reads
   `workspace_status` first; the session starts that read alongside the code.

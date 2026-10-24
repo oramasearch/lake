@@ -5,7 +5,7 @@ serves. Methods:
 
 | Method | Behaviour |
 |---|---|
-| `initialize` | `{protocolVersion, capabilities: {tools: {listChanged: true}}, serverInfo: {name: "lake", version}}`, with an `Mcp-Session-Id` response header |
+| `initialize` | `{protocolVersion, capabilities: {tools: {listChanged: true}}, serverInfo: {name: "lake", title: "Lake", version}, instructions}`, with an `Mcp-Session-Id` response header. A white-labelled Lake names its brand: `serverInfo.name` is the brand's short name, `title` its name, and `instructions` say where its `llms.txt` and skill are ([`../serving/brand.md`](../serving/brand.md), lake#1137) |
 | `notifications/initialized` | accepted, `202`, no body |
 | `ping` | `{}` |
 | `tools/list` | every JSON registry entry as a tool: `name`, `title`, `description`, `inputSchema`, `outputSchema` (`lake::api::mcp_tools`); at `POST /w/<workspace_id>/mcp`, also the allowed tools of the workspace's MCP connections a person chose to expose, as `<prefix>__<tool>` ([MCP connections](mcp-connections.md#lakes-mcp-re-exports-a-connection-opt-in)) |

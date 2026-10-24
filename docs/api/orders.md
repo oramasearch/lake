@@ -247,6 +247,11 @@ hours with the first send, so a retry never sends twice) and a JSON body
 of the hosting platform (`spec.env` with a `secretKeyRef`), never a workspace secret, never logged;
 a 401/403 is reported without any of it.
 
+On a white-labelled Lake every email, the balance's included, is written in the instance brand's
+words, sent from `LAKE_BRAND_EMAIL_FROM` with the brand's support address as Reply-To
+([`../serving/brand.md`](../serving/brand.md#where-it-is-read), lake#1135). Lake's own brand sends
+exactly the email below.
+
 | State | Support (`LAKE_SUPPORT_EMAIL`) | Customer (the contact email) |
 |---|---|---|
 | `submitted` | Every field and the order id; reply-to the customer | A copy, with the status link |

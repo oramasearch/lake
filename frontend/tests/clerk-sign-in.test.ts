@@ -59,7 +59,7 @@ test("invitation wording appears only where sign-up is by invitation", () => {
             assert.doesNotMatch(sub, /invit/i, `${mode} ${signUp}`);
         }
     }
-    assert.match(page, /sub=\{clerkPageSub\(signUp, signUpMode\)\}/);
+    assert.match(page, /sub=\{brandText\(instanceBrand\(\), clerkPageSub\(signUp, signUpMode\)\)\}/);
     assert.doesNotMatch(page, /invited with/);
     // The visitor homepage: the note only under restricted sign-up, Create an account under public.
     assert.match(home, /signUpByInvitation\(signUpMode\) \?/);

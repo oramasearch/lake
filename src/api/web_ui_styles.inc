@@ -732,6 +732,21 @@ a.hosted-brand {
   color: inherit;
   text-decoration: none;
 }
+/* A white-labelled Lake's logo and legal footer (lake#1135, docs/serving/brand.md). */
+.hosted-brand-logo {
+  display: block;
+  max-height: 1.75rem;
+  max-width: 12rem;
+}
+.hosted-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--lake-space-4);
+  padding: 0 var(--lake-page-gutter) var(--lake-space-8);
+  color: var(--lake-text-secondary);
+  font-size: var(--lake-text-12);
+}
 .order-trust {
   display: flex;
   flex-wrap: wrap;

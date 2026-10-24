@@ -7,6 +7,7 @@
 
 #include "lake/api/balance.hpp"
 #include "lake/api/billing.hpp"
+#include "lake/api/brand.hpp"
 #include "lake/api/clerk.hpp"
 #include "lake/api/client_address.hpp"
 #include "lake/api/legal_links.hpp"
@@ -176,6 +177,10 @@ struct ServerOptions {
     // platform credentials. Without the key, orders are still recorded and their email waits.
     // `resend_http` replaces the outbound client (tests); `resend_api_base` is Resend's origin.
     ResendSettings resend;
+    // The instance brand (LAKE_BRAND_FILE, LAKE_BRAND_*, lake#1135, docs/serving/brand.md): Lake's
+    // own unless configured. The server installs it as the process's instance_brand() when it is
+    // constructed, so every surface it renders reads it.
+    Brand brand;
     ResendHttp resend_http;
     std::string resend_api_base = std::string(lake::api::resend_api_base);
     // How often the order pass (the orders' email and audit) runs; tests shorten it.

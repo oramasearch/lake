@@ -1,5 +1,6 @@
 #include "lake/api/mcp.hpp"
 
+#include "lake/api/brand.hpp"
 #include "lake/api/mcp_connections.hpp"
 
 #include <algorithm>
@@ -39,6 +40,15 @@ std::string jsonrpc_result(const nlohmann::json& id, nlohmann::json result) {
     return response.dump();
 }
 
+// What initialize tells a client about this server (lake#1137): in the brand's name.
+std::string mcp_instructions() {
+    const Brand& brand = instance_brand();
+    return brand.name + "'s MCP server. Every tool is one capability of " + brand.name +
+           ", also served as REST under /v1. Call server_info first, then tools/list; the full "
+           "reference is /llms.txt and /llms-full.txt on this server, and the skill is /skills/" +
+           brand.short_name + "/SKILL.md.";
+}
+
 } // namespace
 
 nlohmann::json mcp_tools(const Registry& registry, SchemaAudience audience) {
@@ -59,6 +69,8 @@ nlohmann::json mcp_tools(const Registry& registry, SchemaAudience audience) {
         if (capability->output_schema.is_object() && !capability->output_schema.empty()) {
             tool["outputSchema"] = success_envelope_schema(capability->output_schema);
         }
+        // A white-labelled Lake's tools speak its brand's names (lake#1137); unchanged for Lake's.
+        instance_brand().apply_to_documentation(tool);
         tools.push_back(std::move(tool));
     }
     return tools;
@@ -166,11 +178,14 @@ std::optional<std::string> mcp_dispatch(const Registry& registry,
     if (method == "notifications/initialized")
         return std::nullopt;
     if (method == "initialize") {
-        return jsonrpc_result(
-            id,
-            {{"protocolVersion", std::string(mcp_protocol_version)},
-             {"capabilities", {{"tools", {{"listChanged", true}}}}},
-             {"serverInfo", {{"name", "lake"}, {"version", std::string(version)}}}});
+        return jsonrpc_result(id,
+                              {{"protocolVersion", std::string(mcp_protocol_version)},
+                               {"capabilities", {{"tools", {{"listChanged", true}}}}},
+                               {"serverInfo",
+                                {{"name", instance_brand().short_name},
+                                 {"title", instance_brand().name},
+                                 {"version", std::string(version)}}},
+                               {"instructions", mcp_instructions()}});
     }
     if (method == "ping")
         return jsonrpc_result(id, nlohmann::json::object());
