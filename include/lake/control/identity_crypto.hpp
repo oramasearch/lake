@@ -15,6 +15,13 @@ namespace lake::control::identity_crypto {
 std::string random_secret();
 std::string hash_secret(std::string_view secret);
 bool verify_secret(std::string_view encoded, std::string_view secret);
+// Runs verify_secret against a fixed dummy hash and returns false. The dummy is made once per
+// process by hash_secret, so it carries the same Argon2id parameters as every stored credential.
+// A refusal for an unknown subject, or one with no stored secret, calls this so it costs what a
+// wrong secret for a real subject costs: the timing does not tell them apart (lake#1101).
+bool verify_secret_against_dummy(std::string_view secret);
+// How many times verify_secret_against_dummy has run in this process, for tests.
+std::uint64_t dummy_secret_verifications();
 // New recovery codes are 128 random bits with a version prefix; legacy codes are refused.
 std::string new_recovery_code();
 std::string recovery_selector(std::string_view code);

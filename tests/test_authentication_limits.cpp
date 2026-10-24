@@ -117,6 +117,51 @@ TEST_P(AuthenticationStores, AccountBudgetSpansCaseVariantsAndAllEntryPoints) {
     EXPECT_EQ(disabled.error().code, "unauthenticated");
 }
 
+// An unknown email answers with the same 401 as a wrong password and, so that the response time
+// does not tell them apart either, runs one Argon2id check against the dummy hash (lake#1101).
+TEST_P(AuthenticationStores, UnknownAccountsRunTheSameArgon2idCheckAsAWrongPassword) {
+    namespace crypto = lake::control::identity_crypto;
+    const std::string unknown = "nobody-1101@example.test";
+
+    auto before = crypto::dummy_secret_verifications();
+    const auto known = store->sign_in_password({"lake", email, "wrong", "", "test"});
+    ASSERT_FALSE(known);
+    EXPECT_EQ(crypto::dummy_secret_verifications(), before)
+        << "a known account checks its own hash, not the dummy";
+
+    before = crypto::dummy_secret_verifications();
+    const auto missing = store->sign_in_password({"lake", unknown, "wrong", "", "test"});
+    ASSERT_FALSE(missing);
+    EXPECT_EQ(crypto::dummy_secret_verifications(), before + 1);
+    EXPECT_EQ(missing.error().code, known.error().code);
+    EXPECT_EQ(missing.error().message, known.error().message);
+    EXPECT_EQ(missing.error().code, "unauthenticated");
+
+    before = crypto::dummy_secret_verifications();
+    const auto known_totp = store->sign_in_totp({"lake", email, "wrong", "000000", "test"});
+    const auto missing_totp = store->sign_in_totp({"lake", unknown, "wrong", "000000", "test"});
+    ASSERT_FALSE(known_totp);
+    ASSERT_FALSE(missing_totp);
+    EXPECT_EQ(crypto::dummy_secret_verifications(), before + 1);
+    EXPECT_EQ(missing_totp.error().code, known_totp.error().code);
+    EXPECT_EQ(missing_totp.error().message, known_totp.error().message);
+
+    // Recovery runs one check on every refusal: an unknown email, and a code matching no
+    // selector on a known one.
+    before = crypto::dummy_secret_verifications();
+    const auto known_recovery = store->recover_with_code("lake", email, "wrong", "test");
+    const auto missing_recovery = store->recover_with_code("lake", unknown, codes[0], "test");
+    ASSERT_FALSE(known_recovery);
+    ASSERT_FALSE(missing_recovery);
+    EXPECT_EQ(crypto::dummy_secret_verifications(), before + 2);
+    EXPECT_EQ(missing_recovery.error().code, known_recovery.error().code);
+    EXPECT_EQ(missing_recovery.error().message, known_recovery.error().message);
+
+    // The real account still signs in: the dummy never matches and the budget is per subject.
+    EXPECT_FALSE(crypto::verify_secret_against_dummy(password));
+    EXPECT_TRUE(store->sign_in_totp({"lake", email, password, codes[1], "test"}));
+}
+
 TEST_P(AuthenticationStores, ConcurrentRecoveryConsumesExactlyOnce) {
     std::barrier start(3);
     auto recover = [&] {

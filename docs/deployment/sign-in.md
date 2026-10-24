@@ -261,6 +261,11 @@ is the host of the request's own origin**; `LAKE_PUBLIC_HOST` is used only when 
 origin (`webauthn_relying_party` in `src/api/capabilities.cpp`). A passkey registered on one host
 therefore does not work on another, for example `eu.lake.live` and `us.lake.live`.
 
+A wrong password answers with the same 401 (`invalid credentials`) and in the same time whether or
+not the email has a Lake password account: an unknown email is checked against a dummy Argon2id
+hash with the real parameters (lake#1101). Failed attempts are limited per account and per client
+address ([identity API](../api/identity.md#authentication-attempt-limits)).
+
 ## 4. Enterprise SSO and SCIM
 
 A customer organization brings its own IdP. Its administrator registers it with

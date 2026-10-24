@@ -4255,6 +4255,10 @@ Result<IssuedSession> InMemoryStore::sign_in_password(const PasswordSignIn& inpu
                 issued.session.reason.clear();
                 return issued;
             }
+            // An unknown email, or an account with no password, still runs one Argon2id check,
+            // so it answers as slowly as a wrong password (lake#1101).
+            lock.unlock();
+            identity_crypto::verify_secret_against_dummy(input.password);
             return std::unexpected(StoreError{"unauthorized", "invalid email or password"});
         });
 }
@@ -4317,9 +4321,13 @@ Result<MfaEnrollment> InMemoryStore::enroll_mfa(const std::string& user_id,
             const auto credential = std::ranges::find_if(passwords_, [&](const auto& value) {
                 return value.user_id == user_id && value.pool_id == pool;
             });
-            if (credential == passwords_.end())
+            if (credential == passwords_.end()) {
+                // An account with no password still runs one Argon2id check (lake#1101).
+                lock.unlock();
+                identity_crypto::verify_secret_against_dummy(proof.password);
                 return std::unexpected(
                     StoreError{"unauthorized", "MFA enrollment requires the current password"});
+            }
 
             outcome = AuthenticationOutcome::failure;
             const std::string password_hash = credential->password;
@@ -4516,6 +4524,8 @@ Result<IssuedSession> InMemoryStore::sign_in_totp(const PasswordSignIn& input) {
                 issued.session.reason.clear();
                 return issued;
             }
+            lock.unlock();
+            identity_crypto::verify_secret_against_dummy(input.password); // lake#1101
             return std::unexpected(StoreError{"unauthorized", "invalid credentials or TOTP code"});
         });
 }
@@ -8376,8 +8386,11 @@ Result<IssuedSession> InMemoryStore::recover_with_code(const std::string& pool_i
                 lock.unlock();
                 const auto recovery =
                     credential.recovery_hashes.find(identity_crypto::recovery_selector(code));
-                if (recovery == credential.recovery_hashes.end() ||
-                    !identity_crypto::verify_secret(recovery->second, code)) {
+                const bool code_matches =
+                    recovery == credential.recovery_hashes.end()
+                        ? identity_crypto::verify_secret_against_dummy(code) // lake#1101
+                        : identity_crypto::verify_secret(recovery->second, code);
+                if (!code_matches) {
                     return std::unexpected(
                         StoreError{"unauthorized", "invalid email or recovery code"});
                 }
@@ -8409,6 +8422,8 @@ Result<IssuedSession> InMemoryStore::recover_with_code(const std::string& pool_i
                 issued.session.reason.clear();
                 return issued;
             }
+            lock.unlock();
+            identity_crypto::verify_secret_against_dummy(code); // lake#1101
             return std::unexpected(StoreError{"unauthorized", "invalid email or recovery code"});
         });
 }
@@ -8648,12 +8663,16 @@ Result<IssuedSession> InMemoryStore::complete_recovery(const std::string& recove
                 return value.attempt.id == recovery_id;
             });
             // A cancelled, completed or unapproved attempt, or one whose token was cleared, is
-            // refused before any hash work; the check is repeated after the hash is verified
-            // (lake#968).
+            // refused without reading its hash; the check is repeated after the hash is verified
+            // (lake#968). The refusal still runs one Argon2id check, outside the lock, so it
+            // answers as slowly as a wrong token (lake#1101).
             if (found == recovery_attempts_.end() ||
                 (found->attempt.status != "cooling" && found->attempt.status != "approved") ||
-                found->token_hash.empty())
+                found->token_hash.empty()) {
+                lock.unlock();
+                identity_crypto::verify_secret_against_dummy(token);
                 return std::unexpected(StoreError{"unauthorized", "invalid recovery token"});
+            }
 
             const auto token_hash = found->token_hash;
             lock.unlock();
