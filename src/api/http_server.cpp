@@ -7955,6 +7955,7 @@ struct ApiServer::Impl {
     lake::Thread io_thread;
     std::atomic<bool> is_running{false};
     unsigned short bound_port = 0;
+    unsigned short bound_proxy_port = 0;
     std::string failure_reason;
     std::vector<std::string> get_routes;
     // Exclusive ownership of options.store_root while the server runs (lake#467). The owner
@@ -13682,7 +13683,8 @@ struct ApiServer::Impl {
     }
 
     // The address an anonymous order and an authentication attempt are counted against (lake#838,
-    // LSR-103, lake#1083). From a trusted proxy (LAKE_TRUSTED_PROXY_CIDRS): X-Real-IP, which the
+    // LSR-103, lake#1083, lake#1132). From the proxy listener (LAKE_PROXY_PORT), whatever the peer,
+    // or from a trusted proxy on the main listener (LAKE_TRUSTED_PROXY_CIDRS): X-Real-IP, which the
     // ingress (ingress-nginx) always sets itself, overwriting any the sender sent; else the last
     // X-Forwarded-For hop, the one the nearest proxy appended; else the proxy's own address. From
     // any other peer: the peer's address, whatever headers it sent, so a caller that reaches the
@@ -13697,10 +13699,10 @@ struct ApiServer::Impl {
             }
             return route.req.at(name);
         };
-        return client_address(options.trusted_proxies,
-                              server ? server->peer(route) : std::string{},
-                              header("x-real-ip"),
-                              header("x-forwarded-for"));
+        const std::string peer = server ? server->peer(route) : std::string{};
+        const bool believed =
+            (server && server->proxied(route)) || is_trusted_proxy(options.trusted_proxies, peer);
+        return client_address(believed, peer, header("x-real-ip"), header("x-forwarded-for"));
     }
 
     // Where order links point: https://<apex host>, else the order sheet's configured URL.
@@ -16645,6 +16647,22 @@ bool ApiServer::start() {
         return false;
     }
     impl.bound_port = impl.server->port();
+    if (impl.options.proxy_port) {
+        if (*impl.options.proxy_port != 0 && *impl.options.proxy_port == impl.bound_port) {
+            impl.failure_reason = "the proxy port (LAKE_PROXY_PORT) is the listen port " +
+                                  std::to_string(impl.bound_port) + "; give it a port of its own";
+            impl.server.reset();
+            return false;
+        }
+        const std::string proxy_error =
+            impl.server->bind_proxy(corosio::endpoint(address, *impl.options.proxy_port));
+        if (!proxy_error.empty()) {
+            impl.failure_reason = "proxy listener (LAKE_PROXY_PORT): " + proxy_error;
+            impl.server.reset();
+            return false;
+        }
+        impl.bound_proxy_port = impl.server->proxy_port();
+    }
     if (impl.options.store && impl.options.workspaces && !impl.options.instance_kek.empty()) {
         impl.metering_recorder =
             std::make_unique<MeteringRecorder>(impl.options.store.get(),
@@ -16812,6 +16830,9 @@ bool ApiServer::running() const {
 }
 unsigned short ApiServer::port() const {
     return impl_->bound_port;
+}
+unsigned short ApiServer::proxy_port() const {
+    return impl_->bound_proxy_port;
 }
 const std::string& ApiServer::reason() const {
     return impl_->failure_reason;

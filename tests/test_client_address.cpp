@@ -93,3 +93,42 @@ TEST(ClientAddress, RefusesWhatIsNotACidr) {
 }
 
 } // namespace
+
+namespace {
+
+// lake#1132: the proxy listener's port.
+TEST(ClientAddress, ProxyPortParsesAPortOrNothing) {
+    using lake::api::parse_proxy_port;
+    EXPECT_EQ(*parse_proxy_port(""), std::nullopt);
+    EXPECT_EQ(*parse_proxy_port("  "), std::nullopt);
+    EXPECT_EQ(*parse_proxy_port("4901"), std::optional<unsigned short>{4901});
+    EXPECT_EQ(*parse_proxy_port(" 1 "), std::optional<unsigned short>{1});
+    EXPECT_EQ(*parse_proxy_port("65535"), std::optional<unsigned short>{65535});
+    for (const char* bad : {"0", "65536", "-1", "49o1", "4901x", "http", "4901,4902"}) {
+        const auto parsed = parse_proxy_port(bad);
+        ASSERT_FALSE(parsed.has_value()) << bad;
+        EXPECT_NE(parsed.error().find(bad), std::string::npos) << parsed.error();
+    }
+}
+
+// With a proxy listener, the main listener believes nobody unless LAKE_TRUSTED_PROXY_CIDRS says so.
+TEST(ClientAddress, AProxyListenerMakesTheMainListenerTrustNobodyByDefault) {
+    EXPECT_EQ(lake::api::default_trusted_proxy_setting(false),
+              lake::api::default_trusted_proxy_cidrs);
+    EXPECT_EQ(lake::api::default_trusted_proxy_setting(true), "none");
+    const auto with_proxy = trust(lake::api::default_trusted_proxy_setting(true));
+    EXPECT_FALSE(is_trusted_proxy(with_proxy, "10.244.2.176"));
+    EXPECT_FALSE(is_trusted_proxy(with_proxy, "127.0.0.1"));
+}
+
+// The decided form: believed takes the headers whatever the peer; not believed takes the peer.
+TEST(ClientAddress, BelievedHeadersAreTakenWhateverThePeer) {
+    EXPECT_EQ(client_address(true, "10.244.9.9", "203.0.113.7", "198.51.100.1"), "203.0.113.7");
+    EXPECT_EQ(client_address(true, "8.8.8.8", std::nullopt, "198.51.100.1, 203.0.113.9"),
+              "203.0.113.9");
+    EXPECT_EQ(client_address(true, "10.244.9.9", std::nullopt, std::nullopt), "10.244.9.9");
+    EXPECT_EQ(client_address(false, "10.244.9.9", "203.0.113.7", "198.51.100.1"), "10.244.9.9");
+    EXPECT_EQ(client_address(false, "", "203.0.113.7", std::nullopt), "direct");
+}
+
+} // namespace

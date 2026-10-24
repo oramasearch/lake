@@ -179,8 +179,12 @@ int usage() {
                  "a worker, after 10 s (default 1024; 0 turns it off)");
     std::println("  LAKE_HTTP_MAX_LONG_REQUESTS long polls and pulls at once (default 512); "
                  "LAKE_HTTP_MAX_LONG_REQUESTS_PER_CALLER per caller (default 64)");
-    std::println("  LAKE_TRUSTED_PROXY_CIDRS peers whose X-Real-IP / X-Forwarded-For per-client limits "
-                 "believe, comma-separated CIDRs or 'none' (default loopback and private ranges)");
+    std::println("  LAKE_PROXY_PORT a second listener for the reverse proxy, on the --listen host, "
+                 "where X-Real-IP / X-Forwarded-For are believed from any peer (default none)");
+    std::println(
+        "  LAKE_TRUSTED_PROXY_CIDRS peers whose X-Real-IP / X-Forwarded-For per-client limits "
+        "believe on the main listener, comma-separated CIDRs or 'none' (default loopback "
+        "and private ranges; 'none' when LAKE_PROXY_PORT is set)");
     std::println("  LAKE_WORKSPACE_STORE_PREOPEN=false opens workspace stores on first use only "
                  "(default true: opened in the background from start)");
     std::println("  --tunnel-clients-dir the tunnel client downloads (default "
@@ -368,17 +372,42 @@ int main(int argc, char** argv) {
         env_u64("LAKE_HTTP_MAX_LONG_REQUESTS_PER_CALLER", opts.max_long_requests_per_caller));
     opts.header_timeout = std::chrono::seconds{env_u64("LAKE_HTTP_HEADER_TIMEOUT_SECONDS", 10)};
     opts.worker_wait = std::chrono::seconds{env_u64("LAKE_HTTP_WORKER_WAIT_SECONDS", 10)};
-    // lake#1083: whose X-Real-IP / X-Forwarded-For the per-client limits believe. Unset: loopback
-    // and the private ranges, so an image rolled before the operator sets it counts as before.
+    // lake#1132: the reverse proxy's own listener, where X-Real-IP / X-Forwarded-For are
+    // believed. Unset: none, and everything arrives on the main listener as before.
     {
-        auto trusted = lake::api::parse_trusted_proxies(env_or("LAKE_TRUSTED_PROXY_CIDRS", ""));
+        auto proxy_port = lake::api::parse_proxy_port(env_or("LAKE_PROXY_PORT", ""));
+        if (!proxy_port) {
+            std::println(stderr, "lake: {}", proxy_port.error());
+            return 2;
+        }
+        opts.proxy_port = *proxy_port;
+    }
+    // lake#1083: whose X-Real-IP / X-Forwarded-For the per-client limits believe on the main
+    // listener. Unset without a proxy listener: loopback and the private ranges, so an image
+    // rolled before the operator sets it counts as before. Unset with one: nobody.
+    {
+        std::string setting = env_or("LAKE_TRUSTED_PROXY_CIDRS", "");
+        if (setting.find_first_not_of(" \t") == std::string::npos) {
+            setting =
+                std::string(lake::api::default_trusted_proxy_setting(opts.proxy_port.has_value()));
+        }
+        auto trusted = lake::api::parse_trusted_proxies(setting);
         if (!trusted) {
             std::println(stderr, "lake: {}", trusted.error());
             return 2;
         }
         opts.trusted_proxies = std::move(*trusted);
-        std::println(stderr, "lake: per-client limits believe X-Real-IP from {}",
-                     opts.trusted_proxies.description);
+        if (opts.proxy_port) {
+            std::println(stderr,
+                         "lake: per-client limits believe X-Real-IP on the proxy port {} from any "
+                         "peer, and on the main port from {}",
+                         *opts.proxy_port,
+                         opts.trusted_proxies.description);
+        } else {
+            std::println(stderr,
+                         "lake: per-client limits believe X-Real-IP from {}",
+                         opts.trusted_proxies.description);
+        }
     }
     // Every connection is a descriptor: raise the soft limit to the hard one and keep the
     // connection cap inside it, with room for PostgreSQL, stores and outbound calls.
@@ -696,6 +725,10 @@ int main(int argc, char** argv) {
             {"version", lake::version_string()},
             {"revision", lake::build_revision_string()},
             {"listen", "http://" + opts.listen_address + ":" + std::to_string(server.port())},
+            {"proxy_listen",
+             server.proxy_port() == 0
+                 ? std::string{}
+                 : "http://" + opts.listen_address + ":" + std::to_string(server.proxy_port())},
             {"node", opts.node_name},
             {"store", store_kind},
             {"store_root_configured", opts.store_root.empty() ? "no" : "yes"},

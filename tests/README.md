@@ -244,8 +244,12 @@ or stdout.
 `test_client_address.cpp` (lake#1083) covers which address per-client limits count: a trusted
 peer's `X-Real-IP` and last `X-Forwarded-For` hop, an untrusted peer counted on its own address
 whatever it sends, the unset default (loopback and private ranges), `none`, and the parsing of
-`LAKE_TRUSTED_PROXY_CIDRS`; `test_http_server.cpp`'s
-`AuthenticationClientBudgetIgnoresForwardedHeadersFromAnUntrustedPeer` proves it through the server.
+`LAKE_TRUSTED_PROXY_CIDRS`; with lake#1132, the parsing of `LAKE_PROXY_PORT`, `none` as the default
+beside a proxy listener, and the believed form. `test_http_server.cpp`'s
+`AuthenticationClientBudgetIgnoresForwardedHeadersFromAnUntrustedPeer` proves it through the server,
+`ForwardedHeadersAreBelievedOnlyOnTheProxyListener` proves the proxy listener believes rotated
+addresses while the main one counts them as one client, and `ProxyListenerIsOptionalAndNeedsItsOwnPort`
+covers an unset port and a taken one.
 
 `test_http_connections.cpp` (lake#534) covers connections apart from request workers
 (`src/api/http_connections.hpp`) over raw sockets: two hundred idle connections beside a request

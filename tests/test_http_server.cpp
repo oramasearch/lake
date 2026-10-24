@@ -3947,6 +3947,83 @@ TEST(HttpServer, AuthenticationClientBudgetIgnoresForwardedHeadersFromAnUntruste
     }
 }
 
+// lake#1132: X-Real-IP is believed on the proxy listener (LAKE_PROXY_PORT) whatever the peer,
+// and on the main listener only from LAKE_TRUSTED_PROXY_CIDRS (here `none`). Both serve the same
+// routes. An in-cluster caller that reaches the main port rotates the header in vain.
+TEST(HttpServer, ForwardedHeadersAreBelievedOnlyOnTheProxyListener) {
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.proxy_port = 0;
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    options.trusted_proxies = *lake::api::parse_trusted_proxies("none");
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    ASSERT_NE(server.proxy_port(), 0);
+    ASSERT_NE(server.proxy_port(), server.port());
+    int attempt = 0;
+    auto authenticate = [&](unsigned short port,
+                            std::vector<std::pair<std::string, std::string>> headers) {
+        HttpConnection connection(port);
+        const nlohmann::json arguments{{"email", std::to_string(attempt++) + "@example.test"},
+                                       {"code", "wrong"}};
+        const auto response = connection.request("POST",
+                                                 "/v1/recover_with_code",
+                                                 arguments.dump(),
+                                                 "",
+                                                 "HTTP/1.1",
+                                                 "",
+                                                 "application/json",
+                                                 std::move(headers));
+        EXPECT_FALSE(response.empty());
+        return response.find("rate_limited") != std::string::npos;
+    };
+    // The same routes on both listeners.
+    HttpConnection main_probe(server.port());
+    EXPECT_NE(main_probe.request("GET", "/healthz").find("200 OK"), std::string::npos);
+    HttpConnection proxy_probe(server.proxy_port());
+    EXPECT_NE(proxy_probe.request("GET", "/healthz").find("200 OK"), std::string::npos);
+    // Through the proxy port, each address is its own client.
+    for (int i = 0; i < 100; ++i) {
+        const std::string address = "192.0.2." + std::to_string(i + 1);
+        EXPECT_FALSE(authenticate(server.proxy_port(), {{"X-Real-IP", address}})) << i;
+    }
+    EXPECT_FALSE(authenticate(server.proxy_port(), {{"X-Forwarded-For", "198.51.100.2"}}));
+    // On the main port the headers are ignored: 100 rotated attempts are one client, the peer.
+    for (int i = 0; i < 100; ++i) {
+        const std::string address = "203.0.113." + std::to_string(i + 1);
+        EXPECT_FALSE(
+            authenticate(server.port(), {{"X-Real-IP", address}, {"X-Forwarded-For", address}}))
+            << i;
+    }
+    EXPECT_TRUE(authenticate(server.port(), {{"X-Real-IP", "198.51.100.1"}}));
+    // The proxy port still counts the address the proxy reported, not the shared peer.
+    EXPECT_FALSE(authenticate(server.proxy_port(), {{"X-Real-IP", "198.51.100.3"}}));
+    server.stop();
+}
+
+// lake#1132: unset, there is no second listener; the proxy port may not be the listen port.
+TEST(HttpServer, ProxyListenerIsOptionalAndNeedsItsOwnPort) {
+    {
+        lake::api::ServerOptions options;
+        options.port = 0;
+        lake::api::ApiServer server(options);
+        ASSERT_TRUE(server.start()) << server.reason();
+        EXPECT_EQ(server.proxy_port(), 0);
+        server.stop();
+    }
+    lake::api::ServerOptions first;
+    first.port = 0;
+    lake::api::ApiServer holder(first);
+    ASSERT_TRUE(holder.start()) << holder.reason();
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.proxy_port = holder.port(); // taken
+    lake::api::ApiServer server(options);
+    EXPECT_FALSE(server.start());
+    EXPECT_NE(server.reason().find("LAKE_PROXY_PORT"), std::string::npos) << server.reason();
+    holder.stop();
+}
+
 TEST(HttpServer, RecoveryWorkCannotBlockHealthOrTheSharedStoreConnection) {
     const auto uri = lake::test::postgres_uri();
     if (!uri)

@@ -124,6 +124,25 @@ std::expected<TrustedProxies, std::string> parse_trusted_proxies(std::string_vie
     return trusted;
 }
 
+std::expected<std::optional<unsigned short>, std::string>
+parse_proxy_port(std::string_view setting) {
+    const auto text = trim(setting);
+    if (text.empty()) {
+        return std::optional<unsigned short>{};
+    }
+    unsigned int port = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), port);
+    if (error != std::errc{} || end != text.data() + text.size() || port == 0 || port > 65535) {
+        return std::unexpected("LAKE_PROXY_PORT: '" + std::string(text) +
+                               "' is not a port from 1 to 65535");
+    }
+    return std::optional<unsigned short>{static_cast<unsigned short>(port)};
+}
+
+std::string_view default_trusted_proxy_setting(bool proxy_listener) {
+    return proxy_listener ? std::string_view("none") : default_trusted_proxy_cidrs;
+}
+
 bool is_trusted_proxy(const TrustedProxies& trusted, std::string_view peer) {
     const auto address = parse_ip_address(peer);
     if (!address) {
@@ -141,7 +160,14 @@ std::string client_address(const TrustedProxies& trusted,
                            std::string_view peer,
                            std::optional<std::string_view> real_ip,
                            std::optional<std::string_view> forwarded_for) {
-    if (!is_trusted_proxy(trusted, peer)) {
+    return client_address(is_trusted_proxy(trusted, peer), peer, real_ip, forwarded_for);
+}
+
+std::string client_address(bool believe_headers,
+                           std::string_view peer,
+                           std::optional<std::string_view> real_ip,
+                           std::optional<std::string_view> forwarded_for) {
+    if (!believe_headers) {
         return peer.empty() || peer == "unknown" ? std::string("direct") : std::string(peer.substr(0, 64));
     }
     if (real_ip) {
