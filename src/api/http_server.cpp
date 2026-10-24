@@ -16338,6 +16338,7 @@ bool ApiServer::start() {
     }));
 
     auto parser_options = http::parser_config{true};
+    apply_header_limits(parser_options, impl.options.max_header_bytes);
     parser_options.body_limit =
         std::max<std::uint64_t>(maximum_sync_body_size, impl.options.max_registry_blob_bytes);
     HttpConnectionLimits limits;

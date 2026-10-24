@@ -62,6 +62,9 @@ struct ServerOptions {
     // Open connections, idle ones included; a connection above it is answered 503 and closed
     // (LAKE_HTTP_MAX_CONNECTIONS).
     std::size_t max_connections = 4096;
+    // The request headers' total size, in bytes. Larger is answered 431
+    // (LAKE_HTTP_MAX_HEADER_BYTES, lake#1108).
+    std::size_t max_header_bytes = 1024 * 1024;
     // A keep-alive connection waiting this long for its next request is closed
     // (LAKE_HTTP_IDLE_TIMEOUT_SECONDS). It must outlast the idle timeout of a proxy's pooled
     // upstream connections (nginx: 60 s).
