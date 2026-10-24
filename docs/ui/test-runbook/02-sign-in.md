@@ -58,7 +58,9 @@ As: owner (signed out) · Needs: a Clerk Lake
 
 Expect:
 - Step 1: eyebrow "Lake by Orama", title "Sign In", sub "Sign in with the email address you were
-  invited with.", and Clerk's form inside the card (no Clerk header, Lake's blue).
+  invited with." where the Clerk instance's sign-up is restricted (testing, staging), or "Sign in
+  with your email address or one of the accounts below." where it is public (lake.live, lake#1116),
+  and Clerk's form inside the card (no Clerk header, Lake's blue).
 - Step 2: the status line reads "Signing you in." and the browser goes through
   `POST /identity/clerk-session` to `/`, the Ask Orama home.
 
@@ -88,7 +90,9 @@ As: visitor · Needs: a Clerk Lake
 
 Expect:
 - Title "Create Your Account", sub "Accounts are added by invitation while Lake is in development.
-  Ask the person who invited you, or sign in if you already have access."
+  Ask the person who invited you, or sign in if you already have access." under restricted
+  sign-up, or "Create your Lake account with your email address or one of the accounts below."
+  under public sign-up (lake#1116).
 - Clerk's sign-up form, whose sign-in link returns to `/sign-in`.
 
 #### AUTH-007 · The server's error is shown · P2
@@ -98,6 +102,10 @@ As: visitor · Needs: a Clerk Lake
 
 Expect:
 - A red notice "Test message" above Clerk's form.
+- Signed in to Clerk already (a refused exchange): the page does not post again by itself. It shows
+  the notice with **Try again** and **Use another account**, and lake's log has no second
+  `POST /identity/clerk-session` until one is pressed (lake#1115; it used to loop once a second
+  into 429).
 
 #### AUTH-008 · Signing out of Clerk does not sign straight back in · P1
 As: owner · Needs: a Clerk Lake

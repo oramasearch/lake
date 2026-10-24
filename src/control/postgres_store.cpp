@@ -818,19 +818,42 @@ std::optional<OidcClaims> verify_oidc_id_token(std::string_view token,
                        std::chrono::system_clock::now().time_since_epoch())
                        .count();
     }
-    const long expires_at = claims.value("exp", 0L);
-    const long not_before = claims.value("nbf", 0L);
-    const long issued_at = claims.value("iat", 0L);
-    const std::string subject = claims.value("sub", "");
-    const nlohmann::json audience = claims.value("aud", nlohmann::json());
-    const bool authorized_party_valid =
-        !audience.is_array() || audience.size() <= 1 || claims.value("azp", "") == client_id;
-    if (claims.value("iss", "") != issuer || !audience_contains(audience, client_id) ||
-        !authorized_party_valid || expires_at <= now_unix || not_before > now_unix + 60 ||
-        issued_at > now_unix + 60 || subject.empty() || claims.value("nonce", "") != nonce) {
+    if (!claims.is_object()) {
         return std::nullopt;
     }
-    return OidcClaims{subject, claims.value("email", ""), claims.value("name", ""), issued_at};
+    // A string claim, or empty. Issuers render an unset template value as null (Clerk's
+    // `{{user.full_name}}` for a person without a name, lake#1115); `value()` would throw on it.
+    const auto text = [&](const char* name) {
+        return claims.contains(name) && claims[name].is_string() ? claims[name].get<std::string>()
+                                                                 : std::string();
+    };
+    const auto number = [&](const char* name) {
+        return claims.contains(name) && claims[name].is_number_integer() ? claims[name].get<long>()
+                                                                         : 0L;
+    };
+    for (const auto* name : {"iss", "sub", "nonce", "azp", "email", "name"}) {
+        if (claims.contains(name) && !claims[name].is_null() && !claims[name].is_string()) {
+            return std::nullopt;
+        }
+    }
+    for (const auto* name : {"exp", "nbf", "iat"}) {
+        if (claims.contains(name) && !claims[name].is_number_integer()) {
+            return std::nullopt;
+        }
+    }
+    const long expires_at = number("exp");
+    const long not_before = number("nbf");
+    const long issued_at = number("iat");
+    const std::string subject = text("sub");
+    const nlohmann::json audience = claims.value("aud", nlohmann::json());
+    const bool authorized_party_valid =
+        !audience.is_array() || audience.size() <= 1 || text("azp") == client_id;
+    if (text("iss") != issuer || !audience_contains(audience, client_id) ||
+        !authorized_party_valid || expires_at <= now_unix || not_before > now_unix + 60 ||
+        issued_at > now_unix + 60 || subject.empty() || text("nonce") != nonce) {
+        return std::nullopt;
+    }
+    return OidcClaims{subject, text("email"), text("name"), issued_at};
 }
 
 std::expected<VerifiedPasskeyRegistration, std::string>

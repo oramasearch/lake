@@ -98,7 +98,7 @@ std::string collapsed(std::string_view text) {
 
 // docs/ui/front-door.md's Landing copy quotes the homepage word for word: every bold phrase is in
 // the page's source (frontend/src/pages/home/HomePage.tsx, and the invitation sentence in
-// frontend/src/pages/account/signIn.ts), as its Verify section checks by hand.
+// frontend/src/lib/clerkSignIn.ts), as its Verify section checks by hand.
 TEST(WebApp, FrontDoorDocQuotesTheHomePage) {
     const std::string doc = read_source("docs/ui/front-door.md");
     const auto start = doc.find("## Landing copy");
@@ -106,7 +106,7 @@ TEST(WebApp, FrontDoorDocQuotesTheHomePage) {
     const auto end = doc.find("\n## ", start + 1);
     const std::string section = doc.substr(start, end == std::string::npos ? end : end - start);
     const std::string source = collapsed(read_source("frontend/src/pages/home/HomePage.tsx") +
-                                         read_source("frontend/src/pages/account/signIn.ts"));
+                                         read_source("frontend/src/lib/clerkSignIn.ts"));
     ASSERT_FALSE(source.empty());
     std::size_t quoted = 0;
     for (std::size_t at = section.find("**"); at != std::string::npos;) {

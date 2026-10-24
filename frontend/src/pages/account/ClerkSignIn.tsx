@@ -5,15 +5,16 @@
  * `lake_session` and redirects. Lake reads no other Clerk state. */
 import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { Notice, Page } from "@/lib/ui";
+import { Actions, Button, Notice, Page } from "@/lib/ui";
 import { useSession } from "@/lib/session";
+import { clerkPageSub, exchangeAutomatically, signUpModeOf, type ClerkEnvironmentHolder, type SignUpMode } from "@/lib/clerkSignIn";
 import { AuthFrame } from "./AuthFrame";
 import { AccountRegionNote } from "@/components/Region";
-import { INVITATION_NOTE, returnQuery, returnTarget } from "./signIn";
+import { returnQuery, returnTarget } from "./signIn";
 
 /** The part of clerk-js this page uses. */
 type ClerkSession = { getToken(options: { template: string }): Promise<string | null> };
-type ClerkJs = {
+type ClerkJs = ClerkEnvironmentHolder & {
   load(): Promise<void>;
   signOut(): Promise<void>;
   session: ClerkSession | null | undefined;
@@ -53,6 +54,30 @@ function loadClerk(publishableKey: string, frontendApi: string): Promise<ClerkJs
     document.head.appendChild(script);
   });
   return loading;
+}
+
+/** The instance's sign-up mode for pages that do not mount Clerk's form (the visitor homepage):
+ * loads clerk-js like the sign-in page and reads what it fetched. "unknown" until then, or when
+ * Clerk is off or cannot be reached (lake#1116). */
+export function useClerkSignUpMode(publishableKey: string | undefined, frontendApi: string | undefined): SignUpMode {
+  const [mode, setMode] = useState<SignUpMode>("unknown");
+  useEffect(() => {
+    if (!publishableKey || !frontendApi) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const clerk = await loadClerk(publishableKey, frontendApi);
+        await clerk.load();
+        if (!cancelled) setMode(signUpModeOf(clerk));
+      } catch {
+        /* the page still offers sign-in; it only leaves the invitation note out */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [publishableKey, frontendApi]);
+  return mode;
 }
 
 /** Post the Clerk token as a real form: a top-level navigation, so the server's Set-Cookie and
@@ -97,6 +122,12 @@ export function ClerkSignIn({ mode }: { mode: "sign-in" | "sign-up" }) {
   // The server's error stays on the page after the address drops it.
   const [error] = useState(() => new URLSearchParams(location.search).get("error"));
   const [signedOut] = useState(() => !!new URLSearchParams(location.search).get("signed_out"));
+  // After a refused exchange the page waits for the person instead of posting again (lake#1115).
+  const [automatic] = useState(() => exchangeAutomatically(location.search));
+  const [signUpMode, setSignUpMode] = useState<SignUpMode>("unknown");
+  const [held, setHeld] = useState(false);
+  const clerkRef = useRef<ClerkJs | null>(null);
+  const retry = useRef<() => void>(() => {});
   const kept = returnQuery(location.search);
   const next = returnTarget(location.search, "");
   const signUp = mode === "sign-up";
@@ -113,6 +144,7 @@ export function ClerkSignIn({ mode }: { mode: "sign-in" | "sign-up" }) {
     let clerk: ClerkJs | null = null;
     let stopListening: (() => void) | null = null;
     let busy = false;
+    retry.current = () => void exchange();
     const exchange = async () => {
       if (busy || cancelled || !clerk?.session) return;
       busy = true;
@@ -131,12 +163,19 @@ export function ClerkSignIn({ mode }: { mode: "sign-in" | "sign-up" }) {
         clerk = await loadClerk(key, host);
         await clerk.load();
         if (cancelled) return;
+        clerkRef.current = clerk;
+        setSignUpMode(signUpModeOf(clerk));
         if (signedOut) {
           // Without this, the still-live Clerk session would sign the person straight back in.
           await clerk.signOut();
           navigate({ pathname: location.pathname, search: kept }, { replace: true });
         }
         if (clerk.session) {
+          if (!automatic) {
+            // Lake refused this session's token: show why and wait for Try again, never a loop.
+            setHeld(true);
+            return;
+          }
           await exchange();
           return;
         }
@@ -172,14 +211,27 @@ export function ClerkSignIn({ mode }: { mode: "sign-in" | "sign-up" }) {
       <Page
         eyebrow="Lake by Orama"
         title={signUp ? "Create Your Account" : "Sign In"}
-        sub={
-          signUp
-            ? `${INVITATION_NOTE} Ask the person who invited you, or sign in if you already have access.`
-            : "Sign in with the email address you were invited with."
-        }
+        sub={clerkPageSub(signUp, signUpMode)}
       >
         <AccountRegionNote mode={signUp ? "sign-up" : "sign-in"} />
         {error && <Notice tone="danger">{error}</Notice>}
+        {held && (
+          <Actions>
+            <Button variant="primary" onClick={() => retry.current()}>
+              Try again
+            </Button>
+            <Button
+              onClick={() => {
+                const clerk = clerkRef.current;
+                const back = `/sign-in${kept}`;
+                if (!clerk) return window.location.assign(back);
+                void clerk.signOut().then(() => window.location.assign(back));
+              }}
+            >
+              Use another account
+            </Button>
+          </Actions>
+        )}
         <div ref={mount} className="clerk-mount" />
         <p className="muted" role="status" aria-live="polite">
           {status}

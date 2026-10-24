@@ -10728,19 +10728,57 @@ struct ApiServer::Impl {
         }
         const std::string audience(clerk_token_template);
         std::optional<control::identity_crypto::OidcClaims> claims;
+        std::string refusal = "no token";
         if (!token.empty()) {
             auto ran = co_await run_blocking(
                 [cache = oidc_jwks, fetch = jwks_fetch(), token, config = *clerk, audience] {
-                    return cache->verify(
-                        token, config.jwks_url, config.issuer, audience, "", false, fetch, true);
+                    std::string reason;
+                    auto verified = cache->verify(token,
+                                                  config.jwks_url,
+                                                  config.issuer,
+                                                  audience,
+                                                  "",
+                                                  false,
+                                                  fetch,
+                                                  true,
+                                                  &reason);
+                    return std::pair{std::move(verified), std::move(reason)};
                 });
             if (ran) {
-                claims = std::move(*ran);
+                claims = std::move(ran->first);
+                refusal = std::move(ran->second);
+            } else {
+                refusal = "verification did not run: " + ran.error().message;
+            }
+            if (claims && claims->issued_at <= 0) {
+                refusal = "no iat";
             }
         }
         ApiContext context = context_for(route);
         context.authentication_method = "clerk";
         if (!claims || claims->issued_at <= 0) {
+            // Why it was refused, and what the token claimed, never the token itself (lake#1115).
+            const auto summary = summarize_token(token);
+            nlohmann::json claim_types = nlohmann::json::object();
+            for (const auto& [name, type] : summary.claim_types) {
+                claim_types[name] = type;
+            }
+            std::cerr << nlohmann::json{{"event", "clerk_sign_in_refused"},
+                                        {"reason", refusal},
+                                        {"expected_issuer", clerk->issuer},
+                                        {"expected_audience", audience},
+                                        {"jwks_url", clerk->jwks_url},
+                                        {"alg", summary.algorithm},
+                                        {"kid", summary.key_id},
+                                        {"iss", summary.issuer},
+                                        {"aud", summary.audience},
+                                        {"azp", summary.authorized_party},
+                                        {"iat", summary.issued_at},
+                                        {"nbf", summary.not_before},
+                                        {"exp", summary.expires_at},
+                                        {"claim_types", claim_types}}
+                             .dump()
+                      << '\n';
             (void)record_direct_event(context,
                                       audit::EventDraft{
                                           .kind = "authentication",

@@ -6,8 +6,10 @@
 #include <chrono>
 #include <ctime>
 #include <future>
+#include <iostream>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -22,6 +24,7 @@
 
 #include "lake/api/capabilities.hpp"
 #include "lake/api/clerk.hpp"
+#include "lake/api/oidc_jwks.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/server.hpp"
 #include "lake/audit/audit.hpp"
@@ -575,4 +578,211 @@ TEST(HttpServer, ClerkBackendStatusDoesNotBlockOtherRequests) {
     const auto denied = exchange.get();
     ASSERT_TRUE(denied);
     EXPECT_EQ(denied->status, 302U);
+}
+
+namespace {
+// What lake.live's production instance issued on 2026-10-24 for a person with no name in Clerk:
+// the `lake` template renders `{{user.full_name}}` as null (lake#1115).
+std::string nameless_template_token(const ClerkInstance& clerk,
+                                    json email = "person@example.test") {
+    const long now = now_unix();
+    return clerk.token({{"iss", ClerkInstance::issuer},
+                        {"aud", "lake"},
+                        {"azp", "https://us.lake.example.test"},
+                        {"sub", "user_test"},
+                        {"email", std::move(email)},
+                        {"name", nullptr},
+                        {"jti", "02aec7b63bb547cf8501"},
+                        {"iat", now},
+                        {"nbf", now - 5},
+                        {"exp", now + 300}});
+}
+
+lake::api::OidcJwks::Fetch serve(const ClerkInstance& clerk) {
+    return [document = clerk.jwks()](const std::string&, bool) {
+        return std::optional<std::string>(document);
+    };
+}
+} // namespace
+
+TEST(Clerk, ATemplateTokenWithANullNameOrEmailVerifies) {
+    ClerkInstance clerk;
+    const auto direct = verify(clerk, nameless_template_token(clerk));
+    ASSERT_TRUE(direct) << "a person without a name in Clerk must still sign in (lake#1115)";
+    EXPECT_EQ(direct->subject, "user_test");
+    EXPECT_EQ(direct->email, "person@example.test");
+    EXPECT_EQ(direct->display_name, "");
+    const auto no_email = verify(clerk, nameless_template_token(clerk, nullptr));
+    ASSERT_TRUE(no_email);
+    EXPECT_EQ(no_email->email, "");
+
+    lake::api::OidcJwks cache;
+    std::string reason;
+    const auto cached = cache.verify(nameless_template_token(clerk),
+                                     std::string(ClerkInstance::issuer) + "/.well-known/jwks.json",
+                                     ClerkInstance::issuer,
+                                     "lake",
+                                     "",
+                                     false,
+                                     serve(clerk),
+                                     true,
+                                     &reason);
+    ASSERT_TRUE(cached) << reason;
+    EXPECT_EQ(cached->display_name, "");
+
+    // Null means absent; any other type is still refused, before and after the signature.
+    const long now = now_unix();
+    const auto numbered = clerk.token({{"iss", ClerkInstance::issuer},
+                                       {"aud", "lake"},
+                                       {"sub", "user_test"},
+                                       {"name", 7},
+                                       {"iat", now},
+                                       {"exp", now + 300}});
+    EXPECT_FALSE(verify(clerk, numbered));
+    reason.clear();
+    EXPECT_FALSE(cache.verify(numbered,
+                              std::string(ClerkInstance::issuer) + "/.well-known/jwks.json",
+                              ClerkInstance::issuer,
+                              "lake",
+                              "",
+                              false,
+                              serve(clerk),
+                              true,
+                              &reason));
+    EXPECT_EQ(reason, "name is neither a string nor null");
+}
+
+TEST(Clerk, ARefusedTokenSaysWhyAndSummarizesWithoutPersonalClaims) {
+    ClerkInstance clerk;
+    const std::string jwks = std::string(ClerkInstance::issuer) + "/.well-known/jwks.json";
+    const auto refusal = [&](const std::string& token) {
+        lake::api::OidcJwks cache;
+        std::string reason;
+        EXPECT_FALSE(cache.verify(
+            token, jwks, ClerkInstance::issuer, "lake", "", false, serve(clerk), true, &reason));
+        return reason;
+    };
+    const long now = now_unix();
+    EXPECT_EQ(refusal(clerk.template_token(-600)).rfind("expired (exp ", 0), 0U);
+    EXPECT_EQ(refusal(clerk.token({{"iss", "https://clerk.example.test/"},
+                                   {"aud", "lake"},
+                                   {"sub", "user_test"},
+                                   {"iat", now},
+                                   {"exp", now + 300}})),
+              "iss is not https://example-123.clerk.accounts.dev");
+    EXPECT_EQ(refusal(clerk.token({{"iss", ClerkInstance::issuer},
+                                   {"aud", "other"},
+                                   {"sub", "user_test"},
+                                   {"iat", now},
+                                   {"exp", now + 300}})),
+              "aud does not name lake");
+    EXPECT_EQ(refusal(clerk.token({{"iss", ClerkInstance::issuer},
+                                   {"aud", "lake"},
+                                   {"sub", "user_test"},
+                                   {"exp", now + 300}})),
+              "no iat");
+    EXPECT_EQ(refusal("not.a.jwt"), "header, claims or signature do not decode");
+    ClerkInstance other;
+    lake::api::OidcJwks cache;
+    std::string reason;
+    EXPECT_FALSE(cache.verify(clerk.template_token(),
+                              jwks,
+                              ClerkInstance::issuer,
+                              "lake",
+                              "",
+                              false,
+                              serve(other),
+                              true,
+                              &reason));
+    EXPECT_EQ(reason, "signature or claims do not verify with key ins_test");
+
+    const auto summary = lake::api::summarize_token(nameless_template_token(clerk));
+    EXPECT_EQ(summary.algorithm, "RS256");
+    EXPECT_EQ(summary.key_id, "ins_test");
+    EXPECT_EQ(summary.issuer, ClerkInstance::issuer);
+    EXPECT_EQ(summary.audience, "\"lake\"");
+    EXPECT_EQ(summary.authorized_party, "https://us.lake.example.test");
+    EXPECT_GT(summary.expires_at, summary.issued_at);
+    EXPECT_EQ(summary.claim_types.at("name"), "null");
+    EXPECT_EQ(summary.claim_types.at("email"), "string");
+    EXPECT_TRUE(lake::api::summarize_token("garbage").issuer.empty());
+}
+
+// The exchange end to end: the token shape lake.live refused signs in, and a refused token is
+// logged with its reason and registered claims, never the token or the person's claims.
+TEST(HttpServer, ClerkExchangeAcceptsANamelessPersonAndLogsWhyATokenWasRefused) {
+    ClerkInstance clerk;
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.store = store;
+    options.instance_kek = std::string(test_kek);
+    options.clerk_publishable_key = "pk_test_" + base64("example-123.clerk.accounts.dev$");
+    options.clerk_secret_key = "dummy-clerk-key";
+    options.clerk_http = [&](const std::string& url, const auto&) -> lake::api::ClerkResponse {
+        if (url == std::string(ClerkInstance::issuer) + "/.well-known/jwks.json") {
+            return {200, clerk.jwks(), ""};
+        }
+        return {200,
+                json{{"id", "user_test"},
+                     {"updated_at", 100},
+                     {"banned", false},
+                     {"locked", false},
+                     {"deprovisioned", false}}
+                    .dump(),
+                ""};
+    };
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const auto exchange = [&](const std::string& token) {
+        const auto body = "token=" + token;
+        const auto* bytes = reinterpret_cast<const std::byte*>(body.data());
+        return lake::test::http_request(
+            {.url = "http://127.0.0.1:" + std::to_string(server.port()),
+             .method = "POST",
+             .suffix = "/identity/clerk-session",
+             .headers = {{"Content-Type", "application/x-www-form-urlencoded"}},
+             .body = std::vector<std::byte>(bytes, bytes + body.size())});
+    };
+    const auto active_sessions = [&] {
+        const auto users = store->list_users(10);
+        if (!users || users->empty())
+            return std::ptrdiff_t{0};
+        const auto sessions = store->list_sessions(users->front().id, "lake");
+        return sessions ? std::ranges::count_if(*sessions,
+                                                [](const auto& s) { return s.revoked_at.empty(); })
+                        : std::ptrdiff_t{0};
+    };
+
+    const auto signed_in = exchange(nameless_template_token(clerk));
+    ASSERT_TRUE(signed_in);
+    EXPECT_EQ(signed_in->status, 302U);
+    EXPECT_EQ(active_sessions(), 1) << "the nameless person is signed in (lake#1115)";
+
+    const long now = now_unix();
+    const std::string refused_token = clerk.token({{"iss", ClerkInstance::issuer},
+                                                   {"aud", "other"},
+                                                   {"sub", "user_test"},
+                                                   {"email", "person@example.test"},
+                                                   {"iat", now},
+                                                   {"exp", now + 300}});
+    std::ostringstream captured;
+    auto* previous = std::cerr.rdbuf(captured.rdbuf());
+    const auto refused = exchange(refused_token);
+    std::cerr.rdbuf(previous);
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(refused->status, 302U);
+    EXPECT_EQ(active_sessions(), 1);
+    const std::string log = captured.str();
+    ASSERT_NE(log.find("\"event\":\"clerk_sign_in_refused\""), std::string::npos) << log;
+    EXPECT_NE(log.find("\"reason\":\"aud does not name lake\""), std::string::npos) << log;
+    EXPECT_NE(log.find("\"expected_audience\":\"lake\""), std::string::npos) << log;
+    EXPECT_NE(log.find("\"kid\":\"ins_test\""), std::string::npos) << log;
+    EXPECT_EQ(log.find(refused_token.substr(refused_token.rfind('.') + 1)), std::string::npos)
+        << "the signature is never logged";
+    EXPECT_EQ(log.find(refused_token.substr(0, refused_token.rfind('.'))), std::string::npos)
+        << "the token is never logged";
+    EXPECT_EQ(log.find("person@example.test"), std::string::npos);
+    EXPECT_EQ(log.find("user_test"), std::string::npos);
+    server.stop();
 }
