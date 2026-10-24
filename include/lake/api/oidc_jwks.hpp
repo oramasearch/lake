@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -13,8 +14,25 @@
 
 namespace lake::api {
 
+// What a refused token claimed, for the log: header and registered claims only. Never the token,
+// its signature, its subject or its personal claims (lake#1115).
+struct TokenSummary {
+    std::string algorithm;
+    std::string key_id;
+    std::string issuer;
+    std::string audience; // the `aud` claim as JSON: a string or an array
+    std::string authorized_party;
+    std::int64_t issued_at = 0;
+    std::int64_t not_before = 0;
+    std::int64_t expires_at = 0;
+    std::map<std::string, std::string>
+        claim_types; // claim name -> JSON type ("string", "null", ...)
+};
+TokenSummary summarize_token(std::string_view token);
+
 // Shared by Clerk and OIDC. Call on the blocking pool: Fetch may perform network I/O.
 // In-flight refreshes fail closed for other callers; failures also consume the cooldown.
+// `reason`, when given, receives why a token was refused, in words safe to log.
 class OidcJwks {
 public:
     using Clock = std::chrono::steady_clock;
@@ -29,7 +47,8 @@ public:
                                                                std::string_view nonce,
                                                                bool public_only,
                                                                const Fetch& fetch,
-                                                               bool require_issued_at = false);
+                                                               bool require_issued_at = false,
+                                                               std::string* reason = nullptr);
 
 private:
     struct Entry {

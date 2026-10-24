@@ -29,7 +29,15 @@ every page and API call is resolved by `context_for` as before.
    (`<issuer>/.well-known/jwks.json`, with the bounded refresh policy below): RS256,
    `iss` equal to the instance issuer, `aud` equal to `lake`, `exp` in the future, and `nbf` and
    `iat` not more than 60 seconds ahead. Clerk's default session token has no `aud` and is
-   refused; only the template token is accepted.
+   refused; only the template token is accepted. `email` and `name` are strings or `null`: Clerk
+   renders an unset template value as `null`, so a person with no name in Clerk carries
+   `"name": null` and is accepted with an empty display name; any other type is refused
+   (lake#1115, which locked every nameless person out of lake.live through v0.5.2).
+   A refused token is logged as one `clerk_sign_in_refused` line: the reason (for example
+   `aud does not name lake`, `expired (exp …, now …)`, `key … is not in the JWKS`), the issuer,
+   audience and JWKS URL lake expected, and the token's `alg`, `kid`, `iss`, `aud`, `azp`, `iat`,
+   `nbf`, `exp` and each claim's JSON type. Never the token, its signature, `sub`, `email` or
+   `name`.
 4. Lake checks `GET https://api.clerk.com/v1/users/<sub>` with `LAKE_CLERK_SECRET_KEY`,
    without caching. A missing key, transport failure, non-200 reply, mismatched user or incomplete
    status refuses exchange. A banned, locked or Directory Sync deprovisioned account is suspended
@@ -46,7 +54,10 @@ every page and API call is resolved by `context_for` as before.
    the home, Ask Orama (`/`; lake#600, `account_landing` in `http_server.cpp`; it was `/repositories`)
    (lake#561: the web app posts the page that sent the person to sign in). An OAuth or OIDC sign-in
    in lake's own pool lands there too. A
-   failure redirects to `/sign-in?error=<message>`.
+   failure redirects to `/sign-in?error=<message>`. With `?error=` the page does not post again by
+   itself: Clerk's session is still live, so it would be refused again, once a second, into the
+   rate limit (lake#1115). It shows the error with **Try again** (one more exchange) and **Use
+   another account** (signs out of Clerk and shows Clerk's form).
 5. `POST /logout` clears `lake_session` and, with Clerk on, redirects to `/sign-in?signed_out=1`,
    which signs the browser out of Clerk as well. Without that, the next visit would sign the person
    straight back in.
@@ -204,10 +215,15 @@ The Clerk instance needs:
   `{"aud": "lake", "email": "{{user.primary_email_address}}", "name": "{{user.full_name}}"}`,
   lifetime 300 seconds.
 - **Email sign-in** with verification at sign-up, so the email a token carries is verified.
-- **Sign-up mode** `restricted` while lake is in development: people are added in Clerk. The
-  sign-up page and the visitor homepage say the same sentence, `INVITATION_NOTE` in
-  `frontend/src/pages/account/signIn.ts`, and no page offers a visitor *Create account* (lake#448):
-  the `viewer` read says `password_sign_up: false` under Clerk.
+- **Sign-up mode**, chosen per instance in Clerk; lake follows it (lake#1116). The web app reads
+  the mode clerk-js fetched from the instance (`userSettings.signUp.mode`,
+  `frontend/src/lib/clerkSignIn.ts`), never a setting of its own. Under `restricted` or `waitlist`
+  the sign-in and sign-up pages and the visitor homepage say the invitation sentence,
+  `INVITATION_NOTE`, and the homepage offers a visitor Sign in only. Under `public` (lake.live since
+  2026-10-24) no page mentions invitations and the homepage offers **Create an account**. Lake's own
+  password sign-up stays off under Clerk either way (`password_sign_up: false`); people sign up
+  through Clerk. The per-environment table is in
+  [`../deployment/users.md`](../deployment/users.md#what-the-pages-say-about-sign-up).
 
 ### The instance lake.oramadev.net uses
 
@@ -230,7 +246,12 @@ curl -s https://<host>/sign-in | grep data-clerk-publishable-key
 `Clerk.*` covers the key parsing, template-token verification (wrong audience, issuer, signer,
 expiry and tampering are refused), managed-key minting, and the sign-in contract on both stores
 (create, repeat, link by email, refuse without an identity). `HttpServer.Clerk*` covers the pages,
-a refused token, logout, and the exchange being absent without Clerk. The browser flow itself
+a refused token, logout, and the exchange being absent without Clerk.
+`Clerk.ATemplateTokenWithANullNameOrEmailVerifies`, `Clerk.ARefusedTokenSaysWhyAndSummarizesWithoutPersonalClaims`
+and `HttpServer.ClerkExchangeAcceptsANamelessPersonAndLogsWhyATokenWasRefused` pin lake#1115: the
+token shape lake.live issued for a nameless person, each refusal's reason, and a log line without
+the token. `frontend/tests/clerk-sign-in.test.ts` pins the page holding after a refused exchange
+and the sign-up wording per mode (lake#1116). The browser flow itself
 needs a real Clerk instance: sign in at `/sign-in` with an invited address and confirm you land on
 `/repositories` with a `lake_session` cookie.
 
@@ -248,9 +269,8 @@ exchange route with signed template tokens and an isolated HTTP double. Run
 ## Change it
 
 - A different instance: change `LAKE_CLERK_PUBLISHABLE_KEY` and create the `lake` template there.
-- Public sign-up: set the instance's `auth_access_control.sign_up_mode` to `public`, then change
-  `INVITATION_NOTE` and the Clerk branches of the web app's homepage and account menu to offer
-  *Create account* again.
+- Public or restricted sign-up: set the instance's `auth_access_control.sign_up_mode`. The pages
+  follow on the next load; nothing in lake changes.
 - Keep the verifier strict: any change to the claims lake reads belongs in both the template and
   `serve_clerk_session`, with a test in `tests/test_clerk.cpp`.
 

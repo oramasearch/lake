@@ -16,8 +16,8 @@ Without Clerk, a new person's first repository takes these steps in the web app 
 4. **Create a Repository** on `/repositories` chooses the workspace, a name and an optional
    description, and calls `create_repository` (private). The repository home opens.
 
-Under Clerk, sign-up is by invitation and `/sign-up` shows Clerk's form with the invitation
-sentence ([front-door.md](front-door.md)).
+Under Clerk, `/sign-up` shows Clerk's form; the invitation sentence appears only where the
+instance's sign-up mode is restricted ([front-door.md](front-door.md), lake#1116).
 
 To verify, follow the steps in fresh browser profiles at 1280 and 640 px in both themes against a
 native lake on a separate database, then check zero usage with
