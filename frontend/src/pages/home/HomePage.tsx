@@ -1,5 +1,7 @@
-/** Home (`/`): Ask Orama for a signed-in person (lake#600); for a visitor and the operator, what lake
- * is for and their next step. An old Command Center link (`/?ws=`) opens the Dashboard. The landing
+/** Home (`/`): Quickstart for a signed-in person (lake#1128; Ask Orama, the home from lake#600, is at
+ * `/ask`); for a visitor and the operator, what lake is for and their next step. An old Command
+ * Center link (`/?ws=`) opens the Dashboard, and an old Ask Orama home link (`/?conversation=`) opens
+ * `/ask`. The landing
  * copy is pinned by docs/ui/front-door.md (`WebApp.FrontDoorDocQuotesTheHomePage`); keep its bold
  * quotes word for word. */
 import { Link, Navigate, useLocation } from "react-router-dom";
@@ -8,15 +10,15 @@ import { useTrail } from "@/lib/trail";
 import { Actions, Button, Page } from "@/lib/ui";
 import { INVITATION_NOTE, signUpByInvitation } from "@/lib/clerkSignIn";
 import { useClerkSignUpMode } from "@/pages/account/ClerkSignIn";
-import AskHome from "@/pages/ask/AskHome";
 import { homeView } from "@/pages/ask/home";
+import QuickstartPage from "@/pages/quickstart/QuickstartPage";
 
 export default function HomePage() {
   const { viewer } = useSession();
   const { search } = useLocation();
   const home = homeView(viewer, search);
   if (home.view === "redirect") return <Navigate to={home.to} replace />;
-  if (home.view === "ask") return <AskHome />;
+  if (home.view === "quickstart") return <QuickstartPage />;
   return <Landing />;
 }
 

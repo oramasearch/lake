@@ -533,6 +533,14 @@ read, a revoked invitation that cannot be accepted, the grants that are kept, a 
 leaves nothing in its workspace, a conversation removed for its person only, the engine deletions'
 fields and an older engine's `not_supported`, and the log each is audited in.
 
+`test_quickstart.cpp` covers the quickstart process (lake#1128, docs/api/quickstart.md) over a test
+double of the workspace engine and two accounts with billing on: the whole process from a dropped CSV
+to a published model and its website code, a failed step kept with why and resumed, a blocked balance
+refused with the top-up link before any step, another account's workspace refused, a person with no
+workspace waiting for one, input refusals, and the OpenAPI, MCP, `llms.txt`, `llms-full.txt` and
+skill listings. `QuickstartZetta.*` runs the whole process against a real Zetta named by
+`LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` and skips without them.
+
 `test_transcripts.cpp` covers the pure parts of speech-to-text and transcripts (lake#561):
 `.vtt`/`.srt` cleaning, audio decoding and its 25 MiB limit, file names, the OpenAI multipart
 request and its errors through a fake `TranscriptPost`, paging, excerpts and the audit

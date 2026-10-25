@@ -50,7 +50,8 @@ Orama design tokens, the same IBM Plex faces and the same component classes the 
 | `src/pages/connections/` | Data → Connections: `connections.ts` (pure: words, inputs, the old Datasets links; tested by `tests/connections.test.ts`), `forms.tsx` (Add connection and the pull, shared with Datasets) ([connections.md](connections.md)). |
 | `src/pages/drives/` | Data → Drives: `storage.ts` (the `DriveStorage` interface and its four implementations), `StorageTab.tsx` and `stores.ts` (the Storage tab, lake#656), `paths.ts` and `targets.ts` (pure, tested by `tests/drives.test.ts`) ([drives.md](drives.md)). |
 | `src/lib/ask.ts`, `src/components/follow.tsx` | `openAsk` (a page opens Ask Orama about something), `focusAsk` (the top bar's Ask Orama on the home puts the cursor in its message box) and `useFollow` (a conversation follows new answers unless the person scrolled up). |
-| `src/pages/ask/` | Ask Orama: `AskHome.tsx` (the home of a signed-in person, `/`), `thread.ts` (the conversation the home and the panel share), `conversation.tsx` (messages, proposals, the message box), `home.ts` (what `/` shows each viewer, old `/ask` and `/?ws=` links, a link's hand-over, the starting questions; pure, tested by `tests/home.test.ts`) and `AskRedirect.tsx` (`/ask` to `/`). |
+| `src/pages/ask/` | Ask Orama: `AskPage.tsx` and `AskHome.tsx` (its page, `/ask`; the home from lake#600 until lake#1128), `thread.ts` (the conversation the page and the panel share), `conversation.tsx` (messages, proposals, the message box), `home.ts` (what `/` shows each viewer, old `/?conversation=` and `/?ws=` links, a link's hand-over, the starting questions; pure, tested by `tests/home.test.ts`) and `AskRedirect.tsx` (`/w/<id>/ask` to `/ask`). |
+| `src/pages/quickstart/` | Quickstart, the home of a signed-in person (`/`, lake#1128, [quickstart.md](quickstart.md)): `QuickstartPage.tsx` and its pure rules `quickstart.ts`, tested by `tests/quickstart.test.ts`. |
 
 ## The look
 

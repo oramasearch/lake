@@ -468,6 +468,9 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "pull",
     "push",
     "put_secret",
+    // The quickstart process (lake#1128): its record is in the workspace it runs in.
+    "quickstart_snippets",
+    "quickstart_status",
     "read_chunk",
     "read_drive_file",
     "read_mcp_tool",
@@ -530,6 +533,7 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "stage_repository_file",
     "start_app",
     "start_experiment",
+    "start_quickstart",
     "start_solution",
     "stop_agent_launch",
     "stop_app",
@@ -540,6 +544,7 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "suspend_application_user",
     "tail_experiment_events",
     "test_mcp_connection",
+    "train_quickstart",
     // Dictation is the speech-to-text usage of the workspace it is dictated in (lake#613).
     "transcribe",
     "transfer_repository",

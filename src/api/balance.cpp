@@ -451,8 +451,12 @@ json balance_json(const control::AccountBalance& balance,
 std::span<const PaidWork> paid_work_capabilities() {
     // The one list (docs/api/billing.md#the-gate). PaidWorkContract.* fails when a capability whose
     // name says it creates, starts or grows something is neither here nor classified as free.
-    static constexpr std::array<PaidWork, 51> list{{
+    static constexpr std::array<PaidWork, 53> list{{
         {"create_workspace", "starts a workspace engine, billed by its CPU, RAM and volume"},
+        // The quickstart process (lake#1128) calls the paid capabilities below it; refusing it
+        // first means a blocked account gets the top-up link before any step starts.
+        {"start_quickstart", "makes a workspace, stores a dataset and builds a search index"},
+        {"train_quickstart", "trains a model on billed compute and serves it"},
         {"start_workspace", "starts a stopped workspace engine"},
         {"update_workspace", "starts a stopped workspace engine (`desired: running`)"},
         {"create_app", "creates an app that runs on billed compute"},

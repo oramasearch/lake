@@ -42,7 +42,7 @@ Sign-in pages leave with a full page load (`leaveFor` in `signIn.ts`), so the wh
    [web-apps.md](../api/web-apps.md#lake-protected-app-authentication));
 2. else `?next=` when it is a same-origin path (one leading `/`, never `//host` or `/\host`) — a
    protected page sends a visitor to `/sign-in?next=<that page>`;
-3. else the page's default: the home, Ask Orama (`/`), after an account signs in (lake#600;
+3. else the page's default: the home, Quickstart (`/`, lake#1128; Ask Orama until then), after an account signs in (lake#600;
    `landingAfterSignIn` in `pages/ask/home.ts`), `/repositories` for the operator and after sign-up.
 
 Links between sign-in pages carry `next` and `return_to` along. Under Clerk, the pending return is

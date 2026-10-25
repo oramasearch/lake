@@ -1,5 +1,5 @@
 // End-to-end browser walkthrough of lake's console (docs/deployment/browser-testing.md): Clerk
-// sign-in with a one-time ticket, landing on `/` (Ask Orama), then Design, Train and Ship as a
+// sign-in with a one-time ticket, landing on `/` (Quickstart), then Design, Train and Ship as a
 // person does them, with a screenshot per step, a log.json, and pass/fail checks (exit 1 on any
 // failure).
 //
@@ -128,7 +128,8 @@ async function design() {
 /** Every remaining page opens with its title and no error. */
 async function pages() {
   for (const [path, title] of [["/train/data", "Datasets"], ["/train/runs", "Runs"], ["/ship/models", "Models"], ["/ship/indexes", "Search Indexes"],
-                               ["/deployments", "Deployments"], ["/services", "Services"], ["/", /^Hello/]]) {
+                               ["/deployments", "Deployments"], ["/services", "Services"],
+                               ["/", "Search and Model Answers on Your Website"], ["/ask", /^Hello/]]) {
     await page.goto(`${base}${path}`);
     await main().getByRole("heading", { level: 1, name: title }).waitFor({ timeout: 30000 }).catch(() => {});
     await settle();
@@ -323,7 +324,7 @@ async function deleteProjects(project) {
 }
 
 try {
-  // 1. Sign in through Clerk's own form; lake lands a signed-in person on `/` (Ask Orama).
+  // 1. Sign in through Clerk's own form; lake lands a signed-in person on `/` (Quickstart).
   viewer = await signIn(page, base, ticketFile);
   await shot("signed-in");
   check("sign-in", new URL(page.url()).pathname === "/", { url: page.url(), heading: await h1() });

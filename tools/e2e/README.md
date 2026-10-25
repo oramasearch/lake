@@ -16,6 +16,17 @@ How to get a Clerk test user and ticket, and what each browser script checks, is
 | `start-times.py` | How long each service kind takes to start |
 
 ## Live agent scenarios
+# Browser walkthroughs
+
+`walkthrough.mjs` walks every Design, Train and Ship page after a Clerk ticket sign-in, and
+`quickstart.mjs` walks the quickstart process (lake#1128, [docs/ui/quickstart.md](../../docs/ui/quickstart.md)):
+the sign-in lands on Quickstart at `/`, a CSV is dropped, searched on the page, the plain web page
+code is served from another origin and searched there, a model is trained and published, and its
+answers appear on the page and on that website. Both take `<base-url> <ticket-file> <output-dir>`
+([docs/deployment/browser-testing.md](../../docs/deployment/browser-testing.md)). `quickstart.mjs`
+leaves its dataset, index, model and key in the account's workspace.
+
+# Live agent scenarios
 
 `agents.py` drives the Agent Library through a deployed Lake's public API. T1–T10 cover reads,
 proposals, delegation, agent tasks, and workspace pub/sub (Train → Streams' capabilities). T11

@@ -12,12 +12,13 @@ export function billingVisible(item: { billing?: boolean }, viewer: { billing?: 
   return !item.billing || viewer.billing === true;
 }
 
-/** The top of the rail. A signed-in person's Home group lists Ask Orama (the home, `/`), then
- * Dashboard, the whole platform at a glance (`/dashboard`). A visitor and the operator keep the one
- * Home item, their landing. */
+/** The top of the rail. A signed-in person's Home group lists Quickstart (the home, `/`, lake#1128),
+ * Ask Orama (`/ask`), then Dashboard, the whole platform at a glance (`/dashboard`). A visitor and
+ * the operator keep the one Home item, their landing. */
 export const HOME_NAV: NavItem[] = [
   { section: "top", path: "/", label: "Home", icon: "home", audience: ["visitor", "operator"] },
-  { section: "home", path: "/", label: "Ask Orama", icon: "ask", audience: ["account"] },
+  { section: "home", path: "/", label: "Quickstart", icon: "home", audience: ["account"] },
+  { section: "home", path: "/ask", label: "Ask Orama", icon: "ask", audience: ["account"] },
   { section: "home", path: "/dashboard", label: "Dashboard", icon: "dashboard", audience: ["account"] },
 ];
 

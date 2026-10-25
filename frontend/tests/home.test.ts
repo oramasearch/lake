@@ -1,6 +1,7 @@
-/** Ask Orama as the home (lake#600): what `/` shows each viewer, the rail's Home group and which of
- * its items is current, old `/ask` and Command Center links, what a link hands the shared
- * conversation, and the starting questions. `npm test`; the build runs it. */
+/** The home and Ask Orama's page: Quickstart is a signed-in person's home (lake#1128) and Ask Orama
+ * has its own page, `/ask` (it was the home from lake#600); the rail's Home group and which of its
+ * items is current, old home links with a conversation, `/w/<id>/ask` and Command Center links, what
+ * a link hands the shared conversation, and the starting questions. `npm test`; the build runs it. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { askLinkTarget, confirmOutcomes, greeting, homeLink, homeView, isAskHome, landingAfterSignIn, linkThread, proposalCall, shownValue, starterQuestions, visibleText } from "../src/pages/ask/home.ts";
@@ -10,32 +11,40 @@ const person = { signed_in: true, administrator: false };
 const operator = { signed_in: true, administrator: true };
 const visitor = { signed_in: false };
 
-test("a signed-in person's home is Ask Orama; the operator and visitors keep the landing", () => {
-  assert.deepEqual(homeView(person, ""), { view: "ask" });
-  assert.deepEqual(homeView(person, "?from=%2Ftrain%2Fruns"), { view: "ask" });
+test("a signed-in person's home is Quickstart; the operator and visitors keep the landing", () => {
+  assert.deepEqual(homeView(person, ""), { view: "quickstart" });
   assert.deepEqual(homeView(operator, ""), { view: "landing" });
   assert.deepEqual(homeView(visitor, ""), { view: "landing" });
   assert.deepEqual(homeView(visitor, "?ws=a"), { view: "landing" });
+  assert.deepEqual(homeView(visitor, "?conversation=k1"), { view: "landing" });
 });
 
 test("an old Command Center link opens the Dashboard with its query", () => {
   assert.deepEqual(homeView(person, "?ws=a,b"), { view: "redirect", to: "/dashboard?ws=a,b" });
 });
 
-test("the Ask Orama home is `/` for a signed-in person only", () => {
-  assert.equal(isAskHome("/", person), true);
-  assert.equal(isAskHome("/dashboard", person), false);
-  assert.equal(isAskHome("/w/abc/design/projects", person), false);
-  assert.equal(isAskHome("/", operator), false);
-  assert.equal(isAskHome("/", visitor), false);
+test("an old Ask Orama home link opens Ask Orama's page with its query", () => {
+  assert.deepEqual(homeView(person, "?from=%2Ftrain%2Fruns"), { view: "redirect", to: "/ask?from=%2Ftrain%2Fruns" });
+  assert.deepEqual(homeView(person, "?conversation=k1&task=t1"), { view: "redirect", to: "/ask?conversation=k1&task=t1" });
+  assert.deepEqual(homeView(person, "?agent=agent-x"), { view: "redirect", to: "/ask?agent=agent-x" });
 });
 
-test("the rail's Home group: Ask Orama, then Dashboard, for a signed-in person", () => {
+test("Ask Orama's page is `/ask` for a signed-in person only", () => {
+  assert.equal(isAskHome("/ask", person), true);
+  assert.equal(isAskHome("/", person), false, "the home is Quickstart now");
+  assert.equal(isAskHome("/dashboard", person), false);
+  assert.equal(isAskHome("/w/abc/design/projects", person), false);
+  assert.equal(isAskHome("/ask", operator), false);
+  assert.equal(isAskHome("/ask", visitor), false);
+});
+
+test("the rail's Home group: Quickstart, Ask Orama, then Dashboard, for a signed-in person", () => {
   const account = HOME_NAV.filter((i) => i.audience.includes("account"));
   assert.deepEqual(
     account.map((i) => [i.section, i.label, i.path]),
     [
-      ["home", "Ask Orama", "/"],
+      ["home", "Quickstart", "/"],
+      ["home", "Ask Orama", "/ask"],
       ["home", "Dashboard", "/dashboard"],
     ],
   );
@@ -49,20 +58,21 @@ test("the rail's Home group: Ask Orama, then Dashboard, for a signed-in person",
 
 test("each Home item is current on its own page only", () => {
   const items = HOME_NAV.filter((i) => i.audience.includes("account"));
-  assert.equal(currentNavIn("/", items)?.label, "Ask Orama");
+  assert.equal(currentNavIn("/", items)?.label, "Quickstart");
+  assert.equal(currentNavIn("/ask", items)?.label, "Ask Orama");
   assert.equal(currentNavIn("/dashboard", items)?.label, "Dashboard");
   assert.equal(currentNavIn("/dashboard/anything", items)?.label, "Dashboard");
   assert.equal(currentNavIn("/train/runs", items), undefined);
-  assert.equal(currentNavIn("/w/abc/", items)?.label, "Ask Orama");
+  assert.equal(currentNavIn("/w/abc/", items)?.label, "Quickstart");
   assert.equal(localPath("/w/abc/train/runs"), "/train/runs");
   assert.equal(localPath("/w/abc"), "/");
 });
 
-test("old /ask links open the home with their query, without customer_id", () => {
-  assert.equal(askLinkTarget(""), "/");
-  assert.equal(askLinkTarget("?customer_id=c1"), "/");
-  assert.equal(askLinkTarget("?customer_id=c1&conversation=k1&task=t1"), "/?conversation=k1&task=t1");
-  assert.equal(askLinkTarget("?agent=agent-x&from=%2Ftrain%2Fruns"), "/?agent=agent-x&from=%2Ftrain%2Fruns");
+test("Ask Orama links open /ask with their query, without customer_id", () => {
+  assert.equal(askLinkTarget(""), "/ask");
+  assert.equal(askLinkTarget("?customer_id=c1"), "/ask");
+  assert.equal(askLinkTarget("?customer_id=c1&conversation=k1&task=t1"), "/ask?conversation=k1&task=t1");
+  assert.equal(askLinkTarget("?agent=agent-x&from=%2Ftrain%2Fruns"), "/ask?agent=agent-x&from=%2Ftrain%2Fruns");
 });
 
 test("a home link hands its conversation over and keeps only from", () => {
@@ -74,12 +84,13 @@ test("a home link hands its conversation over and keeps only from", () => {
   assert.deepEqual(linkThread("?agent=agent-x"), { adopt: { conversation: "", task: "", agent: "agent-x" }, keep: "" });
 });
 
-test("the panel's Open as a page goes to the home, about its page", () => {
-  assert.equal(homeLink(""), "/");
-  assert.equal(homeLink("/"), "/");
-  assert.equal(homeLink("/train/run?id=r1"), "/?from=%2Ftrain%2Frun%3Fid%3Dr1");
-  // The home reads it back as the same page.
-  assert.equal(new URLSearchParams(homeLink("/train/run?id=r1").slice(1)).get("from"), "/train/run?id=r1");
+test("the panel's Open as a page goes to Ask Orama's page, about its page", () => {
+  assert.equal(homeLink(""), "/ask");
+  assert.equal(homeLink("/"), "/ask");
+  assert.equal(homeLink("/ask"), "/ask");
+  assert.equal(homeLink("/train/run?id=r1"), "/ask?from=%2Ftrain%2Frun%3Fid%3Dr1");
+  // The page reads it back as the same page.
+  assert.equal(new URLSearchParams(homeLink("/train/run?id=r1").split("?")[1]).get("from"), "/train/run?id=r1");
 });
 
 test("starting questions come from the workspace's datasets, projects and runs", () => {

@@ -346,6 +346,8 @@ type ButtonProps = {
   title?: string;
   className?: string;
   "aria-label"?: string;
+  /** A stable hook for browser walkthroughs (tools/e2e). */
+  "data-testid"?: string;
   form?: string;
 };
 
@@ -366,20 +368,20 @@ export function Button({ children, variant = "secondary", onClick, type = "butto
   );
   if (to && !disabled) {
     return (
-      <Link to={to} className={classes} title={title} aria-label={rest["aria-label"]}>
+      <Link to={to} className={classes} title={title} aria-label={rest["aria-label"]} data-testid={rest["data-testid"]}>
         {content}
       </Link>
     );
   }
   if (href && !disabled) {
     return (
-      <a href={href} className={classes} title={title} aria-label={rest["aria-label"]}>
+      <a href={href} className={classes} title={title} aria-label={rest["aria-label"]} data-testid={rest["data-testid"]}>
         {content}
       </a>
     );
   }
   return (
-    <button type={type} className={classes} onClick={onClick} disabled={disabled || loading} title={title} aria-label={rest["aria-label"]} form={form}>
+    <button type={type} className={classes} onClick={onClick} disabled={disabled || loading} title={title} aria-label={rest["aria-label"]} data-testid={rest["data-testid"]} form={form}>
       {content}
     </button>
   );

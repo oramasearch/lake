@@ -6,8 +6,9 @@ server-rendered homepage checked on 2026-10-01 against lake `36679e1` on the dev
 The homepage (`/`, `frontend/src/pages/home/HomePage.tsx`) says what Lake is for: designing,
 training and shipping AI on the customer's own data, in a workspace of their own. It reads only
 `viewer`. Repositories are one link under Ship. Visitors and the operator see it. A signed-in
-person lands on Ask Orama instead, full page, and finds the platform at a glance under Home →
-Dashboard (`/dashboard`; lake#600, [README.md](README.md#the-shell)).
+person lands on Quickstart instead ([quickstart.md](quickstart.md), lake#1128), has Ask Orama at
+`/ask`, and finds the platform at a glance under Home → Dashboard (`/dashboard`; lake#600,
+[README.md](README.md#the-shell)).
 
 **Sign-in.** When `LAKE_CLERK_PUBLISHABLE_KEY` is set (`viewer.clerk.enabled`), Sign in opens
 Clerk's form and lake's own password, TOTP and passkey pages leave the navigation; see

@@ -50,7 +50,7 @@ Identity](#your-identity)).
 ## Sign In
 
 **With Clerk**, press **Sign in** and follow Clerk's steps; you return to the page that sent you,
-or to **Ask Orama**, Lake's home.
+or to **Quickstart**, Lake's home.
 
 **With Lake's own sign-in** (`/sign-in`):
 
@@ -59,7 +59,7 @@ or to **Ask Orama**, Lake's home.
    sign in**.
 3. Or choose **Use a passkey**, or a configured social **Provider** and **Continue to provider**.
 
-You return to the page that sent you to sign in, or to **Ask Orama**, Lake's home, by default.
+You return to the page that sent you to sign in, or to **Quickstart**, Lake's home, by default.
 
 Through the REST API, send `POST /v1/sign_in_password` with this body:
 

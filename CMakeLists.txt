@@ -294,6 +294,7 @@ add_library(lake-core STATIC
   src/api/workspace_deletion.cpp
   src/api/workspace_record_capabilities.cpp
   src/api/solution_capabilities.cpp
+  src/api/quickstart_capabilities.cpp
   src/api/methodology_capabilities.cpp
   src/api/transcript_capabilities.cpp
   src/api/deletion_capabilities.cpp

@@ -1,4 +1,5 @@
-/** Ask Orama, the home of a signed-in person (`/`, lake#600): the conversation the side panel holds
+/** Ask Orama (`/ask`; the home of a signed-in person from lake#600 until lake#1128 made Quickstart
+ * the home): the conversation the side panel holds
  * (pages/ask/thread.ts), across the page's width in one centred, readable column, its message box at
  * the foot. Empty, it welcomes the person and explains what they can do (lake#764): starting
  * questions drawn from the workspace's datasets, projects and runs (`starterQuestions`, ./home.ts),
@@ -35,7 +36,7 @@ import { lakeMap } from "./lakeMap";
 import { EMPTY_THREAD, useThread } from "./thread";
 
 export default function AskHome() {
-  useTrail([{ label: "Home", to: "/" }, { label: "Ask Orama" }], "Ask Orama");
+  useTrail([{ label: "Home", to: "/" }, { label: "Ask Orama", to: "/ask" }], "Ask Orama");
   const { workspaceId, space, viewer } = useSession();
   if (!workspaceId || !space) {
     return (
@@ -221,7 +222,7 @@ function HomeConversation({ workspaceId, customerId }: { workspaceId: string; cu
   useEffect(() => {
     const { adopt, keep } = linkThread(location.search);
     if (adopt) update(adopt);
-    if (location.search !== keep) navigate(`/${keep}`, { replace: true });
+    if (location.search !== keep) navigate(`/ask${keep}`, { replace: true });
   }, [location.search, navigate, update]);
   const from = new URLSearchParams(location.search).get("from") ?? "";
 
@@ -320,7 +321,7 @@ function HomeConversation({ workspaceId, customerId }: { workspaceId: string; cu
               <span className="min-w-0 truncate" title={from}>
                 About the page <Link to={from}>{from.split("?")[0]}</Link>
               </span>
-              <button type="button" className="plain hit rounded text-ink-3 hover:text-ink" onClick={() => navigate("/", { replace: true })} aria-label="Ask without this page">
+              <button type="button" className="plain hit rounded text-ink-3 hover:text-ink" onClick={() => navigate("/ask", { replace: true })} aria-label="Ask without this page">
                 <X size={13} aria-hidden />
               </button>
             </p>
