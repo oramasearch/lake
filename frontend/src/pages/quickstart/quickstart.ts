@@ -71,6 +71,8 @@ export type Snippets = {
   ready: boolean;
   includes_model: boolean;
   snippets: Snippet[];
+  /** One block for a coding agent to install it (lake#1185): the source, ids, key and context. */
+  prompt?: string;
   /** The browser key the code needs (lake#1152): `secret` once, when the call made it with `origins`. */
   key: {
     kind: "browser_key";
@@ -290,4 +292,19 @@ export function hitLine(fields: Record<string, unknown> | undefined): string {
     .map((value) => (value === null || value === undefined ? "" : String(value)))
     .filter(Boolean)
     .join(" · ");
+}
+
+/** The website step's tabs (lake#1185): the agent prompt first, then the source code alone. */
+export type WebsiteView = "prompt" | "code";
+export const WEBSITE_VIEWS: { value: WebsiteView; label: string }[] = [
+  { value: "prompt", label: "Copy agent prompt" },
+  { value: "code", label: "Source code" },
+];
+export const DEFAULT_WEBSITE_VIEW: WebsiteView = "prompt";
+
+/** The agent prompt with the key the page holds put in it; without one, as Lake wrote it (it says
+ * how to make the key). Null when this Lake answers no prompt. */
+export function agentPrompt(snippets: Pick<Snippets, "prompt" | "key"> | null | undefined, secret: string | null): string | null {
+  if (!snippets?.prompt) return null;
+  return withKey(snippets.prompt, snippets.key?.placeholder ?? "YOUR_LAKE_SEARCH_KEY", secret);
 }
