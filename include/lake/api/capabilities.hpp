@@ -304,6 +304,12 @@ nlohmann::json workspace_openapi(const nlohmann::json& document, std::string_vie
 // The pipeline is named `name`, or pipeline_title(intent) when it is empty, numbered " (2)",
 // " (3)" past a pipeline of the project that has the name (lake#816). The description stays the
 // project's captured intent.
+//
+// `create_project` (lake#1193) creates the project first, its description the intent, so a new
+// project's pipeline is one call (and one Ask Orama confirmation); a project that already has the
+// name is refused as `conflict` at `/create_project` and nothing is created. The answer then carries
+// `project_created: true`. When the compile fails after the project was created, the project stays
+// and the failure says so.
 liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
                                                   std::string customer_id,
                                                   std::string project,
@@ -312,7 +318,8 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
                                                   nlohmann::json model = nullptr,
                                                   std::string methodology = {},
                                                   nlohmann::json columns = nlohmann::json::object(),
-                                                  std::string name = {});
+                                                  std::string name = {},
+                                                  bool create_project = false);
 // A short, readable pipeline title from its description (lake#816): the first clause, without a
 // leading request ("Predict which", "Build a"), helper words ("will", "likely to") or what follows
 // a preposition, at most four words and 48 characters (code points), first letter capitalized.

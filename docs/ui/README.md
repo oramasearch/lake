@@ -135,6 +135,11 @@ operator sign-in, passkey sign-in and the public share pages).
   closes. A link's `conversation`, `task` and `agent` go into the shared conversation and leave the
   address; `from` stays, shown as *About the page …* until dismissed. The operator and visitors
   keep the landing ([front-door.md](front-door.md)).
+- **A proposal's confirm card** (`ProposalCallView` in `pages/ask/proposalCard.ts`, in the panel and
+  on `/ask`) shows the exact call Confirm runs, each argument as three rows: name, value,
+  description. A value has the card's full width and wraps at any character; one longer than six
+  lines shows its first six and *Show all N lines* (lake#1192; it was a two-column grid whose value
+  column fell to one character per line). See [Ask Orama](../api/ask-orama.md#what-confirm-runs-lake942).
 - **On a phone** the top bar is compact, Ask Orama is a full-screen conversation, a `Modal sheet`
   fills the screen with its actions above the keyboard, and every page fits 390 px:
   [mobile-web.md](mobile-web.md).

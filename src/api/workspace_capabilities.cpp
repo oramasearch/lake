@@ -3989,7 +3989,8 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
                                                   json model,
                                                   std::string methodology,
                                                   json columns,
-                                                  std::string name) {
+                                                  std::string name,
+                                                  bool create_project) {
     const auto act = [&](std::string capability, json input) {
         return call_capability(context,
                                "workspace_act",
@@ -3997,6 +3998,35 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
                                 {"capability", std::move(capability)},
                                 {"input", std::move(input)}});
     };
+    // A new project's pipeline in one call (lake#1193): the project is created first, described by
+    // the intent. A name already in use is refused before anything is written, so a confirmed
+    // proposal never adds a pipeline to a project the person did not mean.
+    if (create_project) {
+        const ApiResult existing = called(co_await call_capability(context,
+                                                                   "workspace_query",
+                                                                   {{"customer_id", customer_id},
+                                                                    {"capability", "get_project"},
+                                                                    {"input", {{"name", project}}}}));
+        if (existing.ok) {
+            co_return ApiResult::failure("conflict",
+                                         "a project named '" + project +
+                                             "' already exists; leave out create_project to add "
+                                             "the pipeline to it",
+                                         "/create_project");
+        }
+        if (existing.error.code != "not_found") {
+            co_return existing;
+        }
+        const ApiResult created = called(co_await act(
+            "create_project", {{"name", project}, {"description", intent}}));
+        if (!created.ok) {
+            ApiResult refused = created;
+            if (refused.error.path.starts_with("/input/")) {
+                refused.error.path.erase(0, 6);
+            }
+            co_return refused;
+        }
+    }
     ApiResult result = called(co_await act("capture_intent", {{"project", project}, {"text", intent}}));
     if (result.ok) {
         // A short title rather than the engine's, which is the description's words with the
@@ -4049,9 +4079,13 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
         if (result.error.path.starts_with("/input/")) {
             result.error.path.erase(0, 6);
         }
-        if (result.error.code == "not_found" && result.error.path == "/project") {
+        if (create_project) {
+            result.error.message = "the project '" + project + "' was created, but its pipeline " +
+                                   "was not: " + result.error.message;
+        } else if (result.error.code == "not_found" && result.error.path == "/project") {
             result.error.message +=
-                "; create the project first with workspace_act create_project {name, intent}";
+                "; create the project first with workspace_act create_project {name, intent}, "
+                "or call compile_pipeline with create_project";
         }
         co_return result;
     }
@@ -4062,6 +4096,9 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
     const auto with_template = [&](ApiResult answer) {
         if (answer.ok && !template_name.empty()) {
             answer.value["template"] = template_name;
+        }
+        if (answer.ok && create_project) {
+            answer.value["project_created"] = true;
         }
         return answer;
     };
@@ -5324,6 +5361,189 @@ void withhold_invalid_proposals(const ApiContext& context,
     content += said;
 }
 
+// The capabilities whose `project` names a project that must already exist (lake#1193), by Lake's
+// name and, for a proposal sent through workspace_act by an older agent, by the engine's.
+// compile_pipeline is here too, unless it is asked to create the project (`create_project`).
+bool names_existing_project(const std::string& capability) {
+    static constexpr std::array<std::string_view, 19> owning = {
+        "compile_intent", "capture_intent", "compile_n8n",      "compile_python",
+        "import_n8n",     "save_pipeline",  "check_pipeline",   "start_run",
+        "deploy_pipeline", "approve_pipeline", "compile_pipeline", "run_pipeline",
+        "edit_pipeline",  "create_pipeline", "save_graph",       "gate",
+        "run",            "deploy",         "approve_plan"};
+    return std::ranges::find(owning, capability) != owning.end();
+}
+
+// The project a proposal names and whether it must exist (true) or must not (false, a
+// compile_pipeline that creates it). Empty when the proposal names no project to check.
+std::optional<std::pair<std::string, bool>> proposal_project(const json& proposal) {
+    std::string capability = text_of(proposal, "capability");
+    json input = proposal.is_object() ? proposal.value("input", json::object()) : json();
+    if (!input.is_object()) {
+        return std::nullopt;
+    }
+    if (capability == "workspace_act") {
+        capability = text_of(input, "capability");
+        input = input.value("input", json::object());
+        if (!input.is_object()) {
+            return std::nullopt;
+        }
+    }
+    if (!names_existing_project(capability)) {
+        return std::nullopt;
+    }
+    const std::string project = text_of(input, "project");
+    if (project.empty()) {
+        return std::nullopt;
+    }
+    const bool creates = capability == "compile_pipeline" && input.value("create_project", json(false)) == true;
+    return std::pair{project, !creates};
+}
+
+// Proposals that name a project the workspace does not have, or create one it already has, are
+// never offered (lake#1193): confirming one could only fail. Each named project is read once with
+// the engine's get_project, as the person; a project the read cannot settle (the workspace not
+// reachable) leaves the proposal offered, and confirm still checks. A withheld proposal says what
+// is wrong and how to go on: a new project's pipeline is one compile_pipeline with
+// `create_project`.
+liquid::runtime::task<void> withhold_proposals_naming_missing_projects(ApiContext& context,
+                                                                       std::string customer_id,
+                                                                       std::string workspace_id,
+                                                                       std::string& content,
+                                                                       json& payload) {
+    if (!payload.is_object() || !payload.value("proposals", json()).is_array() ||
+        payload.at("proposals").empty()) {
+        co_return {};
+    }
+    std::map<std::string, std::optional<bool>> exists;
+    json offered = json::array();
+    json withheld = payload.value("withheld_proposals", json::array());
+    std::string said;
+    for (const json& proposal : payload.at("proposals")) {
+        const auto named = proposal_project(proposal);
+        if (!named) {
+            offered.push_back(proposal);
+            continue;
+        }
+        const auto& [project, must_exist] = *named;
+        if (!exists.contains(project)) {
+            const ApiResult read = called(co_await call_capability(
+                context,
+                "workspace_query",
+                {{"customer_id", customer_id},
+                 {"workspace_id", workspace_id},
+                 {"capability", "get_project"},
+                 {"input", {{"name", project}}}}));
+            exists[project] = read.ok                          ? std::optional<bool>(true)
+                              : read.error.code == "not_found" ? std::optional<bool>(false)
+                                                               : std::nullopt;
+        }
+        const std::optional<bool> found = exists[project];
+        if (!found || *found == must_exist) {
+            offered.push_back(proposal);
+            continue;
+        }
+        const std::string capability = text_of(proposal, "capability");
+        json entry = proposal;
+        std::string text;
+        if (must_exist) {
+            text = "there is no project named \"" + project + "\" in this workspace, so " +
+                   capability +
+                   " could not run. To build it in a new project, I can propose "
+                   "compile_pipeline with `create_project`, which creates the project and its "
+                   "pipeline in one confirmation.";
+            entry["error"] = {{"code", "not_found"}, {"message", text}, {"path", "/project"}};
+        } else {
+            text = "a project named \"" + project +
+                   "\" already exists, so compile_pipeline cannot create it. I can propose the "
+                   "pipeline in that project instead, without `create_project`.";
+            entry["error"] = {{"code", "conflict"}, {"message", text}, {"path", "/create_project"}};
+        }
+        withheld.push_back(std::move(entry));
+        said += "\n\nI could not offer this change: " + text +
+                " Tell me how to go on and I will propose it again.";
+    }
+    if (said.empty()) {
+        co_return {};
+    }
+    payload["proposals"] = std::move(offered);
+    payload["withheld_proposals"] = std::move(withheld);
+    content += said;
+    co_return {};
+}
+
+// What became of each change Ask Orama proposed in this conversation (lake#1194), oldest first,
+// as Lake recorded it: `pending` (offered, not confirmed), `confirmed`, `failed` with the stored
+// error and whether trying again could work, or `withheld` (never offered, with the reason). Ask
+// Orama receives the last few with each turn, so after a failure it proposes a corrected change
+// instead of pointing at one that can no longer run.
+json ask_proposal_states(const std::vector<control::AskMessage>& messages, std::size_t keep = 10) {
+    json states = json::array();
+    std::map<std::string, std::size_t> at;
+    for (const control::AskMessage& message : messages) {
+        if (message.role != "assistant" || !message.payload.is_object()) {
+            continue;
+        }
+        const json& payload = message.payload;
+        if (const json proposals = payload.value("proposals", json()); proposals.is_array()) {
+            for (std::size_t index = 0; index < proposals.size(); ++index) {
+                const json& proposal = proposals[index];
+                json state{{"message_id", message.id},
+                           {"index", index},
+                           {"capability", text_of(proposal, "capability")},
+                           {"input", proposal.is_object() ? proposal.value("input", json::object())
+                                                          : json::object()},
+                           {"state", "pending"}};
+                at[message.id + "/" + std::to_string(index)] = states.size();
+                states.push_back(std::move(state));
+            }
+        }
+        if (const json withheld = payload.value("withheld_proposals", json());
+            withheld.is_array()) {
+            for (const json& proposal : withheld) {
+                const json error = proposal.is_object() ? proposal.value("error", json::object())
+                                                        : json::object();
+                states.push_back({{"message_id", message.id},
+                                  {"capability", text_of(proposal, "capability")},
+                                  {"input", proposal.is_object()
+                                                ? proposal.value("input", json::object())
+                                                : json::object()},
+                                  {"state", "withheld"},
+                                  {"error", text_of(error, "message")}});
+            }
+        }
+        if (const json mark = payload.value("confirmed", json()); mark.is_object()) {
+            const json index = mark.value("index", json());
+            const std::string key =
+                text_of(mark, "message_id") + "/" +
+                (index.is_string() ? index.get<std::string>()
+                 : index.is_number_unsigned() ? std::to_string(index.get<std::size_t>())
+                                              : std::string());
+            const auto found = at.find(key);
+            if (found == at.end()) {
+                continue;
+            }
+            json& state = states[found->second];
+            if (payload.value("ok", json(true)) == false) {
+                const json error = payload.value("error", json::object());
+                state["state"] = "failed";
+                state["error"] = error.is_object() ? text_of(error, "message") : std::string();
+                state["code"] = error.is_object() ? text_of(error, "code") : std::string();
+                state["retry"] = payload.value("retry", json(false)) == true;
+            } else {
+                state["state"] = "confirmed";
+                state.erase("error");
+                state.erase("code");
+                state.erase("retry");
+            }
+        }
+    }
+    if (states.size() > keep) {
+        states.erase(states.begin(), states.begin() + static_cast<std::ptrdiff_t>(states.size() - keep));
+    }
+    return states;
+}
+
 json conversation_kind_schema() {
     return {{"type", "string"}, {"enum", {"ask", "factory"}}};
 }
@@ -5399,6 +5619,18 @@ liquid::runtime::task<ApiResult> send_ask_message(const json& input, ApiContext&
     if (!factory) {
         turn["page"] = input.value("page", json::object());
     }
+    // What became of Ask Orama's earlier proposals in this conversation (lake#1194): a failed one
+    // is never pointed at again; Ask Orama proposes a corrected change instead. A conversation
+    // that cannot be read now sends none, and the turn still runs.
+    if (agent == "agent-ask-orama") {
+        auto earlier = control::settled(
+            co_await conversation_messages(context, customer_id, workspace_id, conversation_id));
+        if (earlier) {
+            if (json states = ask_proposal_states(*earlier); !states.empty()) {
+                turn["context"] = {{"proposals", std::move(states)}};
+            }
+        }
+    }
     const ApiResult answered = called(co_await call_capability(context, "agent_turn", turn));
     if (!answered.ok) {
         co_return answered;
@@ -5412,6 +5644,8 @@ liquid::runtime::task<ApiResult> send_ask_message(const json& input, ApiContext&
     }
     auto [content, payload] = answer_message(factory, true, answered.value, agent, "", "");
     withhold_invalid_proposals(context, customer_id, workspace_id, content, payload);
+    static_cast<void>(co_await withhold_proposals_naming_missing_projects(
+        context, customer_id, workspace_id, content, payload));
     auto reply = control::settled(co_await append_message(context,
                                                           customer_id,
                                                           workspace_id,
@@ -5475,6 +5709,8 @@ liquid::runtime::task<ApiResult> settle_ask_turn(const json& input, ApiContext& 
                        task_id,
                        text_of(task, "message", "the agent did not answer"));
     withhold_invalid_proposals(context, customer_id, workspace_id, content, payload);
+    static_cast<void>(co_await withhold_proposals_naming_missing_projects(
+        context, customer_id, workspace_id, content, payload));
     auto written =
         control::settled(co_await append_message(context,
                                                  customer_id,
@@ -5945,18 +6181,28 @@ void register_conversation_capabilities(Registry& registry) {
             "intent (\"Predict which customers will churn, with the reasons\" is \"Customers "
             "churn\"), numbered \" (2)\" when the project has one by that name; the intent stays "
             "the project's description. Answers the new pipeline's name as `graph` and, from an "
-            "engine that says so, the `template` its steps started from.",
+            "engine that says so, the `template` its steps started from. With `create_project` it "
+            "creates the project first (its description the intent), so a new project's "
+            "pipeline is one call: a project that already has the name is refused as a "
+            "conflict, and the answer carries `project_created`.",
         .input_schema = customer_input_schema({{"project", {{"type", "string"}, {"minLength", 1}}},
                                                {"intent", {{"type", "string"}, {"minLength", 1}}},
                                                {"dataset", {{"type", "string"}}},
                                                {"label_column", {{"type", "string"}}},
                                                {"entity_column", {{"type", "string"}}},
                                                {"methodology", {{"type", "string"}}},
-                                               {"name", {{"type", "string"}}}},
+                                               {"name", {{"type", "string"}}},
+                                               {"create_project",
+                                                {{"type", "boolean"},
+                                                 {"description",
+                                                  "create the project first, described by the "
+                                                  "intent; refused when a project has this name"}}}},
                                               json::array({"project", "intent"})),
         .output_schema = {{"type", "object"},
                           {"properties",
-                           {{"graph", {{"type", "string"}}}, {"template", {{"type", "string"}}}}},
+                           {{"graph", {{"type", "string"}}},
+                            {"template", {{"type", "string"}}},
+                            {"project_created", {{"type", "boolean"}}}}},
                           {"required", json::array({"graph"})},
                           {"additionalProperties", false}},
         .kind = CapabilityKind::Action,
@@ -5978,7 +6224,8 @@ void register_conversation_capabilities(Registry& registry) {
                 input.value("methodology", std::string()),
                 {{"label_column", input.value("label_column", std::string())},
                  {"entity_column", input.value("entity_column", std::string())}},
-                input.value("name", std::string())));
+                input.value("name", std::string()),
+                input.value("create_project", false)));
         }});
     registry.add(Capability{
         .name = "render_pipeline",
@@ -6550,6 +6797,12 @@ void register_agent_run_capabilities(Registry& registry) {
                             co_return ApiResult::failure(
                                 "invalid_input", "context is an object", "/context");
                         }
+                    } else if (const json sent = input.value("context", json());
+                               sent.is_object() && !sent.empty()) {
+                        // send_ask_message's `proposals`: what became of Ask Orama's earlier
+                        // proposals in the conversation (lake#1194). Information for the turn,
+                        // never authority: Ask Orama's key still carries no action.
+                        body["context"] = sent;
                     }
                 } else if (agent == "agent-application") {
                     task_kind = "app";

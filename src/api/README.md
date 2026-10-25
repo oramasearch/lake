@@ -589,7 +589,11 @@ task content and repository descriptions) left it, with its copier and the store
 when migration `0070_drop_moved_tables` dropped its source (lake#311). Ask Orama and the Agent Factory
 conversations are written only by `send_ask_message`, `settle_ask_turn`, `confirm_ask_proposal` and
 `approve_agent_proposal` in `workspace_capabilities.cpp` (lake#561); the web app calls them, and
-`get_ask_conversation` reads, in the input's workspace.
+`get_ask_conversation` reads, in the input's workspace. Before an answer is stored, its proposals
+pass `withhold_invalid_proposals` (the schema, lake#794) and
+`withhold_proposals_naming_missing_projects` (a `get_project` read per named project, lake#1193);
+`send_ask_message` hands Ask Orama `context.proposals` from `ask_proposal_states`, what became of the
+conversation's earlier proposals (lake#1194).
 `console_capabilities.cpp` registers the reads the web app needs that the pages computed for
 themselves (`viewer`, `my_permissions`, `list_packages`, `list_docs`, `get_doc`, `mcp_setup`,
 docs/api/web-app.md); `latest_agent_task`, `compile_pipeline` and `render_pipeline` sit beside the
