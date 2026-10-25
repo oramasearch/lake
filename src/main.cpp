@@ -786,7 +786,10 @@ int main(int argc, char** argv) {
             exit_code = 1;
             break;
         }
-        if (std::chrono::steady_clock::now() >= next_app_cleanup) {
+        // Without a control store (neither --memory-store nor a control DB; `store` is `none`)
+        // there is nothing to sweep: lake serves what needs no store (lake#1168, where this
+        // dereferenced a null store and lake exited 139 a moment after start).
+        if (opts.store && std::chrono::steady_clock::now() >= next_app_cleanup) {
             if (app_bus_configured) {
                 const auto purged = opts.store->purge_deleted_web_apps();
                 if (!purged) {

@@ -80,6 +80,22 @@ std::string layer_bytes(std::size_t size, std::uint64_t seed) {
     return output;
 }
 
+// AddressSanitizer replaces malloc, and what held_bytes reads then is not what the process holds:
+// on macOS ASan's malloc zone answers `size_in_use` with every byte ever allocated (a free never
+// lowers it, with or without its quarantine), so a 304 MiB pull read as 6.2 to 6.7 GiB of growth;
+// on Linux the resident set includes ASan's shadow memory and quarantine (lake#1168).
+#if defined(__SANITIZE_ADDRESS__)
+constexpr bool memory_measure_is_meaningful = false;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+constexpr bool memory_measure_is_meaningful = false;
+#else
+constexpr bool memory_measure_is_meaningful = true;
+#endif
+#else
+constexpr bool memory_measure_is_meaningful = true;
+#endif
+
 // The bytes this process holds in live allocations now, not freed pages its allocator keeps for
 // reuse. On glibc that is the resident set after malloc_trim returns freed memory from every arena:
 // without the trim a pull that held about 110 MiB at its peak (lake's 64 MiB window cache and the
@@ -663,6 +679,12 @@ TEST(RegistryStore, ALargeLayerIsStreamedNeverHeldWhole) {
     EXPECT_EQ(pulled.headers["content-length"], std::to_string(offset));
     EXPECT_EQ(pulled.body_bytes, offset);
     EXPECT_EQ(received.finish(), digest);
+    if constexpr (!memory_measure_is_meaningful) {
+        // The push and the streamed pull are checked above; only the memory bound is not.
+        GTEST_SKIP() << "the held-memory bound is not measurable under AddressSanitizer: its "
+                        "allocator reports every byte ever allocated as in use (lake#1168); "
+                        "the bound runs in the normal build";
+    }
     const std::uint64_t growth = peak.load() > before ? peak.load() - before : 0;
     EXPECT_LT(growth, std::uint64_t{128} * 1024 * 1024)
         << "the pull grew the memory lake holds by " << growth / (1024 * 1024) << " MiB for a "

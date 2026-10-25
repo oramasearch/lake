@@ -8178,9 +8178,103 @@ std::pair<int, std::string> run_lake_until_ready(const std::vector<std::string>&
     return {exit_status, std::string(std::istreambuf_iterator<char>(written), {})};
 }
 
+// lake#1168: with no control store (no --memory-store, no control DB) lake used to dereference a
+// null store in its owner loop and die with SIGSEGV a moment after start. It now stays live (`/healthz`
+// 200, `/readyz` 503: readiness is the control store's), reports `store: none`, keeps serving past
+// the owner loop's first pass, and exits 0 on SIGTERM.
+TEST(StorelessStartup, LakeWithNoControlStoreServesAndStopsCleanly) {
+    TemporarySyncRoot temporary;
+    const unsigned short port = unused_loopback_port();
+    ASSERT_NE(port, 0);
+    const std::vector<std::string> removed{"LAKE_CONTROL_DB_URI", "LAKE_STORE_ROOT"};
+    std::vector<std::string> variables;
+    for (char** entry = environ; *entry != nullptr; ++entry) {
+        const std::string_view variable(*entry);
+        const std::string name(variable.substr(0, variable.find('=')));
+        if (std::ranges::find(removed, name) == removed.end()) {
+            variables.emplace_back(variable);
+        }
+    }
+    std::vector<std::string> argv{
+        LAKE_TEST_SERVER_PATH, "--listen", "127.0.0.1:" + std::to_string(port)};
+    std::vector<char*> raw_argv;
+    for (std::string& argument : argv) {
+        raw_argv.push_back(argument.data());
+    }
+    raw_argv.push_back(nullptr);
+    std::vector<char*> raw_environment;
+    for (std::string& variable : variables) {
+        raw_environment.push_back(variable.data());
+    }
+    raw_environment.push_back(nullptr);
+    const std::filesystem::path output = temporary.path() / "stdout.log";
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addopen(
+        &actions, STDOUT_FILENO, output.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    pid_t pid = -1;
+    const int spawned = ::posix_spawn(
+        &pid, raw_argv.front(), &actions, nullptr, raw_argv.data(), raw_environment.data());
+    posix_spawn_file_actions_destroy(&actions);
+    ASSERT_EQ(spawned, 0);
+    int status = 0;
+    bool exited = false;
+    bool ready = false;
+    for (int attempt = 0; attempt < 400 && !exited && !ready; ++attempt) {
+        if (::waitpid(pid, &status, WNOHANG) == pid) {
+            exited = true;
+            break;
+        }
+        // Live, not ready: /readyz is control-store readiness and answers 503 without a store.
+        ready = http_request(port, "GET", "/healthz", "", "application/json").find(" 200 ") !=
+                std::string::npos;
+        if (!ready) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+    // The owner loop's first pass runs right after the startup line; give it time to run, then
+    // check lake is still alive and serving.
+    for (int attempt = 0; attempt < 10 && !exited; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (::waitpid(pid, &status, WNOHANG) == pid) {
+            exited = true;
+        }
+    }
+    const std::string healthz =
+        exited ? std::string{} : http_request(port, "GET", "/healthz", "", "application/json");
+    const std::string readyz =
+        exited ? std::string{} : http_request(port, "GET", "/readyz", "", "application/json");
+    if (!exited) {
+        ::kill(pid, SIGTERM);
+        ASSERT_EQ(::waitpid(pid, &status, 0), pid);
+    }
+    std::ifstream written(output);
+    const std::string stdout_text(std::istreambuf_iterator<char>(written), {});
+    ASSERT_FALSE(exited) << "lake exited on its own (signal "
+                         << (WIFSIGNALED(status) ? WTERMSIG(status) : 0) << ", status "
+                         << (WIFEXITED(status) ? WEXITSTATUS(status) : -1) << "):\n"
+                         << stdout_text;
+    EXPECT_TRUE(ready) << stdout_text;
+    EXPECT_NE(healthz.find(" 200 "), std::string::npos) << healthz;
+    EXPECT_NE(readyz.find(" 503 "), std::string::npos) << readyz;
+    ASSERT_TRUE(WIFEXITED(status)) << "lake was killed by signal "
+                                   << (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+    EXPECT_EQ(WEXITSTATUS(status), 0) << stdout_text;
+    std::optional<json> startup;
+    std::istringstream lines(stdout_text);
+    for (std::string line; std::getline(lines, line);) {
+        const json parsed = json::parse(line, nullptr, false);
+        if (parsed.is_object() && parsed.value("event", "") == "startup") {
+            startup = parsed;
+        }
+    }
+    ASSERT_TRUE(startup) << stdout_text;
+    EXPECT_EQ(startup->at("store"), "none");
+}
+
 // lake#915 (LSR-004): the replication credential never defaults to the admin token, and a peer list
 // that is not a list of origins stops startup.
-TEST(ReplicationStartup, TheReplicationCredentialNeverDefaultsToTheAdminToken) {
+TEST(ReplicationStartup,TheReplicationCredentialNeverDefaultsToTheAdminToken) {
     TemporarySyncRoot temporary;
     const unsigned short port = unused_loopback_port();
     ASSERT_NE(port, 0);

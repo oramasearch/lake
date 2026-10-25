@@ -1,5 +1,10 @@
 # API implementation
 
+A condition-variable wait releases its lock, so nothing it is given may point into a container
+another thread changes meanwhile: `run_search_jobs` copies the next job's deadline before
+`wait_until` and does not touch the job after it wakes (lake#1176, a container-overflow under
+AddressSanitizer).
+
 `stream_person` in `agent_stream_triggers.cpp` is shared with `mcp_connection_streams.cpp` and
 requires a present, enabled account (lake#951). Disabled/missing principals trigger idempotent
 workspace cleanup; storage errors leave records pending for retry. No notifications, launches or
