@@ -381,36 +381,41 @@ public:
     // Opens, binds and listens. An empty string on success, otherwise why not.
     std::string bind(const boost::corosio::endpoint& endpoint) {
         State& state = *state_;
-        const auto& limits = state.limits;
-        if (limits.workers == 0 || limits.max_connections == 0 || limits.listen_backlog <= 0 ||
-            limits.idle_timeout.count() <= 0 || limits.header_timeout.count() <= 0 ||
-            limits.worker_wait.count() <= 0 || limits.io_timeout.count() <= 0) {
-            return "HTTP workers, max_connections, listen_backlog and the idle, header, worker "
-                   "wait and I/O timeouts must be positive";
-        }
-        state.acceptor.open();
-        state.acceptor.set_option(boost::corosio::socket_option::reuse_address(true));
-        auto error = state.acceptor.bind(endpoint);
-        if (!error) {
-            error = state.acceptor.listen(limits.listen_backlog);
-        }
-        if (error) {
-            state.acceptor.close();
-            return "bind failed: " + error.message();
-        }
-        state.port = state.acceptor.local_endpoint().port();
-        return {};
+        return open_listener(state.limits, state.acceptor, endpoint, state.port);
+    }
+
+    // Opens a second listener for the reverse proxy (lake#1132, LAKE_PROXY_PORT): the same
+    // routes, workers and limits as bind()'s, but a request that arrives on it is marked proxied
+    // (proxied()), so the client address the proxy reports is believed. Call after bind() and
+    // before start(). An empty string on success, otherwise why not.
+    std::string bind_proxy(const boost::corosio::endpoint& endpoint) {
+        State& state = *state_;
+        auto error = open_listener(state.limits, state.proxy_acceptor, endpoint, state.proxy_port);
+        state.proxy_open = error.empty();
+        return error;
     }
 
     [[nodiscard]] unsigned short port() const {
         return state_->port;
     }
 
-    // Starts the accept loop on the IO executor; the io_context's thread runs it.
+    // The proxy listener's port; 0 when there is none.
+    [[nodiscard]] unsigned short proxy_port() const {
+        return state_->proxy_open ? state_->proxy_port : 0;
+    }
+
+    // Starts the accept loop (one per listener) on the IO executor; the io_context's thread runs
+    // it.
     void start() {
         state_->running.store(true);
         state_->live.fetch_add(1);
-        boost::capy::run_async(state_->io_context.get_executor())(accept_connections(state_));
+        boost::capy::run_async(state_->io_context.get_executor())(
+            accept_connections(state_, false));
+        if (state_->proxy_open) {
+            state_->live.fetch_add(1);
+            boost::capy::run_async(state_->io_context.get_executor())(
+                accept_connections(state_, true));
+        }
     }
 
     // At the drain (lake#536): connections waiting for their next request are closed; the
@@ -456,6 +461,19 @@ public:
                                                                                  : slot->second->connection->peer;
     }
 
+    // True when the connection `route` arrived on came in through the proxy listener
+    // (bind_proxy(), lake#1132); false on the main listener or when the request is not one this
+    // server is serving. IO executor only: call it from the route.
+    [[nodiscard]] bool proxied(const boost::http::route_params& route) const {
+        const auto token = state_->tokens.find(&route);
+        if (token == state_->tokens.end()) {
+            return false;
+        }
+        const auto slot = state_->slots.find(token->second);
+        return slot != state_->slots.end() && slot->second->connection != nullptr &&
+               slot->second->connection->proxied;
+    }
+
     // The request parks (a long poll) or streams a long response: it gives its worker back and
     // finishes outside the worker budget, counted against the long-request caps for `principal`
     // (empty: the client's address). False when a cap is full: the request keeps its worker and
@@ -497,6 +515,8 @@ private:
         bool idle = false;
         // The client's address: an unauthenticated caller's identity for the long-request cap.
         std::string peer;
+        // Accepted on the proxy listener (lake#1132).
+        bool proxied = false;
 
         Connection(boost::corosio::tcp_socket accepted,
                    boost::http::router<boost::http::route_params> router,
@@ -515,6 +535,30 @@ private:
             stream = boost::capy::any_read_stream(&timed);
         }
     };
+
+    static std::string open_listener(const HttpConnectionLimits& limits,
+                                     boost::corosio::tcp_acceptor& acceptor,
+                                     const boost::corosio::endpoint& endpoint,
+                                     unsigned short& port) {
+        if (limits.workers == 0 || limits.max_connections == 0 || limits.listen_backlog <= 0 ||
+            limits.idle_timeout.count() <= 0 || limits.header_timeout.count() <= 0 ||
+            limits.worker_wait.count() <= 0 || limits.io_timeout.count() <= 0) {
+            return "HTTP workers, max_connections, listen_backlog and the idle, header, worker "
+                   "wait and I/O timeouts must be positive";
+        }
+        acceptor.open();
+        acceptor.set_option(boost::corosio::socket_option::reuse_address(true));
+        auto error = acceptor.bind(endpoint);
+        if (!error) {
+            error = acceptor.listen(limits.listen_backlog);
+        }
+        if (error) {
+            acceptor.close();
+            return "bind failed: " + error.message();
+        }
+        port = acceptor.local_endpoint().port();
+        return {};
+    }
 
     static std::string peer_address(boost::corosio::tcp_socket& socket) {
         sockaddr_storage address{};
@@ -632,6 +676,7 @@ private:
               telemetry::Metrics* metric_sink)
             : io_context(context),
               acceptor(context),
+              proxy_acceptor(context),
               router(std::move(routes)),
               parser_config(std::move(parser)),
               serializer_config(std::move(serializer)),
@@ -641,6 +686,10 @@ private:
 
         boost::corosio::io_context& io_context;
         boost::corosio::tcp_acceptor acceptor;
+        // The reverse proxy's own listener (bind_proxy()); open only when proxy_open.
+        boost::corosio::tcp_acceptor proxy_acceptor;
+        bool proxy_open = false;
+        unsigned short proxy_port = 0;
         boost::http::router<boost::http::route_params> router;
         boost::http::shared_parser_config parser_config;
         boost::http::shared_serializer_config serializer_config;
@@ -1129,12 +1178,13 @@ private:
                error == std::errc::too_many_files_open_in_system;
     }
 
-    static boost::capy::task<void> accept_connections(std::shared_ptr<State> state) {
+    static boost::capy::task<void> accept_connections(std::shared_ptr<State> state, bool proxied) {
+        boost::corosio::tcp_acceptor& acceptor = proxied ? state->proxy_acceptor : state->acceptor;
         bool reported_error = false;
         bool reported_capacity = false;
         while (state->running.load()) {
             boost::corosio::tcp_socket accepted(state->io_context);
-            auto [error] = co_await state->acceptor.accept(accepted);
+            auto [error] = co_await acceptor.accept(accepted);
             if (!state->running.load()) {
                 break;
             }
@@ -1182,6 +1232,7 @@ private:
                 state->limits,
                 detail::TimedSocket::Counters{&state->io_timeouts, &state->slow_transfers},
                 &state->draining);
+            connection->proxied = proxied;
             const auto id = state->next_connection++;
             state->connections.emplace(id, connection);
             state->connection_count.store(state->connections.size());
@@ -1204,6 +1255,9 @@ private:
 
     static boost::capy::task<void> close_all(std::shared_ptr<State> state) {
         state->acceptor.close();
+        if (state->proxy_open) {
+            state->proxy_acceptor.close();
+        }
         for (const auto& [id, connection] : state->connections) {
             connection->socket.close();
         }

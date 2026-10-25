@@ -1,8 +1,9 @@
 #pragma once
 
-// Which address a request is counted against for per-client limits (lake#1083): the client
-// address a trusted proxy reported in X-Real-IP or X-Forwarded-For when the connection's peer is
-// one of the trusted proxies (LAKE_TRUSTED_PROXY_CIDRS), else the peer address itself.
+// Which address a request is counted against for per-client limits (lake#1083, lake#1132): the
+// client address a proxy reported in X-Real-IP or X-Forwarded-For when the request arrived on the
+// proxy listener (LAKE_PROXY_PORT) or its peer is one of the trusted proxies
+// (LAKE_TRUSTED_PROXY_CIDRS), else the peer address itself.
 // docs/deployment/client-addresses.md.
 
 #include <array>
@@ -47,6 +48,16 @@ inline constexpr std::string_view default_trusted_proxy_cidrs =
 // address. An error names the entry that is not a CIDR, or one with host bits set.
 std::expected<TrustedProxies, std::string> parse_trusted_proxies(std::string_view setting);
 
+// Parses LAKE_PROXY_PORT (lake#1132): empty for no proxy listener, otherwise a port from 1 to
+// 65535. An error names the value.
+std::expected<std::optional<unsigned short>, std::string>
+parse_proxy_port(std::string_view setting);
+
+// The LAKE_TRUSTED_PROXY_CIDRS text used when it is unset or empty: the private ranges
+// (default_trusted_proxy_cidrs) without a proxy listener, `none` with one, so that on the main
+// port no peer is believed once the proxy has a port of its own.
+std::string_view default_trusted_proxy_setting(bool proxy_listener);
+
 // Parses one address (IPv4, IPv6 or IPv4-mapped IPv6) as a full-length prefix.
 std::optional<IpPrefix> parse_ip_address(std::string_view address);
 
@@ -58,6 +69,15 @@ bool is_trusted_proxy(const TrustedProxies& trusted, std::string_view peer);
 // X-Forwarded-For hop, else the peer. From any other peer: the peer, whatever headers it sent;
 // "direct" when the peer is not known. At most 64 bytes.
 std::string client_address(const TrustedProxies& trusted,
+                           std::string_view peer,
+                           std::optional<std::string_view> real_ip,
+                           std::optional<std::string_view> forwarded_for);
+
+// The same rule with the decision already made: `believe_headers` true takes X-Real-IP, else the
+// last X-Forwarded-For hop, else the peer; false takes the peer. A request that arrived on the
+// proxy listener (LAKE_PROXY_PORT, lake#1132) is believed whatever its peer: the NetworkPolicy,
+// not an address range, decides who reaches that port.
+std::string client_address(bool believe_headers,
                            std::string_view peer,
                            std::optional<std::string_view> real_ip,
                            std::optional<std::string_view> forwarded_for);

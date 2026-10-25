@@ -85,6 +85,11 @@ struct ServerOptions {
     // counted on its own address (LAKE_TRUSTED_PROXY_CIDRS, lake#1083). Default: loopback and the
     // private ranges (default_trusted_proxy_cidrs).
     TrustedProxies trusted_proxies = *parse_trusted_proxies("");
+    // A second listener for the reverse proxy (LAKE_PROXY_PORT, lake#1132), on listen_address:
+    // the same routes, workers and limits, but a request that arrives on it has its X-Real-IP or
+    // last X-Forwarded-For hop believed whatever its peer. Only the proxy may reach it (the
+    // operator's NetworkPolicy). Unset: no second listener; 0: an ephemeral port (tests).
+    std::optional<unsigned short> proxy_port;
     // A request header must arrive whole within this of its first byte, or of the accept for a
     // connection's first request; otherwise the connection is closed
     // (LAKE_HTTP_HEADER_TIMEOUT_SECONDS).
@@ -380,6 +385,8 @@ public:
     [[nodiscard]] bool running() const;
     // The actual bound port (differs from options when port was 0).
     [[nodiscard]] unsigned short port() const;
+    // The proxy listener's bound port; 0 when ServerOptions::proxy_port is unset.
+    [[nodiscard]] unsigned short proxy_port() const;
     [[nodiscard]] const std::string& reason() const;
     // Non-empty once the server cannot continue: the store root stayed held past
     // store_owner_wait, or could not be opened. The owning loop exits non-zero with it.

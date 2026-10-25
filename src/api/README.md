@@ -414,11 +414,15 @@ sign-in results may include a JWT; API-token issuance retains only its derived s
 lock, before any thread opens a repository: liquid creates it without a lock, and two first uses
 at once break it for the process ([store volume](../../docs/deployment/store-volume.md#liquids-local-identity)).
 
-`client_address.cpp` (lake#1083) parses `LAKE_TRUSTED_PROXY_CIDRS` and picks the address a
-request's per-client limits count: the one a trusted proxy reported, else the connection's peer,
-which `HttpConnections::peer` gives the route ([client addresses](../../docs/deployment/client-addresses.md)).
+`client_address.cpp` (lake#1083, lake#1132) parses `LAKE_TRUSTED_PROXY_CIDRS` and `LAKE_PROXY_PORT`
+and picks the address a request's per-client limits count: the one the proxy reported when the
+request arrived on the proxy listener or from a trusted proxy, else the connection's peer.
+`HttpConnections::peer` and `HttpConnections::proxied` give the route its peer and listener
+([client addresses](../../docs/deployment/client-addresses.md)).
 
-`http_connections.hpp` (lake#534) accepts and serves `http_server.cpp`'s connections: one session
+`http_connections.hpp` (lake#534) accepts and serves `http_server.cpp`'s connections, on the main
+listener (`bind`) and, with `LAKE_PROXY_PORT`, the proxy listener (`bind_proxy`, lake#1132), which
+shares its routes, workers, limits and drain: one session
 coroutine per connection up to `LAKE_HTTP_MAX_CONNECTIONS` (503 above it), a request worker only
 while a route runs (taken after any store-root wait, given back by the capabilities declared
 `Capability::long_poll` through `ApiContext::leave_worker` and by streaming pulls, within the
