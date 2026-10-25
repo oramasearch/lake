@@ -10,6 +10,7 @@
 #include <fstream>
 #include <map>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -48,6 +49,9 @@ const std::string movies = "title,genre,rating,popular\n"
 // asked to make, and fails a capability on request.
 struct Engine {
     std::map<std::string, ZettaControlError> fail_next;
+    // Each table's rows (SELECT answers them) and analyze_dataset's profile of it.
+    std::map<std::string, std::vector<json>> tables;
+    std::map<std::string, json> analyses;
     std::string run_status = "running";
     bool listed_model = true;
     int index_count = 0;
@@ -66,7 +70,66 @@ struct Engine {
                         {"rows", 4},
                         {"format", input.at("format")}};
         }
+        if (capability == "analyze_dataset") {
+            const std::string path = input.value("dataset_path", std::string());
+            const std::string table = path.substr(path.find('.') + 1);
+            if (const auto found = analyses.find(table); found != analyses.end()) {
+                return found->second;
+            }
+            // The movies: a title per row, a genre, a rating and whether it was popular.
+            const auto column = [](const char* name, const char* type, int distinct, json top) {
+                json values = json::array();
+                for (const json& value : top) {
+                    values.push_back({{"value", value}, {"count", 2}});
+                }
+                return json{{"name", name},
+                            {"semantic_type", type},
+                            {"distinct_count", distinct},
+                            {"null_rate", 0.0},
+                            {"top_values", values}};
+            };
+            return json{{"columns",
+                         json::array({column("title", "identifier", 4, {"Alien"}),
+                                      column("genre", "categorical", 4, {"scifi", "romance"}),
+                                      column("rating", "numeric", 4, {8.7}),
+                                      column("popular", "boolean", 2, {1, 0})})},
+                        {"leakage_candidates", json::array()}};
+        }
+        if (capability == "sql") {
+            const std::string statement = input.at("statement");
+            const auto from = statement.find(" FROM ") + 6;
+            const auto end = statement.find(' ', from);
+            const std::string path = statement.substr(from, end - from);
+            const std::vector<json>& rows = tables[path.substr(path.find('.') + 1)];
+            if (statement.starts_with("SELECT COUNT(*)")) {
+                return json{{"columns", {"count"}}, {"rows", {{{"count", rows.size()}}}}};
+            }
+            std::size_t limit = rows.size();
+            std::size_t offset = 0;
+            if (const auto at = statement.find(" LIMIT "); at != std::string::npos) {
+                limit = std::stoul(statement.substr(at + 7));
+            }
+            if (const auto at = statement.find(" OFFSET "); at != std::string::npos) {
+                offset = std::stoul(statement.substr(at + 8));
+            }
+            json page = json::array();
+            for (std::size_t i = offset; i < rows.size() && i < offset + limit; ++i) {
+                page.push_back(rows[i]);
+            }
+            return json{{"rows", page}};
+        }
         if (capability == "get_dataset") {
+            if (const auto found = analyses.find(input.value("dataset", std::string()));
+                found != analyses.end()) {
+                json columns = json::array();
+                for (const json& column : found->second["columns"]) {
+                    columns.push_back({{"name", column["name"]}, {"type", "string"}});
+                }
+                return json{{"name", input.at("dataset")},
+                            {"database", "datasets"},
+                            {"rows", tables[input.at("dataset")].size()},
+                            {"columns", columns}};
+            }
             if (input.value("dataset", std::string()) == "missing") {
                 return ZettaControlResult<json>(
                     std::unexpected(ZettaControlError{"not_found", "no dataset named that"}));
@@ -289,9 +352,17 @@ TEST(Quickstart, ADroppedDatasetBecomesSearchThenModelAnswers) {
     EXPECT_EQ(Quickstart::step(status, "model")["state"], "pending");
     EXPECT_EQ(status["search"]["capability"], "search_index");
     EXPECT_EQ(status["search"]["input"]["index_id"], "index-1");
-    EXPECT_EQ(q.engine_calls(),
-              (std::vector<std::string>{
-                  "upload_dataset", "get_dataset", "create_index", "expose_index"}));
+    EXPECT_EQ(
+        q.engine_calls(),
+        (std::vector<std::string>{
+            "upload_dataset", "get_dataset", "analyze_dataset", "create_index", "expose_index"}));
+    // Each column's kind, from the engine's own profile (lake#1181), and the first offer.
+    EXPECT_EQ(status["dataset"]["columns"][0]["kind"], "identifier");
+    EXPECT_EQ(status["dataset"]["columns"][3]["kind"], "boolean");
+    EXPECT_EQ(status["dataset"]["columns"][3]["type"], "integer");
+    EXPECT_EQ(status["suggested"]["target"], "popular");
+    EXPECT_EQ(status["suggested"]["entity_column"], "title");
+    EXPECT_EQ(status["snapshot_date"], status["created_at"]) << "the upload time";
     // Through the same capabilities a person calls: upload_dataset's name rule and rename.
     for (const auto& [capability, input] : q.workspaces.zetta->calls) {
         if (capability == "upload_dataset") {
@@ -400,6 +471,9 @@ TEST(Quickstart, ADroppedDatasetBecomesSearchThenModelAnswers) {
     EXPECT_EQ(training.value["training"]["run_id"], "run-1");
     EXPECT_EQ(training.value["training"]["methodology"], "M-1");
     EXPECT_EQ(training.value["training"]["holdout_fraction"], 0.2);
+    // Ready as it is: no training copy, and no rows read.
+    EXPECT_EQ(training.value["training"]["preparation"]["copy"], false);
+    EXPECT_EQ(count(q.engine_calls(), "sql"), 0U);
     for (const auto& [capability, input] : q.workspaces.zetta->calls) {
         if (capability == "train_model") {
             EXPECT_EQ(input["dataset_path"], "datasets.movies");
@@ -515,7 +589,11 @@ TEST(Quickstart, AStepThatFailsIsKeptWithWhyAndResumed) {
     q.engine.run_status = "failed";
     read = q.by(me, "quickstart_status", where);
     EXPECT_EQ(read.value["state"], "failed");
-    EXPECT_EQ(Quickstart::step(read.value, "model")["error"]["message"],
+    // In plain words, with the engine's own reason beside it (lake#1181).
+    EXPECT_NE(Quickstart::step(read.value, "model")["error"]["message"].get<std::string>().find(
+                  "same answer for popular"),
+              std::string::npos);
+    EXPECT_EQ(Quickstart::step(read.value, "model")["error"]["detail"],
               "the label column has one value");
     auto retried = q.by(me, "train_quickstart", where);
     ASSERT_TRUE(retried.ok) << retried.error.message;
@@ -544,6 +622,305 @@ TEST(Quickstart, AStepThatFailsIsKeptWithWhyAndResumed) {
               std::string::npos);
     auto exposed = q.by(me, "train_quickstart", where);
     EXPECT_EQ(exposed.value["state"], "done");
+}
+
+// lake#1181: Steve's dataset on lake-dev (v0.7.0): a first name, a country and a date, with an id,
+// free text, numbers, an empty column and one that never changes. Training refused with
+// `transform_required: add_snapshot_date`; now every kind is detected and prepared.
+struct People {
+    using Top = std::vector<std::pair<json, int>>;
+    static json profile(
+        const char* name, const char* type, int distinct, const Top& top, double null_rate = 0.0) {
+        json values = json::array();
+        for (const auto& [value, count] : top) {
+            values.push_back({{"value", value}, {"count", count}});
+        }
+        return {{"name", name},
+                {"semantic_type", type},
+                {"distinct_count", distinct},
+                {"null_rate", null_rate},
+                {"top_values", values}};
+    }
+
+    static void load(Engine& engine) {
+        engine.analyses["people"] = {
+            {"columns",
+             json::array(
+                 {profile("customer_id", "identifier", 12, {{"c-0", 1}}),
+                  profile("First Name", "categorical", 3, {{"Ana", 4}, {"Ben", 4}, {"Chen", 4}}),
+                  profile(
+                      "Country", "categorical", 3, {{"Canada", 6}, {"France", 3}, {"Japan", 3}}),
+                  profile("Signup Date", "datetime", 12, {{"2025-01-15", 1}}),
+                  // A date column the profile missed: its values are dates all the same.
+                  profile("Renewed", "categorical", 12, {{"2026-01-15", 1}}),
+                  profile("Spend", "numeric", 12, {{10.5, 1}}),
+                  profile("Bio", "free_text", 12, {{"Likes hiking", 1}}),
+                  profile("Notes", "unknown", 0, Top{}, 1.0),
+                  profile("Region", "categorical", 1, {{"EU", 12}})})},
+            {"leakage_candidates", json::array()}};
+        const std::vector<std::string> names{"Ana", "Ben", "Chen"};
+        const std::vector<std::string> countries{"Canada", "France", "Canada", "Japan"};
+        for (int i = 0; i < 12; ++i) {
+            const std::string month = (i < 9 ? "0" : "") + std::to_string(i + 1);
+            engine.tables["people"].push_back(
+                {{"customer_id", "c-" + std::to_string(i)},
+                 {"First Name", names[static_cast<std::size_t>(i % 3)]},
+                 {"Country", countries[static_cast<std::size_t>(i % 4)]},
+                 {"Signup Date", "2025-" + month + "-15"},
+                 {"Renewed", "2026-" + month + "-15"},
+                 {"Spend", 10.5 + i},
+                 {"Bio", "Likes hiking and long walks number " + std::to_string(i)},
+                 {"Notes", nullptr},
+                 {"Region", "EU"}});
+        }
+    }
+};
+
+// The JSON Lines of every upload_dataset call of the training copy.
+std::vector<std::vector<json>> copies(const Quickstart& q) {
+    std::vector<std::vector<json>> out;
+    for (const auto& [capability, input] : q.workspaces.zetta->calls) {
+        if (capability == "upload_dataset" &&
+            input.value("table_name", std::string()).ends_with("_training")) {
+            std::vector<json> rows;
+            std::istringstream lines(input.at("content").get<std::string>());
+            for (std::string line; std::getline(lines, line);) {
+                rows.push_back(json::parse(line));
+            }
+            out.push_back(std::move(rows));
+        }
+    }
+    return out;
+}
+
+std::vector<json> calls_of(const Quickstart& q, const std::string& name) {
+    std::vector<json> out;
+    for (const auto& [capability, input] : q.workspaces.zetta->calls) {
+        if (capability == name) {
+            out.push_back(input);
+        }
+    }
+    return out;
+}
+
+TEST(Quickstart, AnyColumnTypesTrainADatedDatasetIsPreparedNotRefused) {
+    Quickstart q;
+    People::load(q.engine);
+    const auto& me = q.first;
+    const json where{{"workspace_id", me.workspace_id}};
+    auto started = q.by(me,
+                        "start_quickstart",
+                        {{"workspace_id", me.workspace_id},
+                         {"content", "customer_id,First Name\nc-0,Ana\n"},
+                         {"format", "csv"},
+                         {"name", "people"}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const json& status = started.value;
+    ASSERT_EQ(status["dataset"]["columns"].size(), 9U);
+    std::map<std::string, std::string> kinds;
+    for (const json& column : status["dataset"]["columns"]) {
+        kinds[column["name"]] = column["kind"];
+    }
+    EXPECT_EQ(kinds["customer_id"], "identifier");
+    EXPECT_EQ(kinds["Country"], "categorical");
+    EXPECT_EQ(kinds["Signup Date"], "datetime");
+    EXPECT_EQ(kinds["Spend"], "numeric");
+    EXPECT_EQ(kinds["Bio"], "free_text");
+    EXPECT_EQ(kinds["Notes"], "empty");
+    EXPECT_EQ(kinds["Region"], "constant");
+    EXPECT_EQ(status["suggested"]["target"], "Country") << "no two-valued column: a category";
+    EXPECT_EQ(status["suggested"]["target_value"], "Canada");
+    EXPECT_EQ(status["suggested"]["entity_column"], "customer_id");
+    const std::string snapshot = status["snapshot_date"];
+    EXPECT_EQ(status["created_at"], snapshot);
+    // The engine was told the snapshot date.
+    ASSERT_FALSE(calls_of(q, "analyze_dataset").empty());
+    EXPECT_EQ(calls_of(q, "analyze_dataset").back()["as_of"], snapshot);
+
+    // Steve's exact choice: Country to predict, First Name names a row.
+    auto training = q.by(me,
+                         "train_quickstart",
+                         {{"workspace_id", me.workspace_id},
+                          {"target", "Country"},
+                          {"entity_column", "First Name"}});
+    ASSERT_TRUE(training.ok) << training.error.message;
+    ASSERT_EQ(training.value["state"], "training") << training.value.dump(2);
+    const json& trained = training.value["training"];
+    EXPECT_EQ(trained["target"], "Country");
+    EXPECT_EQ(trained["target_value"], "Canada") << "the most common value";
+    EXPECT_EQ(trained["as_of"], snapshot);
+    const json& preparation = trained["preparation"];
+    EXPECT_EQ(preparation["copy"], true);
+    EXPECT_EQ(preparation["dataset_id"], "datasets/people_training");
+    // First Name repeats, so the rows are numbered and First Name is learned from.
+    EXPECT_EQ(preparation["entity"], "row_number");
+    EXPECT_NE(preparation["note"].get<std::string>().find("First Name repeats"), std::string::npos);
+    EXPECT_EQ(trained["entity_column"], "First Name") << "the person's choice is kept";
+    EXPECT_EQ(preparation["label"]["positive"], "Canada");
+    std::map<std::string, std::string> dropped;
+    for (const json& entry : preparation["dropped"]) {
+        dropped[entry["name"]] = entry["reason"];
+    }
+    for (const char* left : {"customer_id", "Signup Date", "Bio", "Notes", "Region"}) {
+        ASSERT_TRUE(dropped.contains(left)) << left;
+        EXPECT_FALSE(dropped[left].empty()) << left;
+    }
+    EXPECT_NE(dropped["Signup Date"].find("date"), std::string::npos);
+    // The engine was asked with the column to predict, for its leakage checks.
+    EXPECT_EQ(calls_of(q, "analyze_dataset").back()["label"], "Country");
+
+    // What was uploaded: the usable columns and the answer as 0/1, no date the profile named.
+    const auto uploaded = copies(q);
+    ASSERT_EQ(uploaded.size(), 1U);
+    ASSERT_EQ(uploaded[0].size(), 12U);
+    EXPECT_EQ(uploaded[0][0]["Country"], 1);
+    EXPECT_EQ(uploaded[0][1]["Country"], 0);
+    EXPECT_EQ(uploaded[0][0]["First Name"], "Ana");
+    EXPECT_FALSE(uploaded[0][0].contains("Signup Date"));
+    EXPECT_FALSE(uploaded[0][0].contains("customer_id"));
+    EXPECT_FALSE(uploaded[0][0].contains("Bio"));
+    EXPECT_TRUE(uploaded[0][0].contains("Spend"));
+    const auto trains = calls_of(q, "train_model");
+    ASSERT_EQ(trains.size(), 1U);
+    EXPECT_EQ(trains[0]["dataset_path"], "datasets.people_training");
+    EXPECT_EQ(trains[0]["target"], "Country");
+    EXPECT_EQ(trains[0]["entity_column"], "row_number");
+    // The rows were read as the person, through the engine's SQL.
+    EXPECT_GE(count(q.engine_calls(), "sql"), 2U);
+
+    // Kept in the workspace: the status reads the same.
+    auto read = q.by(me, "quickstart_status", where);
+    EXPECT_EQ(read.value["training"]["preparation"]["dataset_id"], "datasets/people_training");
+    EXPECT_EQ(read.value["snapshot_date"], snapshot);
+}
+
+TEST(Quickstart, ATransformRequiredLakeCanSatisfyIsAppliedAndTriedOnce) {
+    Quickstart q;
+    People::load(q.engine);
+    const auto& me = q.first;
+    ASSERT_TRUE(q.by(me,
+                     "start_quickstart",
+                     {{"workspace_id", me.workspace_id},
+                      {"content", "a\n1\n"},
+                      {"format", "csv"},
+                      {"name", "people"}})
+                    .ok);
+    // The engine still finds a date: the one the profile missed (Renewed).
+    q.engine.fail_next["train_model"] = {
+        "invalid_input",
+        "transform_required: add_snapshot_date: Datetime features must be computed relative to a "
+        "declared as_of or snapshot date; using the current time would change training data "
+        "silently."};
+    auto training = q.by(me,
+                         "train_quickstart",
+                         {{"workspace_id", me.workspace_id},
+                          {"target", "Country"},
+                          {"entity_column", "First Name"},
+                          {"as_of", "2026-01-31"}});
+    ASSERT_TRUE(training.ok) << training.error.message;
+    ASSERT_EQ(training.value["state"], "training") << training.value.dump(2);
+    EXPECT_EQ(training.value["snapshot_date"], "2026-01-31") << "the date sent is kept";
+    EXPECT_EQ(training.value["training"]["preparation"]["applied"],
+              json::array({"add_snapshot_date"}));
+    EXPECT_EQ(calls_of(q, "train_model").size(), 2U) << "tried once more, not again";
+    const auto uploaded = copies(q);
+    ASSERT_EQ(uploaded.size(), 2U);
+    EXPECT_TRUE(uploaded[0][0].contains("Renewed")) << "the profile called it a category";
+    EXPECT_FALSE(uploaded[1][0].contains("Renewed")) << "its values are dates: left out";
+    EXPECT_EQ(calls_of(q, "analyze_dataset").back()["as_of"], "2026-01-31");
+
+    // A second refusal of the same kind is explained, not tried a third time.
+    Quickstart again;
+    People::load(again.engine);
+    ASSERT_TRUE(again
+                    .by(again.first,
+                        "start_quickstart",
+                        {{"workspace_id", again.first.workspace_id},
+                         {"content", "a\n1\n"},
+                         {"format", "csv"},
+                         {"name", "people"}})
+                    .ok);
+    again.engine.fail_next["train_model"] = {"invalid_input",
+                                             "transform_required: add_snapshot_date: dates"};
+    again.workspaces.zetta->responder = [&again, failures = 0](const std::string& capability,
+                                                               const json& input) mutable {
+        if (capability == "train_model" && failures++ < 2) {
+            return std::optional<ZettaControlResult<json>>(std::unexpected(ZettaControlError{
+                "invalid_input", "transform_required: add_snapshot_date: dates"}));
+        }
+        return again.engine.answer(capability, input);
+    };
+    again.engine.fail_next.clear();
+    auto refused = again.by(again.first,
+                            "train_quickstart",
+                            {{"workspace_id", again.first.workspace_id}, {"target", "Country"}});
+    ASSERT_TRUE(refused.ok) << refused.error.message;
+    EXPECT_EQ(refused.value["state"], "failed");
+    const json model = Quickstart::step(refused.value, "model");
+    EXPECT_EQ(model["error"]["code"], "training_refused");
+    const std::string message = model["error"]["message"];
+    EXPECT_EQ(message.find("transform_required"), std::string::npos) << "never the raw code";
+    EXPECT_NE(message.find("snapshot date"), std::string::npos) << message;
+    EXPECT_NE(refused.value["next"].get<std::string>().find("train_quickstart"), std::string::npos);
+    EXPECT_EQ(calls_of(again, "train_model").size(), 2U);
+}
+
+TEST(Quickstart, WhatCannotBeTrainedIsSaidInPlainWords) {
+    Quickstart q;
+    People::load(q.engine);
+    const auto& me = q.first;
+    ASSERT_TRUE(q.by(me,
+                     "start_quickstart",
+                     {{"workspace_id", me.workspace_id},
+                      {"content", "a\n1\n"},
+                      {"format", "csv"},
+                      {"name", "people"}})
+                    .ok);
+    // A column that cannot be predicted, chosen: refused before anything runs.
+    auto spend =
+        q.by(me, "train_quickstart", {{"workspace_id", me.workspace_id}, {"target", "Spend"}});
+    EXPECT_EQ(spend.error.code, "invalid_input");
+    EXPECT_EQ(spend.error.path, "/target");
+    EXPECT_NE(spend.error.message.find("yes-or-no"), std::string::npos) << spend.error.message;
+    auto bad_date =
+        q.by(me, "train_quickstart", {{"workspace_id", me.workspace_id}, {"as_of", "yesterday"}});
+    EXPECT_EQ(bad_date.error.path, "/as_of");
+    auto absent =
+        q.by(me,
+             "train_quickstart",
+             {{"workspace_id", me.workspace_id}, {"target", "Country"}, {"target_value", "Peru"}});
+    ASSERT_TRUE(absent.ok) << absent.error.message;
+    EXPECT_EQ(Quickstart::step(absent.value, "model")["error"]["code"], "cannot_prepare");
+    EXPECT_NE(Quickstart::step(absent.value, "model")["error"]["message"].get<std::string>().find(
+                  "No row has Country = Peru"),
+              std::string::npos);
+    EXPECT_TRUE(calls_of(q, "train_model").empty());
+
+    // A refusal Lake cannot fix: explained, with what to choose.
+    q.engine.fail_next["train_model"] = {
+        "invalid_input",
+        "transform_required: create_eligible_features: The plan has no feature columns."};
+    auto eligible =
+        q.by(me,
+             "train_quickstart",
+             {{"workspace_id", me.workspace_id}, {"target", "Country"}, {"target_value", "Japan"}});
+    ASSERT_TRUE(eligible.ok) << eligible.error.message;
+    const json model = Quickstart::step(eligible.value, "model");
+    EXPECT_EQ(model["state"], "failed");
+    EXPECT_EQ(model["error"]["transform"], "create_eligible_features");
+    const std::string message = model["error"]["message"];
+    EXPECT_EQ(message.find("transform_required"), std::string::npos);
+    EXPECT_NE(message.find("Choose another column to predict"), std::string::npos) << message;
+    EXPECT_EQ(calls_of(q, "train_model").size(), 1U) << "not tried again";
+    // The next call with another choice trains.
+    auto plan =
+        q.by(me,
+             "train_quickstart",
+             {{"workspace_id", me.workspace_id}, {"target", "Country"}, {"target_value", "Japan"}});
+    EXPECT_EQ(plan.value["state"], "training") << plan.value.dump(2);
+    EXPECT_EQ(plan.value["training"]["target_value"], "Japan");
+    EXPECT_EQ(plan.value["training"]["preparation"]["entity"], "customer_id")
+        << "the detected identifier names a row";
 }
 
 TEST(Quickstart, ABlockedBalanceGetsTheTopUpLinkAndNothingStarts) {
@@ -901,6 +1278,130 @@ TEST(QuickstartZetta, ADatasetBecomesSearchAndModelAnswersOnARealEngine) {
     }
     snippets = call("quickstart_snippets", json::object());
     EXPECT_EQ(snippets.value["includes_model"], true);
+    std::error_code ignored;
+    std::filesystem::remove_all(dir, ignored);
+}
+
+// lake#1181 on a real Zetta: Steve's shape (a first name, a country, a date, with an id, free text,
+// numbers and a two-valued plan). v0.7.0 refused it with transform_required: add_snapshot_date.
+TEST(QuickstartZetta, ADatedDatasetWithAnyColumnTypesTrainsAndAnswersOnARealEngine) {
+    const char* url = std::getenv("LAKE_TEST_ZETTA_URL");
+    const char* token = std::getenv("LAKE_TEST_ZETTA_TOKEN");
+    if (url == nullptr || token == nullptr || *url == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_ZETTA_URL and LAKE_TEST_ZETTA_TOKEN are not set";
+    }
+    lake::control::install_zetta_control_transport();
+    struct Shutdown {
+        ~Shutdown() {
+            lake::control::shutdown_zetta_control_transport();
+        }
+    } shutdown;
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const std::filesystem::path dir =
+        lake::test::fixture_path("quickstart-dated-" + lake::control::new_uuid_v4());
+    std::filesystem::create_directories(dir);
+    auto service = std::make_shared<lake::control::WorkspaceService>(
+        lake::control::WorkspaceConfig{dir.string(), 0},
+        store,
+        std::make_shared<lake::control::ZettaWorkspaceCaller>());
+    const std::string identity = "taap:1:ed25519:quickstart-dated";
+    const auto user = store->create_user({identity, "dated@example.test", "Dated"});
+    ASSERT_TRUE(user);
+    const auto customer = store->create_customer({"individual", user->id, "", "qsdated"});
+    ASSERT_TRUE(customer);
+    const auto object = store->find_policy_object("customer", customer->id);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(store->create_grant({identity, object->id, "admin", "a", "admin", "r"}));
+    const auto workspace = store->create_workspace({customer->id, "home", "dev", ""});
+    ASSERT_TRUE(workspace) << workspace.error().message;
+    const auto zetta_service = store->get_service(workspace->zetta_service_id);
+    ASSERT_TRUE(zetta_service);
+    ASSERT_TRUE(store->set_service_status(zetta_service->id, "Ready", "", url));
+    std::ofstream(dir / (zetta_service->slug + ".json"))
+        << json{{"kind", "zetta"}, {"token", token}}.dump();
+
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const auto call = [&](const std::string& name, json input) {
+        lake::api::ApiContext context;
+        context.store = store.get();
+        context.workspaces = service.get();
+        context.authorized = true;
+        context.acting_identity = identity;
+        context.acting_user_id = user->id;
+        context.session_credential = true;
+        context.scopes = {"*"};
+        context.instance_kek = std::string(kek);
+        context.external_origin = "https://lake.test";
+        context.request_id = lake::control::new_uuid_v4();
+        input["customer_id"] = customer->id;
+        input["workspace_id"] = workspace->id;
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(completed);
+        return completed ? std::move(*completed) : lake::api::ApiResult{};
+    };
+
+    const std::vector<std::string> names{"Ana", "Ben", "Chen", "Dana", "Eli", "Fay"};
+    const std::vector<std::string> countries{"Canada", "France", "Japan", "Brazil"};
+    std::string csv = "customer_id,First Name,Country,Signup Date,Age,Plan,Spend,Bio\n";
+    for (int i = 0; i < 60; ++i) {
+        const std::string& country = countries[static_cast<std::size_t>(i % 4)];
+        const std::string month = (i % 12 < 9 ? "0" : "") + std::to_string(i % 12 + 1);
+        const std::string day = (i % 27 < 9 ? "0" : "") + std::to_string(i % 27 + 1);
+        csv += "cust-" + std::to_string(1000 + i) + "," + names[static_cast<std::size_t>(i % 6)] +
+               "," + country + ",2025-" + month + "-" + day + "," + std::to_string(20 + i % 40) +
+               "," + (i % 3 == 0 ? "pro" : "free") + "," +
+               std::to_string(10 + i + (country == "Canada" ? 40 : 0)) +
+               ",Likes hiking and long walks number " + std::to_string(i) + " by the lake\n";
+    }
+    const std::string table = "qsd_" + lake::control::new_uuid_v4().substr(0, 8);
+    auto started = call("start_quickstart", {{"content", csv}, {"format", "csv"}, {"name", table}});
+    ASSERT_TRUE(started.ok) << started.error.code << ": " << started.error.message;
+    ASSERT_EQ(started.value["state"], "search_ready") << started.value.dump(2);
+    std::map<std::string, std::string> kinds;
+    for (const json& column : started.value["dataset"]["columns"]) {
+        kinds[column["name"]] = column.value("kind", std::string());
+    }
+    EXPECT_EQ(kinds["Signup Date"], "datetime") << started.value["dataset"].dump(2);
+    EXPECT_EQ(kinds["Bio"], "free_text");
+    EXPECT_EQ(kinds["Age"], "numeric");
+    EXPECT_EQ(kinds["Plan"], "boolean");
+    EXPECT_EQ(kinds["Country"], "categorical");
+    EXPECT_TRUE(started.value["snapshot_date"].is_string());
+    const std::string index_id = started.value["index"]["id"];
+
+    // Steve's choice.
+    auto training =
+        call("train_quickstart", {{"target", "Country"}, {"entity_column", "First Name"}});
+    ASSERT_TRUE(training.ok) << training.error.message;
+    ASSERT_EQ(training.value["state"], "training") << training.value.dump(2);
+    EXPECT_EQ(training.value["training"]["preparation"]["copy"], true);
+    json status;
+    for (int attempt = 0; attempt < 120; ++attempt) {
+        status = call("quickstart_status", json::object()).value;
+        if (status["state"] != "training") {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    ASSERT_EQ(status["state"], "trained") << status.dump(2);
+    auto published = call("train_quickstart", json::object());
+    ASSERT_EQ(published.value["state"], "done") << published.value.dump(2);
+    const std::string model_id = published.value["model"]["id"];
+
+    // The website's rows, as search answers them (the date and every other column in them).
+    auto searched =
+        call("search_index", {{"index_id", index_id}, {"query", "hiking"}, {"top_k", 5}});
+    ASSERT_TRUE(searched.ok) << searched.error.message;
+    ASSERT_FALSE(searched.value["hits"].empty());
+    json rows = json::array();
+    for (const json& hit : searched.value["hits"]) {
+        rows.push_back(hit["fields"]);
+    }
+    ASSERT_TRUE(rows[0].contains("Signup Date"));
+    auto predicted = call("predict", {{"model_id", model_id}, {"rows", rows}});
+    ASSERT_TRUE(predicted.ok) << predicted.error.message;
+    ASSERT_EQ(predicted.value["ranked"].size(), rows.size());
     std::error_code ignored;
     std::filesystem::remove_all(dir, ignored);
 }

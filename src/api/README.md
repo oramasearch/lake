@@ -18,6 +18,10 @@ metering stay each capability's own; its bookkeeping reads (`get_run`, `list_mod
 `get_dataset`) use `call_workspace`. The state is a sealed `lake_quickstarts` record per quickstart
 in the workspace Zetta. The website code is built here; with `origins` it makes a browser key through
 a nested `create_browser_key` and puts the secret in the code, otherwise `key.create` names that call.
+`quickstart_columns.cpp` (lake#1181) holds its pure column rules: each column's kind from the
+engine's `analyze_dataset`, what is offered first, the training copy's rows and the engine's
+`transform_required` refusals in plain words; `train_quickstart` reads rows through `call_workspace`
+`sql` and loads the copy with a nested `upload_dataset`.
 See [quickstart.md](../../docs/api/quickstart.md).
 
 `browser_key_capabilities.cpp` registers `create_browser_key`, `list_browser_keys` and

@@ -35,12 +35,14 @@
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "quickstart_columns.hpp"
 #include "workspace_records_api.hpp"
 
 namespace lake::api {
 namespace {
 
 using json = nlohmann::json;
+namespace qc = quickstart_columns;
 
 constexpr control::RecordCollection quickstart_records{"quickstarts", 1};
 // The newest quickstarts quickstart_status lists beside the one it answers.
@@ -135,6 +137,11 @@ template <class V> struct Taken<std::expected<V, ApiResult>> {
         return std::unexpected(ApiResult::failure("store_error", message));
     }
 };
+template <class V> struct Taken<std::expected<V, std::string>> {
+    static std::expected<V, std::string> failure(const std::string& message) {
+        return std::unexpected(message);
+    }
+};
 template <class V> struct Taken<control::ZettaControlResult<V>> {
     static control::ZettaControlResult<V> failure(const std::string& message) {
         return std::unexpected(control::ZettaControlError{"store_error", message});
@@ -176,6 +183,27 @@ engine_read(ApiContext& context,
     bound.workspace_id = workspace_id;
     co_return control::settled(
         co_await call_workspace(bound, customer_id, std::move(capability), true, std::move(input)));
+}
+
+// The workspace engine's own profile of the dataset's columns (analyze_dataset), with the
+// snapshot date declared as its `as_of` and, once chosen, the column to predict as its `label`
+// (for the engine's leakage checks).
+liquid::runtime::task<control::ZettaControlResult<json>> analyze(ApiContext& context,
+                                                                 const std::string& customer_id,
+                                                                 const std::string& workspace_id,
+                                                                 const json& dataset,
+                                                                 const std::string& as_of,
+                                                                 const std::string& label) {
+    json input{{"dataset_path", text(dataset, "database") + "." + text(dataset, "name")},
+               {"sample_rows", qc::analysis_sample_rows}};
+    if (!as_of.empty()) {
+        input["as_of"] = as_of;
+    }
+    if (!label.empty()) {
+        input["label"] = label;
+    }
+    co_return co_await engine_read(
+        context, customer_id, workspace_id, "analyze_dataset", std::move(input));
 }
 
 // ---- the record ----
@@ -314,10 +342,22 @@ liquid::runtime::task<json> training_progress(ApiContext& context,
                status == "canceled") {
         progress["state"] = "failed";
         std::string reason = text(*run, "error");
+        if (reason.empty() && run->contains("logs") && (*run)["logs"].is_array()) {
+            // The engine writes why a run failed to its log, not always to `error`.
+            for (const json& line : (*run)["logs"]) {
+                if (text(line, "level") == "error" && !text(line, "message").empty()) {
+                    reason = text(line, "message");
+                }
+            }
+        }
         if (reason.empty()) {
             reason = "the training run " + status;
         }
-        progress["error"] = {{"code", "run_failed"}, {"message", reason}};
+        // In plain words (lake#1181), with the engine's own reason beside it for an agent.
+        const qc::Choice choice{text(training, "target"), text(training, "target_value"), {}};
+        progress["error"] = {{"code", "run_failed"},
+                             {"message", qc::explain_run_failure(reason, choice)},
+                             {"detail", reason}};
     } else {
         progress["state"] = "running";
     }
@@ -397,6 +437,13 @@ json status_of(const json& record, const json& progress) {
     for (const json& entry : steps) {
         if (entry["state"] == "failed") {
             state = "failed";
+            if (entry["step"] == "model" && entry["error"].is_object()) {
+                // What to choose, in plain words (lake#1181), then the call that trains again.
+                next = text(entry["error"], "message") +
+                       " Then call train_quickstart again with this quickstart_id, sending "
+                       "target, target_value, entity_column or as_of to change them.";
+                break;
+            }
             next = "Call " +
                    std::string(entry["step"] == "model" || entry["step"] == "model_answers"
                                    ? "train_quickstart"
@@ -444,6 +491,13 @@ json status_of(const json& record, const json& progress) {
              {"predict", nullptr},
              {"created_at", record.value("created_at", json(nullptr))},
              {"updated_at", record.value("updated_at", json(nullptr))}};
+    // lake#1181: the date the dataset's dates are read as of, and the columns the console offers
+    // first (the detected kinds are on dataset.columns).
+    out["snapshot_date"] =
+        text(record, "snapshot_date").empty() ? json(nullptr) : json(text(record, "snapshot_date"));
+    out["suggested"] = have_dataset && qc::detected(dataset.value("columns", json::array()))
+                           ? qc::suggest(dataset["columns"])
+                           : json(nullptr);
     if (!model_id.empty()) {
         out["model"] = {{"id", model_id}, {"published", model_published}};
     }
@@ -497,6 +551,8 @@ json waiting_for(const std::string& customer_id,
             {"model", nullptr},
             {"search", nullptr},
             {"predict", nullptr},
+            {"snapshot_date", nullptr},
+            {"suggested", nullptr},
             {"created_at", nullptr},
             {"updated_at", nullptr}};
 }
@@ -851,6 +907,19 @@ liquid::runtime::task<ApiResult> start_quickstart(const json& input, ApiContext&
                 {{"dataset", dataset["name"]}, {"database", dataset["database"]}}));
             dataset["columns"] = summary ? columns_of(*summary) : json::array();
         }
+        // The snapshot date the dataset's dates are read as of: when it was uploaded, or when the
+        // quickstart took an existing dataset (lake#1181). train_quickstart's `as_of` changes it.
+        if (text(record, "snapshot_date").empty()) {
+            record["snapshot_date"] =
+                text(dataset, "source") == "upload" ? text(record, "created_at") : now_text();
+        }
+        // Each column's kind, from the engine's own profile. Without it (an engine that cannot
+        // profile) the columns keep their storage types and training detects them again.
+        auto analysis = take(co_await analyze(
+            context, customer_id, workspace_id, dataset, text(record, "snapshot_date"), {}));
+        if (analysis) {
+            dataset["columns"] = qc::detect_columns(*analysis, dataset["columns"]);
+        }
         record["dataset"] = std::move(dataset);
         clear_error(record, "dataset");
         auto written = take(co_await saved.save(record));
@@ -950,11 +1019,29 @@ liquid::runtime::task<ApiResult> quickstart_status(const json& input, ApiContext
             out["next"] = "Call start_quickstart with the file's content and format, or a "
                           "dataset_id.";
         } else {
-            const json& record = loaded->record->body;
+            json record = loaded->record->body;
             const json progress =
                 present(record, "training") && !present(record, "model")
                     ? take(co_await training_progress(context, customer_id, workspace_id, record))
                     : json(nullptr);
+            // A quickstart started before columns were detected (lake#1181): detect them for this
+            // answer, without writing; train_quickstart keeps them.
+            if (present(record, "dataset") &&
+                !qc::detected(record["dataset"].value("columns", json::array()))) {
+                if (text(record, "snapshot_date").empty()) {
+                    record["snapshot_date"] = text(record, "created_at");
+                }
+                auto analysis = take(co_await analyze(context,
+                                                      customer_id,
+                                                      workspace_id,
+                                                      record["dataset"],
+                                                      text(record, "snapshot_date"),
+                                                      {}));
+                if (analysis) {
+                    record["dataset"]["columns"] = qc::detect_columns(
+                        *analysis, record["dataset"].value("columns", json::array()));
+                }
+            }
             out = status_of(record, progress);
         }
         out["workspace"] = *state;
@@ -967,6 +1054,72 @@ liquid::runtime::task<ApiResult> quickstart_status(const json& input, ApiContext
 }
 
 // ---- train_quickstart ----
+
+// The rows a training copy is made from, at most this many, read this many at a time.
+constexpr std::int64_t max_prepared_rows = 1'000'000;
+constexpr std::int64_t read_page_rows = 5000;
+
+// The dataset's rows, read as the caller through the engine's SQL (the read every engine read
+// takes), a page at a time. Refused in plain words.
+liquid::runtime::task<std::expected<std::vector<json>, std::string>>
+read_rows(ApiContext& context,
+          const std::string& customer_id,
+          const std::string& workspace_id,
+          const json& dataset) {
+    using Rows = std::expected<std::vector<json>, std::string>;
+    const std::string table = text(dataset, "database") + "." + text(dataset, "name");
+    const bool plain = std::ranges::all_of(
+        table, [](unsigned char c) { return std::isalnum(c) != 0 || c == '_' || c == '.'; });
+    if (!plain || std::ranges::count(table, '.') != 1) {
+        co_return Rows(std::unexpected(
+            "Lake cannot read " + text(dataset, "id") +
+            " to prepare its columns: SQL cannot name it. Upload the file again under a name of "
+            "letters, digits and underscores."));
+    }
+    auto counted = take(co_await engine_read(context,
+                                             customer_id,
+                                             workspace_id,
+                                             "sql",
+                                             {{"statement", "SELECT COUNT(*) FROM " + table}}));
+    if (!counted) {
+        co_return Rows(std::unexpected("Lake could not read " + text(dataset, "id") +
+                                       " to prepare its columns: " + counted.error().message));
+    }
+    std::int64_t total = 0;
+    const json counts = counted->value("rows", json::array());
+    if (!counts.empty() && counts[0].is_object()) {
+        for (const auto& [key, value] : counts[0].items()) {
+            if (value.is_number()) {
+                total = value.get<std::int64_t>();
+            }
+        }
+    }
+    total = std::min(total, max_prepared_rows);
+    std::vector<json> rows;
+    rows.reserve(static_cast<std::size_t>(total));
+    for (std::int64_t offset = 0; offset < total; offset += read_page_rows) {
+        auto page = take(co_await engine_read(
+            context,
+            customer_id,
+            workspace_id,
+            "sql",
+            {{"statement",
+              "SELECT * FROM " + table + " LIMIT " + std::to_string(read_page_rows) + " OFFSET " +
+                  std::to_string(offset)}}));
+        if (!page) {
+            co_return Rows(std::unexpected("Lake could not read " + text(dataset, "id") +
+                                           " to prepare its columns: " + page.error().message));
+        }
+        const json got = page->value("rows", json::array());
+        for (const json& row : got) {
+            rows.push_back(row);
+        }
+        if (got.size() < static_cast<std::size_t>(read_page_rows)) {
+            break;
+        }
+    }
+    co_return Rows(std::move(rows));
+}
 
 liquid::runtime::task<ApiResult> train_quickstart(const json& input, ApiContext& context) {
     if (!context.store || !context.workspaces) {
@@ -1059,37 +1212,294 @@ liquid::runtime::task<ApiResult> train_quickstart(const json& input, ApiContext&
             }
             return fallback;
         };
-        json training{{"name", name},
-                      {"methodology", setting("methodology", std::string(default_methodology))},
-                      {"target", setting("target", nullptr)},
-                      {"entity_column", setting("entity_column", nullptr)},
-                      {"holdout_fraction", setting("holdout_fraction", default_holdout)},
-                      {"attempt", attempt}};
-        json train{{"customer_id", customer_id},
-                   {"workspace_id", workspace_id},
-                   {"name", name},
-                   {"methodology", training["methodology"]},
-                   {"dataset_path",
-                    record["dataset"]["database"].get<std::string>() + "." +
-                        record["dataset"]["name"].get<std::string>()},
-                   {"holdout_fraction", training["holdout_fraction"]}};
-        for (const char* optional : {"target", "entity_column"}) {
-            if (training[optional].is_string()) {
-                train[optional] = training[optional];
+        const auto setting_text = [&](const char* key) {
+            const json value = setting(key, nullptr);
+            return value.is_string() ? value.get<std::string>() : std::string();
+        };
+
+        // The snapshot date the dataset's dates are read as of (lake#1181): the one sent, else the
+        // quickstart's, else when it was made.
+        if (input.contains("as_of")) {
+            const std::string as_of = qc::snapshot_date(input.at("as_of").get<std::string>());
+            if (as_of.empty()) {
+                co_return ApiResult::failure(
+                    "invalid_input",
+                    "as_of is a date such as 2026-10-24, or an ISO-8601 time such as "
+                    "2026-10-24T09:30:00Z",
+                    "/as_of");
             }
+            record["snapshot_date"] = as_of;
+        } else if (text(record, "snapshot_date").empty()) {
+            record["snapshot_date"] = text(record, "created_at");
         }
-        const ApiResult started = take(co_await nested(context, "train_model", std::move(train)));
-        if (!started.ok) {
-            if (started.error.code == "payment_required") {
-                co_return started;
-            }
-            set_error(record, "model", error_json(started.error));
+        const std::string as_of = text(record, "snapshot_date");
+
+        const std::string methodology = setting_text("methodology").empty()
+                                            ? std::string(default_methodology)
+                                            : setting_text("methodology");
+        qc::Choice choice{setting_text("target"), {}, setting_text("entity_column")};
+        // The value to look for belongs to its column: choosing another column drops it.
+        if (input.contains("target_value")) {
+            choice.target_value = input.at("target_value").get<std::string>();
+        } else if (!input.contains("target") || text(before, "target") == choice.target) {
+            choice.target_value = text(before, "target_value");
+        }
+        const bool chosen = input.contains("target");
+        const std::string source_path = record["dataset"]["database"].get<std::string>() + "." +
+                                        record["dataset"]["name"].get<std::string>();
+
+        // A refusal Lake could not fix, or a choice it cannot train: kept on the model step in
+        // plain words, never the engine's code.
+        const auto refuse = [&](json error) -> liquid::runtime::task<ApiResult> {
+            set_error(record, "model", std::move(error));
             if (auto failure = take(co_await save())) {
                 co_return std::move(*failure);
             }
             co_return ApiResult::success(status_of(record, json(nullptr)));
+        };
+
+        std::string dataset_path = source_path;
+        json preparation = nullptr;
+        std::optional<ApiResult> started;
+        if (methodology == qc::prepared_methodology) {
+            // Each column's kind from the engine's profile, read again with the column to predict
+            // as its label, so the engine's leakage checks run (lake#1181).
+            json detected = record["dataset"].value("columns", json::array());
+            if (choice.target.empty() && !qc::detected(detected)) {
+                auto first = take(co_await analyze(
+                    context, customer_id, workspace_id, record["dataset"], as_of, {}));
+                if (first) {
+                    detected = qc::detect_columns(*first, detected);
+                }
+            }
+            if (choice.target.empty() && qc::detected(detected)) {
+                const json suggested = qc::suggest(detected);
+                if (suggested["target"].is_string()) {
+                    choice.target = suggested["target"];
+                    if (choice.target_value.empty() && suggested["target_value"].is_string()) {
+                        choice.target_value = suggested["target_value"];
+                    }
+                }
+            }
+            json leakage = json::array();
+            auto analysis = take(co_await analyze(
+                context, customer_id, workspace_id, record["dataset"], as_of, choice.target));
+            if (analysis) {
+                detected = qc::detect_columns(*analysis, detected);
+                leakage = analysis->value("leakage_candidates", json::array());
+            }
+            if (qc::detected(detected)) {
+                record["dataset"]["columns"] = detected;
+                if (choice.entity_column.empty() && !input.contains("entity_column")) {
+                    const json suggested = qc::suggest(detected);
+                    if (suggested["entity_column"].is_string() &&
+                        suggested["entity_column"] != choice.target) {
+                        choice.entity_column = suggested["entity_column"];
+                    }
+                }
+                const json* target_column = qc::find(detected, choice.target);
+                if (choice.target_value.empty() && target_column != nullptr &&
+                    target_column->contains("predict") &&
+                    (*target_column)["predict"].value("choose_value", false)) {
+                    const json values = (*target_column)["predict"].value("values", json::array());
+                    if (!values.empty()) {
+                        choice.target_value = values[0];
+                    }
+                }
+                if (const qc::Problem problem = qc::check_choice(detected, choice);
+                    !problem.message.empty()) {
+                    if (chosen || input.contains("target_value") ||
+                        input.contains("entity_column")) {
+                        co_return ApiResult::failure(
+                            "invalid_input", problem.message, problem.path);
+                    }
+                    co_return co_await refuse(
+                        {{"code", "choose_columns"}, {"message", problem.message}});
+                }
+                // A column the engine says may give the answer away is left out too.
+                json usable = detected;
+                for (json& column : usable) {
+                    for (const json& leak : leakage) {
+                        if (text(leak, "column") == text(column, "name") &&
+                            text(column, "name") != choice.target &&
+                            text(column, "name") != choice.entity_column) {
+                            column["feature"] = {
+                                {"use", false},
+                                {"reason",
+                                 "it may give the answer away (" + text(leak, "reason") + ")"}};
+                        }
+                    }
+                }
+
+                qc::Fixes fixes;
+                json applied = json::array();
+                for (int pass = 0; pass < 2; ++pass) {
+                    json train{{"customer_id", customer_id},
+                               {"workspace_id", workspace_id},
+                               {"name", name},
+                               {"methodology", methodology},
+                               {"holdout_fraction", setting("holdout_fraction", default_holdout)},
+                               {"target", choice.target}};
+                    if (qc::trains_as_is(usable, choice, fixes)) {
+                        dataset_path = source_path;
+                        json used = json::array();
+                        json dropped = json::array();
+                        for (const json& column : usable) {
+                            const std::string column_name = text(column, "name");
+                            if (column_name == choice.target ||
+                                column_name == choice.entity_column) {
+                                continue;
+                            }
+                            if (column.contains("feature") &&
+                                column["feature"].value("use", false)) {
+                                used.push_back(column_name);
+                            } else {
+                                dropped.push_back({{"name", column_name},
+                                                   {"reason",
+                                                    column.contains("feature")
+                                                        ? column["feature"].value("reason", "")
+                                                        : std::string()}});
+                            }
+                        }
+                        preparation = {{"methodology", methodology},
+                                       {"copy", false},
+                                       {"dataset_id", record["dataset"]["id"]},
+                                       {"entity", choice.entity_column},
+                                       {"used", std::move(used)},
+                                       {"dropped", std::move(dropped)},
+                                       {"label", {{"column", choice.target}, {"positive", "1"}}},
+                                       {"applied", applied}};
+                        train["entity_column"] = choice.entity_column;
+                    } else {
+                        auto rows = take(co_await read_rows(
+                            context, customer_id, workspace_id, record["dataset"]));
+                        if (!rows) {
+                            co_return co_await refuse(
+                                {{"code", "cannot_prepare"}, {"message", rows.error()}});
+                        }
+                        qc::Prepare made = qc::prepare_rows(usable, *rows, choice, fixes);
+                        if (!made.prepared) {
+                            co_return co_await refuse(
+                                {{"code", "cannot_prepare"}, {"message", made.problem}});
+                        }
+                        const qc::Prepared& prepared = *made.prepared;
+                        std::string format = "jsonl";
+                        std::string content = prepared.content;
+                        if (content.size() > qc::max_upload_bytes) {
+                            format = "csv";
+                            content = qc::csv_content(prepared);
+                        }
+                        if (content.size() > qc::max_upload_bytes) {
+                            co_return co_await refuse(
+                                {{"code", "cannot_prepare"},
+                                 {"message",
+                                  "The columns the model trains on are larger than Lake loads in "
+                                  "one call (16 MiB). Train this dataset from Train → Models, or "
+                                  "start the quickstart with a smaller file."}});
+                        }
+                        std::string table = text(record["dataset"], "name") + "_training";
+                        if (table.size() > 63) {
+                            table = text(record["dataset"], "name").substr(0, 54) + "_training";
+                        }
+                        const ApiResult uploaded =
+                            take(co_await nested(context,
+                                                 "upload_dataset",
+                                                 {{"customer_id", customer_id},
+                                                  {"workspace_id", workspace_id},
+                                                  {"content", std::move(content)},
+                                                  {"format", format},
+                                                  {"table_name", table},
+                                                  {"if_exists", "rename"}}));
+                        if (!uploaded.ok) {
+                            if (uploaded.error.code == "payment_required") {
+                                co_return uploaded;
+                            }
+                            co_return co_await refuse(error_json(uploaded.error));
+                        }
+                        const std::string database = text(uploaded.value, "database").empty()
+                                                         ? std::string("datasets")
+                                                         : text(uploaded.value, "database");
+                        const std::string copied = text(uploaded.value, "table").empty()
+                                                       ? table
+                                                       : text(uploaded.value, "table");
+                        dataset_path = database + "." + copied;
+                        preparation = {
+                            {"methodology", methodology},
+                            {"copy", true},
+                            {"dataset_id", datasets::id_of(database, copied)},
+                            {"format", format},
+                            {"entity", prepared.entity},
+                            {"used", prepared.used},
+                            {"dropped", prepared.dropped},
+                            {"label", prepared.label},
+                            {"rows", prepared.rows},
+                            {"skipped", prepared.skipped},
+                            {"note", prepared.note.empty() ? json(nullptr) : json(prepared.note)},
+                            {"applied", applied}};
+                        train["entity_column"] = prepared.entity;
+                    }
+                    train["dataset_path"] = dataset_path;
+                    started = take(co_await nested(context, "train_model", std::move(train)));
+                    if (started->ok || started->error.code == "payment_required") {
+                        break;
+                    }
+                    const auto refused = qc::refusal(started->error.message);
+                    if (refused && pass == 0) {
+                        if (const auto fix = qc::fix_for(*refused, usable, choice)) {
+                            // Lake can satisfy it: the training copy does, once.
+                            fixes.drop.insert(fix->drop.begin(), fix->drop.end());
+                            fixes.dates_from_values |= fix->dates_from_values;
+                            fixes.number_rows |= fix->number_rows;
+                            applied.push_back(refused->name);
+                            continue;
+                        }
+                    }
+                    if (refused) {
+                        co_return co_await refuse(
+                            {{"code", "training_refused"},
+                             {"message", qc::explain_refusal(*refused, usable, choice)},
+                             {"transform", refused->name}});
+                    }
+                    break;
+                }
+            }
         }
-        training["run_id"] = text(started.value, "run_id");
+        if (!started) {
+            // Another methodology, or an engine that cannot profile the dataset: trained as it
+            // is, with the columns sent.
+            json train{{"customer_id", customer_id},
+                       {"workspace_id", workspace_id},
+                       {"name", name},
+                       {"methodology", methodology},
+                       {"dataset_path", source_path},
+                       {"holdout_fraction", setting("holdout_fraction", default_holdout)}};
+            if (!choice.target.empty()) {
+                train["target"] = choice.target;
+            }
+            if (!choice.entity_column.empty()) {
+                train["entity_column"] = choice.entity_column;
+            }
+            started = take(co_await nested(context, "train_model", std::move(train)));
+        }
+        if (!started->ok) {
+            if (started->error.code == "payment_required") {
+                co_return *started;
+            }
+            co_return co_await refuse(error_json(started->error));
+        }
+        json training{{"name", name},
+                      {"methodology", methodology},
+                      {"target", choice.target.empty() ? json(nullptr) : json(choice.target)},
+                      {"target_value",
+                       choice.target_value.empty() ? json(nullptr) : json(choice.target_value)},
+                      {"entity_column",
+                       choice.entity_column.empty() ? json(nullptr) : json(choice.entity_column)},
+                      {"holdout_fraction", setting("holdout_fraction", default_holdout)},
+                      {"as_of", as_of},
+                      {"dataset_path", dataset_path},
+                      {"preparation", preparation},
+                      {"attempt", attempt}};
+        training["run_id"] = text(started->value, "run_id");
         training["started_at"] = now_text();
         record["training"] = std::move(training);
         clear_error(record, "model");
@@ -1099,14 +1509,13 @@ liquid::runtime::task<ApiResult> train_quickstart(const json& input, ApiContext&
         context.audit_details["run_id"] = record["training"]["run_id"];
         progress = {{"state", "running"},
                     {"status",
-                     text(started.value, "status").empty() ? json("running")
-                                                           : json(text(started.value, "status"))},
+                     text(started->value, "status").empty() ? json("running")
+                                                            : json(text(started->value, "status"))},
                     {"model_id", nullptr},
                     {"error", nullptr},
                     {"started_at", record["training"]["started_at"]}};
         co_return ApiResult::success(status_of(record, progress));
     }
-
     // Trained: publish it, so the website can ask it.
     const ApiResult exposed = take(co_await nested(
         context,
@@ -1527,7 +1936,17 @@ json status_output_schema() {
           {"training", {{"type", json::array({"object", "null"})}}},
           {"model", {{"type", json::array({"object", "null"})}}},
           {"search", {{"type", json::array({"object", "null"})}}},
-          {"predict", {{"type", json::array({"object", "null"})}}}}},
+          {"predict", {{"type", json::array({"object", "null"})}}},
+          {"snapshot_date",
+           {{"type", json::array({"string", "null"})},
+            {"description",
+             "the date the dataset's dates are read as of: when it was uploaded unless "
+             "train_quickstart's `as_of` changed it"}}},
+          {"suggested",
+           {{"type", json::array({"object", "null"})},
+            {"description",
+             "{target, target_value, entity_column}: the column to predict (and the value to look "
+             "for) and the column that names a row the quickstart offers first"}}}}},
         {"required",
          json::array({"quickstart_id", "customer_id", "workspace_id", "state", "next", "steps"})}};
 }
@@ -1555,7 +1974,11 @@ void register_quickstart_capabilities(Registry& registry) {
             "with the same input once quickstart_status reports the workspace ready. Then it adds "
             "the dataset (the file's `content` with `format` csv or jsonl, through upload_dataset; "
             "or an existing `dataset_id`), builds its search index (create_index) and publishes it "
-            "(expose_index). Each step's state is kept in the workspace; a step that fails is "
+            "(expose_index). It reads each column's kind from the engine's own profile "
+            "(analyze_dataset): number, category, yes or no, free text, date or time, "
+            "identifier, empty or the same in every row, in `dataset.columns` with what the "
+            "first model can use and predict. Each step's state is kept in the workspace; a step "
+            "that fails is "
             "answered with why (state `failed`), and calling again with the `quickstart_id` "
             "resumes from it. Paid: refused 402 payment_required with the top-up link while the "
             "account's balance is blocked. Next: quickstart_snippets for the website code, "
@@ -1598,7 +2021,10 @@ void register_quickstart_capabilities(Registry& registry) {
         .description =
             "Where the quickstart process stands in a workspace (lake#1128): each step in order "
             "(workspace, dataset, search_index, website, model, model_answers) with its state "
-            "(pending, running, done or failed, with why), the dataset, index and model ids, the "
+            "(pending, running, done or failed, with why), the dataset with each column's "
+            "detected kind (`dataset.columns`: kind, title, feature {use, reason}, predict {can, "
+            "reason, values}), `snapshot_date`, `suggested` (the column to predict and the column "
+            "that names a row offered first), the dataset, index and model ids, the "
             "training's progress read live from its run, the `search_index` and `predict` calls "
             "that reach what it made, and `next`, what to call next. `quickstart_id` picks one; "
             "the newest otherwise. `quickstarts` lists the workspace's quickstarts, newest first. "
@@ -1626,7 +2052,18 @@ void register_quickstart_capabilities(Registry& registry) {
             "quickstart's dataset (train_model; methodology M-1 and a 0.2 held-out share unless "
             "told otherwise, `target` the column to predict, `entity_column` the column that names "
             "a row), and once the run has finished, publishes the model (expose_model) so the "
-            "website can ask it. Call it once to start training, read quickstart_status for "
+            "website can ask it. Any column types train (lake#1181): M-1 answers a yes-or-no "
+            "question, so `target` is a column with two values or a category with `target_value` "
+            "the value to look for (the most common unless sent); left out, the columns "
+            "quickstart_status `suggested` names. Date and time columns are read as of "
+            "`as_of` (default: the quickstart's snapshot date, when the dataset was uploaded) and "
+            "left out of the first model with identifiers, free text, empty columns and columns "
+            "with one value; when the dataset cannot train as it is, Lake writes the usable "
+            "columns, a row number when no column names a row, and the target as 0/1 to a "
+            "training copy (upload_dataset, `<name>_training`) and trains on that. A "
+            "`transform_required` refusal Lake can satisfy is applied and tried once more; any "
+            "other is answered on the model step in plain words with what to choose. Call it "
+            "once to start training, read quickstart_status for "
             "progress, then call it again to publish; while the run is still going it changes "
             "nothing. A failed run is trained again by the next call, with the settings sent then "
             "or the ones before. Paid: training runs on the workspace engine's billed compute; "
@@ -1635,11 +2072,20 @@ void register_quickstart_capabilities(Registry& registry) {
             {{"workspace_id", workspace_schema("the workspace the quickstart is in")},
              {"quickstart_id", quickstart_id_schema()},
              {"target",
-              string_schema("the column to predict (list_methodologies says whether "
-                            "the methodology needs one)")},
+              string_schema("the column to predict: with M-1 a column with two values, or a "
+                            "category with target_value (default: quickstart_status "
+                            "`suggested`)")},
+             {"target_value",
+              string_schema("the value of `target` the model looks for: its answer is how "
+                            "likely a row has it (default: a yes-like value, else the rarer of "
+                            "two, else the category's most common)")},
+             {"as_of",
+              string_schema("the snapshot date the dataset's dates are read as of, such as "
+                            "2026-10-24 or an ISO-8601 time (default: the quickstart's, when the "
+                            "dataset was uploaded); kept on the quickstart")},
              {"entity_column",
-              string_schema("the column that identifies a row (default: the "
-                            "dataset's own)")},
+              string_schema("the column that identifies a row (default: a detected identifier; "
+                            "without one Lake numbers the rows)")},
              {"methodology",
               string_schema("a methodology id from list_methodologies (default "
                             "M-1, tabular supervised learning)")},

@@ -558,7 +558,9 @@ origin), a failed step kept with why and resumed, a blocked balance
 refused with the top-up link before any step, another account's workspace refused, a person with no
 workspace waiting for one, input refusals, and the OpenAPI, MCP, `llms.txt`, `llms-full.txt` and
 skill listings. `QuickstartZetta.*` runs the whole process against a real Zetta named by
-`LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` and skips without them.
+`LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` and skips without them, including a dated dataset of
+every column kind (lake#1181). `test_quickstart_columns.cpp` (`QuickstartColumns.*`) covers the
+quickstart's pure column rules: detection, suggestions, the training copy and refusals in plain words.
 
 `test_transcripts.cpp` covers the pure parts of speech-to-text and transcripts (lake#561):
 `.vtt`/`.srt` cleaning, audio decoding and its 25 MiB limit, file names, the OpenAI multipart

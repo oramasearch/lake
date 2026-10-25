@@ -3,7 +3,43 @@
  * balance. `npm test`; the build runs it. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MAX_UPLOAD_BYTES, blockedBy, keyCovers, currentStep, fileKind, firstColumns, hitLine, pollInterval, publishesNow, rateLabel, siteOrigin, stepTone, uploadContent, withKey } from "../src/pages/quickstart/quickstart.ts";
+import {
+  MAX_UPLOAD_BYTES,
+  blockedBy,
+  columnUses,
+  dateInput,
+  detected,
+  keyCovers,
+  currentStep,
+  fileKind,
+  firstColumns,
+  hitLine,
+  kindLabel,
+  pollInterval,
+  predictable,
+  publishesNow,
+  rateLabel,
+  siteOrigin,
+  startingChoice,
+  stepTone,
+  trainInput,
+  trainLabel,
+  uploadContent,
+  valuesOf,
+  withKey,
+  type Column,
+} from "../src/pages/quickstart/quickstart.ts";
+
+// Steve's dataset (lake#1181) as quickstart_status answers it: every column with its detected kind.
+const people: Column[] = [
+  { name: "customer_id", type: "string", kind: "identifier", title: "identifier", feature: { use: false, reason: "an identifier: it names a row" }, predict: { can: false, reason: "an identifier" } },
+  { name: "First Name", type: "string", kind: "categorical", title: "category, 10 values", feature: { use: true, reason: "a category of 10 values" }, predict: { can: true, choose_value: true, values: ["Ana", "Ben"] } },
+  { name: "Country", type: "string", kind: "categorical", title: "category, 4 values", feature: { use: true, reason: "a category of 4 values" }, predict: { can: true, choose_value: true, values: ["Canada", "Japan"] } },
+  { name: "Signup Date", type: "string", kind: "datetime", title: "date or time", feature: { use: false, reason: "a date or time" }, predict: { can: false, reason: "a date" } },
+  { name: "Plan", type: "string", kind: "boolean", title: "yes or no", feature: { use: true, reason: "two values" }, predict: { can: true, values: ["free", "pro"], positive: "pro" } },
+  { name: "Spend", type: "number", kind: "numeric", title: "number", feature: { use: true, reason: "a number" }, predict: { can: false, reason: "a number with many values" } },
+];
+const dataset = { id: "datasets/people", database: "datasets", name: "people", columns: people };
 
 test("a dropped file is sent as what upload_dataset takes", () => {
   assert.deepEqual(uploadContent("movies.csv", "title,genre\nAlien,horror\n"), { content: "title,genre\nAlien,horror\n", format: "csv" });
@@ -103,4 +139,58 @@ test("the website's address becomes the origin its browser key lists (lake#1152)
   assert.match((siteOrigin("http://example.com") as { error: string }).error, /https/);
   assert.match((siteOrigin("ftp://example.com") as { error: string }).error, /https/);
   assert.match((siteOrigin("https://exa mple.com") as { error: string }).error, /not a website/);
+});
+
+test("the column to predict lists only predictable columns, each with its detected type (lake#1181)", () => {
+  assert.equal(detected(people), true);
+  assert.equal(detected([{ name: "a", type: "string" }]), false, "an engine that could not profile it");
+  assert.deepEqual(predictable(people), [
+    { name: "First Name", label: "First Name (category, 10 values)" },
+    { name: "Country", label: "Country (category, 4 values)" },
+    { name: "Plan", label: "Plan (yes or no)" },
+  ]);
+  assert.equal(kindLabel(people[3]), "date or time");
+  assert.deepEqual(valuesOf(people, "Country"), ["Canada", "Japan"], "a category asks which value");
+  assert.deepEqual(valuesOf(people, "Plan"), [], "two values need no choice");
+});
+
+test("the page starts from what Lake suggests, then from what the last training used", () => {
+  const fresh = startingChoice({ dataset, index: null, training: null, snapshot_date: "2026-10-24T08:00:00Z", suggested: { target: "Country", target_value: "Canada", entity_column: "customer_id" } });
+  assert.deepEqual(fresh, { target: "Country", value: "Canada", entity: "customer_id", asOf: "2026-10-24" });
+  const again = startingChoice({ dataset, index: null, training: { target: "Country", target_value: "Japan", entity_column: "First Name", as_of: "2026-01-31" }, snapshot_date: "2026-01-31", suggested: { target: "Plan", target_value: null, entity_column: "customer_id" } });
+  assert.deepEqual(again, { target: "Country", value: "Japan", entity: "First Name", asOf: "2026-01-31" });
+  // Without a profile, the file's order as before.
+  const plain = startingChoice({ dataset: { ...dataset, columns: [{ name: "title", type: "string" }, { name: "popular", type: "integer" }] }, index: null, training: null, suggested: null, snapshot_date: null });
+  assert.deepEqual(plain, { target: "popular", value: "", entity: "title", asOf: "" });
+});
+
+test("every column says what happens to it, left-out ones with why", () => {
+  const uses = columnUses(people, { target: "Country", entity: "customer_id" });
+  assert.deepEqual(
+    uses.map((u) => [u.name, u.use]),
+    [
+      ["customer_id", "Names a row"],
+      ["First Name", "Learned from"],
+      ["Country", "Predicted"],
+      ["Signup Date", "Left out"],
+      ["Plan", "Learned from"],
+      ["Spend", "Learned from"],
+    ],
+  );
+  assert.equal(uses[3].reason, "a date or time");
+  assert.equal(uses[3].used, false);
+});
+
+test("training sends the choices, and the snapshot date only when it was changed", () => {
+  const choice = { target: "Country", value: "Japan", entity: "First Name", asOf: "2026-10-24" };
+  assert.deepEqual(trainInput(choice, people, "2026-10-24T08:00:00Z"), { target: "Country", target_value: "Japan", entity_column: "First Name" });
+  assert.deepEqual(trainInput({ ...choice, asOf: "2026-01-31" }, people, "2026-10-24T08:00:00Z"), { target: "Country", target_value: "Japan", entity_column: "First Name", as_of: "2026-01-31" });
+  assert.deepEqual(trainInput({ target: "Plan", value: "x", entity: "", asOf: "" }, people, null), { target: "Plan" }, "no value for two values, no row name");
+  assert.equal(dateInput("2026-10-24T08:00:00Z"), "2026-10-24");
+  assert.equal(dateInput("soon"), "");
+});
+
+test("after a failure the button trains with the changed choices, never 'Try again'", () => {
+  assert.equal(trainLabel(false), "Train a model");
+  assert.equal(trainLabel(true), "Train with these choices");
 });

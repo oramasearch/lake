@@ -16,10 +16,18 @@ import { nameForFile } from "@/pages/train/upload";
 import {
   MAX_UPLOAD_BYTES,
   blockedBy,
-  firstColumns,
+  columnUses,
+  detected,
   hitLine,
   pollInterval,
+  predictable,
   publishesNow,
+  startingChoice,
+  trainInput,
+  trainLabel,
+  valuesOf,
+  type Choice,
+  type Column,
   rateLabel,
   stepTone,
   uploadContent,
@@ -523,17 +531,21 @@ function Website({ status }: { status: QuickstartStatus }) {
 }
 
 /** Step 4: one click trains a model on the same dataset, with its progress; once trained it is
- * published by the same click, so the website code grows its answers. */
+ * published by the same click, so the website code grows its answers. Any column types train
+ * (lake#1181): the choices list only columns the model can predict, with their detected types, and
+ * the page shows what Lake does with every column and the snapshot date its dates are read as of. */
 function Train({ status, costs, blocked, onChanged }: { status: QuickstartStatus; costs: Costs | undefined; blocked: boolean; onChanged: () => void }) {
   const columns = status.dataset?.columns ?? [];
-  const fields = columns.length ? columns.map((c) => c.name) : status.index?.fields ?? [];
-  const guess = firstColumns(fields, columns);
-  const [target, setTarget] = useState(status.training?.target ?? guess.target);
-  const [entity, setEntity] = useState(status.training?.entity_column ?? guess.entity);
+  const known = detected(columns);
+  const names = columns.length ? columns.map((c) => c.name) : status.index?.fields ?? [];
+  const targets = known ? predictable(columns) : names.map((name) => ({ name, label: name }));
+  const [choice, setChoice] = useState<Choice>(() => startingChoice(status));
+  const set = (change: Partial<Choice>) => setChoice((before) => ({ ...before, ...change }));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const model = status.steps.find((s) => s.step === "model");
   const answers = status.steps.find((s) => s.step === "model_answers");
+  const values = known ? valuesOf(columns, choice.target) : [];
   const train = (input: Row) => {
     setBusy(true);
     setError(null);
@@ -552,44 +564,82 @@ function Train({ status, costs, blocked, onChanged }: { status: QuickstartStatus
 
   const done = answers?.state === "done";
   const running = model?.state === "running" || status.state === "trained";
+  const failed = model?.state === "failed" || answers?.state === "failed";
+  const preparation = status.training?.preparation ?? null;
+  const asked = status.training?.target_value ? `${status.training.target} is ${status.training.target_value}` : status.training?.target;
   return (
     <Card label="Step 4" title="Train a Model on the Same Data" tone={done ? "default" : "active"} actions={model ? <Status value={done ? "published" : model.state} tone={done ? "success" : stepTone(model.state)} /> : null}>
       <div data-testid="quickstart-train">
         {done ? (
           <p className="m-0 text-[13px] text-ink-2">
-            The model is trained and published: the search above and your website code show its answer for {status.training?.target ?? "each result"}. <Link to="/ship/models">Ship → Models</Link> has its scores and traffic.
+            The model is trained and published: the search above and your website code show how likely {asked ?? "each result"} is for each result. <Link to="/ship/models">Ship → Models</Link> has its scores and traffic.
           </p>
         ) : running ? (
           <p className="m-0 text-[13px] text-ink-2" data-testid="quickstart-training">
             <Brain size={14} aria-hidden className="inline" /> {status.state === "trained" ? "Trained. Publishing it…" : `Training on ${status.dataset?.name ?? "your dataset"}${model?.progress?.status ? ` (${model.progress.status})` : ""}. This page follows it; you can leave and come back.`}
           </p>
+        ) : known && targets.length === 0 ? (
+          <div data-testid="quickstart-no-target">
+            <Banner tone="warn" title="Nothing to Predict Yet">
+              The model answers a yes-or-no question, so it needs a column with two values (such as yes and no) or a category of a few values. None of this dataset's columns is one. Add such a column to the file and start another quickstart.
+            </Banner>
+          </div>
         ) : (
           <>
-            <p className="mt-0 text-[13px] text-ink-2">Lake learns to predict one column from the others, then answers it for every search result.</p>
+            <p className="mt-0 text-[13px] text-ink-2">Lake learns to answer a yes-or-no question about one column from the others, then answers it for every search result.</p>
             <div className="grid gap-2 sm:grid-cols-2">
               <label>
                 <span className="label m-0 block">Column to predict</span>
-                <select className="w-full" value={target} onChange={(e) => setTarget(e.target.value)} data-testid="quickstart-target">
-                  {fields.map((f) => (
-                    <option key={f} value={f}>
-                      {f}
+                <select className="w-full" value={choice.target} onChange={(e) => set({ target: e.target.value, value: valuesOf(columns, e.target.value)[0] ?? "" })} data-testid="quickstart-target">
+                  {choice.target ? null : <option value="">Choose a column</option>}
+                  {targets.map((t) => (
+                    <option key={t.name} value={t.name}>
+                      {t.label}
                     </option>
                   ))}
                 </select>
               </label>
+              {values.length ? (
+                <label>
+                  <span className="label m-0 block">Value to look for</span>
+                  <select className="w-full" value={choice.value} onChange={(e) => set({ value: e.target.value })} data-testid="quickstart-target-value">
+                    {values.map((v) => (
+                      <option key={v} value={v}>
+                        {v}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
               <label>
                 <span className="label m-0 block">Column that names a row</span>
-                <select className="w-full" value={entity} onChange={(e) => setEntity(e.target.value)} data-testid="quickstart-entity">
-                  <option value="">None</option>
-                  {fields.filter((f) => f !== target).map((f) => (
-                    <option key={f} value={f}>
-                      {f}
+                <select className="w-full" value={choice.entity} onChange={(e) => set({ entity: e.target.value })} data-testid="quickstart-entity">
+                  <option value="">None: Lake numbers the rows</option>
+                  {(known ? columns : names.map((name) => ({ name, kind: null }))).filter((c) => c.name !== choice.target).map((c) => (
+                    <option key={c.name} value={c.name}>
+                      {c.kind === "identifier" ? `${c.name} (identifier)` : c.name}
                     </option>
                   ))}
                 </select>
               </label>
+              {known ? (
+                <label>
+                  <span className="label m-0 block">Snapshot date</span>
+                  <input type="date" className="w-full" value={choice.asOf} onChange={(e) => set({ asOf: e.target.value })} data-testid="quickstart-as-of" />
+                </label>
+              ) : null}
             </div>
-            {model?.error ? <p className="text-[12.5px] text-bad">{model.error.message}</p> : null}
+            {values.length ? (
+              <p className="mb-0 text-[12.5px] text-ink-2">
+                The model answers how likely a row's {choice.target} is {choice.value || "the value you choose"}.
+              </p>
+            ) : null}
+            {known ? <ColumnList columns={columns} choice={choice} /> : null}
+            {model?.error ? (
+              <p className="text-[12.5px] text-bad" role="alert" data-testid="quickstart-model-problem">
+                {model.error.message}
+              </p>
+            ) : null}
             {answers?.error ? <p className="text-[12.5px] text-bad">{answers.error.message}</p> : null}
             <div className="mt-2">
               <CostNote costs={costs} step="model" />
@@ -600,15 +650,50 @@ function Train({ status, costs, blocked, onChanged }: { status: QuickstartStatus
               <>
                 {error ? <ErrorBlock error={error} /> : null}
                 <div className="mt-3">
-                  <Button variant="primary" loading={busy} disabled={!target} onClick={() => train({ target, ...(entity ? { entity_column: entity } : {}) })} data-testid="quickstart-train-button">
-                    <Brain size={14} aria-hidden /> {model?.state === "failed" || answers?.state === "failed" ? "Try again" : "Train a model"}
+                  <Button variant="primary" loading={busy} disabled={!choice.target} onClick={() => train(known ? trainInput(choice, columns, status.snapshot_date) : { target: choice.target, ...(choice.entity ? { entity_column: choice.entity } : {}) })} data-testid="quickstart-train-button">
+                    <Brain size={14} aria-hidden /> {trainLabel(failed)}
                   </Button>
                 </div>
               </>
             )}
           </>
         )}
+        {(running || done) && preparation ? <Prepared preparation={preparation} /> : null}
       </div>
     </Card>
+  );
+}
+
+/** What Lake does with each column for these choices: predicted, names a row, learned from, or left
+ * out with why. Dates are read as of the snapshot date. */
+function ColumnList({ columns, choice }: { columns: Column[]; choice: Choice }) {
+  const uses = columnUses(columns, choice);
+  return (
+    <details className="mt-2 text-[12.5px]" data-testid="quickstart-columns">
+      <summary className="cursor-pointer text-ink-2">
+        How Lake reads your columns: {uses.filter((u) => u.used).length} used, {uses.filter((u) => !u.used).length} left out
+      </summary>
+      <ul className="mt-1 mb-0 grid list-none gap-0.5 p-0">
+        {uses.map((u) => (
+          <li key={u.name} data-testid="quickstart-column" data-use={u.use}>
+            <span className="text-ink">{u.name}</span> <span className="text-ink-3">({u.kind})</span>: {u.use}
+            {u.reason ? <span className="text-ink-3">, {u.reason}</span> : null}
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+/** What the training ran on, once it started. */
+function Prepared({ preparation }: { preparation: NonNullable<NonNullable<QuickstartStatus["training"]>["preparation"]> }) {
+  const left = preparation.dropped ?? [];
+  return (
+    <p className="mb-0 mt-2 text-[12px] text-ink-3" data-testid="quickstart-prepared">
+      Learned from {(preparation.used ?? []).join(", ") || "no other column"}.
+      {left.length ? ` Left out: ${left.map((d) => d.name).join(", ")}.` : ""}
+      {preparation.note ? ` ${preparation.note}` : ""}
+      {preparation.copy && preparation.dataset_id ? ` Trained on the copy ${preparation.dataset_id}.` : ""}
+    </p>
   );
 }

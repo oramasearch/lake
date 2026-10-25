@@ -421,6 +421,14 @@ nested registry call of an existing capability (balance gate, audit and metering
 is a sealed `lake_quickstarts` record per quickstart in the workspace Zetta. Signed-in people land
 on Quickstart at `/`; Ask Orama moved to `/ask`. The website key is a browser key (lake#1152, below). Not deployed. See [`docs/api/quickstart.md`](docs/api/quickstart.md) and
 [`docs/ui/quickstart.md`](docs/ui/quickstart.md).
+It trains on any column types (lake#1181, no migration): each column's kind comes from the engine's
+`analyze_dataset`; `quickstart_status` answers them with `snapshot_date` and `suggested`;
+`train_quickstart` takes `target_value` and `as_of`, leaves dates, identifiers, free text, empty and
+constant columns out, and, when the dataset cannot train as it is, trains on a `<name>_training` copy
+(usable columns, numbered rows when no unique column names them, the target as 0/1) loaded with a
+nested `upload_dataset`. A `transform_required` it can satisfy is applied and tried once; any other is
+answered in plain words. Dates are not yet features: zetta v0.5.0's `train_model` takes no `as_of`
+(zetta#1494). See [`docs/api/quickstart.md#columns`](docs/api/quickstart.md#columns).
 
 Browser keys (lake#1152, migration `0102_browser_keys`): the key a website's page holds, bound to one
 workspace, one search index and optionally one model, callable only for `search_index` and
