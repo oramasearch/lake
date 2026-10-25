@@ -17,7 +17,7 @@ capabilities and pass ([below](#adding-a-resource-kind-lake1209)).
 ## Where it lives
 
 Both are workspace data (umbrella rule: everything goes in the workspace Zetta), so both are sealed
-records in the workspace Zetta of the resource's workspace, found by the resource's space
+records in the workspace Zetta of the resource's workspace, found by the resource's account
 ([workspace records](../architecture/workspace-records.md)). Lake's Postgres gains nothing; there
 is no migration and nothing for the operator to vendor.
 
@@ -67,7 +67,7 @@ REST, MCP and OpenAPI expose them like every capability; their audit goes to the
 | Capability | Kind | Input beyond `customer_id`, `workspace_id` | Answer |
 |---|---|---|---|
 | `list_notifications` | read | `resource_kind?`, `resource_id?`, `include_dismissed?`, `include_resolved?` | `{notifications, open}`, newest first; each with `for_you` when it is for the caller |
-| `dismiss_notification` | action (read on the space) | `notification_id` | the notification, dismissed for the caller only |
+| `dismiss_notification` | action (read on the account) | `notification_id` | the notification, dismissed for the caller only |
 | `get_auto_fix` | read | `resource_kind`, `resource_id` | the repair settings |
 | `set_auto_fix` | action (write) | `resource_kind`, `resource_id`, `enabled`, `max_attempts?` (1 to 10, default 3) | the repair settings; turning it on resets the attempts and records the caller as the person attempts act as |
 | `repair_app` | action (write, paid work) | `app_id`, `message?`, `notification_id?`, `conversation_id?` | the `agent_turn` answer (`task_id`) of a `repair` turn |
