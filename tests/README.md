@@ -922,6 +922,9 @@ signature with a valid self-digest on append, replication and historical scans.
 authentication, proof rejection without writes, and honest partial catch-up (lake#974, LSR-107).
 `test_authentication_limits.cpp` exercises bounded account/client state, selector-backed recovery,
 legacy refusal, concurrent one-use consumption and worker saturation (lake#969).
+`AuthenticationStores.UnknownAccountsRunTheSameArgon2idCheckAsAWrongPassword` counts dummy-hash
+verifications to prove an unknown email runs one Argon2id check and gets the same 401 as a wrong
+password, in both stores (lake#1101).
 `HttpServer.RecoveryWorkCannotBlockHealthOrTheSharedStoreConnection` holds a recovery row lock
 while probing health and reading an unrelated store row; the client-limit HTTP test alternates
 REST/MCP, gives two ingress addresses behind one proxy peer separate budgets and still limits

@@ -15,6 +15,17 @@ a password-only response requiring MFA and an accepted email-recovery start do n
 Email-recovery initiation verifies no credential and does not change these failure counts;
 its mail/token budgets are tracked separately in lake#968.
 
+A refusal also takes as long for an unknown account as for a known one (lake#1101). Password
+sign-in, MFA sign-in, recovery-code sign-in, recovery completion and MFA enrollment, when the email
+has no account, the account has no password credential, the recovery code matches no selector or
+the recovery attempt is unknown or has no token, verify the given secret against a fixed dummy
+Argon2id hash before answering. The dummy is made once per process by the same function that hashes
+real credentials (`identity_crypto::hash_secret`), so it always has their parameters, and it never
+matches. Before this, an email with a password answered about 100 ms slower than one without, which
+told a caller which emails had Lake password accounts. The failure budgets above count these
+refusals exactly as before. Hosted application sign-in forms call the same `sign_in_password`
+capability, so application pools get the same behaviour.
+
 REST, hosted application forms and MCP also share 100 failed attempts per trusted client address
 per fifteen minutes, across these operations and account-deletion step-up. The HTTP adapter
 reuses the order/recovery address rule: ingress-nginx's rewritten `X-Real-IP`, else the final
@@ -734,7 +745,9 @@ failures from earlier authentication attempts.
 New recovery codes have the form `rc1_` followed by 32 lowercase hexadecimal characters
 (128 random bits). The SHA-256 selector in `credentials.subject`, indexed by the existing
 unique `(pool_id, kind, subject)` constraint, selects one Argon2id hash. Unknown selectors and
-malformed codes perform no recovery-code derivation. Password-plus-recovery sign-in performs
+malformed codes never scan stored hashes; `recover_with_code` verifies them against the dummy hash
+instead, so its refusals all cost one derivation (lake#1101), while MFA verification and
+disablement, whose caller is already signed in, refuse them without one. Password-plus-recovery sign-in performs
 one password derivation and at most one recovery derivation. Every recovery verifier, including
 fresh verification and MFA disablement, uses the same selector rule. Every successful use, including step-up, consumes the selected recovery row under lock.
 

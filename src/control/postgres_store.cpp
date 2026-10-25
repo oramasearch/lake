@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <charconv>
 #include <chrono>
@@ -532,6 +533,26 @@ bool verify_secret(std::string_view encoded, std::string_view secret) {
     const int result = EVP_KDF_derive(context, derived.data(), derived.size(), parameters);
     EVP_KDF_CTX_free(context);
     return result == 1 && CRYPTO_memcmp(derived.data(), expected.data(), derived.size()) == 0;
+}
+
+namespace {
+std::atomic<std::uint64_t> dummy_verifications{0};
+
+// Made by hash_secret itself, so a change to the stored parameters reaches the dummy too.
+const std::string& dummy_secret_hash() {
+    static const std::string hash = hash_secret(random_secret());
+    return hash;
+}
+} // namespace
+
+bool verify_secret_against_dummy(std::string_view secret) {
+    dummy_verifications.fetch_add(1, std::memory_order_relaxed);
+    static_cast<void>(verify_secret(dummy_secret_hash(), secret));
+    return false;
+}
+
+std::uint64_t dummy_secret_verifications() {
+    return dummy_verifications.load(std::memory_order_relaxed);
 }
 
 std::string new_totp_secret() {
@@ -8713,12 +8734,15 @@ public:
                 return with_authentication_tx<IssuedSession>([&](pqxx::work& tx)
                                                                  -> Result<IssuedSession> {
                     const pqxx::result rows = password_credential_tx(tx, in.pool_id, in.email);
-                    if (rows.empty())
+                    // An unknown email, or an account with no password, still runs one
+                    // Argon2id check, so it answers as slowly as a wrong password (lake#1101).
+                    if (rows.empty()) {
+                        identity_crypto::verify_secret_against_dummy(in.password);
                         return std::unexpected(
                             StoreError{"not_found", "invalid email or password"});
-
-                    if (rows.empty() || !identity_crypto::verify_secret(
-                                            rows[0][1].as<std::string>(), in.password)) {
+                    }
+                    if (!identity_crypto::verify_secret(rows[0][1].as<std::string>(),
+                                                        in.password)) {
                         return std::unexpected(
                             StoreError{"not_found", "invalid email or password"});
                     }
@@ -8847,8 +8871,13 @@ public:
                                        "AND kind = 'password' AND revoked_at IS NULL FOR UPDATE",
                                        user_id,
                                        pool);
-                    if (password.empty() || !identity_crypto::verify_secret(
-                                                password[0][0].as<std::string>(), proof.password)) {
+                    // An account with no password still runs one Argon2id check (lake#1101).
+                    const bool password_matches =
+                        password.empty()
+                            ? identity_crypto::verify_secret_against_dummy(proof.password)
+                            : identity_crypto::verify_secret(password[0][0].as<std::string>(),
+                                                             proof.password);
+                    if (!password_matches) {
                         return std::unexpected(StoreError{
                             "unauthorized", "MFA enrollment requires the current password"});
                     }
@@ -8927,12 +8956,12 @@ public:
                                                                  -> Result<IssuedSession> {
                     const pqxx::result password_rows =
                         password_credential_tx(tx, in.pool_id, in.email);
-                    if (password_rows.empty())
+                    if (password_rows.empty()) {
+                        identity_crypto::verify_secret_against_dummy(in.password); // lake#1101
                         return std::unexpected(
                             StoreError{"not_found", "invalid email or password"});
-
-                    if (password_rows.empty() ||
-                        !identity_crypto::verify_secret(password_rows[0][1].as<std::string>(),
+                    }
+                    if (!identity_crypto::verify_secret(password_rows[0][1].as<std::string>(),
                                                         in.password)) {
                         return std::unexpected(
                             StoreError{"not_found", "invalid email or password"});
@@ -12134,7 +12163,10 @@ public:
                 return with_authentication_tx<IssuedSession>([&](pqxx::work& tx)
                                                                  -> Result<IssuedSession> {
                     const pqxx::result user_rows = password_credential_tx(tx, pool_id, email);
+                    // Every refusal runs one Argon2id check, so neither an unknown email nor a
+                    // code that matches no selector answers faster than a wrong code (lake#1101).
                     if (user_rows.empty()) {
+                        identity_crypto::verify_secret_against_dummy(code);
                         return std::unexpected(
                             StoreError{"unauthorized", "invalid email or recovery code"});
                     }
@@ -12148,8 +12180,12 @@ public:
                         user_id,
                         pool_id,
                         identity_crypto::recovery_selector(code));
-                    if (recovery_rows.empty() || !identity_crypto::verify_secret(
-                                                     recovery_rows[0][1].as<std::string>(), code))
+                    const bool code_matches =
+                        recovery_rows.empty()
+                            ? identity_crypto::verify_secret_against_dummy(code)
+                            : identity_crypto::verify_secret(recovery_rows[0][1].as<std::string>(),
+                                                             code);
+                    if (!code_matches)
                         return std::unexpected(
                             StoreError{"unauthorized", "invalid email or recovery code"});
                     tx.exec_params("UPDATE credentials SET revoked_at = now() WHERE id = $1::uuid",
@@ -12424,20 +12460,24 @@ public:
             [&](AuthenticationOutcome&) -> Result<IssuedSession> {
                 return with_authentication_tx<IssuedSession>([&](pqxx::work& tx)
                                                                  -> Result<IssuedSession> {
-                    if (!attempt || !lock_authentication_account_tx(tx, attempt->user_id))
+                    // An unknown recovery, or one with no token yet, still runs one Argon2id
+                    // check, so it answers as slowly as a wrong token (lake#1101).
+                    if (!attempt || !lock_authentication_account_tx(tx, attempt->user_id)) {
+                        identity_crypto::verify_secret_against_dummy(token);
                         return std::unexpected(invalid_authentication());
+                    }
                     const pqxx::result attempts = tx.exec_params(
                         "SELECT user_id::text, method, status, token_hash, ready_at <= now(), "
                         "expires_at > now() FROM offline_recovery_attempts WHERE id = $1::uuid AND "
                         "user_id = $2::uuid FOR UPDATE",
                         recovery_id,
                         attempt->user_id);
-                    if (attempts.empty())
-                        return std::unexpected(
-                            StoreError{"unauthorized", "invalid recovery token"});
-
-                    if (attempts.empty() || attempts[0][3].is_null() ||
-                        !identity_crypto::verify_secret(attempts[0][3].as<std::string>(), token)) {
+                    const bool token_matches =
+                        attempts.empty() || attempts[0][3].is_null()
+                            ? identity_crypto::verify_secret_against_dummy(token)
+                            : identity_crypto::verify_secret(attempts[0][3].as<std::string>(),
+                                                             token);
+                    if (!token_matches) {
                         return std::unexpected(
                             StoreError{"unauthorized", "invalid recovery token"});
                     }

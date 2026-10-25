@@ -346,7 +346,10 @@ Authentication budgets are enforced in both stores against resolved user ids bef
 (lake#969). Recovery credentials select their single Argon2id hash by a versioned SHA-256
 selector in the existing unique subject index; legacy rows are never scanned. PostgreSQL uses
 private authentication transactions, with row locks for one-use recovery; memory verifies
-snapshots outside its shared mutex and rechecks them before committing.
+snapshots outside its shared mutex and rechecks them before committing. A refusal for an unknown
+email, a missing password credential, an unmatched recovery selector or an unknown recovery runs
+`identity_crypto::verify_secret_against_dummy`, one Argon2id check against a per-process dummy
+made by `hash_secret`, so its timing matches a wrong secret (lake#1101).
 See [the contract and tests](../../docs/api/identity.md#authentication-attempt-limits).
 Clerk revocation (lake#948, migration `0094_clerk_revocation`) keeps user-state ordering and a
 separate account-wide revocation watermark in PostgreSQL and memory. Old template JWTs cannot
