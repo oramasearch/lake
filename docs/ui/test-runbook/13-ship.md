@@ -693,7 +693,10 @@ As: owner · Needs: the apps above
 2. Search `img`, then pick a phase chip.
 
 Expect:
-- Figures "Apps", "Ready" ("of <n>"), "Failed", "With Workspace Data" ("bound to the workspace").
+- Figures "Apps", "Ready" ("of <n>"), "Needs attention" ("failed or degraded"), "With Workspace Data"
+  ("bound to the workspace"). A Degraded (crash-looping) app counts in "Needs attention" (lake#1208).
+  Selecting it shows only Failed and Degraded apps, with "Showing the apps that need attention. Show
+  all apps".
 - One card per app: label "From a repository" or "From an image", the name, a phase chip, the address
   (or "Not assigned"), "Revision" (revision or image), "Bindings" ("None" or "Workspace data, <n>
   service(s)"), footer "Updated <time>" and **Open**.
