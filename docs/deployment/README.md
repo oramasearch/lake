@@ -1,5 +1,7 @@
 # Deployment
 
+- [White-label sign-in](white-label-sign-in.md): sign-in on a Lake that serves a customer's own
+  domain, through a Clerk instance for that domain or the customer's IdP alone (lake#1136).
 - [Sign-in](sign-in.md): Clerk instances, social-provider setup, production Microsoft ownership,
   legal links, publisher-verification blockers and browser steps, and the terms and privacy links on
   every sign-up and sign-in form (`LAKE_TERMS_URL`, `LAKE_PRIVACY_URL`).

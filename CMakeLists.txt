@@ -362,6 +362,7 @@ add_library(lake-core STATIC
   src/control/network_records.cpp
   src/api/tunnel_clients.cpp
   src/api/regions.cpp
+  src/api/white_label.cpp
   src/api/orders.cpp
   src/api/resend.cpp
   src/api/tunnel_client_capabilities.cpp

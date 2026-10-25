@@ -517,6 +517,10 @@ struct ApiContext {
     // `legal` for the sign-up and sign-in pages. Empty: no link.
     std::string terms_url;
     std::string privacy_url;
+    // LAKE_SIGN_IN_SSO_PROVIDER (lake#1136): the enterprise SSO provider that is the only way in
+    // for people. The registry refuses Lake's other sign-in methods in its own pool while it is set
+    // (sso_only_refusal), and `viewer` names it for the sign-in page. Empty: the usual sign-in.
+    std::string sign_in_sso_provider;
     // The instance registries' catalog (npm, Python, one-component OCI) as {available, oci, npm,
     // python}, read from the store root by the HTTP server (list_packages). Empty outside HTTP.
     std::function<nlohmann::json()> artifact_catalog;

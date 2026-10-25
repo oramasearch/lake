@@ -19,9 +19,11 @@
 #include "lake/api/billing.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/manifest.hpp"
+#include "lake/api/clerk.hpp"
 #include "lake/api/model_gateway.hpp"
 #include "lake/api/server.hpp"
 #include "lake/api/tunnel_clients.hpp"
+#include "lake/api/white_label.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_library.hpp"
 #include "lake/control/agent_runs.hpp"
@@ -194,6 +196,11 @@ int usage() {
         "  LAKE_REGION, LAKE_REGION_LABEL this Lake's region; LAKE_REGIONS the deployment's "
         "regions as JSON [{{name,label,host,latitude,longitude}}]");
     std::println("  LAKE_APEX_HOST the host whose every request gets the region picker");
+    std::println("  LAKE_HOST_ALIASES other hosts that are this Lake (comma-separated): pages there "
+                 "go to LAKE_PUBLIC_HOST, the API is served; LAKE_CONTROL_HOST this Lake's name on "
+                 "the operator's control rows (default LAKE_PUBLIC_HOST)");
+    std::println("  LAKE_SIGN_IN_SSO_PROVIDER the SSO provider id that is the only way in for "
+                 "people (not with Clerk)");
     std::println("  LAKE_ORDER_SHEET JSON merged over the apex order sheet's default offers, "
                  "prices and limits (docs/api/orders.md)");
     std::println("  LAKE_RESEND_API_KEY Orama's Resend key for order email; LAKE_RESEND_FROM the "
@@ -307,6 +314,18 @@ int main(int argc, char** argv) {
             return 2;
         }
         *target = *url;
+    }
+    // The customer's identity provider as the only way in (lake#1136, docs/api/sso.md). Never
+    // together with Clerk.
+    {
+        auto provider = lake::api::sso_sign_in_from_environment(
+            env_or("LAKE_SIGN_IN_SSO_PROVIDER", ""),
+            lake::api::clerk_config(opts.clerk_publishable_key).has_value());
+        if (!provider) {
+            std::println(stderr, "lake: {}", provider.error());
+            return 2;
+        }
+        opts.sign_in_sso_provider = std::move(*provider);
     }
     // The Zettas lake may reach (lake#1097): rendered by the operator. A malformed list stops lake
     // rather than widen or narrow it; an empty one leaves only Zettas on loopback reachable.
@@ -438,6 +457,20 @@ int main(int argc, char** argv) {
     opts.search_memory_bytes = static_cast<std::size_t>(
         std::max<std::uint64_t>(1024ULL * 1024ULL, env_u64("LAKE_SEARCH_MEMORY_BYTES", 256ULL * 1024ULL * 1024ULL)));
     opts.public_host = env_or("LAKE_PUBLIC_HOST", "");
+    // A white-labelled Lake (lake#1136, docs/deployment/white-label-sign-in.md): the operator moves
+    // LAKE_PUBLIC_HOST to the customer's host, keeps the Orama host as an alias, and keeps the
+    // control rows named by the Orama host. Invalid values stop startup.
+    std::string control_host;
+    {
+        auto hosts = lake::api::instance_hosts_from_environment(
+            opts.public_host, env_or("LAKE_HOST_ALIASES", ""), env_or("LAKE_CONTROL_HOST", ""));
+        if (!hosts) {
+            std::println(stderr, "lake: {}", hosts.error());
+            return 2;
+        }
+        opts.host_aliases = std::move(hosts->aliases);
+        control_host = std::move(hosts->control_host);
+    }
     opts.external_origin = env_or("LAKE_EXTERNAL_ORIGIN", "");
     opts.apps_wildcard = env_or("LAKE_APPS_WILDCARD", "");
     opts.apps_runtime_image = env_or("LAKE_APPS_RUNTIME_IMAGE", "");
@@ -610,7 +643,7 @@ int main(int argc, char** argv) {
                      "together");
         return 2;
     }
-    if (!operator_zetta_url.empty() && opts.public_host.empty()) {
+    if (!operator_zetta_url.empty() && control_host.empty()) {
         std::println(
             stderr, "lake: LAKE_PUBLIC_HOST is required when the operator Zetta client is enabled");
         return 2;
@@ -649,7 +682,7 @@ int main(int argc, char** argv) {
             opts.store,
             std::move(control),
             std::move(logs),
-            lake::control::PlatformConfig{opts.public_host,
+            lake::control::PlatformConfig{control_host,
                                           std::chrono::seconds{platform_sync_seconds},
                                           opts.identity_seed,
                                           opts.instance_kek});

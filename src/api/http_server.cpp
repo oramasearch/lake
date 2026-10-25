@@ -112,6 +112,7 @@
 #include "lake/api/transcription.hpp"
 #include "lake/api/tunnel_clients.hpp"
 #include "lake/api/web_app.hpp"
+#include "lake/api/white_label.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/api/workspace_deletion.hpp"
 #include "lake/audit/audit.hpp"
@@ -9478,6 +9479,7 @@ struct ApiServer::Impl {
         ctx.clerk_publishable_key = options.clerk_publishable_key;
         ctx.terms_url = options.terms_url;
         ctx.privacy_url = options.privacy_url;
+        ctx.sign_in_sso_provider = options.sign_in_sso_provider;
         ctx.sealing_public_key = options.sealing_public_key;
         ctx.transcriber = transcriber;
         ctx.mcp_http = mcp_http;
@@ -11277,6 +11279,17 @@ struct ApiServer::Impl {
         if (!options.store) {
             co_return co_await saml_error(
                 route, provider_id, ApiError{.code = "store_unavailable", .message = "no store"});
+        }
+        // SSO-only sign-in (lake#1136): the same refusal the registry gives start_sso_saml.
+        if (!options.sign_in_sso_provider.empty()) {
+            const auto provider = options.store->get_sso_provider(provider_id);
+            if (auto refused = sso_only_refusal(options.sign_in_sso_provider,
+                                                "start_sso_saml",
+                                                nlohmann::json{{"provider_id", provider_id}},
+                                                provider ? provider->pool_id : std::string("lake"))) {
+                co_return co_await saml_error(
+                    route, provider_id, ApiError{.code = "unauthorized", .message = *refused});
+            }
         }
         const auto started = start_saml_sign_in(*options.store,
                                                 options.public_host,
@@ -15870,6 +15883,36 @@ bool ApiServer::start() {
         auto result = co_await impl.serve_region_picker(route);
         impl.record_request(route, "region_picker", start);
         co_return result;
+    }));
+    // A host alias (LAKE_HOST_ALIASES, lake#1136): the Orama host of a white-labelled Lake. A
+    // browser page opened there is sent to the public host (the customer's), so people sign in and
+    // stay on the customer's domain; the redirect is temporary, so removing the custom domain never
+    // leaves browsers pointed at it. Every other request (the API, MCP, git, the registry, OAuth and
+    // SAML callbacks, webhooks) is served exactly as on the public host: its Host is rewritten, so
+    // nothing below treats the alias as an application's custom domain.
+    router.use(guarded("host_alias", [&impl](http::route_params& route) -> http::route_task {
+        if (impl.options.host_aliases.empty() || impl.options.public_host.empty() ||
+            route.req.count(http::field::host) == 0 ||
+            !is_host_alias(impl.options.host_aliases, route.req.at(http::field::host))) {
+            co_return http::route_next;
+        }
+        const std::string path(route.url.path());
+        const std::string accept(route.req.value_or(http::field::accept, ""));
+        if (web_app_serves(route.req.method_text(), path, accept, false)) {
+            std::string target(route.url.encoded_path());
+            if (route.url.has_query()) {
+                target += "?" + std::string(route.url.encoded_query());
+            }
+            const auto timing = request_timing(route);
+            const auto start = timing ? timing->started : std::chrono::steady_clock::now();
+            const RequestTimingScope timing_scope(route, start);
+            auto result = co_await impl.redirect(
+                route, alias_redirect_location(impl.options.public_host, target));
+            impl.record_request(route, "host_alias", start);
+            co_return result;
+        }
+        route.req.set(http::field::host, impl.options.public_host);
+        co_return http::route_next;
     }));
     // A cookie-authenticated unsafe request from another origin is refused before any route.
     router.use(guarded("cross_site", [&impl](http::route_params& route) -> http::route_task {

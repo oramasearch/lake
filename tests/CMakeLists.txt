@@ -80,6 +80,8 @@ target_sources(lake-tests PRIVATE test_network_capabilities.cpp test_network_tun
 target_sources(lake-tests PRIVATE test_tunnel_clients.cpp)
 # Regions and the apex region picker (lake#757).
 target_sources(lake-tests PRIVATE test_regions.cpp)
+# A white-labelled Lake: host aliases, the control host and SSO-only sign-in (lake#1136).
+target_sources(lake-tests PRIVATE test_white_label.cpp)
 # SAML sign-in through the Assertion Consumer Service (lake#836).
 target_sources(lake-tests PRIVATE test_saml.cpp)
 # OpenID Connect discovery for Lake OAuth and enterprise OIDC (lake#837).
