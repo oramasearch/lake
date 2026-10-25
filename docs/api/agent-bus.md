@@ -305,7 +305,7 @@ unprefixed route. Lake OpenAPI marks the task credential's workspace inputs opti
 JSON still fails validation, and explicit mismatches remain rejected. The shared HTTP helper also
 exercises Ask Orama and the Ship App proposal flow without echoing workspace IDs.
 
-`tools/e2e/agents.py <base-url> <token-file> <customer-id> [T1 …]` is the agents' live scenario
+`tools/e2e/agents.py <base-url> <token-file> <customer-id> <workspace-id> [T1 …]` is the agents' live scenario
 suite: each library agent over the bus, as the person whose key it holds, with a pass condition per
 scenario. T1–T10 are the scenarios tracked at https://github.com/oramasearch/lake/issues/276
 through https://github.com/oramasearch/lake/issues/285. T11 builds a data App with

@@ -6,13 +6,13 @@ Do this once per run, before any section file.
 
 | Environment | URL | Use it for | Sign-in | Clerk instance for a ticket |
 |---|---|---|---|---|
-| testing | `https://lake-testing.oramadev.net` | A version release (the `testing` gate) | Clerk | `lake-testing` application, production instance (`clerk-ticket.sh … prod`) |
-| dev | `https://lake-dev.oramadev.net` | Any other run: a change, a roll, a single section | Clerk | `lake-testing` application, development instance (`clerk-ticket.sh … dev`) |
+| testing | `https://lake-testing.oramadev.net` | A version release (the `testing` gate) | Clerk | `lake-testing` application, production instance (Secret `clerk-lake-testing`) |
+| dev | `https://lake-dev.oramadev.net` | Any other run: a change, a roll, a single section | Clerk | `lake-testing` application, development instance (`CLERK_INSTANCE=ins_3JpNNvZd4jnehvW6XsKWcMq6MKx`, Secret `clerk-lake-dev`) |
 | staging | `https://lake-staging.oramadev.net` | Only when a release asks for a staging check | Clerk | `Orama Lake` application, development instance |
 | local | `http://127.0.0.1:4900` (`./build/lake`) | The cases marked *Lake without Clerk*: Lake's own sign-in, sign-up, passkeys, MFA, OAuth | Lake's own pages | none: sign up at `/sign-up` |
 
 Never run this runbook on `lake.live`, `eu.lake.live` or `us.lake.live` (production) without Steve's
-go-ahead, and never on `lake.oramadev.net` (temporary, being removed). The Clerk application and
+go-ahead, and never on `lake.oramadev.net` (retired 2026-10-24). The Clerk application and
 instance ids are in the bridge's `lake-devops` skill; [`../../deployment/users.md`](../../deployment/users.md)
 says how to create a Clerk user.
 
@@ -65,12 +65,13 @@ workspace** ([04-workspaces.md](04-workspaces.md)); it takes a minute or two to 
 
 ## Signing in
 
-On a Clerk environment, mint a one-time ticket and open the sign-in page with it
-([`../../deployment/browser-testing.md`](../../deployment/browser-testing.md)):
+On a Clerk environment, mint a one-time ticket through Clerk's Backend API, with the
+environment's secret key in `CLERK_SECRET_KEY` (from its `clerk-lake-<env>` Secret on the managing
+cluster, never written to a file) and its instance id in `CLERK_INSTANCE`, and open the sign-in page
+with it ([`../../deployment/browser-testing.md`](../../deployment/browser-testing.md)):
 
 ```sh
-cd ~/.clerk-lake    # linked to the environment's Clerk application
-/path/to/lake/tools/e2e/clerk-ticket.sh <clerk user id> /tmp/lake-ticket-owner prod   # dev for lake-dev
+/path/to/lake/tools/e2e/clerk-ticket.sh ticket <clerk user id> /tmp/lake-ticket-owner
 ```
 
 Open `https://<host>/sign-in?__clerk_ticket=<the file's contents>`. A ticket works once and lasts

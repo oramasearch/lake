@@ -47,7 +47,8 @@ the person to Clerk; lake creates their account the first time they sign in.
    lake either links them to an existing lake account with the same email, or creates the account
    with a lake-held TAAP identity and their personal account. Nothing else needs doing in lake.
 
-4. **Check** (optional): the person lands on `/repositories` with an **Account** menu. Their
+4. **Check** (optional): the person lands on `/` (Ask Orama) with their account menu at the foot of
+   the rail. Their
    `/sessions` page lists the browser session.
 
 Accounts created so far: `steve@orama.com` (linked to the existing lake account, 2026-09-25) and

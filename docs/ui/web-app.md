@@ -124,6 +124,11 @@ the page is sent `Cache-Control: private, no-store`. Three more things keep late
   HTML, and only through `Markdown` (`src/lib/markdown.tsx`); see [Markdown](#markdown).
 - **Live views poll or long-poll the capability** that the server page's script called; nothing
   refreshes the whole page.
+- **The live browser scripts find controls by role and label** (`tools/e2e/`,
+  `docs/deployment/browser-testing.md`): a button's text, a field's label, a dialog, a table's
+  caption. Where a screen has nothing stable to find, it carries a `data-testid` (design `Panel`
+  takes `testId`): `change-pipeline`, `service-status`, `store-status` today (lake#1099). Renaming a
+  label or a test id a script uses changes that script in the same pull request.
 
 ## How a page runs
 

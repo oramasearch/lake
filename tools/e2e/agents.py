@@ -5,10 +5,14 @@ Each scenario is a test with a pass condition and a GitHub issue (label `test`) 
 definition and results. It runs against a deployed lake through the public API, as the person whose
 key it holds, and never waits inside a request: every turn is followed with receive_agent_events.
 
-    tools/e2e/agents.py <base-url> <token-file> <customer-id> [scenario ...]
+    tools/e2e/agents.py <base-url> <token-file> <customer-id> <workspace-id> [scenario ...]
 
-<token-file> holds a lake API key with every tool (Developer → MCP). The token is never printed. The
-workspace needs the UX-review datasets (datasets.ux_review_churn and churn_results.at_risk_*).
+<token-file> holds a lake API key with every tool (Developer → MCP). The token is never printed. Every
+workspace call names the workspace (`workspace_id`, required since lake v0.5). The scenarios read
+`datasets.ux_review_churn` (200 accounts, with an `as_of` snapshot date, a 90-day churn window,
+`churned` and `tenure_months`) and `datasets.ux_review_at_risk` (each account's risk); when the
+workspace does not have them, the suite uploads them first (`upload_dataset`) and says so. T3 ranks
+by a `churn_results.at_risk_*` table when a run wrote one, else by `ux_review_at_risk`.
 Scenarios that only propose change nothing. T11 confirms its exact Application Agent proposal,
 deploys that App, and requests its URL. T12 confirms an Experiments Agent experiment, observes its
 trials, and asks for the explanation. Prints one line per scenario and exits 1 when any failed.
@@ -21,7 +25,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-base, token_file, customer, *only = sys.argv[1:]
+if len(sys.argv) < 5 or sys.argv[4].upper().startswith("T") and sys.argv[4][1:].isdigit():
+    sys.exit(__doc__)
+base, token_file, customer, workspace, *only = sys.argv[1:]
 token = open(token_file).read().strip()
 if not token.lower().startswith("bearer "):
     token = "Bearer " + token
@@ -58,15 +64,16 @@ def app_answers(url):
 def turn(agent, message, kind="api", context=None, budget=330):
     """One agent turn, followed on the bus. Returns (task, seconds, request seconds, event types)."""
     started = time.time()
-    asked = api("POST", "agent_turn", {"customer_id": customer, "agent": agent, "message": message,
-                                       "kind": kind, "context": context or {}})
+    asked = api("POST", "agent_turn", {"customer_id": customer, "workspace_id": workspace, "agent": agent,
+                                       "message": message, "kind": kind, "context": context or {}})
     request_seconds = time.time() - started
     if not asked.get("ok"):
         return {"status": "refused", "message": json.dumps(asked.get("error"))}, 0, request_seconds, []
     task_id, sequence, events, task = asked["value"]["task_id"], 1, [], {}
     while time.time() - started < budget:
-        value = api("GET", "receive_agent_events", {"customer_id": customer, "task_id": task_id,
-                                                    "from_sequence": sequence, "wait_ms": 10000}
+        value = api("GET", "receive_agent_events", {"customer_id": customer, "workspace_id": workspace,
+                                                    "task_id": task_id, "from_sequence": sequence,
+                                                    "wait_ms": 10000}
                     ).get("value") or {}
         events += [event["type"] for event in value.get("events", [])]
         sequence = value.get("next_sequence", sequence)
@@ -117,9 +124,9 @@ def t2_columns():
 
 
 def t3_ranked():
-    top = api("GET", "workspace_sql", {"customer_id": customer, "statement":
-              "SELECT account, risk FROM churn_results.at_risk_f3cced7b ORDER BY risk DESC LIMIT 3"})
-    if not top.get("ok"):
+    top = api("GET", "workspace_sql", {"customer_id": customer, "workspace_id": workspace,
+                                       "statement": RANKING})
+    if not top.get("ok") or not (top.get("value") or {}).get("rows"):
         return [f"the workspace cannot rank: {top.get('error')}"], 0
     expected = str(top["value"]["rows"][0]["account"])
     task, seconds, request, _ = turn("agent-ask-orama",
@@ -165,7 +172,8 @@ def t6_scan():
     profile = ((task.get("answer") or {}).get("result") or {}).get("project_profile") or {}
     if not profile.get("suggested"):
         problems.append("nothing suggested")
-    listed = api("GET", "list_opportunities", {"customer_id": customer, "task_id": task.get("task_id", "")})
+    listed = api("GET", "list_opportunities", {"customer_id": customer, "workspace_id": workspace,
+                                               "task_id": task.get("task_id", "")})
     rows = [row for row in (listed.get("value") or {}).get("opportunities", [])
             if row.get("task_id") == task.get("task_id")]
     if not rows:
@@ -214,16 +222,15 @@ def t9_bus_refuses_people():
 
 
 def t10_workspace_pubsub():
+    """Train → Streams' capabilities (docs/api/streams.md): raw topic writes left workspace_act."""
     topic, problems = f"e2e-{int(time.time())}", []
+    where = {"customer_id": customer, "workspace_id": workspace, "zetta": "workspace", "topic": topic}
 
-    def act(capability, body, read=False):
-        return api("POST", "workspace_query" if read else "workspace_act",
-                   {"customer_id": customer, "capability": capability, "input": body})
-
-    steps = [act("create_topic", {"topic": topic, "exposed": True}),
-             act("publish_event", {"topic": topic, "payload": '{"hello":1}', "encoding": "json"})]
-    received = act("receive_events", {"topic": topic, "from_sequence": 1, "wait_ms": 100}, True)
-    steps += [received, act("drop_topic", {"topic": topic})]
+    steps = [api("POST", "create_stream", where),
+             api("POST", "publish_stream_message", {**where, "payload": '{"hello":1}'})]
+    received = api("POST", "browse_stream", {**where, "from_sequence": 1, "direction": "forward",
+                                             "limit": 10})
+    steps += [received, api("POST", "delete_stream", {**where, "confirm_name": topic})]
     for step in steps:
         if not step.get("ok"):
             problems.append(json.dumps(step.get("error")))
@@ -349,6 +356,56 @@ SCENARIOS = {
         "Experiments Agent proposes, confirms, observes trials, and explains",
         t12_experiments_agent),
 }
+
+def sql_rows(statement):
+    answer = api("GET", "workspace_sql", {"customer_id": customer, "workspace_id": workspace,
+                                          "statement": statement})
+    return ((answer.get("value") or {}).get("rows") or []) if answer.get("ok") else None
+
+
+def churn_rows():
+    """200 accounts, the same every run: the snapshot each row was taken at (`as_of`, the feature
+    cutoff), a 90-day churn window after it, tenure, spend and tickets, whether the account churned
+    in the window, and a risk score kept apart (ACME-0042 is the riskiest, so T3 has one answer)."""
+    for i in range(1, 201):
+        tenure, spend, tickets = 1 + (i * 7) % 60, 50 + (i * 37) % 900, (i * 13) % 9
+        risk = 0.99 if i == 42 else round(min(0.95, 0.9 - tenure / 80 + tickets / 30), 3)
+        yield f"ACME-{i:04d}", f"2026-{1 + i % 6:02d}-{1 + i % 28:02d}", tenure, spend, tickets, risk
+
+
+def churn_csv():
+    lines = ["account,as_of,churn_window_days,tenure_months,monthly_spend,support_tickets,churned"]
+    lines += [f"{a},{d},90,{t},{s},{k},{1 if r > 0.6 else 0}" for a, d, t, s, k, r in churn_rows()]
+    return "\n".join(lines) + "\n"
+
+
+def risk_csv():
+    return "account,risk\n" + "".join(f"{a},{r}\n" for a, _, _, _, _, r in churn_rows())
+
+
+def prepare():
+    """The data the scenarios read: uploads datasets.ux_review_churn and datasets.ux_review_at_risk
+    when they are missing, and answers the SQL that ranks accounts by risk (a run's
+    churn_results.at_risk_* table when there is one)."""
+    rows = sql_rows("SELECT database, dataset FROM system.datasets")
+    if rows is None:
+        sys.exit("the workspace cannot list its datasets (workspace_sql); is the workspace ready?")
+    names = {(r.get("database"), r.get("dataset")) for r in rows}
+    for table, content in (("ux_review_churn", churn_csv()), ("ux_review_at_risk", risk_csv())):
+        if ("datasets", table) in names:
+            continue
+        uploaded = api("POST", "workspace_act", {
+            "customer_id": customer, "workspace_id": workspace, "capability": "upload_dataset",
+            "input": {"table_name": table, "format": "csv", "content": content, "if_exists": "fail"}})
+        if not uploaded.get("ok"):
+            sys.exit(f"could not upload datasets.{table}: {json.dumps(uploaded.get('error'))}")
+        print(f"prepared: uploaded datasets.{table} (200 rows)", flush=True)
+    at_risk = sorted(d for db, d in names if db == "churn_results" and str(d).startswith("at_risk_"))
+    table = f"churn_results.{at_risk[-1]}" if at_risk else "datasets.ux_review_at_risk"
+    return f"SELECT account, risk FROM {table} ORDER BY risk DESC LIMIT 3"
+
+
+RANKING = prepare() if not only or set(only) & {"T1", "T2", "T3", "T5", "T6", "T7", "T11", "T12"} else ""
 
 failed = 0
 for key, (title, run) in SCENARIOS.items():
