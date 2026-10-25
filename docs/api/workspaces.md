@@ -348,6 +348,15 @@ credential's OpenAPI document. A supplied path or input workspace must match the
 
 Verify: `HttpServer/HttpResponseIsolation.AgentsReachAWorkspacesZettaThroughLakeInZettasShape`.
 
+**Apps reach it the same way.** A running App's Zetta binding (`/var/run/orama/bindings/zetta`) is
+the JSON document the operator writes, `{"lake_url":"<lake>/w/<workspace>","customer_id":…,"token":…}`.
+app-runtime calls `<lake_url>/workspaces/<customer_id>/zetta/v1/<capability>` with the token as its
+bearer. Lake checks the token's `zetta` hash on the app's row: it reads that app's own workspace
+only, with no actions, and only while the app's binding is `{"scopes":["read"]}`. Until lake#1205
+the operator wrote the bare token and every App with workspace data stopped at startup. App-runtime's
+`sql()` is not served on this route yet (lake#1212). Verify:
+`HttpServer/HttpResponseIsolation.AnAppsZettaBindingReadsItsWorkspaceThroughLake`.
+
 ## Configuration
 
 | Variable | Set by | Meaning |
