@@ -1,9 +1,26 @@
 # Control-plane schema
 
-**Source of truth: `db/schema.sql` in this repository.** The operator carries a byte-identical
-vendored copy at `internal/controller/assets/lake-schema.sql` and applies it to every Lake's
-Postgres. Change the schema here, then copy it into the operator in the same change; the
-operator's test checks the copy carries the source-of-truth header.
+**Source of truth: `db/schema.sql` in this repository.** It is compiled into the lake binary, and
+`lake migrate` applies it (below). Until orama-operator#936 runs that command, the operator carries
+a byte-identical vendored copy at `internal/controller/assets/lake-schema.sql` and applies it to
+every Lake's Postgres; change the schema here, then copy it into the operator in the same change.
+
+## Applying the schema: `lake migrate`
+
+`lake migrate` (lake#1119) applies the `db/schema.sql` built into the binary to
+`LAKE_CONTROL_DB_URI` (or `--control-db`) exactly as the operator's `PostgresSchema` Job does:
+one transaction, skipped when the newest migration's guard table exists and every migration the
+file records is in `schema_migrations`, otherwise the whole idempotent file. It holds
+`pg_advisory_xact_lock(0x6c616b656d6967)` for the transaction, so concurrent runs apply one at a
+time, and prints the migration rows and guard tables it added as JSON. Exit 0 applied or current,
+1 a statement failed (rolled back), 2 usage, 3 the database unreachable within `--wait-seconds`.
+The server process never migrates. `lake manifest` publishes the schema's SHA-256, latest
+migration, guard table and every guard table, so the operator needs no copy of the file. The full
+contract is [`../deployment/operator-interface.md`](../deployment/operator-interface.md).
+
+A new migration still follows the rules below: idempotent SQL, its row in `schema_migrations`, and a
+new `*_guard` table created by the newest migration (`LakeManifest.TheGuardTableIsTheNewestMigrations`
+fails otherwise).
 
 `0094_clerk_revocation` (lake#948, LSR-085) adds `clerk_user_states`: upstream user id, the
 last applied timestamp for that Clerk subject, an independent revocation watermark, suspension

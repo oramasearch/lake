@@ -79,6 +79,18 @@ add_custom_command(
   DEPENDS src/api/engine_openapi.json cmake/embed_engine_openapi.cmake
   VERBATIM)
 
+# lake's control-plane schema (db/schema.sql), embedded so `lake migrate` applies the schema this
+# binary was built with and the operator vendors no copy (lake#1119, orama-operator#936).
+set(LAKE_EMBEDDED_SCHEMA_CPP "${CMAKE_CURRENT_BINARY_DIR}/generated/schema_sql.cpp")
+add_custom_command(
+  OUTPUT "${LAKE_EMBEDDED_SCHEMA_CPP}"
+  COMMAND "${CMAKE_COMMAND}"
+    "-DINPUT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/db/schema.sql"
+    "-DOUTPUT_FILE=${LAKE_EMBEDDED_SCHEMA_CPP}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_schema.cmake"
+  DEPENDS db/schema.sql cmake/embed_schema.cmake
+  VERBATIM)
+
 # The web app (frontend/, React + Vite): built with npm and embedded into the binary, so lake
 # serves its whole UI with no files at run time (docs/ui/README.md). LAKE_FRONTEND_DIST points
 # at an already-built dist/ instead (the image's Node stage); empty builds it here.
@@ -218,6 +230,9 @@ add_library(lake-core STATIC
   ${LAKE_EMBEDDED_FONTS_CPP}
   ${LAKE_EMBEDDED_GUIDE_CPP}
   ${LAKE_EMBEDDED_ENGINE_OPENAPI_CPP}
+  ${LAKE_EMBEDDED_SCHEMA_CPP}
+  src/control/schema.cpp
+  src/api/manifest.cpp
   ${LAKE_EMBEDDED_WEB_APP_CPP}
   src/api/web_app.cpp
   src/control/lake_identity.cpp

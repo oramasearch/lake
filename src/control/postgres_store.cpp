@@ -19,6 +19,7 @@
 #include <set>
 #include <span>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <openssl/core_names.h>
@@ -42,6 +43,7 @@
 #include <pqxx/pqxx>
 
 #include "lake/control/policy.hpp"
+#include "lake/control/schema.hpp"
 #include "lake/control/workspace_records.hpp"
 
 namespace lake::control {
@@ -13352,6 +13354,102 @@ private:
 
 std::unique_ptr<Store> make_postgres_store(std::string connection_uri, std::string instance_kek) {
     return std::make_unique<PostgresStore>(std::move(connection_uri), std::move(instance_kek));
+}
+
+// `lake migrate` (lake#1119): the operator's PostgresSchema Job, done by the binary that carries
+// the schema. Same checks in the same order: skip when the newest guard table exists and every
+// migration the file records is in schema_migrations (or the file records none, or the database has
+// no schema_migrations table), else run the whole file in one transaction. The advisory lock makes
+// a second concurrent run wait, then find the database current.
+std::expected<MigrationReport, MigrationError> apply_control_schema(const MigrationOptions& options,
+                                                                    std::string_view sql) {
+    using clock = std::chrono::steady_clock;
+    const auto started = clock::now();
+    const SchemaFacts facts = schema_facts(sql);
+    if (options.connection_uri.empty()) {
+        return std::unexpected(MigrationError{"connect", "no control database URI"});
+    }
+    std::unique_ptr<pqxx::connection> connection;
+    const auto deadline = started + options.wait;
+    for (;;) {
+        try {
+            connection = std::make_unique<pqxx::connection>(options.connection_uri);
+            break;
+        } catch (const std::exception& error) {
+            const auto now = clock::now();
+            if (now >= deadline) {
+                return std::unexpected(MigrationError{"connect", error.what()});
+            }
+            std::this_thread::sleep_for(
+                std::min<clock::duration>(std::chrono::seconds(2), deadline - now));
+        }
+    }
+    MigrationReport report;
+    try {
+        pqxx::work tx(*connection);
+        tx.exec("SET LOCAL client_min_messages TO warning");
+        tx.exec("SELECT pg_advisory_xact_lock(" + std::to_string(schema_migration_lock_key) + ")");
+        const auto has_migrations_table = [&tx] {
+            return tx.exec("SELECT to_regclass('public.schema_migrations') IS NOT NULL")[0][0]
+                .as<bool>();
+        };
+        const auto recorded = [&tx, &has_migrations_table] {
+            std::set<std::string> versions;
+            if (has_migrations_table()) {
+                for (const auto& row : tx.exec("SELECT version FROM public.schema_migrations")) {
+                    versions.insert(row[0].as<std::string>());
+                }
+            }
+            return versions;
+        };
+        const auto guards = [&tx] {
+            std::set<std::string> tables;
+            for (const auto& row :
+                 tx.exec("SELECT tablename::text FROM pg_tables WHERE schemaname = "
+                         "'public' AND tablename LIKE '%\\_guard'")) {
+                tables.insert(row[0].as<std::string>());
+            }
+            return tables;
+        };
+        const bool migrations_table = has_migrations_table();
+        const auto migrations_before = recorded();
+        const auto guards_before = guards();
+        for (const auto& version : facts.migrations) {
+            if (!migrations_before.contains(version)) {
+                report.migrations_missing.push_back(version);
+            }
+        }
+        const bool current =
+            !facts.guard_table.empty() && guards_before.contains(facts.guard_table) &&
+            (facts.migrations.empty() || !migrations_table || report.migrations_missing.empty());
+        if (current) {
+            report.migrations_missing.clear();
+        } else {
+            tx.exec(std::string(sql));
+            report.applied = true;
+        }
+        const auto migrations_after = recorded();
+        const auto guards_after = guards();
+        for (const auto& version : facts.migrations) {
+            if (migrations_after.contains(version) && !migrations_before.contains(version)) {
+                report.migrations_applied.push_back(version);
+            }
+        }
+        for (const auto& table : facts.guard_tables) {
+            if (guards_after.contains(table) && !guards_before.contains(table)) {
+                report.guard_tables_created.push_back(table);
+            }
+        }
+        report.migrations_recorded = migrations_after.size();
+        tx.commit();
+    } catch (const pqxx::broken_connection& error) {
+        return std::unexpected(MigrationError{"connect", error.what()});
+    } catch (const std::exception& error) {
+        return std::unexpected(MigrationError{"apply", error.what()});
+    }
+    report.elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - started).count();
+    return report;
 }
 
 } // namespace lake::control

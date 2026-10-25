@@ -53,6 +53,7 @@
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
 #include "lake/api/server.hpp"
+#include "lake/api/stripe.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/audit/audit.hpp"
@@ -3116,6 +3117,12 @@ TEST(Registry, ServerInfoNeedsNoAuth) {
     EXPECT_EQ(r.value["name"], "lake");
     EXPECT_EQ(r.value["store"], "memory");
     EXPECT_EQ(r.value["revision"], lake::build_revision_string());
+    // lake#1119: the Stripe events this version handles, as `lake manifest` publishes them.
+    nlohmann::json events = nlohmann::json::array();
+    for (const auto event : lake::api::stripe_webhook_events) {
+        events.push_back(std::string(event));
+    }
+    EXPECT_EQ(r.value["stripe_webhook_events"], events);
 }
 
 TEST(Telemetry, PrometheusCounterAndHistogram) {

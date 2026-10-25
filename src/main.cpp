@@ -17,6 +17,7 @@
 
 #include "lake/api/billing.hpp"
 #include "lake/api/capabilities.hpp"
+#include "lake/api/manifest.hpp"
 #include "lake/api/model_gateway.hpp"
 #include "lake/api/server.hpp"
 #include "lake/api/tunnel_clients.hpp"
@@ -27,6 +28,7 @@
 #include "lake/control/methodologies.hpp"
 #include "lake/control/platform.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "lake/control/schema.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/search/index.hpp"
 #include "lake/thread.hpp"
@@ -63,9 +65,18 @@ int usage() {
                  "[--instance-kek VALUE] [--tsa-url URL] [--tunnel-clients-dir PATH] "
                  "[--memory-store]");
     std::println("  lake version");
+    std::println("  lake migrate [--control-db URI] [--wait-seconds N]");
+    std::println("  lake manifest");
     std::println("");
     std::println("  --control-db   Postgres URI of the control plane (default "
                  "$LAKE_CONTROL_DB_URI)");
+    std::println("  migrate        applies the schema built into this binary to the control "
+                 "database, idempotently, in one transaction under an advisory lock, and prints "
+                 "what it applied as JSON; exit 0 applied or current, 1 failed and rolled back, "
+                 "2 usage, 3 unreachable. The server never migrates");
+    std::println("  --wait-seconds how long migrate keeps trying to connect (default 0)");
+    std::println("  manifest       prints, as JSON, what this image needs from the operator: "
+                 "version, schema, Stripe webhook events and environment variables");
     std::println("  --store-root   customer and instance data root (default $LAKE_STORE_ROOT)");
     std::println("  --external-origin HTTP(S) origin for repository commands "
                  "(default $LAKE_EXTERNAL_ORIGIN, then https://$LAKE_PUBLIC_HOST)");
@@ -185,9 +196,70 @@ int usage() {
     return 2;
 }
 
+// `lake migrate` (lake#1119, docs/control-plane/schema.md#applying-the-schema-lake-migrate):
+// the operator runs it from the image a Lake names before that image serves. It reads only its
+// own arguments and LAKE_CONTROL_DB_URI, never the server's settings.
+int migrate(int argc, char** argv) {
+    lake::control::MigrationOptions options;
+    options.connection_uri = env_or("LAKE_CONTROL_DB_URI", "");
+    const auto facts = lake::control::schema_facts(lake::control::embedded_schema_sql());
+    const auto usage_error = [&](std::string message) {
+        std::println(stderr, "lake migrate: {}", message);
+        std::println(
+            "{}", lake::control::migration_error_json(facts, {"usage", std::move(message)}).dump());
+        return lake::control::migrate_exit_usage;
+    };
+    for (int i = 2; i < argc; ++i) {
+        const std::string_view arg = argv[i];
+        if ((arg == "--control-db" || arg == "--wait-seconds") && i + 1 >= argc) {
+            return usage_error(std::string(arg) + " needs a value");
+        }
+        if (arg == "--control-db") {
+            options.connection_uri = argv[++i];
+        } else if (arg == "--wait-seconds") {
+            const std::string_view value = argv[++i];
+            std::uint64_t seconds = 0;
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), seconds);
+            if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() ||
+                seconds > 86400) {
+                return usage_error("--wait-seconds must be a whole number of seconds up to 86400");
+            }
+            options.wait = std::chrono::seconds{seconds};
+        } else {
+            return usage_error("unknown argument " + std::string(arg));
+        }
+    }
+    if (options.connection_uri.empty()) {
+        return usage_error("no control database: set LAKE_CONTROL_DB_URI or pass --control-db");
+    }
+    const auto result =
+        lake::control::apply_control_schema(options, lake::control::embedded_schema_sql());
+    if (!result) {
+        std::println(stderr, "lake migrate: {}: {}", result.error().code, result.error().message);
+        std::println("{}", lake::control::migration_error_json(facts, result.error()).dump());
+        return result.error().code == "connect" ? lake::control::migrate_exit_unreachable
+                                                : lake::control::migrate_exit_apply_failed;
+    }
+    std::println("{}", lake::control::migration_report_json(facts, *result).dump());
+    return lake::control::migrate_exit_ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
+    // Subcommands that never start the server, dispatched before the server's settings are read
+    // so a setting the server would refuse cannot stop them (lake#1119).
+    if (argc >= 2 && std::string_view(argv[1]) == "migrate") {
+        return migrate(argc, argv);
+    }
+    if (argc >= 2 && std::string_view(argv[1]) == "manifest") {
+        if (argc > 2) {
+            std::println(stderr, "lake manifest: takes no arguments");
+            return 2;
+        }
+        std::println("{}", lake::api::operator_manifest().dump(2));
+        return 0;
+    }
     lake::api::ServerOptions opts;
     std::string control_db = env_or("LAKE_CONTROL_DB_URI", "");
     opts.admin_token = env_or("LAKE_ADMIN_TOKEN", "");

@@ -3,6 +3,13 @@
 One page per tagged release, newest first. A page states what the release includes, what it
 does not, what is knowingly still broken, and how it was verified.
 
+**In `dev`, for the next release:** `lake migrate` and `lake manifest` (lake#1119). From that release
+the image applies its own schema and declares its Stripe webhook events, Stripe products and
+environment, so the operator can drop its vendored schema, its `lakeStripeWebhookEvents` and the
+rest (orama-operator#936): a lake release becomes only the `image:` in a set file. Releases up to
+v0.6.1 predate the commands; the operator keeps its vendored path for them. See
+[`../deployment/operator-interface.md`](../deployment/operator-interface.md).
+
 - [v0.6.1](v0.6.1.md) — 2026-10-24. A patch: a blocked account can stop or rename its workspace (#1122).
 - [v0.6.0](v0.6.0.md) — 2026-10-24. lake.live becomes prepaid: an account balance with Stripe top-ups,
   warnings and emails, and a stop on paid work at $50 below zero; sign-in with no name in Clerk.

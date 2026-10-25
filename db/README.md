@@ -1,5 +1,11 @@
 # Database schema
 
+`schema.sql` is compiled into the lake binary (`cmake/embed_schema.cmake`), and `lake migrate`
+applies it to `LAKE_CONTROL_DB_URI` in one transaction under an advisory lock, as the operator's
+`PostgresSchema` Job does; `lake manifest` reports its latest migration and guard tables
+(lake#1119, [operator-interface.md](../docs/deployment/operator-interface.md)). Once
+orama-operator#936 consumes them, a new migration needs no operator vendoring.
+
 Migration `0099_account_balances` (lake#1114, liquid-bridge decision 67) adds the prepaid balance:
 `account_balances` (each account's settings, last refresh, email marks and auto top-up, with a
 compare-and-swap `version`), `account_balance_credits` (paid top-ups, unique per provider reference)

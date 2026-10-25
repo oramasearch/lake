@@ -2,6 +2,7 @@
 #include "lake/api/agent_stream_triggers.hpp"
 #include "lake/api/authentication_work.hpp"
 #include "lake/api/mcp_connections.hpp"
+#include "lake/api/stripe.hpp"
 
 #include "audit_logs.hpp"
 #include "lake/api/audit_routing.hpp"
@@ -2488,6 +2489,14 @@ std::expected<control::Workspace, ApiError> repository_workspace(ApiContext& con
 
 namespace {
 
+json stripe_webhook_events_json() {
+    json events = json::array();
+    for (const auto event : stripe_webhook_events) {
+        events.push_back(std::string(event));
+    }
+    return events;
+}
+
 void register_server_info(Registry& registry, std::string_view version) {
     const std::string version_string(version);
     registry.add(Capability{
@@ -2535,7 +2544,15 @@ void register_server_info(Registry& registry, std::string_view version) {
                              {{"type", json::array({"string", "null"})},
                               {"description",
                                "Where to order a private warehouse, dedicated cluster or on-prem "
-                               "Lake; null when this Lake has no order sheet."}}}}}},
+                               "Lake; null when this Lake has no order sheet."}}},
+                            // lake#1119: the operator subscribes a Lake's Stripe endpoint to
+                            // exactly these (orama-operator#936).
+                            {"stripe_webhook_events",
+                             {{"type", "array"},
+                              {"description",
+                               "The Stripe webhook events this version of Lake handles, sorted; "
+                               "the same list `lake manifest` prints."},
+                              {"items", {{"type", "string"}}}}}}}},
         .kind = CapabilityKind::Read,
         .requires_auth = false,
         .object = "server",
@@ -2564,7 +2581,8 @@ void register_server_info(Registry& registry, std::string_view version) {
                  // The region of this Lake and the deployment's regions (lake#757).
                  {"region", region_json(ctx.regions)},
                  {"regions", regions_json(ctx.regions)},
-                 {"order_sheet_url", order_sheet_url_json(ctx.regions)}});
+                 {"order_sheet_url", order_sheet_url_json(ctx.regions)},
+                 {"stripe_webhook_events", stripe_webhook_events_json()}});
         }});
 }
 
