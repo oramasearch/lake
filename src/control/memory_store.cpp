@@ -3167,8 +3167,8 @@ std::optional<std::string> account_balance_problem(const AccountBalance& balance
 }
 
 std::optional<std::string> balance_credit_problem(const BalanceCredit& credit) {
-    if (credit.kind != "top_up" && credit.kind != "auto_top_up") {
-        return "a credit is a top_up or an auto_top_up";
+    if (credit.kind != "top_up" && credit.kind != "auto_top_up" && credit.kind != "grant") {
+        return "a credit is a top_up, an auto_top_up or a grant";
     }
     if (credit.amount_micros <= 0) {
         return "a credit is more than $0";
@@ -3177,7 +3177,127 @@ std::optional<std::string> balance_credit_problem(const BalanceCredit& credit) {
         credit.reference.size() > 255 || credit.event_id.size() > 255) {
         return "a credit needs its provider and the provider's reference";
     }
+    if (credit.kind != "grant") {
+        if (!credit.reason.empty() || !credit.granted_by.empty() || !credit.expires_at.empty() ||
+            credit.forfeited_micros != 0) {
+            return "only a grant has a reason, a giver, an expiry or a forfeited part";
+        }
+        return std::nullopt;
+    }
+    // account_balance_credits' checks on a grant (migration 0100, lake#1134).
+    if (credit.amount_micros > balance_grant_most_micros) {
+        return "a grant is at most $10,000";
+    }
+    if (credit.reason.empty() || credit.reason.size() > 1000 || credit.granted_by.size() > 255) {
+        return "a grant needs its reason (at most 1,000 bytes)";
+    }
+    if (credit.forfeited_micros < 0 || credit.forfeited_micros > credit.amount_micros) {
+        return "a grant's forfeited part is between $0 and its amount";
+    }
     return std::nullopt;
+}
+
+std::vector<std::int64_t> grant_allocation(const std::vector<BalanceCredit>& grants,
+                                           std::int64_t charges_micros) {
+    std::vector<std::int64_t> used(grants.size(), 0);
+    const std::int64_t top = std::max<std::int64_t>(charges_micros, 0);
+    const auto on_axis = [&](std::int64_t value) {
+        return std::clamp<std::int64_t>(value, 0, top);
+    };
+    // The points where a grant starts or ends paying, along the account's charges.
+    std::vector<std::int64_t> points{0, top};
+    for (const BalanceCredit& grant : grants) {
+        if (grant.kind != "grant") {
+            continue;
+        }
+        points.push_back(on_axis(grant.charges_at_grant_micros));
+        if (!grant.ended_at.empty()) {
+            points.push_back(on_axis(grant.charges_at_end_micros));
+        }
+    }
+    std::ranges::sort(points);
+    points.erase(std::unique(points.begin(), points.end()), points.end());
+    // The one that expires first pays first, then the oldest.
+    std::vector<std::size_t> order(grants.size());
+    for (std::size_t index = 0; index < order.size(); ++index) {
+        order[index] = index;
+    }
+    std::ranges::sort(order, [&](std::size_t a, std::size_t b) {
+        const BalanceCredit& left = grants[a];
+        const BalanceCredit& right = grants[b];
+        return std::forward_as_tuple(
+                   left.expires_at.empty(), left.expires_at, left.created_at, left.id) <
+               std::forward_as_tuple(
+                   right.expires_at.empty(), right.expires_at, right.created_at, right.id);
+    });
+    for (std::size_t point = 0; point + 1 < points.size(); ++point) {
+        const std::int64_t from = points[point];
+        const std::int64_t to = points[point + 1];
+        std::int64_t left = to - from;
+        for (const std::size_t index : order) {
+            if (left == 0) {
+                break;
+            }
+            const BalanceCredit& grant = grants[index];
+            if (grant.kind != "grant" || on_axis(grant.charges_at_grant_micros) > from ||
+                (!grant.ended_at.empty() && on_axis(grant.charges_at_end_micros) < to)) {
+                continue;
+            }
+            const std::int64_t cap = grant.ended_at.empty()
+                                         ? grant.amount_micros
+                                         : grant.amount_micros - grant.forfeited_micros;
+            const std::int64_t take = std::min(std::max<std::int64_t>(cap - used[index], 0), left);
+            used[index] += take;
+            left -= take;
+        }
+    }
+    // What an ended grant paid for is fixed by its record.
+    for (std::size_t index = 0; index < grants.size(); ++index) {
+        if (grants[index].kind == "grant" && !grants[index].ended_at.empty()) {
+            used[index] = grants[index].amount_micros - grants[index].forfeited_micros;
+        }
+    }
+    return used;
+}
+
+std::vector<BalanceCredit> grants_ending(const std::vector<BalanceCredit>& grants,
+                                         std::int64_t charges_micros,
+                                         std::string_view at,
+                                         std::string_view revoke_id) {
+    const std::vector<std::int64_t> used = grant_allocation(grants, charges_micros);
+    std::vector<BalanceCredit> out;
+    for (std::size_t index = 0; index < grants.size(); ++index) {
+        const BalanceCredit& grant = grants[index];
+        if (grant.kind != "grant" || !grant.ended_at.empty()) {
+            continue;
+        }
+        const bool revoked = !revoke_id.empty() && grant.id == revoke_id;
+        // Both are whole-second UTC text, so they compare as text.
+        const bool expired =
+            !grant.expires_at.empty() && grant.expires_at.substr(0, 19) <= at.substr(0, 19);
+        if (!revoked && !expired) {
+            continue;
+        }
+        BalanceCredit ended = grant;
+        ended.ended_at = std::string(at);
+        ended.end_reason = revoked ? "revoked" : "expired";
+        ended.charges_at_end_micros = std::max<std::int64_t>(charges_micros, 0);
+        ended.forfeited_micros =
+            std::clamp<std::int64_t>(grant.amount_micros - used[index], 0, grant.amount_micros);
+        out.push_back(std::move(ended));
+    }
+    return out;
+}
+
+std::int64_t grants_unused(const std::vector<BalanceCredit>& grants, std::int64_t charges_micros) {
+    const std::vector<std::int64_t> used = grant_allocation(grants, charges_micros);
+    std::int64_t unused = 0;
+    for (std::size_t index = 0; index < grants.size(); ++index) {
+        if (grants[index].kind == "grant" && grants[index].ended_at.empty()) {
+            unused += std::max<std::int64_t>(grants[index].amount_micros - used[index], 0);
+        }
+    }
+    return unused;
 }
 
 AccountBalance InMemoryStore::account_balance_locked(const std::string& customer_id) const {
@@ -3187,10 +3307,18 @@ AccountBalance InMemoryStore::account_balance_locked(const std::string& customer
     balance.credits_micros = 0;
     balance.charges_micros = 0;
     balance.credit_count = 0;
+    balance.first_grant_at.clear();
+    std::vector<BalanceCredit> grants;
     for (const BalanceCredit& credit : balance_credits_) {
         if (credit.customer_id == customer_id) {
-            balance.credits_micros += credit.amount_micros;
+            balance.credits_micros += credit.amount_micros - credit.forfeited_micros;
             ++balance.credit_count;
+            if (credit.kind == "grant") {
+                grants.push_back(credit);
+                if (balance.first_grant_at.empty() || credit.created_at < balance.first_grant_at) {
+                    balance.first_grant_at = credit.created_at;
+                }
+            }
         }
     }
     for (const auto& [key, charge] : balance_charges_) {
@@ -3198,6 +3326,7 @@ AccountBalance InMemoryStore::account_balance_locked(const std::string& customer
             balance.charges_micros += charge.amount_micros;
         }
     }
+    balance.grants_unused_micros = grants_unused(grants, balance.charges_micros);
     // A paid cloud order of the account's organization covers it (lake#1114): one being paid for,
     // provisioned or running, whose subscription is current (an order form has none).
     balance.paid_order = false;
@@ -3285,10 +3414,18 @@ Result<BalanceCreditResult> InMemoryStore::apply_balance_credit(const BalanceCre
     BalanceCredit stored = credit;
     stored.id = new_uuid_v4();
     stored.created_at = now_iso8601();
+    stored.ended_at.clear();
+    stored.end_reason.clear();
+    stored.charges_at_end_micros = 0;
+    stored.forfeited_micros = 0;
+    // A grant pays only for usage charged after it was given (lake#1134).
+    stored.charges_at_grant_micros =
+        credit.kind == "grant" ? account_balance_locked(credit.customer_id).charges_micros : 0;
     balance_credits_.push_back(stored);
     AccountBalance& row = balances_[credit.customer_id];
     row.customer_id = credit.customer_id;
-    if (row.first_top_up_at.empty()) {
+    // A grant is not a payment: the overdraft waits for the first paid top-up.
+    if (row.first_top_up_at.empty() && credit.kind != "grant") {
         row.first_top_up_at = stored.created_at;
     }
     row.limit_warning_notified_at.clear();
@@ -3350,6 +3487,65 @@ Result<std::vector<BalanceCharge>> InMemoryStore::balance_charges(const std::str
     }
     std::ranges::sort(out, std::greater<>{}, &BalanceCharge::period);
     return out;
+}
+
+Result<BalanceCredit> InMemoryStore::balance_credit(const std::string& credit_id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(balance_credits_, credit_id, &BalanceCredit::id);
+    if (found == balance_credits_.end()) {
+        return std::unexpected(StoreError{"not_found", "no credit " + credit_id});
+    }
+    return *found;
+}
+
+Result<std::vector<BalanceCredit>> InMemoryStore::end_balance_grants(const std::string& customer_id,
+                                                                     const std::string& at,
+                                                                     const std::string& revoke_id) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(customers_, [&](const Customer& c) { return c.id == customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+    }
+    std::vector<BalanceCredit> grants;
+    for (const BalanceCredit& credit : balance_credits_) {
+        if (credit.customer_id == customer_id && credit.kind == "grant") {
+            grants.push_back(credit);
+        }
+    }
+    const std::vector<BalanceCredit> ending =
+        grants_ending(grants, account_balance_locked(customer_id).charges_micros, at, revoke_id);
+    if (!revoke_id.empty() &&
+        std::ranges::none_of(ending, [&](const BalanceCredit& g) { return g.id == revoke_id; })) {
+        return std::unexpected(
+            StoreError{"conflict", "no grant " + revoke_id + " of this account still counts"});
+    }
+    for (const BalanceCredit& ended : ending) {
+        auto kept = std::ranges::find(balance_credits_, ended.id, &BalanceCredit::id);
+        *kept = ended;
+    }
+    if (!ending.empty()) {
+        AccountBalance& row = balances_[customer_id];
+        row.customer_id = customer_id;
+        ++row.version;
+        row.updated_at = now_iso8601();
+    }
+    return ending;
+}
+
+Result<Customer> InMemoryStore::personal_account_by_email(const std::string& email) {
+    std::lock_guard lock(mutex_);
+    const std::string wanted = lower(email);
+    for (const User& user : users_) {
+        if (wanted.empty() || lower(user.email) != wanted || deleted_users_.contains(user.id)) {
+            continue;
+        }
+        for (const Customer& customer : customers_) {
+            if (customer.customer_type == "individual" && customer.user_id == user.id &&
+                !deleted_customers_.contains(customer.id)) {
+                return customer;
+            }
+        }
+    }
+    return std::unexpected(StoreError{"not_found", "no personal account has that email"});
 }
 
 Result<std::vector<std::string>> InMemoryStore::balance_customers() {

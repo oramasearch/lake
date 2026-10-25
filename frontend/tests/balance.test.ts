@@ -3,7 +3,7 @@
  * page says after Stripe. `npm test`; the build runs it. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { addFundsPath, balanceTone, bannerFor, dollarsToMicros, historyRows, microsToDollars, returnNotice, topUpRule, type Balance } from "../src/pages/billing/balance.ts";
+import { addFundsPath, balanceTone, bannerFor, dollarsToMicros, grantInput, historyRows, microsToDollars, returnNotice, topUpRule, type Balance } from "../src/pages/billing/balance.ts";
 
 const base: Balance = {
   customer_id: "acct",
@@ -93,4 +93,41 @@ test("the page says what happened after Stripe sends the person back", () => {
   assert.match(returnNotice(new URLSearchParams("top_up=cancelled"))!.text, /Nothing was charged/);
   assert.match(returnNotice(new URLSearchParams("auto_top_up=saved"))!.text, /Card saved/);
   assert.equal(returnNotice(new URLSearchParams("customer_id=x")), null);
+});
+
+// Credits from Orama (lake#1134).
+test("a credit from Orama is listed with its reason, expiry and what is left, and its unused part stops on expiry", () => {
+  const rows = historyRows(
+    [
+      { id: "g1", kind: "grant", label: "Credit from Orama", amount_micros: 25_000_000, provider: "orama", reference: "grant-a", created_at: "2026-10-01T10:00:00Z", reason: "Design partner", expires_at: "2026-12-31T23:59:59Z", ended_at: "", end_reason: "", forfeited_micros: 0, unused_micros: 15_000_000 },
+      { id: "g2", kind: "grant", amount_micros: 10_000_000, provider: "orama", reference: "grant-b", created_at: "2026-09-01T10:00:00Z", reason: "Prize", expires_at: "2026-09-30T23:59:59Z", ended_at: "2026-09-30T23:59:59Z", end_reason: "expired", forfeited_micros: 4_000_000 },
+    ],
+    [],
+  );
+  assert.deepEqual(rows.map((r) => r.label), ["Credit from Orama", "Credit from Orama expired", "Credit from Orama"]);
+  assert.equal(rows[0].detail, "Design partner · expires 2026-12-31 · $15.00 left");
+  assert.equal(rows[0].grantId, "g1");
+  assert.equal(rows[1].amount_micros, -4_000_000);
+  assert.equal(rows[2].detail, "Prize · expired 2026-09-30");
+  assert.equal(rows[2].grantId, undefined, "an ended credit is not revoked again");
+});
+
+test("the banner says when a credit from Orama is used up", () => {
+  const used = bannerFor({ ...base, state: "blocked", reason: "first_top_up", first_top_up_at: "", first_grant_at: "2026-10-01T00:00:00Z", balance_micros: 0 });
+  assert.equal(used?.title, "Your Credit Is Used Up");
+  assert.match(used!.text, /Add \$20\.00/);
+});
+
+test("the Give credit form names the account by ID or email and checks the amount, reason and last day", () => {
+  const now = new Date("2026-10-24T12:00:00Z");
+  const byId = grantInput({ account: " acct ", dollars: "25", reason: " Design partner ", expires: "2026-12-31" }, now);
+  assert.equal(byId.problem, null);
+  assert.deepEqual(byId.input, { amount_micros: 25_000_000, reason: "Design partner", customer_id: "acct", expires_at: "2026-12-31T23:59:59Z" });
+  const byEmail = grantInput({ account: "Pat@Example.com", dollars: "5.50", reason: "Prize", expires: "" }, now);
+  assert.deepEqual(byEmail.input, { amount_micros: 5_500_000, reason: "Prize", email: "Pat@Example.com" });
+  assert.match(grantInput({ account: "", dollars: "25", reason: "x", expires: "" }, now).problem!, /account/);
+  assert.match(grantInput({ account: "a", dollars: "0", reason: "x", expires: "" }, now).problem!, /amount/);
+  assert.match(grantInput({ account: "a", dollars: "10000.01", reason: "x", expires: "" }, now).problem!, /\$10,000/);
+  assert.match(grantInput({ account: "a", dollars: "25", reason: "  ", expires: "" }, now).problem!, /why/);
+  assert.match(grantInput({ account: "a", dollars: "25", reason: "x", expires: "2026-10-23" }, now).problem!, /future/);
 });

@@ -942,6 +942,21 @@ public:
     control::Result<std::vector<std::string>> balance_customers() override {
         return call("balance_customers", [&] { return store_->balance_customers(); });
     }
+    control::Result<control::BalanceCredit> balance_credit(const std::string& credit_id) override {
+        return call("balance_credit", [&] { return store_->balance_credit(credit_id); });
+    }
+    control::Result<std::vector<control::BalanceCredit>>
+    end_balance_grants(const std::string& customer_id,
+                       const std::string& at,
+                       const std::string& revoke_id) override {
+        return call("end_balance_grants",
+                    [&] { return store_->end_balance_grants(customer_id, at, revoke_id); });
+    }
+    control::Result<control::Customer>
+    personal_account_by_email(const std::string& email) override {
+        return call("personal_account_by_email",
+                    [&] { return store_->personal_account_by_email(email); });
+    }
     control::Result<control::CloudOrder>
     create_cloud_order(const control::NewCloudOrder& order) override {
         return call("create_cloud_order", [&] { return store_->create_cloud_order(order); });

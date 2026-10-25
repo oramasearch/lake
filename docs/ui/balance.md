@@ -54,13 +54,38 @@ refreshes the session so the banner goes.
   **Turned Off** with the reason. Members read it.
 - Back from Stripe's card page, `auto_top_up=saved` or `cancelled` is said in a banner.
 
+- **Credits from Orama** (lake#1134) are in the history as **Credit from Orama** (+), with the
+  reason, the last day it counts and what is left (`grantDetail`); one that expired or was revoked
+  adds a row **Credit from Orama expired** / **revoked** (−) for the unused part that stopped
+  counting. **Added** says "Top-ups and credits from Orama" and how much credit is left. Once a
+  grant-only account's credit is used up, the banner reads **Your Credit Is Used Up**.
+
 Capabilities: `viewer`, `account_balance`, `start_top_up`, `set_auto_top_up`.
+
+## Give credit
+
+The operator's (lake#1134, [billing.md](../api/billing.md#credits-from-orama)). `GiveCredit.tsx`
+is one dialog opened from two places:
+
+- **Customers → Give credit** (`CustomersPage.tsx`, where the Lake bills): **Account ID or email**
+  (a person's email gives the credit to their personal account), **Amount (USD)** (up to $10,000),
+  **Reason** (the account sees it) and **Last day it counts (UTC)** (optional; the credit's unused
+  part stops counting at the end of that day).
+- **Billing → Give credit** on an account's Billing page (the account is the one open).
+
+`grantInput` in `balance.ts` turns the form into `grant_balance_credit`'s input and says what is
+missing. The toast says the new balance and whether the account was emailed. In the Billing page's
+history, a credit from Orama that still counts has **Revoke** for the operator: a confirmation, then
+`revoke_balance_credit`, and a toast with the unused amount that stopped counting. Lake has no staff
+area beyond the operator's pages, and the server refuses both capabilities to anyone but the
+operator or the instance administrator.
 
 ## Verify
 
-- `frontend/tests/balance.test.ts`: the banner per state (none while ok or covered), the Add funds
-  link, dollar amounts in whole cents, the first-top-up rule, the history order and the return
-  notices.
+- `frontend/tests/balance.test.ts`: the banner per state (none while ok or covered, "used up" after
+  a credit from Orama), the Add funds link, dollar amounts in whole cents, the first-top-up rule,
+  the history order (credits from Orama, their expiry rows), the return notices, and the Give credit
+  form's input (`grantInput`).
 - `npm run build` (types, the tests, the effect and empty-state checks) and
   `./tools/ui/test-token-gates.sh`.
 - In a browser on a billing Lake: an account with no top-up sees **Add Funds to Start** on every

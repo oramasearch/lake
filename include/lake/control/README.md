@@ -246,7 +246,11 @@ and `verify_event` (one event checked alone).
 (once per event id and per provider reference, in one transaction), `set_balance_charge` (a month
 an invoice froze stays), `balance_credits`, `balance_charges` and `balance_customers`, are the
 prepaid balance's records (migration `0099_account_balances`, lake#1114); `account_balance_problem`
-and `balance_credit_problem` are the checks both stores apply.
+and `balance_credit_problem` are the checks both stores apply. Credits from Orama (migration
+`0100_balance_grants`, lake#1134) are `BalanceCredit`s of kind `grant` with their own fields;
+`balance_credit`, `end_balance_grants` (expired ones and one revoked, in one transaction) and
+`personal_account_by_email` are their store calls, and `grant_allocation`, `grants_ending` and
+`grants_unused` the one rule both stores and the API use for how charges fall on grants.
 
 
 `oci_records.hpp` holds a tenant image's manifests and tags in its routed workspace (lake#383

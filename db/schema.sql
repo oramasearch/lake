@@ -4968,6 +4968,50 @@ CREATE TABLE IF NOT EXISTS account_balance_charges (
 );
 CREATE TABLE IF NOT EXISTS account_balances_guard (applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0099_account_balances') ON CONFLICT DO NOTHING;
+-- 0100_balance_grants (lake#1134, docs/api/billing.md#credits-from-orama): credits Orama gives an
+-- account (a design partner, a prize, a make-good), recorded as credits of kind `grant` beside the
+-- paid top-ups, so the balance stays the credits minus the charges. A grant is not a payment: it
+-- never sets first_top_up_at, so it never unlocks the overdraft. It records why, who gave it, when
+-- it stops counting and the account's charges when it was given (it pays only for later usage).
+-- When it expires or is revoked, the unused part (`forfeited_micros`) stops counting; what it paid
+-- for stays paid. Additive: new columns with defaults, the kind check widened, a guard.
+ALTER TABLE account_balance_credits ADD COLUMN IF NOT EXISTS reason text NOT NULL DEFAULT ''
+    CHECK (length(reason) <= 1000);
+ALTER TABLE account_balance_credits ADD COLUMN IF NOT EXISTS granted_by text NOT NULL DEFAULT ''
+    CHECK (length(granted_by) <= 255);
+ALTER TABLE account_balance_credits ADD COLUMN IF NOT EXISTS expires_at timestamptz;
+ALTER TABLE account_balance_credits ADD COLUMN IF NOT EXISTS charges_at_grant_micros bigint NOT NULL
+    DEFAULT 0 CHECK (charges_at_grant_micros >= 0);
+ALTER TABLE account_balance_credits ADD COLUMN IF NOT EXISTS ended_at timestamptz;
+ALTER TABLE account_balance_credits ADD COLUMN IF NOT EXISTS end_reason text NOT NULL DEFAULT ''
+    CHECK (end_reason IN ('', 'expired', 'revoked'));
+ALTER TABLE account_balance_credits ADD COLUMN IF NOT EXISTS charges_at_end_micros bigint NOT NULL
+    DEFAULT 0 CHECK (charges_at_end_micros >= 0);
+ALTER TABLE account_balance_credits ADD COLUMN IF NOT EXISTS forfeited_micros bigint NOT NULL
+    DEFAULT 0 CHECK (forfeited_micros >= 0);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'account_balance_credits_grant_check'
+                     AND conrelid = 'account_balance_credits'::regclass) THEN
+        -- Widened once: 0099 named it from its column.
+        ALTER TABLE account_balance_credits DROP CONSTRAINT IF EXISTS account_balance_credits_kind_check;
+        ALTER TABLE account_balance_credits ADD CONSTRAINT account_balance_credits_kind_check
+            CHECK (kind IN ('top_up', 'auto_top_up', 'grant'));
+        ALTER TABLE account_balance_credits ADD CONSTRAINT account_balance_credits_grant_check CHECK (
+            (kind = 'grant' AND provider = 'orama' AND length(reason) >= 1
+             AND amount_micros <= 10000000000 AND forfeited_micros <= amount_micros
+             AND ((ended_at IS NULL AND end_reason = '' AND forfeited_micros = 0)
+                  OR (ended_at IS NOT NULL AND end_reason <> '')))
+            OR (kind <> 'grant' AND reason = '' AND granted_by = '' AND expires_at IS NULL
+                AND charges_at_grant_micros = 0 AND ended_at IS NULL AND end_reason = ''
+                AND charges_at_end_micros = 0 AND forfeited_micros = 0));
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS account_balance_credits_counting_grants
+    ON account_balance_credits (customer_id) WHERE kind = 'grant' AND ended_at IS NULL;
+CREATE TABLE IF NOT EXISTS balance_grants_guard (applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0100_balance_grants') ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------------------------
 -- 0103_clerk_session_binding (lake#1163, docs/api/clerk.md#webhooks): each Lake browser session

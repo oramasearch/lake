@@ -4,20 +4,22 @@
  * account is the current workspace's (`session.space`); the operator opens one with `?customer_id=`
  * and can issue an invoice for a month that has ended. Reads `billing_account`, `price_list`,
  * `bill_preview` and `list_invoices`; writes `set_billing_contact` (owners, admins and the
- * operator, lake#857) and `issue_invoice` (the operator). The page exists only where the lake bills
- * (`viewer.billing`). */
+ * operator, lake#857), `issue_invoice` (the operator), and `grant_balance_credit` and
+ * `revoke_balance_credit` (the operator's Give credit and Revoke, lake#1134). The page exists only
+ * where the lake bills (`viewer.billing`). */
 import { type ChangeEvent, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { FileText, Receipt, Tags, Wallet } from "lucide-react";
+import { FileText, Gift, Receipt, Tags, Wallet } from "lucide-react";
 import { act, useRead } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTrail } from "@/lib/trail";
 import { useToast } from "@/lib/toast";
-import { Modal } from "@/lib/overlay";
+import { ConfirmButton, Modal } from "@/lib/overlay";
 import { date } from "@/lib/format";
 import { Banner, Button, Card, DataTable, Empty, ErrorBlock, Field, fieldError, Form, KeyValue, Page, Skeleton, Split, Stat, StatRow, Status } from "@/lib/ui";
 import { useSpacePermissions } from "@/pages/apps/shared";
 import { addFundsPath, balanceTone, dollarsToMicros, historyRows, microsToDollars, returnNotice, type BalanceAnswer } from "./balance";
+import { GiveCredit } from "./GiveCredit";
 import { addressLines, asksForBillingEmail, billedNote, contactDraft, contactSavedMessage, countryOptions, invoiceTone, lineSentence, monthLabel, months, money, owed, paymentSummary, priceLabel, quantityLabel, type Account, type Bill, type ContactDraft, type ContactSaved, type Invoice, type Line, type PriceListAnswer } from "./billing";
 
 export default function BillingPage() {
@@ -27,6 +29,7 @@ export default function BillingPage() {
   const customerId = params.get("customer_id") || session.space?.id || "";
   const operator = viewer.administrator;
   const [issuing, setIssuing] = useState(false);
+  const [giving, setGiving] = useState(false);
   useTrail([{ label: "Billing" }], "Billing");
 
   const account = useRead<Account>(customerId ? "billing_account" : null, { customer_id: customerId }, { workspace: null });
@@ -60,6 +63,11 @@ export default function BillingPage() {
           <Button to="/usage">Usage</Button>
           {operator && <Button to="/billing/plans">Price list</Button>}
           {operator && (
+            <Button onClick={() => setGiving(true)}>
+              <Gift size={14} aria-hidden /> Give credit
+            </Button>
+          )}
+          {operator && (
             <Button variant="primary" onClick={() => setIssuing(true)}>
               <FileText size={14} aria-hidden /> Issue an invoice
             </Button>
@@ -80,7 +88,7 @@ export default function BillingPage() {
             <Stat label="Payment" value={paymentSummary(account.data.provider).value} sub={paymentSummary(account.data.provider).sub} />
           </StatRow>
           {returned && <Banner tone={returned.tone}>{returned.text}</Banner>}
-          <BalanceCard balance={balance} customerId={customerId} canEdit={permissions.canAdmin} />
+          <BalanceCard balance={balance} customerId={customerId} canEdit={permissions.canAdmin} operator={operator} />
           {account.data.provider.reason && (
             <Banner tone="quiet" title="Invoice Only">
               {operator ? account.data.provider.reason : "Card payment is not set up on this Lake yet. Orama sends payment details with each invoice and records your payment."}
@@ -128,6 +136,7 @@ export default function BillingPage() {
         </>
       )}
       {issuing && <IssueInvoice customerId={customerId} onClose={() => setIssuing(false)} />}
+      {giving && <GiveCredit customerId={customerId} onClose={() => setGiving(false)} onGiven={() => void balance.refetch()} />}
     </Page>
   );
 }
@@ -376,11 +385,18 @@ function IssueInvoice({ customerId, onClose }: { customerId: string; onClose: ()
 
 /** The prepaid balance (lake#1114, docs/ui/balance.md): the balance, its state and limit, Add funds,
  * and the history of credits and charges, newest first. */
-function BalanceCard({ balance, customerId, canEdit }: { balance: ReturnType<typeof useRead<BalanceAnswer>>; customerId: string; canEdit: boolean }) {
+function BalanceCard({ balance, customerId, canEdit, operator }: { balance: ReturnType<typeof useRead<BalanceAnswer>>; customerId: string; canEdit: boolean; operator: boolean }) {
+  const toast = useToast();
   if (balance.isError) return <ErrorBlock error={balance.error} retry={() => void balance.refetch()} what="this account's balance" />;
   if (!balance.data) return <Skeleton lines={3} />;
   const b = balance.data;
   const rows = historyRows(b.credits, b.charges);
+  const granted = (b.grants_unused_micros ?? 0) > 0;
+  const revoke = async (creditId: string) => {
+    const revoked = await act<{ revoked_micros: number }>("revoke_balance_credit", { credit_id: creditId });
+    toast(`Credit revoked: ${money(revoked.revoked_micros, "USD")} unused stopped counting`);
+    void balance.refetch();
+  };
   return (
     <Card
       label="Balance"
@@ -403,7 +419,7 @@ function BalanceCard({ balance, customerId, canEdit }: { balance: ReturnType<typ
       <div className="p-4">
         <StatRow cols={3}>
           <Stat label="Balance" value={money(b.balance_micros, "USD")} sub={<Status value={b.exempt ? "covered by your order" : b.state} tone={b.exempt ? "success" : balanceTone(b.state)} />} />
-          <Stat label="Added" value={money(b.credits_micros ?? 0, "USD")} sub="Top-ups" />
+          <Stat label="Added" value={money(b.credits_micros ?? 0, "USD")} sub={granted ? `Top-ups and credits from Orama, ${money(b.grants_unused_micros ?? 0, "USD")} of credit left` : b.first_grant_at ? "Top-ups and credits from Orama" : "Top-ups"} />
           <Stat label="Limit" value={money(b.limit_micros, "USD")} sub="Paid work stops below it" />
         </StatRow>
       </div>
@@ -421,6 +437,21 @@ function BalanceCard({ balance, customerId, canEdit }: { balance: ReturnType<typ
           { key: "label", label: "History", render: (r) => (<div><span className="font-semibold text-ink">{r.label}</span><div className="text-[12px] text-ink-3">{r.detail}</div></div>) },
           { key: "when", label: "Date", render: (r) => <span className="text-ink-2">{date(r.when)}</span> },
           { key: "amount", label: "Amount", numeric: true, render: (r) => <span className="font-mono">{r.amount_micros > 0 ? "+" : ""}{money(r.amount_micros, "USD")}</span> },
+          // The operator revokes what is left of a credit from Orama (lake#1134).
+          ...(operator
+            ? [
+                {
+                  key: "revoke",
+                  label: "",
+                  render: (r: (typeof rows)[number]) =>
+                    r.grantId ? (
+                      <ConfirmButton variant="ghost" danger title="Revoke this credit?" confirmLabel="Revoke" confirm="What the credit has not paid for stops counting. What it paid for stays paid." onConfirm={() => revoke(r.grantId!)}>
+                        Revoke
+                      </ConfirmButton>
+                    ) : null,
+                },
+              ]
+            : []),
         ]}
       />
     </Card>

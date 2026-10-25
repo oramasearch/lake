@@ -435,6 +435,11 @@ public:
                                                        int limit) override;
     Result<std::vector<BalanceCharge>> balance_charges(const std::string& customer_id) override;
     Result<std::vector<std::string>> balance_customers() override;
+    Result<BalanceCredit> balance_credit(const std::string& credit_id) override;
+    Result<std::vector<BalanceCredit>> end_balance_grants(const std::string& customer_id,
+                                                          const std::string& at,
+                                                          const std::string& revoke_id) override;
+    Result<Customer> personal_account_by_email(const std::string& email) override;
     Result<CloudOrder> create_cloud_order(const NewCloudOrder& order) override;
     Result<CloudOrder> get_cloud_order(const std::string& id) override;
     Result<CloudOrder> transition_cloud_order(const CloudOrderTransition& change) override;

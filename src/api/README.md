@@ -208,13 +208,18 @@ and the `checkout.session.*` events, and `http_server.cpp` its routes on the ape
 pass (email and audit) on the maintenance thread.
 
 The prepaid balance (lake#1114, decision 67): `balance.cpp` registers `account_balance`,
-`start_top_up`, `set_auto_top_up`, `set_balance_overdraft` and `refresh_account_balance` (from
+`start_top_up`, `set_auto_top_up`, `set_balance_overdraft`, `refresh_account_balance`,
+`grant_balance_credit` and `revoke_balance_credit` (from
 `register_billing_capabilities`, so billing on only), holds the one list of capabilities that start
 paid work, the 402 gate and the answer warning that `registry.cpp` calls in `Registry::call`, the
 provider's balance notices, the emails once per crossing and the refresh the store root's owner
 runs (`ApiServer::Impl::run_balance_pass`, every `LAKE_BALANCE_REFRESH_SECONDS`). A refresh reads
 usage through `usage_over_time`'s handler, not a registry call, so it adds no audit event per
-account. `billing_capabilities.cpp` issues a topped-up account's invoice paid by the balance;
+account. Credits from Orama (lake#1134) are `balance.cpp`'s too: `grant_balance_credit` and
+`revoke_balance_credit` (the operator or the instance administrator), the grant email
+(`balance_grant_email`), and the refresh ending expired grants after a full read
+(`billing.balance.credit_expired`). `billing_capabilities.cpp` issues a topped-up (or granted)
+account's invoice paid by the balance;
 `stripe.cpp` adds the top-up and card-setup Checkouts, the off-session PaymentIntent and the balance
 events; `console_capabilities.cpp`'s `viewer` answers `balance`.
 

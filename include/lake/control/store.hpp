@@ -458,16 +458,23 @@ struct BillingContact {
     std::string updated_at;
 };
 // A prepaid account balance (migration 0099, lake#1114, liquid-bridge decision 67,
-// docs/api/billing.md#balance): billing, so in the control plane. Credits are paid top-ups; charges
+// docs/api/billing.md#balance): billing, so in the control plane. Credits are paid top-ups and
+// grants from Orama (lake#1134); charges
 // are the account's usage priced at the list in force, one row a month (usage stays in each
 // workspace Zetta: only the priced amount is kept). The balance is credits minus charges. Amounts
 // are millionths of a US dollar. Timestamps are RFC 3339 UTC text, empty when unset.
 struct AccountBalance {
     std::string customer_id;
-    std::int64_t credits_micros = 0; // every credit, summed
+    // Every credit, summed; a grant counts what has not stopped counting (its amount less its
+    // forfeited part, lake#1134).
+    std::int64_t credits_micros = 0;
     std::int64_t charges_micros = 0; // every month's charge, summed
     std::int64_t credit_count = 0;
     std::string first_top_up_at; // empty: the account has never topped up
+    // The first grant from Orama (empty: none), and what the grants still counting have left
+    // unused (grants_unused, lake#1134). A grant never sets first_top_up_at.
+    std::string first_grant_at;
+    std::int64_t grants_unused_micros = 0;
     // The operator's overdraft for this account, replacing the instance's; nullopt: the instance's.
     std::optional<std::int64_t> overdraft_limit_micros;
     // The last refresh of the charges that read every workspace, and the last one that could not
@@ -498,15 +505,55 @@ struct AccountBalance {
     std::int64_t balance_micros() const {
         return credits_micros - charges_micros;
     }
+    // From when the charges are read: the first top-up's or the first grant's, whichever came
+    // first; empty while the account has neither.
+    std::string charges_since() const {
+        if (first_top_up_at.empty() ||
+            (!first_grant_at.empty() && first_grant_at < first_top_up_at)) {
+            return first_grant_at;
+        }
+        return first_top_up_at;
+    }
 };
 // One credit: a paid top-up, recorded once per (provider, reference), the Checkout Session or the
-// PaymentIntent that paid it.
+// PaymentIntent that paid it; or a grant from Orama (lake#1134), provider `orama`, reference the
+// grant's idempotency key.
 struct BalanceCredit {
     std::string id, customer_id;
-    std::string kind = "top_up"; // top_up | auto_top_up
+    std::string kind = "top_up"; // top_up | auto_top_up | grant
     std::int64_t amount_micros = 0;
     std::string provider, reference, event_id, created_at;
+    // A grant's own (empty or 0 for a top-up): why it was given, who gave it, when it stops
+    // counting (RFC 3339 UTC, YYYY-MM-DDTHH:MM:SSZ; empty: never), and the account's charges when
+    // it was given (it pays only for usage charged after; the store records them).
+    std::string reason, granted_by, expires_at;
+    std::int64_t charges_at_grant_micros = 0;
+    // When it stopped counting (empty: it counts), why (expired | revoked), the account's charges
+    // then, and the unused part that stopped counting. What it paid for stays paid.
+    std::string ended_at, end_reason;
+    std::int64_t charges_at_end_micros = 0;
+    std::int64_t forfeited_micros = 0;
 };
+// The most one grant from Orama gives: $10,000, the largest top-up (account_balance_credits checks
+// it too).
+inline constexpr std::int64_t balance_grant_most_micros = 10'000'000'000;
+// How an account's charges fall on its grants (lake#1134, docs/api/billing.md#credits-from-orama):
+// usage is paid by grants before paid money. A grant pays only for usage charged after it was
+// given and, once ended, before it ended; of the grants paying at once, the one that expires first
+// pays first (then the oldest). Answers what each of `grants` (in the order given) has paid for at
+// `charges_micros`. Both stores and the API use it.
+std::vector<std::int64_t> grant_allocation(const std::vector<BalanceCredit>& grants,
+                                           std::int64_t charges_micros);
+// The grants that stop counting at `at` (RFC 3339 UTC): every one still counting whose expiry is
+// at or before `at`, and `revoke_id` when it still counts. Each is answered with ended_at (`at`),
+// end_reason, charges_at_end_micros (`charges_micros`) and forfeited_micros: its amount less what
+// grant_allocation says it has paid for.
+std::vector<BalanceCredit> grants_ending(const std::vector<BalanceCredit>& grants,
+                                         std::int64_t charges_micros,
+                                         std::string_view at,
+                                         std::string_view revoke_id);
+// What the grants still counting have left unused at `charges_micros`.
+std::int64_t grants_unused(const std::vector<BalanceCredit>& grants, std::int64_t charges_micros);
 struct BalanceCreditResult {
     bool duplicate = false; // the event or the reference was recorded before; nothing changed
     BalanceCredit credit;
@@ -2280,6 +2327,19 @@ public:
                                                                int limit) = 0;
     virtual Result<std::vector<BalanceCharge>> balance_charges(const std::string& customer_id) = 0;
     virtual Result<std::vector<std::string>> balance_customers() = 0;
+    // Grants from Orama (migration 0100, lake#1134). apply_balance_credit records a grant like any
+    // credit (once per reference, the marks cleared) but never sets first_top_up_at, and records
+    // the account's charges at that moment. balance_credit answers one credit by id (not_found).
+    // end_balance_grants ends, in one transaction, the account's grants grants_ending names at `at`
+    // against its charges now (`revoke_id`: one grant to revoke, else empty), and answers them;
+    // conflict when `revoke_id` names no grant of the account that still counts.
+    // personal_account_by_email answers the individual account of the person with that email
+    // (case-insensitive), not_found when there is none.
+    virtual Result<BalanceCredit> balance_credit(const std::string& credit_id) = 0;
+    virtual Result<std::vector<BalanceCredit>> end_balance_grants(const std::string& customer_id,
+                                                                  const std::string& at,
+                                                                  const std::string& revoke_id) = 0;
+    virtual Result<Customer> personal_account_by_email(const std::string& email) = 0;
     // Cloud orders (lake#831, migration 0089, docs/api/orders.md).
     // Records a new order and its first event (actor lake).
     virtual Result<CloudOrder> create_cloud_order(const NewCloudOrder& order) = 0;
