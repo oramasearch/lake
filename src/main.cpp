@@ -206,6 +206,10 @@ int usage() {
     std::println("  LAKE_RESEND_API_KEY Orama's Resend key for order email; LAKE_RESEND_FROM the "
                  "sender (default Lake <orders@lake.live>); LAKE_SUPPORT_EMAIL where orders go "
                  "(default support@orama.com)");
+    std::println("  LAKE_BRAND_FILE a JSON brand; LAKE_BRAND_NAME, _SHORT_NAME, _COMPANY, "
+                 "_ASSISTANT_NAME, _CONSOLE_TITLE, _BY_ORAMA, _LOGO, _LOGO_DARK, _FAVICON, "
+                 "_ACCENT, _ACCENT_DARK, _SUPPORT_EMAIL, _EMAIL_FROM, _LEGAL_NAME, _TERMS_URL, "
+                 "_PRIVACY_URL over it: a white-labelled Lake (docs/serving/brand.md)");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
     return 2;
 }
@@ -305,10 +309,16 @@ int main(int argc, char** argv) {
     opts.clerk_secret_key = env_or("LAKE_CLERK_SECRET_KEY", "");
     // The terms and privacy policy sign-up and sign-in link to (liquid-bridge#15): unset keeps
     // Orama's published pages, `off` shows no link, and a malformed URL stops lake.
-    for (const auto& [name, target, fallback] :
-         {std::tuple{"LAKE_TERMS_URL", &opts.terms_url, lake::api::default_terms_url},
-          std::tuple{"LAKE_PRIVACY_URL", &opts.privacy_url, lake::api::default_privacy_url}}) {
-        const auto url = lake::api::legal_url_setting(name, std::getenv(name), fallback);
+    for (const auto& [name, value, target, fallback] :
+         {std::tuple{"LAKE_TERMS_URL",
+                     std::getenv("LAKE_TERMS_URL"),
+                     &opts.terms_url,
+                     lake::api::default_terms_url},
+          std::tuple{"LAKE_PRIVACY_URL",
+                     std::getenv("LAKE_PRIVACY_URL"),
+                     &opts.privacy_url,
+                     lake::api::default_privacy_url}}) {
+        const auto url = lake::api::legal_url_setting(name, value, fallback);
         if (!url) {
             std::println(stderr, "lake: {}", url.error());
             return 2;
@@ -521,6 +531,35 @@ int main(int argc, char** argv) {
             return 2;
         }
         opts.resend = std::move(*resend);
+        // The instance brand (lake#1135, docs/serving/brand.md): LAKE_BRAND_FILE with the
+        // LAKE_BRAND_* variables over it, rendered by the operator. Lake's own brand when none is
+        // set; an invalid brand stops startup. A custom brand's sender becomes Resend's From.
+        auto brand = lake::api::brand_from_sources(
+            {.file = env_or("LAKE_BRAND_FILE", ""),
+             .name = env_or("LAKE_BRAND_NAME", ""),
+             .short_name = env_or("LAKE_BRAND_SHORT_NAME", ""),
+             .company = env_or("LAKE_BRAND_COMPANY", ""),
+             .assistant_name = env_or("LAKE_BRAND_ASSISTANT_NAME", ""),
+             .console_title = env_or("LAKE_BRAND_CONSOLE_TITLE", ""),
+             .by_orama = env_or("LAKE_BRAND_BY_ORAMA", ""),
+             .logo = env_or("LAKE_BRAND_LOGO", ""),
+             .logo_dark = env_or("LAKE_BRAND_LOGO_DARK", ""),
+             .favicon = env_or("LAKE_BRAND_FAVICON", ""),
+             .accent = env_or("LAKE_BRAND_ACCENT", ""),
+             .accent_dark = env_or("LAKE_BRAND_ACCENT_DARK", ""),
+             .support_email = env_or("LAKE_BRAND_SUPPORT_EMAIL", ""),
+             .email_from = env_or("LAKE_BRAND_EMAIL_FROM", ""),
+             .legal_name = env_or("LAKE_BRAND_LEGAL_NAME", ""),
+             .terms_url = env_or("LAKE_BRAND_TERMS_URL", ""),
+             .privacy_url = env_or("LAKE_BRAND_PRIVACY_URL", "")},
+            opts.resend.from,
+            opts.resend.support_email);
+        if (!brand) {
+            std::println(stderr, "lake: {}", brand.error());
+            return 2;
+        }
+        opts.resend.from = brand->email_from;
+        opts.brand = std::move(*brand);
     }
     opts.apps_reserved_names = env_or("LAKE_APPS_RESERVED_NAMES", "");
     opts.apps_per_customer = env_u64("LAKE_APPS_PER_CUSTOMER");
@@ -811,6 +850,7 @@ int main(int argc, char** argv) {
                                             : nlohmann::json(opts.regions.apex_host)},
             {"order_sheet", opts.order_sheet.enabled ? "on" : "off"},
             {"resend_api_key_set", opts.resend.api_key.empty() ? "no" : "yes"},
+            {"brand", opts.brand.custom ? opts.brand.name : "default"},
             {"agent_bus", opts.agent_bus ? (bus_url.empty() ? "memory" : "zetta") : "no"},
             {"api", "/v1/openapi.json"},
             {"mcp", "POST /mcp"}}

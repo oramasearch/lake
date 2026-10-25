@@ -1,6 +1,8 @@
 #include "lake/api/capabilities.hpp"
+
 #include "lake/api/agent_stream_triggers.hpp"
 #include "lake/api/authentication_work.hpp"
+#include "lake/api/brand.hpp"
 #include "lake/api/mcp_connections.hpp"
 #include "lake/api/stripe.hpp"
 
@@ -2562,7 +2564,8 @@ void register_server_info(Registry& registry, std::string_view version) {
         .handler = [version_string](const json&, ApiContext& ctx) {
             const json payment = payment_status_json(ctx);
             return ApiResult::success(
-                {{"name", "lake"},
+                // The brand's short name: "lake" unless white-labelled (lake#1137).
+                {{"name", instance_brand().short_name},
                  {"node", ctx.node_name},
                  {"version", version_string},
                  {"revision", build_revision_string()},

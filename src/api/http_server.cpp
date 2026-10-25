@@ -8740,6 +8740,8 @@ struct ApiServer::Impl {
     explicit Impl(ServerOptions opts)
         : options(std::move(opts)), sync_store(options.store_root, options.store_owner_wait),
           artifacts(options.store_root, options.node_name) {
+        // The brand first: the OpenAPI document and the MCP tool list below are rendered with it.
+        set_instance_brand(options.brand);
         sync_store.configure_replication(options.replication_allow_private_addresses,
                                          options.replication_timeout);
         configure_workspace_stores();
@@ -9366,6 +9368,10 @@ struct ApiServer::Impl {
             const std::string pattern = rest_path(*capability);
             if (path == pattern)
                 return pattern;
+        }
+        // A white-labelled Lake's skill (lake#1137): /skills/<short name>/SKILL.md.
+        if (path == "/skills/" + instance_brand().short_name + "/SKILL.md") {
+            return path;
         }
         if (path.starts_with("/v1/oauth/") && path.ends_with("/callback")) {
             return "/v1/oauth/:provider/callback";
@@ -14133,6 +14139,19 @@ struct ApiServer::Impl {
                 html.insert(head, tag);
             }
         }
+        // A white-labelled Lake's title, favicon and colours are in the first paint (lake#1135):
+        // no build per brand, and no flash of Lake's own. Unchanged for Lake's brand.
+        if (const Brand& brand = instance_brand(); brand.custom) {
+            static constexpr std::string_view lake_title = "<title>Lake Console</title>";
+            if (const std::size_t title = html.find(lake_title); title != std::string::npos) {
+                html.replace(title,
+                             lake_title.size(),
+                             "<title>" + web_ui_escape(brand.console_title) + "</title>");
+            }
+            if (const std::size_t head = html.find("</head>"); head != std::string::npos) {
+                html.insert(head, brand.head_markup());
+            }
+        }
         return send_text(route,
                          boost::http::status::ok,
                          std::move(html),
@@ -16133,6 +16152,16 @@ bool ApiServer::start() {
                   return impl.observe_request(
                       route, "/skills/lake/SKILL.md", impl.serve_mcp_skill(route));
               });
+    // A white-labelled Lake also serves the skill under its brand's short name (lake#1137); the
+    // Lake path stays, so a link written before the brand still works.
+    if (const std::string branded = "/skills/" + instance_brand().short_name + "/SKILL.md";
+        branded != "/skills/lake/SKILL.md") {
+        add_route(http::method::get,
+                  branded,
+                  [&impl, branded](http::route_params& route) -> http::route_task {
+                      return impl.observe_request(route, branded, impl.serve_mcp_skill(route));
+                  });
+    }
     add_route(
         http::method::get, "/llms.txt", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/llms.txt", impl.serve_llms(route, false));

@@ -5,6 +5,10 @@ executable with no control store and checks that it stays live (`/healthz` 200, 
 survives the owner loop's first pass and exits 0 on SIGTERM, not SIGSEGV (lake#1168). The SCIM
 tests (`Scim.*`, `ScimHttp.*`) and `WorkspaceStoreSearch.*` cover lake#1175 and lake#1176, which
 show only under AddressSanitizer; see [testing](../docs/build/testing.md#addresssanitizer).
+`test_brand.cpp` covers the instance brand (lake#1135, lake#1137): Lake's own brand leaves every
+email, page and agent surface as it was, a test brand reaches each with no "Lake", "Orama" or
+`lake.live` left, and invalid settings are refused naming the setting. `test_api.cpp`'s
+`BrandStartup.*` starts the binary with an invalid brand (exit 2) and a custom one (served).
 
 `test_workspace_records.cpp` runs `DisablingAUserRevokesAgentDelegation` and
 `DisabledUsersCannotDriveAgentOrMcpStreams` on memory and PostgreSQL (lake#951). They exercise

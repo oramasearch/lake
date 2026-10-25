@@ -13,6 +13,11 @@ readers retain the 64 MiB ceiling or a smaller route-specific bound.
 The [signed links](http.md#signed-links) section covers the two routes a link authorizes instead of
 a session: the Hub's LFS upload and the tunnel client download (lake#745).
 
+[brand.md](brand.md) is the instance brand (lake#1135, lake#1137): a white-labelled Lake's name,
+logo, colours, support address, email sender and legal footer (`LAKE_BRAND_FILE`, `LAKE_BRAND_*`),
+validated at start and read by the console, the pages lake renders, every email and the agent
+surfaces. The default is Lake's own brand, which changes nothing.
+
 [configuration.md](configuration.md) lists every command-line flag and environment variable with
 its default and owning contract. [telemetry.md](telemetry.md) covers probes, metrics, and request
 logs, including the dynamic-lease expiry pass's counters (lake#362) and the workspace deletion

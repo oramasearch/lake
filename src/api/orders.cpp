@@ -13,6 +13,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "lake/api/brand.hpp"
 #include "lake/api/tunnel_clients.hpp"
 #include "lake/api/usage_recorder.hpp"
 
@@ -710,12 +711,16 @@ std::vector<std::string> order_email_recipients_due(const control::CloudOrder& o
     return due;
 }
 
-Email order_email(const OrderSheet& sheet,
-                  const Regions& regions,
-                  const ResendSettings& settings,
-                  const control::CloudOrder& order,
-                  std::string_view recipient,
-                  std::string_view status_url) {
+namespace {
+
+// An order's email in Lake's words; order_email() writes it in the instance brand's.
+Email order_email_in_lake_words(const OrderSheet& sheet,
+                                const Regions& regions,
+                                const ResendSettings& settings,
+                                const control::CloudOrder& order,
+                                std::string_view recipient,
+                                std::string_view status_url,
+                                const std::string& customer_support) {
     const OrderOffer* offer = sheet.find_offer(order.offer);
     const std::string offer_title = offer != nullptr ? offer->title : order.offer;
     const std::string price = std::format(
@@ -786,7 +791,7 @@ Email order_email(const OrderSheet& sheet,
         return email;
     }
     email.to = {order.contact_email};
-    email.reply_to = settings.support_email;
+    email.reply_to = customer_support;
     std::string lead;
     if (order.state == "submitted") {
         email.subject = "We received your Lake order (" + order.id + ")";
@@ -811,8 +816,28 @@ Email order_email(const OrderSheet& sheet,
         text += "Your order: " + std::string(status_url) + "\n\n";
     }
     text += ordered;
-    text += "\nQuestions: reply to this email or write to " + settings.support_email + ".\n";
+    text += "\nQuestions: reply to this email or write to " + customer_support + ".\n";
     email.text = std::move(text);
+    return email;
+}
+
+} // namespace
+
+Email order_email(const OrderSheet& sheet,
+                  const Regions& regions,
+                  const ResendSettings& settings,
+                  const control::CloudOrder& order,
+                  std::string_view recipient,
+                  std::string_view status_url) {
+    // The customer is told to write to the brand's support address (lake#1135); orders still go
+    // to LAKE_SUPPORT_EMAIL.
+    const Brand& brand = instance_brand();
+    const std::string customer_support =
+        brand.custom && !brand.support_email.empty() ? brand.support_email : settings.support_email;
+    Email email = order_email_in_lake_words(
+        sheet, regions, settings, order, recipient, status_url, customer_support);
+    email.subject = brand.apply(email.subject);
+    email.text = brand.apply(email.text);
     return email;
 }
 

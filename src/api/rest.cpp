@@ -2,6 +2,8 @@
 
 #include <charconv>
 
+#include "lake/api/brand.hpp"
+
 namespace lake::api {
 
 std::string rest_path(const Capability& capability) {
@@ -438,6 +440,8 @@ openapi_document(const Registry& registry, std::string_view version, SchemaAudie
           {"404", error_response("no such platform, or this Lake has no tunnel clients")}}}};
     paths["/tunnel-clients/{platform}"]["get"] = std::move(tunnel_client);
     document["paths"] = std::move(paths);
+    // A white-labelled Lake's document speaks its brand's names (lake#1137); unchanged for Lake's.
+    instance_brand().apply_to_documentation(document);
     return document;
 }
 

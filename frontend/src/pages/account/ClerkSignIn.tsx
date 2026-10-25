@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Actions, Button, Notice, Page } from "@/lib/ui";
 import { useSession } from "@/lib/session";
+import { brandText, instanceBrand } from "@/lib/brand";
 import { clerkPageSub, exchangeAutomatically, signUpModeOf, type ClerkEnvironmentHolder, type SignUpMode } from "@/lib/clerkSignIn";
 import { AuthFrame } from "./AuthFrame";
 import { LegalNotice } from "./LegalNotice";
@@ -107,9 +108,10 @@ function postToLake(token: string, sessionToken: string, next: string) {
   form.submit();
 }
 
-/** Clerk's form inside lake's card: lake's blue, IBM Plex and radius, and no card of its own. */
+/** Clerk's form inside lake's card: lake's blue (a white-labelled Lake's accent, lake#1135), IBM
+ * Plex and radius, and no card of its own. */
 const CLERK_APPEARANCE = {
-  variables: { colorPrimary: "#0f62fe", fontFamily: "'IBM Plex Sans', 'Helvetica Neue', Arial, sans-serif", borderRadius: "6px" },
+  variables: { colorPrimary: instanceBrand().accent ?? "#0f62fe", fontFamily: "'IBM Plex Sans', 'Helvetica Neue', Arial, sans-serif", borderRadius: "6px" },
   elements: {
     rootBox: { width: "100%" },
     cardBox: { width: "100%", boxShadow: "none", border: "0" },
@@ -142,7 +144,7 @@ export function ClerkSignIn({ mode }: { mode: "sign-in" | "sign-up" }) {
     const key = viewer.clerk.publishable_key;
     const host = viewer.clerk.frontend_api;
     if (!node || !key || !host) {
-      setStatus("Sign-in could not load: Clerk is not configured on this Lake.");
+      setStatus(brandText(instanceBrand(), "Sign-in could not load: Clerk is not configured on this Lake."));
       return;
     }
     let cancelled = false;
@@ -215,9 +217,9 @@ export function ClerkSignIn({ mode }: { mode: "sign-in" | "sign-up" }) {
   return (
     <AuthFrame title={signUp ? "create account" : "sign in"}>
       <Page
-        eyebrow="Lake by Orama"
+        eyebrow={instanceBrand().eyebrow}
         title={signUp ? "Create Your Account" : "Sign In"}
-        sub={clerkPageSub(signUp, signUpMode)}
+        sub={brandText(instanceBrand(), clerkPageSub(signUp, signUpMode))}
       >
         <AccountRegionNote mode={signUp ? "sign-up" : "sign-in"} />
         {error && <Notice tone="danger">{error}</Notice>}

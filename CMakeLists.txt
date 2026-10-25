@@ -365,6 +365,7 @@ add_library(lake-core STATIC
   src/api/white_label.cpp
   src/api/orders.cpp
   src/api/resend.cpp
+  src/api/brand.cpp
   src/api/tunnel_client_capabilities.cpp
   src/audit/audit.cpp
   src/api/secrets_capabilities.cpp

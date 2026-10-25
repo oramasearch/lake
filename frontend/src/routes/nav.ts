@@ -1,6 +1,7 @@
 /** The rail's rules that need no page code (lake#600): which rail item a path makes current, and the
  * Home group. Pure, so `npm test` runs them (tests/home.test.ts); `routes.tsx` joins them with the
  * page registry. */
+import { instanceBrand } from "../lib/brand.ts";
 import type { Audience, SectionKey } from "./types.ts";
 
 /** One rail item. `external` opens a non-page URL instead of a page. */
@@ -18,7 +19,8 @@ export function billingVisible(item: { billing?: boolean }, viewer: { billing?: 
 export const HOME_NAV: NavItem[] = [
   { section: "top", path: "/", label: "Home", icon: "home", audience: ["visitor", "operator"] },
   { section: "home", path: "/", label: "Quickstart", icon: "home", audience: ["account"] },
-  { section: "home", path: "/ask", label: "Ask Orama", icon: "ask", audience: ["account"] },
+  // The assistant goes by the brand's name on a white-labelled Lake (lake#1135).
+  { section: "home", path: "/ask", label: instanceBrand().assistant_name, icon: "ask", audience: ["account"] },
   { section: "home", path: "/dashboard", label: "Dashboard", icon: "dashboard", audience: ["account"] },
 ];
 

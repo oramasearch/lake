@@ -129,6 +129,16 @@ recovers at a quorum of distinct participants. No share is stored: the coefficie
 from the root key. Not deployed; the operator must vendor the schema and select
 `root_recovery_participants_guard`. See [`docs/api/break-glass.md`](docs/api/break-glass.md).
 
+A white-labelled Lake shows its customer's brand (lake#1135, lake#1137, no migration):
+`LAKE_BRAND_FILE` and `LAKE_BRAND_*` (name, short name, company, assistant name, logo, favicon,
+accent, support address, email sender, legal footer) are validated at start; any setting makes a
+custom brand, which must give its name, support address and a sender off Lake's domains, or lake
+stops. The console's frame, sign-in and Ask (`viewer.brand`, written into index.html's first
+paint), the pages lake renders, the order and balance emails, `llms.txt`, `llms-full.txt`, the
+skill at `/skills/<short_name>/SKILL.md`, MCP and OpenAPI take the brand. Lake's own brand changes
+nothing. The operator must render the variables (orama-operator#947). See
+[`docs/serving/brand.md`](docs/serving/brand.md).
+
 The newest dated record, [`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md),
 and [`docs/design/status.md`](docs/design/status.md) still describe the 2026-10-01 deployment
 (`oramasearch/lake:20261001d`, `36679e1`); they have not been brought up to the release. Until they

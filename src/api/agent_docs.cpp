@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <format>
 #include <initializer_list>
 
+#include "lake/api/brand.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/mcp.hpp"
 
@@ -457,7 +459,46 @@ std::string mcp_endpoint(std::string_view origin) {
     return std::string(origin) + "/mcp";
 }
 
+// The variable a person keeps their key in, after the brand's short name: LAKE_KEY for Lake.
+std::string key_variable(std::string_view short_name) {
+    std::string out;
+    for (const char c : short_name) {
+        out += c == '-' ? '_' : static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    return out + "_KEY";
+}
+
+// A document written in Lake's words, in the instance brand's (lake#1137): every line but the
+// JSON input schemas, which llms_full_txt brands field by field so no enum value or key changes.
+// Unchanged for Lake's own brand.
+std::string in_brand(std::string_view markdown) {
+    const Brand& brand = instance_brand();
+    if (!brand.custom) {
+        return std::string(markdown);
+    }
+    static constexpr std::string_view open = "```json\n";
+    static constexpr std::string_view close = "\n```";
+    std::string out;
+    std::size_t at = 0;
+    while (at < markdown.size()) {
+        const std::size_t fence = markdown.find(open, at);
+        if (fence == std::string_view::npos) {
+            break;
+        }
+        const std::size_t end = markdown.find(close, fence + open.size());
+        if (end == std::string_view::npos) {
+            break;
+        }
+        out += brand.apply(markdown.substr(at, fence - at));
+        out += markdown.substr(fence, end - fence);
+        at = end;
+    }
+    out += brand.apply(markdown.substr(at));
+    return out;
+}
+
 std::string how_to_connect(std::string_view origin) {
+    const std::string& short_name = instance_brand().short_name;
     return std::format(
         "Lake's MCP server is `{0}` (Streamable HTTP, JSON-RPC 2.0, protocol {1}: `initialize`, "
         "`ping`, `tools/list`, `tools/call`). Authenticate with `Authorization: Bearer <key>`: a "
@@ -465,8 +506,8 @@ std::string how_to_connect(std::string_view origin) {
         "as long as the sign-in that made it had left (at most 30 days), and signing out does not "
         "end it, unless it is a standing key that never expires, which the account or "
         "organization must allow and which names its tools and a reason.\n\n"
-        "- Claude Code: `claude mcp add --transport http lake {0} --header \"Authorization: "
-        "Bearer $LAKE_KEY\"`\n"
+        "- Claude Code: `claude mcp add --transport http {3} {0} --header \"Authorization: "
+        "Bearer ${4}\"`\n"
         "- REST: every tool is also `{2}/v1/<tool>` (a read is GET with a query string, an "
         "action is POST with a JSON body); the schema is `{2}/v1/openapi.json`.\n"
         "- Answers are `{{\"ok\": true, \"value\": …}}` or `{{\"ok\": false, \"error\": "
@@ -477,7 +518,9 @@ std::string how_to_connect(std::string_view origin) {
         "or ignores the notice keeps the tools and schemas it first listed.\n",
         mcp_endpoint(origin),
         mcp_protocol_version,
-        origin);
+        origin,
+        short_name,
+        key_variable(short_name));
 }
 
 std::string flows_markdown(const Registry& registry) {
@@ -841,12 +884,15 @@ std::string tool_reference(const Registry& registry) {
         out += std::format("## {}\n\n{}\n\n", group.title, group.summary);
         for (const Tool& tool : group.tools) {
             const auto capability = registry.find(tool.name);
+            nlohmann::json schema =
+                capability ? capability->input_schema : nlohmann::json::object();
+            brand.apply_to_documentation(schema);
             out += std::format("### `{}` — {}\n\n{} {}\n\nInput schema:\n\n```json\n{}\n```\n\n",
                                tool.name,
                                tool.title,
                                tool.writes ? "**Write.**" : "**Read.**",
                                tool.description,
-                               capability ? capability->input_schema.dump(2) : "{}");
+                               schema.dump(2));
         }
     }
     out += "## Worked flows\n\n" + flows_markdown(registry);
@@ -961,9 +1007,9 @@ std::string llms_txt(const Registry& registry, std::string_view origin) {
         "## What Lake Does\n\n{2}\n"
         "## Connect\n\n{0}\n"
         "## The Lake skill for Claude\n\n"
-        "Download [SKILL.md]({1}/skills/lake/SKILL.md) (public, no key needed) and install it:\n\n"
-        "```sh\nmkdir -p ~/.claude/skills/lake && curl -fsSL {1}/skills/lake/SKILL.md -o "
-        "~/.claude/skills/lake/SKILL.md\n```\n\n"
+        "Download [SKILL.md]({1}/skills/{4}/SKILL.md) (public, no key needed) and install it:\n\n"
+        "```sh\nmkdir -p ~/.claude/skills/{4} && curl -fsSL {1}/skills/{4}/SKILL.md -o "
+        "~/.claude/skills/{4}/SKILL.md\n```\n\n"
         "It says how to connect, which tools to use for which task, the worked flows and the "
         "rules.\n\n"
         "## Learn more\n\n"
@@ -973,23 +1019,25 @@ std::string llms_txt(const Registry& registry, std::string_view origin) {
         how_to_connect(origin),
         origin,
         what_lake_does,
-        start_here);
-    return out + tools_flows_and_rules(registry);
+        start_here,
+        instance_brand().short_name);
+    return in_brand(out + tools_flows_and_rules(registry));
 }
 
 std::string llms_full_txt(const Registry& registry, std::string_view origin) {
     std::string out = std::format("# Lake — every tool\n\n## Start Here\n\n{}\n{}\nThe Lake "
-                                  "skill for Claude: {}/skills/lake/SKILL.md (public).\n\n",
+                                  "skill for Claude: {}/skills/{}/SKILL.md (public).\n\n",
                                   start_here,
                                   how_to_connect(origin),
-                                  origin);
-    return out + tool_reference(registry);
+                                  origin,
+                                  instance_brand().short_name);
+    return in_brand(out + tool_reference(registry));
 }
 
 std::string skill_md(const Registry& registry, std::string_view origin) {
     std::string out = std::format(
         "---\n"
-        "name: lake\n"
+        "name: {4}\n"
         "description: Work in Lake ({0}) through its MCP server — Design, Train and Ship in a "
         "workspace (the quickstart process first: a dataset to search and model answers on a "
         "website; then projects, pipelines, data, runs, experiments, models, search indexes), "
@@ -1004,12 +1052,13 @@ std::string skill_md(const Registry& registry, std::string_view origin) {
         "## Connect\n\n{1}\n"
         "Check the connection with `server_info`, then `tools/list`. Full reference: "
         "{0}/llms.txt and {0}/llms-full.txt (every tool's input schema). The latest copy of this "
-        "skill is always at {0}/skills/lake/SKILL.md.\n\n",
+        "skill is always at {0}/skills/{4}/SKILL.md.\n\n",
         origin,
         how_to_connect(origin),
         what_lake_does,
-        start_here);
-    return out + skill_tools_flows_and_rules(registry);
+        start_here,
+        instance_brand().short_name);
+    return in_brand(out + skill_tools_flows_and_rules(registry));
 }
 
 std::string
@@ -1036,7 +1085,7 @@ apex_llms_txt(const Registry& registry, const Regions& regions, std::string_view
         apex_regions_section(regions, apex_origin),
         what_lake_does,
         start_here);
-    return out + tools_flows_and_rules(registry);
+    return in_brand(out + tools_flows_and_rules(registry));
 }
 
 std::string
@@ -1047,7 +1096,7 @@ apex_llms_full_txt(const Registry& registry, const Regions& regions, std::string
                                   apex_regions_section(regions, apex_origin),
                                   start_here,
                                   apex_origin);
-    return out + tool_reference(registry);
+    return in_brand(out + tool_reference(registry));
 }
 
 std::string
@@ -1073,7 +1122,7 @@ apex_skill_md(const Registry& registry, const Regions& regions, std::string_view
         apex_regions_section(regions, apex_origin),
         what_lake_does,
         start_here);
-    return out + skill_tools_flows_and_rules(registry);
+    return in_brand(out + skill_tools_flows_and_rules(registry));
 }
 
 } // namespace lake::api::agent_docs

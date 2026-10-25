@@ -150,3 +150,14 @@
 .recovery-codes code {
   overflow-wrap: break-word;
 }
+
+/* A white-labelled Lake's legal footer under the sign-in (lake#1135, AuthFrame's BrandFooter). */
+.auth-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--lake-space-4);
+  padding: 0 var(--lake-page-gutter) var(--lake-space-8);
+  color: var(--lake-text-secondary);
+  font-size: var(--lake-text-12);
+}

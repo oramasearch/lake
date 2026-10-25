@@ -4,16 +4,19 @@ import { type ReactNode, useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useTheme } from "@/lib/theme";
 import { Moon, Sun } from "lucide-react";
-import { LakeMark } from "@/components/LakeMark";
+import { BrandMark } from "@/components/BrandMark";
+import { brandKicker, documentTitle, instanceBrand } from "@/lib/brand";
 import { useSession } from "@/lib/session";
 import { isLeaving, leaveFor, returnTarget } from "./signIn";
 import "@/styles/account.css";
 
 export function AuthFrame({ children, title }: { children: ReactNode; title: string }) {
   const [theme, toggleTheme] = useTheme();
+  // A white-labelled Lake's name, logo and legal footer (lake#1135).
+  const brand = instanceBrand();
   useEffect(() => {
-    document.title = `Lake — ${title}`;
-  }, [title]);
+    document.title = documentTitle(brand, title);
+  }, [brand, title]);
   return (
     <div className="auth-plane">
       <div className="brand-strip fixed inset-x-0 top-0 z-40" />
@@ -30,12 +33,12 @@ export function AuthFrame({ children, title }: { children: ReactNode; title: str
         {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
       </button>
       <div className="auth-layout">
-        <section className="auth-brand" aria-label="Lake Console">
+        <section className="auth-brand" aria-label={brand.console_title}>
           <Link to="/" className="auth-brand-link">
-            <LakeMark size={30} />
-            <span className="auth-kicker">Orama</span>
+            <BrandMark brand={brand} size={30} />
+            {brandKicker(brand) && <span className="auth-kicker">{brandKicker(brand)}</span>}
           </Link>
-          <p className="auth-name">Lake</p>
+          <p className="auth-name">{brand.name}</p>
           <p className="auth-tagline">Design, train and ship AI on your own data, in your own workspace.</p>
           <ul className="auth-stages">
             <li>Design</li>
@@ -47,7 +50,22 @@ export function AuthFrame({ children, title }: { children: ReactNode; title: str
           {children}
         </main>
       </div>
+      <BrandFooter />
     </div>
+  );
+}
+
+/** The brand's legal footer (legal name, terms, privacy) where one is configured (lake#1135). */
+function BrandFooter() {
+  const brand = instanceBrand();
+  if (!brand.legal_name && !brand.terms_url && !brand.privacy_url) return null;
+  return (
+    <footer className="auth-footer">
+      {brand.legal_name && <span>© {brand.legal_name}</span>}
+      {brand.support_email && <a href={`mailto:${brand.support_email}`}>Support</a>}
+      {brand.terms_url && <a href={brand.terms_url}>Terms</a>}
+      {brand.privacy_url && <a href={brand.privacy_url}>Privacy</a>}
+    </footer>
   );
 }
 
