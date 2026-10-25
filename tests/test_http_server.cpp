@@ -4256,6 +4256,29 @@ TEST(HttpServer, ClerkExchangeRefusesAForgedTokenAndSignOutEndsClerkToo) {
     EXPECT_EQ(viewer["clerk"]["enabled"], true);
     EXPECT_EQ(viewer["clerk"]["publishable_key"], "pk_test_MTI3LjAuMC4xJA");
     EXPECT_EQ(viewer["password_sign_up"], false);
+    // lake#1098: and the API agrees. Password sign-up in the Lake pool is refused, with no
+    // session cookie, so an address Clerk would refuse gets no account.
+    const std::string sign_up =
+        connection.request("POST",
+                           "/v1/sign_up_password",
+                           R"({"email":"outsider@example.com","password":"correct horse battery"})",
+                           {},
+                           "HTTP/1.1",
+                           {},
+                           "application/json");
+    ASSERT_TRUE(sign_up.starts_with("HTTP/1.1 403")) << sign_up.substr(0, 400);
+    EXPECT_EQ(nlohmann::json::parse(response_body(sign_up))["error"]["code"], "forbidden");
+    EXPECT_TRUE(response_header(sign_up, "set-cookie").empty());
+    const std::string sign_in =
+        connection.request("POST",
+                           "/v1/sign_in_password",
+                           R"({"email":"outsider@example.com","password":"correct horse battery"})",
+                           {},
+                           "HTTP/1.1",
+                           {},
+                           "application/json");
+    ASSERT_TRUE(sign_in.starts_with("HTTP/1.1 403")) << sign_in.substr(0, 400);
+    EXPECT_TRUE(response_header(sign_in, "set-cookie").empty());
     // Clerk's sign-in shows its images from Clerk's image host, and from nowhere else (lake#943).
     const std::string page = connection.request(
         "GET", "/sign-in", {}, {}, "HTTP/1.1", {}, "text/plain", {{"Accept", "text/html"}});

@@ -24,7 +24,8 @@ each, on the site and through the API.
 Clerk's steps. Some lakes create accounts only by invitation; on `lake.oramadev.net`, an
 administrator adds people.
 
-**With Lake's own sign-up** (`/sign-up`):
+**With Lake's own sign-up** (`/sign-up`, on a Lake without Clerk; under Clerk the password
+entries below answer `403 forbidden`):
 
 1. Fill in **Email**, **Display name** (optional), **Password** and **Device name**.
 2. Press **Create account**. You land on **Data → Repositories**, signed in.

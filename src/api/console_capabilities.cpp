@@ -180,8 +180,9 @@ ApiResult viewer(const json& input, ApiContext& context, const std::string& vers
          {{"enabled", clerk.has_value()},
           {"publishable_key", clerk ? clerk->publishable_key : std::string()},
           {"frontend_api", clerk ? clerk->frontend_api : std::string()}}},
-        // Under Clerk, sign-up is Clerk's and restricted to invitations (docs/api/clerk.md).
-        {"password_sign_up", !clerk.has_value()},
+        // Under Clerk, sign-up is Clerk's (docs/api/clerk.md); the password entries refuse by the
+        // same rule (lake#1098).
+        {"password_sign_up", lake_pool_password_sign_in(context.clerk_publishable_key)},
         {"external_origin", public_origin(context)},
         {"public_host", context.public_host},
         {"config", {{"frontier_model", ""}}},

@@ -1,7 +1,9 @@
 #pragma once
 
 #include <expected>
+#include <optional>
 #include <string>
+#include <string_view>
 
 #include <liquid/runtime.hpp>
 #include <nlohmann/json.hpp>
@@ -44,6 +46,13 @@ checked_application_session(control::Result<control::IssuedSession> issued, ApiC
 // that id, and the session completes as above, writing the user record.
 liquid::runtime::task<ApiResult> sign_up_password_session(control::NewPasswordUser user,
                                                           ApiContext& context);
+
+// The refusal of a Lake-pool password entry (sign_up_password, sign_in_password, verify_mfa,
+// recover_with_code) on a Lake that signs people in through Clerk (lake#1098), or nullopt when the
+// entry may run: in an application's pool, or without Clerk. The rule is
+// lake_pool_password_sign_in, the one `viewer` reports as `password_sign_up`.
+std::optional<ApiResult> lake_pool_password_refusal(const ApiContext& context,
+                                                    std::string_view pool_id);
 
 liquid::runtime::task<ApiResult> emit_application_event(control::Application application,
                                                         std::string event,

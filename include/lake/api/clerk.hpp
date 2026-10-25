@@ -46,4 +46,11 @@ inline constexpr std::string_view clerk_token_template = "lake";
 // signs people in with its own identity pages, as an on-prem install does.
 std::optional<ClerkConfig> clerk_config(std::string_view publishable_key);
 
+// Whether Lake's own password entries serve the `lake` pool: sign_up_password, sign_in_password,
+// verify_mfa and recover_with_code. They do only when Clerk is not configured; under Clerk, Clerk
+// is the only way into the `lake` pool, sign-up included (lake#1098). `viewer` reports this as
+// `password_sign_up` and the entries refuse with it, so the two cannot disagree. Application
+// pools keep their own password sign-in either way.
+bool lake_pool_password_sign_in(std::string_view clerk_publishable_key);
+
 } // namespace lake::api

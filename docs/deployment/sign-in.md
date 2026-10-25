@@ -20,8 +20,16 @@ provider's console and in a Kubernetes Secret. This page names where it lives, n
 | **Without Clerk** (on-prem, air-gapped, [private-install.md](private-install.md)) | Lake's own: password + TOTP, passkeys, TAAP identity, and **Lake OAuth** (Google, GitHub, and an OIDC issuer that serves Lake's fixed paths) | Lake's administrator ([§3](#3-lake-oauth-without-clerk)) |
 | **A customer organization's own IdP** | **Enterprise SSO**: SAML 2.0 or OIDC, plus SCIM provisioning. **Not ready to offer** ([§4](#4-enterprise-sso-and-scim)) | The organization's administrator ([§4](#4-enterprise-sso-and-scim)) |
 
-Under Clerk, Lake turns its own password sign-up off (`viewer` answers `password_sign_up: false`), so
-on a hosted Lake **every person signs in through Clerk**. Clerk sits in front of Lake's own sessions:
+Under Clerk, Lake turns its own password entries off in the `lake` pool, so on a hosted Lake **every
+person signs up and signs in through Clerk**, and Clerk's sign-up mode (restricted, or public on
+`lake.live`) is the only sign-up control. `viewer` answers `password_sign_up: false`, and the API
+refuses by the same rule (`lake_pool_password_sign_in` in `src/api/clerk.cpp`, lake#1098):
+`sign_up_password`, `sign_in_password`, `verify_mfa` and `recover_with_code` in the `lake` pool
+answer **403 `forbidden`** and issue no session. Before lake#1098 only `viewer` said so, and
+`POST /v1/sign_up_password` still created an account, a personal customer and a session for any
+email. Application pools keep their own password sign-in. Operator access (the admin token at
+`/login`), TAAP and passkey sign-in, and email and administrator recovery are not password entries
+and are unchanged. Clerk sits in front of Lake's own sessions:
 Lake verifies a `lake` JWT-template token and issues an ordinary `lake_session`
 ([`../api/clerk.md`](../api/clerk.md)).
 

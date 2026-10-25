@@ -9607,6 +9607,57 @@ TEST(WebApp, PermissionsDocsMcpAndPackagesAreCapabilities) {
     EXPECT_EQ(packages.value["oci"][0]["versions"][0], "latest");
 }
 
+// lake#1098: under Clerk, Clerk is the only way into the Lake pool. The password entries refuse by
+// the same rule that makes viewer say password_sign_up false, and work again without Clerk.
+TEST(Identity, ClerkTurnsOffLakePoolPasswordSignUpAndSignIn) {
+    Surface s;
+    s.ctx.authorized = false;
+    s.ctx.acting_identity.clear();
+    s.ctx.operator_credential = false;
+    const json ada = {{"email", "ada@example.com"}, {"password", "correct horse battery"}};
+    const json outsider = {{"email", "outsider@example.com"},
+                           {"password", "correct horse battery"}};
+
+    // Without Clerk: Lake's own sign-up and sign-in.
+    EXPECT_EQ(s.call("viewer").value["password_sign_up"], true);
+    const ApiResult signed_up = s.call("sign_up_password", ada);
+    ASSERT_TRUE(signed_up.ok) << signed_up.error.message;
+    ASSERT_TRUE(s.call("sign_in_password", ada).ok);
+
+    s.ctx.clerk_publishable_key = "pk_test_YWJvdmUtc2VhaG9yc2UtNzUzNS5jbGVyay5hY2NvdW50cy5kZXYk";
+    EXPECT_EQ(s.call("viewer").value["password_sign_up"], false);
+    const auto refused = [&](const std::string& capability, json input) {
+        const ApiResult result = s.call(capability, std::move(input));
+        EXPECT_FALSE(result.ok) << capability;
+        EXPECT_EQ(result.error.code, "forbidden") << capability << ": " << result.error.message;
+        EXPECT_FALSE(result.value.contains("secret")) << capability;
+    };
+    refused("sign_up_password", outsider);
+    refused("sign_up_password",
+            json{{"pool_id", "lake"},
+                 {"email", "x@example.com"},
+                 {"password", "correct horse battery"}});
+    refused("sign_in_password", ada);
+    json mfa = ada;
+    mfa["code"] = "000000";
+    refused("verify_mfa", mfa);
+    refused("recover_with_code", json{{"email", "ada@example.com"}, {"code", "abcd-efgh"}});
+    // Application pools keep their own password sign-in: the rule is the Lake pool's only.
+    const ApiResult application = s.call("sign_in_password",
+                                         json{{"pool_id", "app-unknown"},
+                                              {"email", "ada@example.com"},
+                                              {"password", "correct horse battery"}});
+    EXPECT_FALSE(application.ok);
+    EXPECT_NE(application.error.code, "forbidden") << application.error.message;
+
+    // The refusal changed nothing: the existing account signs in again once Clerk is off, and the
+    // refused sign-up created no account.
+    s.ctx.clerk_publishable_key.clear();
+    EXPECT_EQ(s.call("viewer").value["password_sign_up"], true);
+    EXPECT_TRUE(s.call("sign_in_password", ada).ok);
+    EXPECT_EQ(s.call("sign_in_password", outsider).error.code, "unauthenticated");
+}
+
 TEST(WebApp, ViewerNamesClerkAndAnOrganizationNamesItsSpace) {
     Surface s;
     s.ctx.clerk_publishable_key = "pk_test_YWJvdmUtc2VhaG9yc2UtNzUzNS5jbGVyay5hY2NvdW50cy5kZXYk";

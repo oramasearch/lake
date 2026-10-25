@@ -493,7 +493,11 @@ script refuses each contradiction it looks for (lake#448). `WebApp.FrontDoorDocQ
 holds the bold quotes in `docs/ui/front-door.md` to `frontend/src/pages/home/HomePage.tsx` and
 `signIn.ts`. Under Clerk the `viewer` read says `password_sign_up: false`
 (`HttpServer.ClerkExchangeRefusesAForgedTokenAndSignOutEndsClerkToo`,
-`WebApp.ViewerNamesClerkAndAnOrganizationNamesItsSpace`).
+`WebApp.ViewerNamesClerkAndAnOrganizationNamesItsSpace`), and the API agrees (lake#1098):
+`Identity.ClerkTurnsOffLakePoolPasswordSignUpAndSignIn` refuses `sign_up_password`,
+`sign_in_password`, `verify_mfa` and `recover_with_code` in the Lake pool under Clerk with
+`forbidden`, creates no account, and signs the same account in again once Clerk is off; the HTTP
+test checks `POST /v1/sign_up_password` answers 403 with no cookie.
 `OperatorContract.EveryStatementTheOperatorRunsPreparesAgainstTheSchema` and
 `OperatorContract.RowsLakeWritesAppearInTheOperatorsPolls` (`test_operator_contract.cpp`, in
 `lake-postgres-tests`) run a copy of every statement in orama-operator's

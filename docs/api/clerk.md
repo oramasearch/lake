@@ -222,7 +222,11 @@ The Clerk instance needs:
   `INVITATION_NOTE`, and the homepage offers a visitor Sign in only. Under `public` (lake.live since
   2026-10-24) no page mentions invitations and the homepage offers **Create an account**. Lake's own
   password sign-up stays off under Clerk either way (`password_sign_up: false`); people sign up
-  through Clerk. The per-environment table is in
+  through Clerk. The API enforces it (lake#1098): in the `lake` pool `sign_up_password`,
+  `sign_in_password`, `verify_mfa` and `recover_with_code` answer `403 forbidden` under Clerk, by
+  the same rule `viewer` reports (`lake_pool_password_sign_in`). A password account could otherwise
+  be registered under someone's email before their first Clerk sign-in links to it (LSR-011,
+  lake#920). The per-environment table is in
   [`../deployment/users.md`](../deployment/users.md#what-the-pages-say-about-sign-up).
 
 ### The instance lake.oramadev.net uses
