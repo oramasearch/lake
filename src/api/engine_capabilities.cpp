@@ -214,6 +214,14 @@ std::string lake_note(std::string_view engine) {
                "catalogue solution's governed foundation into a project, as Start as a Project "
                "does.";
     }
+    if (engine == "plan_features") {
+        return "A dataset alone is enough: with no `methodology` Lake plans M-1 when the dataset "
+               "has a label and M-3 when it has none, and with no `as_of` Lake takes the latest "
+               "value of the column that holds each row's snapshot date (`time_column`, else one "
+               "named as_of, snapshot_date, observed_at, ...). The plan's `inferred` says what "
+               "Lake filled, and a `transform_required` names the Lake capabilities that perform "
+               "it in `performed_by`.";
+    }
     if (engine == "train_model" || engine == "retrain_model") {
         return "The model is standalone: Design → Projects never lists the project the engine "
                "keeps for it. The new version appears in list_models when the run finishes.";

@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "agent_task_records_api.hpp"
+#include "feature_planning.hpp"
 #include "lake/api/agent_stream_triggers.hpp"
 #include "lake/api/datasets.hpp"
 #include "lake/api/oauth.hpp"
@@ -975,6 +976,21 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
         } else {
             normalize_dataset_reference(capability, arguments);
         }
+        // plan_features takes a dataset alone (lake#1153): Lake chooses the methodology from the
+        // analysis and reads the cutoff from the dataset's snapshot column when the caller names
+        // neither, and says so in the plan.
+        json feature_plan_inferred;
+        if (read && capability == "plan_features") {
+            auto prepared =
+                co_await prepare_feature_plan(context, input.at("customer_id"), arguments);
+            if (!prepared) {
+                co_return ApiResult::failure("store_error", prepared.error().message);
+            }
+            if (!*prepared) {
+                co_return std::move(prepared->error());
+            }
+            feature_plan_inferred = std::move(**prepared);
+        }
         // The agent a delete_agent removes: its stream triggers go with it (lake#677).
         const std::string deleted_agent =
             capability == "delete_agent" ? arguments.value("id", std::string()) : std::string();
@@ -1123,6 +1139,9 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
                     value["deployment"] = served.value.value("deployment", json(nullptr));
                 }
             }
+        }
+        if (capability == "plan_features") {
+            describe_feature_plan(value, feature_plan_inferred);
         }
         if (capability == "list_datasets") {
             datasets::annotate_list(value);

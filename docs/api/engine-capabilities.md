@@ -173,7 +173,7 @@ The groups are the ones `llms.txt` and `llms-full.txt` list them under.
 |---|---|---|
 | `list_dataset_generators` | same | read |
 | `analyze_dataset` | same | read |
-| `plan_features` | same | read |
+| `plan_features` | same | read; Lake fills `methodology` and `as_of` from the data when they are left out and names what performs a transform ([feature-planning.md](feature-planning.md)) |
 | `create_dataset_from_query` | same | write |
 | `upload_dataset` | same | write |
 | `promote_dataset` | same | write |

@@ -61,6 +61,10 @@ lake#757: [regions.md](regions.md) documents regions: the four variables the ope
 apex, `/llms.txt`, `/llms-full.txt` and the skill name every region with its MCP server and agent
 documents instead of the picker ([regions.md](regions.md#the-apexs-agent-documents-lake1110)).
 
+lake#1153: [feature-planning.md](feature-planning.md) documents `plan_features` from a dataset
+alone: Lake chooses the methodology (M-1 with a label, M-3 without) and reads the cutoff (`as_of`)
+from the dataset's snapshot column when the caller names neither, says so in `inferred`, and names
+the Lake capabilities that perform a `transform_required` in `performed_by`.
 lake#650: [engine-capabilities.md](engine-capabilities.md) documents every capability of a
 workspace's engine as a named Lake capability (its own route, OpenAPI operation and MCP tool, with
 the engine's input schema vendored in `src/api/engine_openapi.json`), the names Lake gives the
