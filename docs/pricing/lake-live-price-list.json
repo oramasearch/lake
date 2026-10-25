@@ -135,7 +135,7 @@
       }
     ]
   },
-  "effective_from_flag": "[Steve: choose 2026-10 or 2026-11] 2026-11 leaves October billed at the list in force now (model tokens only). 2026-10 prices every dimension for all of October, so every topped-up balance is charged for its compute, storage and volumes since launch at the next refresh (5 minutes). See README.md.",
+  "effective_from_decision": "Steve, 2026-10-24: 2026-11. 2026-11 leaves October billed at the list in force now (model tokens only). 2026-10 prices every dimension for all of October, so every topped-up balance is charged for its compute, storage and volumes since launch at the next refresh (5 minutes). See README.md.",
   "lines": [
     {
       "dimension": "cpu",
@@ -248,7 +248,7 @@
       "unit": "per thousand searches of a published index",
       "source": "billing.md Rates, https://github.com/oramasearch/lake/issues/658",
       "website": "not listed",
-      "flag": "[Steve: confirm] lake bills it and has a rate; the website's pricing page does not list it"
+      "decision": "Steve, 2026-10-24: kept; the website adds it to its pricing page"
     },
     {
       "dimension": "model_tokens",
@@ -328,7 +328,7 @@
       "dimension": "model_tokens",
       "class": "",
       "why": "Lake's own payload in billing.md also carries a blended $9.00 per million for historical unclassed usage. lake.live has no unclassed usage from before LSR-095 and the website shows no blended rate, so it is left out: model tokens without a model class are not charged.",
-      "flag": "[Steve: set a price] only if unclassed model tokens should be billed; billing.md's figure is 9000000 per 1000000"
+      "decision": "Steve, 2026-10-24: not charged"
     },
     {
       "dimension": "engine_storage",

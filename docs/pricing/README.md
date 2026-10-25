@@ -1,14 +1,14 @@
 # Pricing: the lake.live price list
 
-The complete usage price list proposed for **lake.live**, ready to publish once Steve approves it.
+The complete usage price list for **lake.live**, approved by Steve on 2026-10-24.
 lake.live publishes only the 8 model-token rates today: migration `0095_model_token_prices` seeded
 them, and `https://lake.live/order/price-list` shows them alone, read 2026-10-24. Every other
 dimension (CPU, RAM, GPU, storage, transfer and the rest) has no rate there, so it is not charged.
 This is a launch-checklist item of [lake#755](https://github.com/oramasearch/lake/issues/755), carried
 by [lake#1158](https://github.com/oramasearch/lake/issues/1158).
 
-**Status: draft. Nothing here has been published.** Publishing is an admin-token write on a
-production Lake, so it needs Steve's go-ahead.
+**Status: approved by Steve on 2026-10-24, not yet published.** Publishing is an admin-token write
+on each production Lake, done separately on Steve's go-ahead (below).
 
 | File | What it holds |
 |---|---|
@@ -82,7 +82,14 @@ Checked on 2026-10-24 against orama-website-v2 branch `live`: `src/content/pages
 5. **The offers match**: website `lakeOffers` against `docs/api/orders.md`, fees, credit and "from"
    on On-Prem.
 
-## What Steve decides
+## What Steve decided (2026-10-24)
+
+- **The rates: approved**, as listed.
+- **`effective_from`: `2026-11`.** October stays billed at today's list (model tokens only).
+- **`searches`: kept** at 0.01 per thousand; the website adds it to its pricing page.
+- **Unclassed model tokens: not charged.**
+
+## The choices as they were put to him
 
 - **Approve the rates.** They are the development Lake's rates since 2026-10-11, plus the model
   rates of 2026-10-23. None is new.
