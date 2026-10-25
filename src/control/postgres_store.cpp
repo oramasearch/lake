@@ -793,7 +793,8 @@ std::optional<OidcClaims> verify_oidc_id_token(std::string_view token,
                                                std::string_view issuer,
                                                std::string_view client_id,
                                                std::string_view nonce,
-                                               long now_unix) {
+                                               long now_unix,
+                                               bool audience_absent) {
     const std::size_t first = token.find('.');
     const std::size_t second = first == std::string_view::npos ? first : token.find('.', first + 1);
     if (first == std::string_view::npos || second == std::string_view::npos ||
@@ -854,7 +855,7 @@ std::optional<OidcClaims> verify_oidc_id_token(std::string_view token,
         return claims.contains(name) && claims[name].is_number_integer() ? claims[name].get<long>()
                                                                          : 0L;
     };
-    for (const auto* name : {"iss", "sub", "nonce", "azp", "email", "name"}) {
+    for (const auto* name : {"iss", "sub", "nonce", "azp", "email", "name", "sid"}) {
         if (claims.contains(name) && !claims[name].is_null() && !claims[name].is_string()) {
             return std::nullopt;
         }
@@ -870,13 +871,16 @@ std::optional<OidcClaims> verify_oidc_id_token(std::string_view token,
     const std::string subject = text("sub");
     const nlohmann::json audience = claims.value("aud", nlohmann::json());
     const bool authorized_party_valid =
-        !audience.is_array() || audience.size() <= 1 || text("azp") == client_id;
-    if (text("iss") != issuer || !audience_contains(audience, client_id) ||
-        !authorized_party_valid || expires_at <= now_unix || not_before > now_unix + 60 ||
-        issued_at > now_unix + 60 || subject.empty() || text("nonce") != nonce) {
+        audience_absent || !audience.is_array() || audience.size() <= 1 ||
+        text("azp") == client_id;
+    const bool audience_valid =
+        audience_absent ? audience.is_null() : audience_contains(audience, client_id);
+    if (text("iss") != issuer || !audience_valid || !authorized_party_valid ||
+        expires_at <= now_unix || not_before > now_unix + 60 || issued_at > now_unix + 60 ||
+        subject.empty() || text("nonce") != nonce) {
         return std::nullopt;
     }
-    return OidcClaims{subject, text("email"), text("name"), issued_at};
+    return OidcClaims{subject, text("email"), text("name"), issued_at, text("sid")};
 }
 
 std::expected<VerifiedPasskeyRegistration, std::string>
@@ -1701,20 +1705,26 @@ std::optional<std::string> session_lookup_id(std::string_view bearer) {
     return std::string(bearer.substr(4, 36));
 }
 
+// The session itself and every ancestor up to the first sign-in session (browser or TAAP) must
+// be live. A sign-in ancestor ends the walk without being checked: signing out never ends a key
+// made from that sign-in (lake#1163, Steve: "don't revoke api keys on signout"); it still must
+// belong to the same user and pool. Revoking a key still ends that key's own descendants.
 bool active_session_lineage(pqxx::work& tx,
                             const std::string& session_id,
                             const std::string& user_id,
                             const std::string& pool_id) {
     const auto rows = tx.exec_params(
         "WITH RECURSIVE lineage AS ("
-        "SELECT id, parent_session_id, user_id, pool_id, device_id, expires_at, revoked_at "
-        "FROM sessions WHERE id = $1::uuid AND user_id = $2::uuid AND pool_id = $3 "
+        "SELECT id, parent_session_id, user_id, pool_id, device_id, expires_at, revoked_at, "
+        "false AS sign_in FROM sessions WHERE id = $1::uuid AND user_id = $2::uuid AND "
+        "pool_id = $3 "
         "UNION SELECT p.id, p.parent_session_id, p.user_id, p.pool_id, p.device_id, "
-        "p.expires_at, p.revoked_at FROM sessions p JOIN lineage c ON p.id = c.parent_session_id) "
-        "SELECT count(*) > 0 AND bool_or(parent_session_id IS NULL) AND "
-        "bool_and(lineage.user_id = $2::uuid AND lineage.pool_id = $3 AND "
+        "p.expires_at, p.revoked_at, p.kind IN ('browser', 'taap') FROM sessions p "
+        "JOIN lineage c ON p.id = c.parent_session_id WHERE NOT c.sign_in) "
+        "SELECT count(*) > 0 AND bool_or(parent_session_id IS NULL OR sign_in) AND "
+        "bool_and(lineage.user_id = $2::uuid AND lineage.pool_id = $3 AND (sign_in OR ("
         "lineage.revoked_at IS NULL AND (expires_at IS NULL OR expires_at > clock_timestamp()) "
-        "AND (devices.id IS NULL OR devices.revoked_at IS NULL)) "
+        "AND (devices.id IS NULL OR devices.revoked_at IS NULL)))) "
         "FROM lineage LEFT JOIN devices ON devices.id = lineage.device_id",
         session_id,
         user_id,
@@ -9257,7 +9267,8 @@ public:
         return result;
     }
     Result<IssuedSession> sign_in_clerk(const ClerkIdentity& in) override {
-        if (in.issued_at <= 0 || in.subject.empty() || in.subject.size() > 256) {
+        if (in.issued_at <= 0 || in.subject.empty() || in.subject.size() > 256 ||
+            in.session_id.size() > 256) {
             return std::unexpected(
                 StoreError{"invalid_input", "a Clerk subject and token issue time are required"});
         }
@@ -9275,22 +9286,33 @@ public:
                 return std::unexpected(
                     StoreError{"unauthorized", "the Clerk token predates revocation"});
             }
-            return issue_session(tx,
-                                 found->user_id,
-                                 "lake",
-                                 in.device_name,
-                                 "browser",
-                                 "",
-                                 {"*"},
-                                 "",
-                                 60 * 60 * 24 * 30);
+            auto issued = issue_session(tx,
+                                        found->user_id,
+                                        "lake",
+                                        in.device_name,
+                                        "browser",
+                                        "",
+                                        {"*"},
+                                        "",
+                                        60 * 60 * 24 * 30);
+            if (issued && !in.session_id.empty()) {
+                // Bound to the Clerk session it came from, so that session's end ends only this
+                // browser (lake#1163, migration 0103_clerk_session_binding).
+                tx.exec_params("UPDATE sessions SET clerk_session_id = $2 WHERE id = $1::uuid",
+                               issued->session.id,
+                               in.session_id);
+            }
+            return issued;
         });
     }
     Result<void> revoke_clerk_sessions(const std::string& subject,
+                                       const std::string& session_id,
                                        std::int64_t revoked_at) override {
-        if (subject.empty() || subject.size() > 256 || revoked_at < 0) {
-            return std::unexpected(StoreError{
-                "invalid_input", "a Clerk subject and revocation timestamp are required"});
+        if (subject.empty() || subject.size() > 256 || session_id.empty() ||
+            session_id.size() > 256 || revoked_at < 0) {
+            return std::unexpected(
+                StoreError{"invalid_input",
+                           "a Clerk subject, session id and revocation timestamp are required"});
         }
         return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
             tx.exec_params(
@@ -9299,21 +9321,26 @@ public:
             const auto state = tx.exec_params(
                 "SELECT revoked_before FROM clerk_user_states WHERE subject = $1 FOR UPDATE",
                 subject);
-            if (revoked_at < state[0][0].as<std::int64_t>())
-                return {};
-            tx.exec_params("UPDATE clerk_user_states SET revoked_before = $2 WHERE subject = $1",
+            // An event older than the watermark still ends the browser bound to its own Clerk
+            // session; only the unbound browsers' account-wide revocation follows the order.
+            const bool current = revoked_at >= state[0][0].as<std::int64_t>();
+            tx.exec_params("UPDATE clerk_user_states SET revoked_before = "
+                           "GREATEST(revoked_before, $2) WHERE subject = $1",
                            subject,
                            revoked_at);
             const auto user_id = clerk_user_id(tx, subject);
             if (user_id) {
                 // The user lock also serializes every other issuance path with this revocation.
                 tx.exec_params("SELECT id FROM users WHERE id = $1::uuid FOR UPDATE", *user_id);
-                tx.exec_params("UPDATE sessions SET revoked_at = coalesce(revoked_at, now()) WHERE "
-                               "user_id = $1::uuid",
-                               *user_id);
-                tx.exec_params("UPDATE devices SET revoked_at = coalesce(revoked_at, now()) WHERE "
-                               "user_id = $1::uuid",
-                               *user_id);
+                // Browser sessions only (lake#1163): API keys, static tokens, TAAP sessions and
+                // devices stay, and keys made from a revoked browser session keep working.
+                tx.exec_params("UPDATE sessions SET revoked_at = coalesce(revoked_at, now()) "
+                               "WHERE user_id = $1::uuid AND pool_id = 'lake' AND kind = "
+                               "'browser' AND revoked_at IS NULL AND (clerk_session_id = $2 OR "
+                               "($3 AND clerk_session_id IS NULL))",
+                               *user_id,
+                               session_id,
+                               current);
             }
             return {};
         });

@@ -4,6 +4,7 @@ lake#963: [OAuth and enterprise OIDC](identity.md) require the initiating browse
 HttpOnly cookie at callback, in addition to state, PKCE and nonce.
 
 lake#951: [Clerk offboarding](clerk.md#webhooks) revokes delegated agent credentials and workloads.
+lake#1163: a [Clerk session event](clerk.md#webhooks) (signing out) ends only the browser session bound to that Clerk session, never API keys, MCP keys or devices; `sign_out_everywhere` is the person's own account-wide revocation ([identity](identity.md#what)).
 [Agent streams](agent-launches.md#stream-triggers) and [MCP streams](mcp-connections.md#a-connections-agent-and-streams)
 reject missing/disabled people immediately and retain workspace cleanup for the next worker pass.
 [models.md](models.md) specifies authenticated customer reads for workspace dataset and model

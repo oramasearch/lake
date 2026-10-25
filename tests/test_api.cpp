@@ -9090,7 +9090,8 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
                               user_context));
     EXPECT_FALSE(static_token.ok);
     EXPECT_EQ(static_token.error.code, "unauthorized");
-    EXPECT_FALSE(s.store.context_for(token.value["secret"]));
+    // Signing out never ends a key made from that sign-in (lake#1163).
+    EXPECT_TRUE(s.store.context_for(token.value["secret"]));
     auto audit_events = lake::test::audit_events(s.store, lake::audit::Filter{.limit = 100});
     ASSERT_TRUE(audit_events);
     EXPECT_TRUE(std::ranges::any_of(*audit_events, [](const lake::audit::Event& event) {

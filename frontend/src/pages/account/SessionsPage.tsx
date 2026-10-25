@@ -1,6 +1,7 @@
 /** Sessions and devices (`/sessions`): every session and token of the account, and every device,
  * each revocable. The session this browser is using leads the page; revoking it signs this browser
- * out. */
+ * out. Signing out ends only this browser, never a key (lake#1163); **Sign out everywhere**
+ * (`sign_out_everywhere`) ends every session, key and device of the account. */
 import { useState } from "react";
 import { Laptop, MonitorSmartphone } from "lucide-react";
 import { act, useList } from "@/lib/api";
@@ -42,6 +43,17 @@ export default function SessionsPage() {
       setPending(null);
     }
   };
+  const signOutEverywhere = async () => {
+    setPending("everywhere");
+    setError(null);
+    try {
+      await act("sign_out_everywhere", {}, NO_WORKSPACE);
+      leaveFor("/sign-in");
+    } catch (e) {
+      setError(messageOf(e));
+      setPending(null);
+    }
+  };
   const revokeDevice = async (row: DeviceRow) => {
     setPending(row.id);
     setError(null);
@@ -76,16 +88,28 @@ export default function SessionsPage() {
           actions={<ActiveBadge revokedAt={current.revoked_at} />}
           className="mb-4"
           footer={
-            <ConfirmButton
-              title="Revoke this session?"
-              confirm="This browser is using it. You will be signed out on your next request."
-              confirmLabel="Revoke"
-              variant="danger"
-              disabled={!!current.revoked_at}
-              onConfirm={() => revokeSession(current)}
-            >
-              Revoke and sign out
-            </ConfirmButton>
+            <div className="flex flex-wrap gap-2">
+              <ConfirmButton
+                title="Revoke this session?"
+                confirm="This browser is using it. You will be signed out on your next request. Your API keys, MCP keys and other devices keep working."
+                confirmLabel="Revoke"
+                variant="danger"
+                disabled={!!current.revoked_at}
+                onConfirm={() => revokeSession(current)}
+              >
+                Revoke and sign out
+              </ConfirmButton>
+              <ConfirmButton
+                title="Sign out everywhere?"
+                confirm="This ends every session, API key, MCP key, static token and device of your account, this browser included. Agents and scripts using your keys stop until you make new keys."
+                confirmLabel="Sign out everywhere"
+                variant="danger"
+                disabled={pending === "everywhere"}
+                onConfirm={() => signOutEverywhere()}
+              >
+                Sign out everywhere
+              </ConfirmButton>
+            </div>
           }
         >
           <KeyValue

@@ -61,6 +61,10 @@ from the instance's secret key, every hour and on any change:
   account restriction check at exchange, the `0094_clerk_revocation` schema with `clerk_revocation_guard`, and
   subscriptions to `session.revoked`, `session.removed` and `session.ended`; operator adoption is
   a rollout prerequisite, and exchange fails closed until the server key is injected;
+- lake#1163 additionally requires the `0103_clerk_session_binding` schema with
+  `clerk_session_binding_guard` (session events then end only the browser bound to the ended Clerk
+  session, never keys or devices). No Clerk setting changes: the binding uses Clerk's default
+  session token, which every instance issues;
 - on a production instance, the DNS records Clerk asks for, as `CloudflareDNSRecord`s in the Lake's
   zone.
 

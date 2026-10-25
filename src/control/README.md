@@ -354,7 +354,10 @@ See [the contract and tests](../../docs/api/identity.md#authentication-attempt-l
 Clerk revocation (lake#948, migration `0094_clerk_revocation`) keeps user-state ordering and a
 separate account-wide revocation watermark in PostgreSQL and memory. Old template JWTs cannot
 re-exchange after a session event; account restrictions revoke all sessions, tokens and devices, and a newer
-unban/unlock permits only new credentials. See [the contract](../../docs/api/clerk.md#webhooks).
+unban/unlock permits only new credentials. A session event revokes browser sessions only (lake#1163,
+migration `0103_clerk_session_binding`): those bound to the ended Clerk session (`sessions.clerk_session_id`
+in PostgreSQL, `clerk_session_of_` in memory) and unbound ones unless the event is older than the
+watermark; never API keys, static tokens or devices. See [the contract](../../docs/api/clerk.md#webhooks).
 
 Clerk suspension and permanent disablement use `User::may_act()` for bearer issuance,
 delegation and stream authority. Suspended users' agent credentials are withdrawn just as on

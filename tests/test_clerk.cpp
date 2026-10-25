@@ -786,3 +786,148 @@ TEST(HttpServer, ClerkExchangeAcceptsANamelessPersonAndLogsWhyATokenWasRefused) 
     EXPECT_EQ(log.find("user_test"), std::string::npos);
     server.stop();
 }
+
+// lake#1163: the page posts Clerk's default session token beside the template. Its signed `sid`
+// binds the Lake browser session, so a session event ends that browser and nothing else. The
+// session token must carry no `aud`, name the template's user and carry a sid; the template can
+// never stand in for it.
+TEST(Clerk, TheSessionTokenBindsTheBrowserToItsClerkSession) {
+    ClerkInstance clerk;
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.store = store;
+    options.instance_kek = std::string(test_kek);
+    options.clerk_publishable_key = "pk_test_" + base64("example-123.clerk.accounts.dev$");
+    options.clerk_secret_key = "dummy-clerk-key";
+    options.clerk_http = [&](const std::string& url, const auto&) -> lake::api::ClerkResponse {
+        if (url == std::string(ClerkInstance::issuer) + "/.well-known/jwks.json") {
+            return {200, clerk.jwks(), ""};
+        }
+        return {200,
+                json{{"id", "user_test"},
+                     {"updated_at", 100},
+                     {"banned", false},
+                     {"locked", false}}
+                    .dump(),
+                ""};
+    };
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const auto session_token = [&](json changes) {
+        const long now = now_unix();
+        json claims = {{"iss", ClerkInstance::issuer},
+                       {"azp", "https://lake.example.test"},
+                       {"sub", "user_test"},
+                       {"sid", "sess_browser_a"},
+                       {"iat", now},
+                       {"nbf", now - 5},
+                       {"exp", now + 60}};
+        for (const auto& [name, value] : changes.items()) {
+            if (value.is_null())
+                claims.erase(name);
+            else
+                claims[name] = value;
+        }
+        return clerk.token(claims);
+    };
+    const auto exchange = [&](const std::string& session) {
+        std::string body = "token=" + clerk.template_token();
+        if (!session.empty())
+            body += "&session_token=" + session;
+        const auto* bytes = reinterpret_cast<const std::byte*>(body.data());
+        const auto response = lake::test::http_request(
+            {.url = "http://127.0.0.1:" + std::to_string(server.port()),
+             .method = "POST",
+             .suffix = "/identity/clerk-session",
+             .headers = {{"Content-Type", "application/x-www-form-urlencoded"}},
+             .body = std::vector<std::byte>(bytes, bytes + body.size())});
+        EXPECT_TRUE(response);
+    };
+    const auto active = [&] {
+        const auto users = store->list_users(10);
+        if (!users || users->empty())
+            return std::vector<lake::control::Session>{};
+        auto sessions = store->list_sessions(users->front().id, "lake");
+        std::vector<lake::control::Session> live;
+        for (const auto& session : sessions ? *sessions : std::vector<lake::control::Session>{}) {
+            if (session.revoked_at.empty())
+                live.push_back(session);
+        }
+        return live;
+    };
+
+    // Refused: the template posing as the session token, another user, no sid.
+    exchange(clerk.template_token());
+    EXPECT_TRUE(active().empty()) << "a token with aud cannot be the session token";
+    exchange(session_token({{"sub", "user_someone_else"}}));
+    EXPECT_TRUE(active().empty()) << "the session token must name the template's user";
+    exchange(session_token({{"sid", nullptr}}));
+    EXPECT_TRUE(active().empty()) << "the session token must carry a sid";
+    exchange(session_token({{"aud", "lake"}}));
+    EXPECT_TRUE(active().empty());
+
+    // Browser A and browser B, each bound; and an API key made from browser B.
+    exchange(session_token({}));
+    ASSERT_EQ(active().size(), 1U);
+    const auto browser_a = active().front();
+    exchange(session_token({{"sid", "sess_browser_b"}}));
+    ASSERT_EQ(active().size(), 2U);
+    const std::string user_id = browser_a.user_id;
+    const auto both = active();
+    const auto browser_b =
+        std::ranges::find_if(both, [&](const auto& s) { return s.id != browser_a.id; })->id;
+    const auto key =
+        store->create_token({user_id, "lake", "agent key", "", {"*"}, 3600, false, browser_b});
+    ASSERT_TRUE(key);
+
+    // Clerk ends browser A's session: only browser A's Lake session ends.
+    ASSERT_TRUE(store->revoke_clerk_sessions("user_test", "sess_browser_a", now_unix() * 1000));
+    const auto left = active();
+    EXPECT_TRUE(std::ranges::none_of(left, [&](const auto& s) { return s.id == browser_a.id; }));
+    EXPECT_TRUE(std::ranges::any_of(left, [&](const auto& s) { return s.id == browser_b; }));
+    EXPECT_TRUE(store->context_for(key->secret)) << "the API key keeps working";
+    server.stop();
+}
+
+// lake#1163: a person's own account-wide revocation, now that signing out ends no key.
+TEST(Clerk, SignOutEverywhereEndsEveryKeyAndDeviceOfOnlyThatPerson) {
+    lake::control::InMemoryStore store;
+    auto identity = minted("user_everywhere", "everywhere@example.test");
+    const auto browser = store.sign_in_clerk(identity);
+    const auto other = store.sign_in_clerk(minted("user_bystander", "bystander@example.test"));
+    ASSERT_TRUE(browser);
+    ASSERT_TRUE(other);
+    const auto principal = store.context_for(browser->secret);
+    ASSERT_TRUE(principal);
+    const auto key = store.create_token(
+        {principal->user_id, "lake", "MCP key", "created on Developer -> MCP", {"*"}, 0, true});
+    ASSERT_TRUE(key);
+    const auto derived = store.create_token(
+        {principal->user_id, "lake", "derived", "", {"*"}, 600, false, key->session.id});
+    ASSERT_TRUE(derived);
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::api::ApiContext context;
+    context.store = &store;
+    context.authorized = true;
+    context.acting_user_id = principal->user_id;
+    context.acting_identity = principal->taap_id;
+    context.credential_session_id = key->session.id;
+    context.request_id = lake::control::new_uuid_v4();
+    const auto signed_out = registry.call("sign_out_everywhere", json::object(), context);
+    ASSERT_TRUE(signed_out.ok) << signed_out.error.message;
+    EXPECT_EQ(signed_out.value["sessions"], 3) << "the browser, the MCP key and its descendant";
+    EXPECT_EQ(signed_out.value["devices"], 1);
+    EXPECT_FALSE(store.context_for(browser->secret));
+    EXPECT_FALSE(store.context_for(key->secret));
+    EXPECT_FALSE(store.context_for(derived->secret));
+    EXPECT_TRUE(store.context_for(other->secret)) << "another person is untouched";
+    lake::api::ApiContext operator_context;
+    operator_context.store = &store;
+    operator_context.authorized = true;
+    operator_context.operator_credential = true;
+    operator_context.acting_identity = "admin";
+    EXPECT_FALSE(registry.call("sign_out_everywhere", json::object(), operator_context).ok)
+        << "an operator credential is not a person";
+}

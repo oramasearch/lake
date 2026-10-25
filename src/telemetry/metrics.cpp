@@ -1458,9 +1458,11 @@ public:
                     [&] { return store_->apply_clerk_user_state(value); });
     }
     control::Result<void> revoke_clerk_sessions(const std::string& subject,
+                                                const std::string& session_id,
                                                 std::int64_t revoked_at) override {
-        return call("revoke_clerk_sessions",
-                    [&] { return store_->revoke_clerk_sessions(subject, revoked_at); });
+        return call("revoke_clerk_sessions", [&] {
+            return store_->revoke_clerk_sessions(subject, session_id, revoked_at);
+        });
     }
     control::Result<std::string> update_clerk_user(const control::ClerkIdentity& value) override {
         return call("update_clerk_user", [&] { return store_->update_clerk_user(value); });

@@ -175,7 +175,11 @@ it, choose **Use a passkey** on the sign-in page.
 Open **Sessions** from the account menu.
 
 - **This session** is the browser you are using. **Revoke and sign out** ends it after a
-  confirmation.
+  confirmation. Signing out ends only this browser: your API keys, MCP keys, other browsers and
+  devices keep working (lake#1163), including keys you made in this browser.
+- **Sign out everywhere** ends every session, API key, MCP key, static token and device of your
+  account, this browser included, after a confirmation. Use it when a key or a device may be lost
+  or exposed; agents and scripts using your keys stop until you make new ones.
 - **Sessions** lists your other sessions and tokens, with their scopes, expiry and status; filter by
   **Active** or **Revoked**. **Revoke** ends one on its next request.
 - **Devices** lists the devices you signed in from, including passkeys. Revoking a device ends its
@@ -206,8 +210,8 @@ organization or deactivating you through SCIM revokes your sessions there
 ## Limits
 
 - A session from Clerk sign-in lasts 30 days.
-- A token lasts as long as the session that made it, at most 30 days, unless your account allows
-  never-expiring tokens.
+- A token expires no later than the session that made it would have, at most 30 days, unless your
+  account allows never-expiring tokens. Signing out does not end it (lake#1163).
 - Passkeys and Lake's own multi-factor authentication are not offered when your Lake uses Clerk;
   Clerk handles sign-in there.
 

@@ -22,10 +22,22 @@ A new migration still follows the rules below: idempotent SQL, its row in `schem
 new `*_guard` table created by the newest migration (`LakeManifest.TheGuardTableIsTheNewestMigrations`
 fails otherwise).
 
+`0103_clerk_session_binding` (lake#1163) adds nullable `sessions.clerk_session_id` (1 to 256
+characters): the Clerk session id (`sid`) a Clerk browser exchange came from, taken from Clerk's
+signed default session token. Index `sessions_clerk_session_id_idx` on `(user_id,
+clerk_session_id)` where set. A Clerk `session.revoked`/`removed`/`ended` revokes the account's
+`browser` sessions bound to that id, and unbound `browser` sessions unless the event is older than
+the account's revocation watermark; API keys, static tokens, TAAP sessions and devices are never
+revoked by a session event. Rows issued before the migration stay NULL (unbound). Additive; guard
+`clerk_session_binding_guard`; the operator must vendor this schema and select the guard before the
+binary rolls. See [Clerk](../api/clerk.md#webhooks).
+
 `0094_clerk_revocation` (lake#948, LSR-085) adds `clerk_user_states`: upstream user id, the
 last applied timestamp for that Clerk subject, an independent revocation watermark, suspension
 and terminal deletion. Both timestamps are Clerk milliseconds. Rows remain when an event precedes provisioning;
-revocation prevents re-exchange of old template JWTs and revokes all existing account credentials.
+revocation prevents re-exchange of old template JWTs. A ban, lock, deprovisioning or deletion
+revokes all existing account credentials; a session event revokes browser sessions only (lake#1163,
+`0103_clerk_session_binding`).
 `users.clerk_suspended` blocks every resolved user principal and every PostgreSQL session issuance
 path, while a newer unban/unlock can clear it without clearing `users.disabled_at` or reviving
 revoked credentials. The first application revokes all existing Clerk-linked sessions, tokens and

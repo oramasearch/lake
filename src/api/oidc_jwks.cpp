@@ -69,6 +69,7 @@ std::optional<std::string> token_key(std::string_view token,
                                      std::string_view audience,
                                      std::string_view nonce,
                                      bool require_issued_at,
+                                     bool audience_absent,
                                      std::string& reason) {
     const auto refuse = [&](std::string why) -> std::optional<std::string> {
         reason = std::move(why);
@@ -89,8 +90,9 @@ std::optional<std::string> token_key(std::string_view token,
     }
     if (!text_or_absent(header, "alg") || !text_or_absent(header, "kid") ||
         !text_or_absent(claims, "iss") || !text_or_absent(claims, "sub") ||
-        !text_or_absent(claims, "nonce") || !text_or_absent(claims, "azp")) {
-        return refuse("alg, kid, iss, sub, nonce or azp is not a string");
+        !text_or_absent(claims, "nonce") || !text_or_absent(claims, "azp") ||
+        !text_or_absent(claims, "sid")) {
+        return refuse("alg, kid, iss, sub, nonce, azp or sid is not a string");
     }
     if (text(header, "alg") != "RS256") {
         return refuse("alg is not RS256");
@@ -109,7 +111,10 @@ std::optional<std::string> token_key(std::string_view token,
     }
     const auto aud = claims.value("aud", Json());
     bool matches = aud.is_string() && aud.get<std::string>() == audience;
-    if (aud.is_array()) {
+    if (audience_absent) {
+        // Clerk's default session token has no aud (lake#1163): one that names any is refused.
+        matches = aud.is_null();
+    } else if (aud.is_array()) {
         matches =
             std::ranges::all_of(aud, [](const Json& item) { return item.is_string(); }) &&
             std::ranges::any_of(aud,
@@ -131,7 +136,8 @@ std::optional<std::string> token_key(std::string_view token,
         }
     }
     if (!matches) {
-        return refuse("aud does not name " + std::string(audience));
+        return refuse(audience_absent ? std::string("aud is present")
+                                      : "aud does not name " + std::string(audience));
     }
     if (require_issued_at && claims.value("iat", 0LL) <= 0) {
         return refuse("no iat");
@@ -172,7 +178,8 @@ std::optional<control::identity_crypto::OidcClaims> OidcJwks::verify(std::string
                                                                      bool public_only,
                                                                      const Fetch& fetch,
                                                                      bool require_issued_at,
-                                                                     std::string* reason) {
+                                                                     std::string* reason,
+                                                                     bool audience_absent) {
     std::string why;
     const auto refuse =
         [&](std::string message) -> std::optional<control::identity_crypto::OidcClaims> {
@@ -192,7 +199,8 @@ std::optional<control::identity_crypto::OidcClaims> OidcJwks::verify(std::string
         return verified;
     };
     try {
-        const auto kid = token_key(token, issuer, audience, nonce, require_issued_at, why);
+        const auto kid =
+            token_key(token, issuer, audience, nonce, require_issued_at, audience_absent, why);
         if (!kid) {
             return refuse(why);
         }
@@ -205,7 +213,7 @@ std::optional<control::identity_crypto::OidcClaims> OidcJwks::verify(std::string
             // A known key with a bad signature or claims never warrants a refresh, even when old.
             if (known) {
                 auto verified = control::identity_crypto::verify_oidc_id_token(
-                    token, entry.document, issuer, audience, nonce);
+                    token, entry.document, issuer, audience, nonce, 0, audience_absent);
                 if (!verified || now - entry.fetched_at < std::chrono::hours(1)) {
                     return checked(std::move(verified), entry.document, *kid);
                 }
@@ -250,7 +258,7 @@ std::optional<control::identity_crypto::OidcClaims> OidcJwks::verify(std::string
             return refuse("the JWKS could not be fetched from " + url);
         }
         return checked(control::identity_crypto::verify_oidc_id_token(
-                           token, document, issuer, audience, nonce),
+                           token, document, issuer, audience, nonce, 0, audience_absent),
                        document,
                        *kid);
     } catch (const InvalidDocument&) {

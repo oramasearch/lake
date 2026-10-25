@@ -70,14 +70,20 @@ struct OidcClaims {
     std::string email;
     std::string display_name;
     std::int64_t issued_at = 0; // Clerk rejects templates predating an upstream revocation
+    // `sid`: the Clerk session id its default session token carries, signed (lake#1163). A
+    // custom JWT template never carries it.
+    std::string session_id;
 };
 
+// `audience_absent`: the token must carry no `aud` at all, as Clerk's default session token does
+// (lake#1163); `client_id` is then not consulted. Otherwise `aud` must name `client_id`.
 std::optional<OidcClaims> verify_oidc_id_token(std::string_view token,
                                                std::string_view jwks,
                                                std::string_view issuer,
                                                std::string_view client_id,
                                                std::string_view nonce,
-                                               long now_unix = 0);
+                                               long now_unix = 0,
+                                               bool audience_absent = false);
 
 struct VerifiedPasskeyRegistration {
     std::string credential_id;

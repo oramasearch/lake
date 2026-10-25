@@ -4968,3 +4968,21 @@ CREATE TABLE IF NOT EXISTS account_balance_charges (
 );
 CREATE TABLE IF NOT EXISTS account_balances_guard (applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0099_account_balances') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0103_clerk_session_binding (lake#1163, docs/api/clerk.md#webhooks): each Lake browser session
+-- made by a Clerk exchange records the Clerk session it came from (`sid`, from Clerk's signed
+-- default session token). A Clerk session event then ends only the Lake browser sessions bound to
+-- that Clerk session, never API keys, static tokens or devices. NULL: unbound (exchanged before
+-- this migration, or not a Clerk sign-in); a session event still ends those browser sessions.
+-- Additive. Numbered after the open 0100 (lake#1155), 0101 (lake#1156) and 0102 (lake#1152).
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS clerk_session_id text
+    CHECK (clerk_session_id IS NULL OR length(clerk_session_id) BETWEEN 1 AND 256);
+CREATE INDEX IF NOT EXISTS sessions_clerk_session_id_idx
+    ON sessions (user_id, clerk_session_id) WHERE clerk_session_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS clerk_session_binding_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0103_clerk_session_binding')
+    ON CONFLICT DO NOTHING;

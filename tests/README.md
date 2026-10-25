@@ -961,6 +961,13 @@ cancellation, including refusal of later administrator approval. See
 `Stores/ClerkRevocation.SuspensionAlsoStopsEmailRecovery` in `test_clerk_webhooks.cpp` checks
 that a suspended account's email recovery is accepted but queues no mail until the suspension is
 lifted, on both stores.
+`Stores/ClerkRevocation.SessionEventsEndOnlyBrowserSessions` and
+`Stores/ClerkRevocation.SignOutKeepsKeysAndBansStillEndEverything` (lake#1163) check on both stores
+that a Clerk session event ends only the browser bound to the ended Clerk session (and unbound
+browsers), leaving other browsers, API keys, MCP keys, their descendants and devices working, while
+a ban, a lock or a deletion still ends everything. `Clerk.TheSessionTokenBindsTheBrowserToItsClerkSession`
+and `Clerk.SignOutEverywhereEndsEveryKeyAndDeviceOfOnlyThatPerson` in `test_clerk.cpp` cover the
+exchange's session token and the person's own account-wide revocation.
 `OrdersEntitlement.*` (lake#972, LSR-105) sends synthetic signed renewal, failed-collection and subscription-end events through production webhook handling against both stores. It checks grace expiry, recovery, retry-invoice binding, failure events that cannot restore expired access, stale and duplicate snapshots, identity mismatches, trials, early delivery and invalid signatures; PostgreSQL verifies that the desired-state view suspends an already-ready order without another event and restores it on payment. See [orders](../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
 
 The Stripe ownership fixture in `test_stripe.cpp` includes the event timestamp, customer, subscription and recurring period required to accept an order renewal; all ownership assertions remain in place.

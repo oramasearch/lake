@@ -293,8 +293,8 @@ function SearchKey({ table, published }: { table: string; published: boolean }) 
             </Button>
           )}
           <p className="mb-0 text-[12px] text-ink-3">
-            The key keeps working for other published indexes until you revoke it on <Link to="/tokens">Tokens</Link>. A key lasts as long as the session that made
-            it, at most 30 days.
+            The key keeps working for other published indexes until you revoke it on <Link to="/tokens">Tokens</Link>. A key expires no later than the session that made
+            it would have, at most 30 days; signing out does not end it.
           </p>
         </>
       )}

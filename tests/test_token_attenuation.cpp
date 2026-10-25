@@ -1013,6 +1013,12 @@ TEST_P(TokenAttenuation, WildcardStaticAndDeviceAuthority) {
     const auto revoked = call(
         "revoke_device", {{"id", browser_.at("session").at("device_id")}}, browser_.at("secret"));
     ASSERT_TRUE(revoked.at("ok"));
+    // Keys made from the browser outlive its device and its sign-out (lake#1163).
+    EXPECT_TRUE(call("list_devices", json::object(), wildcard_child.at("secret")).at("ok"));
+    EXPECT_TRUE(call("list_devices", json::object(), narrowed.at("secret")).at("ok"));
+    // Revoking a key still ends that key's own descendants.
+    ASSERT_TRUE(store_->revoke_session(wildcard.at("session").at("user_id"),
+                                       wildcard.at("session").at("id")));
     EXPECT_FALSE(call("list_devices", json::object(), wildcard_child.at("secret")).at("ok"));
     EXPECT_FALSE(call("list_devices", json::object(), narrowed.at("secret")).at("ok"));
 }
@@ -1273,8 +1279,11 @@ TEST_F(PostgresSessionAuthentication, ScopeExpiryAndRevocationApplyOnNextRequest
     ASSERT_TRUE(child);
     EXPECT_TRUE(read("/v1/list_sessions", child->secret).at("ok"));
     ASSERT_TRUE(store_->revoke_device(browser_.session.user_id, browser_.session.device_id));
-    EXPECT_FALSE(read("/v1/list_sessions", child->secret).at("ok"));
+    EXPECT_TRUE(read("/v1/list_sessions", child->secret).at("ok"))
+        << "a key made in a browser outlives that browser's device (lake#1163)";
     EXPECT_FALSE(read("/v1/list_sessions", browser_.secret).at("ok"));
+    ASSERT_TRUE(store_->revoke_session(browser_.session.user_id, child->session.id));
+    EXPECT_FALSE(read("/v1/list_sessions", child->secret).at("ok"));
 }
 
 TEST_F(PostgresSessionAuthentication, OperatorPrecedesEvenAMatchingSession) {
