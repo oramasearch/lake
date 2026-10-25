@@ -433,6 +433,11 @@ answered in plain words. Dates are not yet features: zetta v0.5.0's `train_model
 ids, key (when that call made it), its limits, the answer shapes, the origins and how to check it;
 the console's website step opens on *Copy agent prompt*, with *Source code* beside it. See
 [`docs/api/quickstart.md#the-agent-prompt`](docs/api/quickstart.md#the-agent-prompt).
+The model step is an Ask Orama conversation (lake#1182, no migration): `start_quickstart_conversation`
+opens it on the dataset (a nested `send_ask_message` whose `page` carries the dataset, its columns'
+kinds and the index), `quickstart_status` names it, and confirming a model runs `train_quickstart`,
+which also takes `derived_target` and trains M-3 clustering (not published for the website). See
+[`docs/api/quickstart.md#the-conversation-lake1182`](docs/api/quickstart.md#the-conversation-lake1182).
 
 Browser keys (lake#1152, migration `0102_browser_keys`): the key a website's page holds, bound to one
 workspace, one search index and optionally one model, callable only for `search_index` and

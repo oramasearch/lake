@@ -66,6 +66,10 @@ export function useTalkTo(selected: string): TalkToAgent[] {
   return useMemo(() => talkToAgents(library.data?.agents, own.data?.agents, selected), [library.data, own.data, selected]);
 }
 
+/** The account and workspace a conversation is held in, when it is not the session's (the
+ * Quickstart's own workspace, lake#1182). */
+export type ConversationScope = { customerId: string; workspaceId: string };
+
 /** The messages of a conversation, and the turn being followed. `onSettled` is called once the
  * followed turn's answer is stored. */
 export function useConversation({
@@ -73,13 +77,16 @@ export function useConversation({
   conversationId,
   taskId,
   onSettled,
+  scope,
 }: {
   kind: AskKind;
   conversationId: string;
   taskId: string;
   onSettled: () => void;
+  scope?: ConversationScope;
 }) {
-  const { customerId, workspaceId } = useWorkspace();
+  const session = useWorkspace();
+  const { customerId, workspaceId } = scope ?? session;
   const ready = !!customerId && !!workspaceId;
   const messages = useRead<{ messages?: AskMessage[] }>(
     conversationId && ready ? "get_ask_conversation" : null,
@@ -199,6 +206,10 @@ export function AskMessages({
   working,
   task,
   agent,
+  scope,
+  onConfirmed,
+  empty,
+  after,
 }: {
   conversationId: string;
   list: AskMessage[];
@@ -207,9 +218,18 @@ export function AskMessages({
   working: boolean;
   task: AgentTask | undefined;
   agent: string;
+  /** The conversation's account and workspace, when not the session's (lake#1182). */
+  scope?: ConversationScope;
+  /** Called after Confirm ran a proposal, with its capability and whether it worked. */
+  onConfirmed?: (capability: string, ok: boolean) => void;
+  /** What an empty conversation says. */
+  empty?: ReactNode;
+  /** Shown under a confirmed proposal: where what it made lives. */
+  after?: (capability: string) => ReactNode;
 }) {
   const { name } = useAgentNames();
-  const { customerId, workspaceId } = useWorkspace();
+  const session = useWorkspace();
+  const { customerId, workspaceId } = scope ?? session;
   const path = useAppPath();
   const [confirming, setConfirming] = useState("");
   const [failures, setFailures] = useState<Record<string, string>>({});
@@ -223,7 +243,7 @@ export function AskMessages({
     setConfirming(key);
     setFailures((f) => ({ ...f, [key]: "" }));
     try {
-      const answer = await act<{ ok?: boolean; error?: string }>("confirm_ask_proposal", {
+      const answer = await act<{ ok?: boolean; error?: string; capability?: string }>("confirm_ask_proposal", {
         customer_id: customerId,
         workspace_id: workspaceId,
         conversation_id: conversationId,
@@ -233,6 +253,7 @@ export function AskMessages({
         input_sha256: call.input_sha256,
       });
       if (answer.ok === false && answer.error) setFailures((f) => ({ ...f, [key]: answer.error! }));
+      onConfirmed?.(answer.capability ?? call.capability, answer.ok !== false);
     } catch (e) {
       setFailures((f) => ({ ...f, [key]: e instanceof ApiError ? e.message : (e as Error).message }));
     } finally {
@@ -243,7 +264,7 @@ export function AskMessages({
     <section className="panel ask-conversation" aria-live="polite">
       {error ? <ErrorBlock error={error} what="this conversation" /> : null}
       {loading && <Skeleton lines={2} />}
-      {!loading && !list.length && <p>Ask anything about your Lake: your repositories, projects, data, runs, models, services or agents.</p>}
+      {!loading && !list.length && (empty ?? <p>Ask anything about your Lake: your repositories, projects, data, runs, models, services or agents.</p>)}
       {list.map((message) => {
         const person = message.role === "user";
         const payload = message.payload && typeof message.payload === "object" ? message.payload : null;
@@ -290,6 +311,7 @@ export function AskMessages({
                   {confirmed.has(key) ? (
                     <p>
                       <Badge>Confirmed</Badge>
+                      {after && call ? <> {after(call.capability)}</> : null}
                     </p>
                   ) : !call || (refused[key] && !refused[key].retry) ? null : (
                     <Button variant="primary" loading={confirming === key} disabled={!!confirming} onClick={() => void confirm(message.id, index, call)}>

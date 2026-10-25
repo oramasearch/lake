@@ -20,11 +20,16 @@ How to get a Clerk test user and ticket, and what each browser script checks, is
 
 `walkthrough.mjs` walks every Design, Train and Ship page after a Clerk ticket sign-in, and
 `quickstart.mjs` walks the quickstart process (lake#1128, [docs/ui/quickstart.md](../../docs/ui/quickstart.md)):
-the sign-in lands on Quickstart at `/`, a CSV is dropped, searched on the page, the plain web page
-code is served from another origin and searched there, a model is trained and published, and its
-answers appear on the page and on that website. Both take `<base-url> <ticket-file> <output-dir>`
+the sign-in lands on Quickstart at `/`, a blocked balance is topped up on Stripe's test Checkout
+(`lib.ensureFunds`), a CSV is dropped (attached again until the drop zone shows it and *Add it and
+build search* is enabled), searched on the page, the plain web page code is served from another
+origin and searched there, then step 4's Ask Orama conversation is driven (lake#1182): it waits for
+the answer, asks for a model when none was proposed, confirms the `train_quickstart` proposal, and
+the model's answers appear on the page and on that website. `lib.signIn` waits for
+`domcontentloaded` and the `quickstart-page` test id, never the `load` event, which lake-dev does
+not fire. Both take `<base-url> <ticket-file> <output-dir>`
 ([docs/deployment/browser-testing.md](../../docs/deployment/browser-testing.md)). `quickstart.mjs`
-leaves its dataset, index, model and key in the account's workspace.
+leaves its dataset, index, model, key and conversation in the account's workspace.
 
 # Live agent scenarios
 

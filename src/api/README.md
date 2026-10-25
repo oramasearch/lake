@@ -19,9 +19,14 @@ metering stay each capability's own; its bookkeeping reads (`get_run`, `list_mod
 in the workspace Zetta. The website code is built here; with `origins` it makes a browser key through
 a nested `create_browser_key` and puts the secret in the code, otherwise `key.create` names that call;
 `agent_prompt` writes the same as one block for a coding agent (`prompt`, lake#1185).
+`start_quickstart_conversation` (lake#1182) opens the model step's Ask Orama conversation with a
+nested `send_ask_message`, its `page` built by `conversation_page`; the record keeps only the
+conversation's id. `train_quickstart` takes `derived_target` and trains M-3 (clustering) without a
+target, not publishing that model.
 `quickstart_columns.cpp` (lake#1181) holds its pure column rules: each column's kind from the
 engine's `analyze_dataset`, what is offered first, the training copy's rows and the engine's
-`transform_required` refusals in plain words; `train_quickstart` reads rows through `call_workspace`
+`transform_required` refusals in plain words, a derived target (`parse_derived`, `derive_target`) and
+the label-free copy for clustering (`prepare_unlabeled`); `train_quickstart` reads rows through `call_workspace`
 `sql` and loads the copy with a nested `upload_dataset`.
 See [quickstart.md](../../docs/api/quickstart.md).
 

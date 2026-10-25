@@ -4,10 +4,15 @@
 #include "quickstart_columns.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
 #include <map>
+#include <set>
+#include <utility>
 
 namespace lake::api::quickstart_columns {
 namespace {
@@ -859,6 +864,358 @@ std::string explain_run_failure(std::string_view reason, const Choice& choice) {
 
 std::string snapshot_date(std::string_view typed) {
     return iso_instant(typed) ? std::string(typed) : std::string();
+}
+
+// ---- a derived target (lake#1182) ----
+
+namespace {
+
+// A value as a number: a JSON number, or text that is one ("12.5"). nullopt otherwise.
+std::optional<double> number_of(const json& value) {
+    if (value.is_number()) {
+        return value.get<double>();
+    }
+    if (!value.is_string()) {
+        return std::nullopt;
+    }
+    const std::string& text = value.get_ref<const std::string&>();
+    std::size_t from = 0;
+    while (from < text.size() && std::isspace(static_cast<unsigned char>(text[from])) != 0) {
+        ++from;
+    }
+    std::size_t to = text.size();
+    while (to > from && std::isspace(static_cast<unsigned char>(text[to - 1])) != 0) {
+        --to;
+    }
+    if (from == to) {
+        return std::nullopt;
+    }
+    // strtod, not from_chars: the floating-point from_chars needs macOS 26.
+    const std::string part = text.substr(from, to - from);
+    char* end = nullptr;
+    const double out = std::strtod(part.c_str(), &end);
+    if (end != part.c_str() + part.size() || !std::isfinite(out)) {
+        return std::nullopt;
+    }
+    return out;
+}
+
+// A number as a person writes it: 50, not 50.000000.
+std::string number_text(double number) {
+    return value_text(json(number));
+}
+
+bool numeric_rule(const Derived& derived) {
+    return derived.above || derived.at_least || derived.below || derived.at_most;
+}
+
+// Whether `value` satisfies the rule; nullopt when the row has no answer.
+std::optional<bool> holds(const Derived& derived, const json& value) {
+    if (empty_value(value)) {
+        return std::nullopt;
+    }
+    if (!numeric_rule(derived)) {
+        return std::ranges::find(derived.values, value_text(value)) != derived.values.end();
+    }
+    const auto number = number_of(value);
+    if (!number) {
+        return std::nullopt;
+    }
+    return (!derived.above || *number > *derived.above) &&
+           (!derived.at_least || *number >= *derived.at_least) &&
+           (!derived.below || *number < *derived.below) &&
+           (!derived.at_most || *number <= *derived.at_most);
+}
+
+} // namespace
+
+DerivedParse parse_derived(const json& input, const json& columns) {
+    DerivedParse out;
+    if (!input.is_object()) {
+        out.problem = {"derived_target is an object: {column, above, at_least, below, at_most, "
+                       "values, name}.",
+                       "/derived_target"};
+        return out;
+    }
+    Derived derived;
+    derived.column = text_of(input, "column");
+    derived.name = text_of(input, "name");
+    const json* source = find(columns, derived.column);
+    if (derived.column.empty() || source == nullptr) {
+        out.problem = {derived.column.empty()
+                           ? "derived_target needs the column the target is derived from."
+                           : "This dataset has no column named " + derived.column + ".",
+                       "/derived_target/column"};
+        return out;
+    }
+    for (const auto& [key, slot] : std::to_array<std::pair<const char*, std::optional<double>*>>(
+             {{"above", &derived.above},
+              {"at_least", &derived.at_least},
+              {"below", &derived.below},
+              {"at_most", &derived.at_most}})) {
+        if (!input.contains(key) || input.at(key).is_null()) {
+            continue;
+        }
+        const auto number = number_of(input.at(key));
+        if (!number) {
+            out.problem = {std::string(key) + " is a number.",
+                           "/derived_target/" + std::string(key)};
+            return out;
+        }
+        *slot = number;
+    }
+    if (input.contains("values") && input.at("values").is_array()) {
+        for (const json& value : input.at("values")) {
+            if (!empty_value(value)) {
+                derived.values.push_back(value_text(value));
+            }
+        }
+    }
+    const bool numeric = numeric_rule(derived);
+    if (numeric == !derived.values.empty()) {
+        out.problem = {numeric ? "derived_target takes a numeric rule (above, at_least, below, "
+                                 "at_most) or values, not both."
+                               : "derived_target needs a rule: above, at_least, below or at_most "
+                                 "a number, or the values that count as yes.",
+                       "/derived_target"};
+        return out;
+    }
+    if (numeric && text_of(*source, "kind") != "numeric") {
+        out.problem = {derived.column + " is not a number (" + text_of(*source, "title") +
+                           "), so a numeric rule cannot read it. Name the values that count as "
+                           "yes instead.",
+                       "/derived_target/column"};
+        return out;
+    }
+    if ((derived.above && derived.at_least) || (derived.below && derived.at_most)) {
+        out.problem = {"Use one lower bound (above or at_least) and one upper bound (below or "
+                       "at_most).",
+                       "/derived_target"};
+        return out;
+    }
+    const auto low = derived.above ? derived.above : derived.at_least;
+    const auto high = derived.below ? derived.below : derived.at_most;
+    if (low && high && *low >= *high) {
+        out.problem = {"The lower bound is not below the upper bound, so no row would count as "
+                       "yes.",
+                       "/derived_target"};
+        return out;
+    }
+    if (!derived.name.empty()) {
+        const bool plain = std::ranges::all_of(
+            derived.name, [](unsigned char c) { return std::isalnum(c) != 0 || c == '_'; });
+        if (!plain || derived.name.size() > 63 ||
+            std::isdigit(static_cast<unsigned char>(derived.name[0])) != 0) {
+            out.problem = {"name is letters, digits and underscores, not starting with a digit, "
+                           "at most 63 characters.",
+                           "/derived_target/name"};
+            return out;
+        }
+        if (find(columns, derived.name) != nullptr) {
+            out.problem = {"This dataset already has a column named " + derived.name +
+                               ". Choose another name.",
+                           "/derived_target/name"};
+            return out;
+        }
+    } else {
+        derived.name = derived_name(derived, columns);
+    }
+    out.derived = std::move(derived);
+    return out;
+}
+
+std::string derived_rule(const Derived& derived) {
+    std::string rule = derived.column;
+    if (!numeric_rule(derived)) {
+        rule += derived.values.size() == 1 ? " is " : " is one of ";
+        for (std::size_t at = 0; at < derived.values.size(); ++at) {
+            rule += (at == 0                           ? ""
+                     : at + 1 == derived.values.size() ? " or "
+                                                       : ", ") +
+                    derived.values[at];
+        }
+        return rule;
+    }
+    std::string parts;
+    const auto add = [&](const char* word, const std::optional<double>& bound) {
+        if (bound) {
+            parts +=
+                (parts.empty() ? " " : " and ") + std::string(word) + " " + number_text(*bound);
+        }
+    };
+    add("above", derived.above);
+    add("at least", derived.at_least);
+    add("below", derived.below);
+    add("at most", derived.at_most);
+    return rule + parts;
+}
+
+std::string derived_name(const Derived& derived, const json& columns) {
+    std::string name;
+    for (const char c : derived_rule(derived)) {
+        const auto u = static_cast<unsigned char>(c);
+        if (std::isalnum(u) != 0) {
+            name += static_cast<char>(std::tolower(u));
+        } else if (c == '.' || c == '-') {
+            name += c == '.' ? "_" : "minus_";
+        } else if (!name.empty() && name.back() != '_') {
+            name += '_';
+        }
+    }
+    while (!name.empty() && name.back() == '_') {
+        name.pop_back();
+    }
+    if (name.empty() || std::isdigit(static_cast<unsigned char>(name[0])) != 0) {
+        name = "target_" + name;
+    }
+    name = name.substr(0, 54);
+    std::string unique = name;
+    for (int n = 2; find(columns, unique) != nullptr; ++n) {
+        unique = name + "_" + std::to_string(n);
+    }
+    return unique;
+}
+
+Derive derive_target(const json& columns, const std::vector<json>& rows, const Derived& derived) {
+    Derive out;
+    const std::string rule = derived_rule(derived);
+    for (const json& column : columns) {
+        json kept = column;
+        if (text_of(column, "name") == derived.column) {
+            kept["feature"] = {{"use", false},
+                               {"reason",
+                                "the column to predict is derived from it (" + rule +
+                                    "), so it would give the answer away"}};
+        }
+        out.columns.push_back(std::move(kept));
+    }
+    std::size_t yes = 0;
+    std::size_t no = 0;
+    out.rows.reserve(rows.size());
+    for (const json& row : rows) {
+        json kept = row;
+        if (row.is_object()) {
+            const auto value = row.find(derived.column);
+            const auto answer = value == row.end() ? std::optional<bool>() : holds(derived, *value);
+            if (answer) {
+                kept[derived.name] = *answer ? "yes" : "no";
+                (*answer ? yes : no) += 1;
+            }
+        }
+        out.rows.push_back(std::move(kept));
+    }
+    out.columns.push_back(
+        {{"name", derived.name},
+         {"type", "string"},
+         {"kind", "boolean"},
+         {"title", "yes or no, derived"},
+         {"distinct_count", 2},
+         {"null_rate",
+          rows.empty() ? 0.0
+                       : 1.0 - static_cast<double>(yes + no) / static_cast<double>(rows.size())},
+         {"values", json::array({"yes", "no"})},
+         {"counts", json::array({yes, no})},
+         {"identifier", false},
+         {"feature", {{"use", false}, {"reason", "the column to predict"}}},
+         {"predict", {{"can", true}, {"values", json::array({"yes", "no"})}, {"positive", "yes"}}},
+         {"derived", {{"from", derived.column}, {"rule", rule}}}});
+    if (yes + no == 0) {
+        out.problem = "No row of " + derived.column + " can be read for the rule " + rule +
+                      (numeric_rule(derived) ? ": its values are empty or not numbers." : ".");
+    } else if (yes == 0) {
+        out.problem = "No row has " + rule +
+                      ", so there is nothing to learn. Choose another "
+                      "threshold or values.";
+    } else if (no == 0) {
+        out.problem = "Every row has " + rule +
+                      ", so there is nothing to tell apart. Choose "
+                      "another threshold or values.";
+    }
+    return out;
+}
+
+bool label_free(std::string_view methodology) {
+    const std::string word = lowered(methodology);
+    return word == "m-3" || word == "segmentation" || word == "clustering" || word == "cluster";
+}
+
+Prepare
+prepare_unlabeled(const json& columns, const std::vector<json>& rows, const std::string& entity) {
+    Prepare out;
+    Prepared prepared;
+    prepared.copy = true;
+    bool numbered = entity.empty();
+    if (!numbered) {
+        std::set<std::string> names;
+        for (const json& row : rows) {
+            const auto value = row.is_object() ? row.find(entity) : row.end();
+            if (!row.is_object() || value == row.end() || empty_value(*value)) {
+                numbered = true;
+                break;
+            }
+            names.insert(value_text(*value));
+        }
+        if (!numbered && names.size() != rows.size()) {
+            numbered = true;
+        }
+        if (numbered) {
+            prepared.note = entity + " repeats or is empty in some rows, so Lake numbered the "
+                                     "rows to tell them apart.";
+        }
+    }
+    prepared.entity = numbered ? row_number_column(columns) : entity;
+    std::vector<std::string> inputs;
+    for (const json& column : columns) {
+        const std::string name = text_of(column, "name");
+        if (!numbered && name == entity) {
+            continue;
+        }
+        if (!column.contains("feature") || !column["feature"].value("use", false)) {
+            prepared.dropped.push_back(
+                {{"name", name},
+                 {"reason",
+                  column.contains("feature")
+                      ? column["feature"].value("reason", std::string("not usable"))
+                      : std::string("its kind is not known")}});
+            continue;
+        }
+        inputs.push_back(name);
+        prepared.used.push_back(name);
+    }
+    if (inputs.empty()) {
+        out.problem = "None of this dataset's columns is a number or a short category, so there "
+                      "is nothing to group rows by.";
+        return out;
+    }
+    prepared.header.push_back(prepared.entity);
+    prepared.header.insert(prepared.header.end(), inputs.begin(), inputs.end());
+    std::size_t number = 0;
+    for (const json& row : rows) {
+        ++number;
+        if (!row.is_object()) {
+            ++prepared.skipped;
+            continue;
+        }
+        json line = json::object();
+        if (numbered) {
+            line[prepared.entity] = number;
+        } else {
+            line[prepared.entity] = row.at(entity);
+        }
+        for (const std::string& input : inputs) {
+            const auto value = row.find(input);
+            line[input] = value == row.end() ? json(nullptr) : *value;
+        }
+        prepared.content += line.dump();
+        prepared.content += '\n';
+        ++prepared.rows;
+    }
+    if (prepared.rows == 0) {
+        out.problem = "The dataset has no rows to group.";
+        return out;
+    }
+    out.prepared = std::move(prepared);
+    return out;
 }
 
 } // namespace lake::api::quickstart_columns

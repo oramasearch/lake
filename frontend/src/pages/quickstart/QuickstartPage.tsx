@@ -3,9 +3,9 @@
  * (start_quickstart, quickstart_status, train_quickstart, quickstart_snippets), so an agent can do
  * the same over MCP; the page shows each step's state, resumes where the person stopped, says what
  * a paid step costs before it runs, and offers the top-up link when the balance blocks it. */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { Brain, Code2, Database, KeyRound, Plus, Search, SearchX, Wallet } from "lucide-react";
+import { Brain, Code2, Database, KeyRound, MessageSquare, Plus, RotateCcw, Search, SearchX, Wallet } from "lucide-react";
 import { act, ApiError, usePostRead, useRead, type Row } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTrail } from "@/lib/trail";
@@ -13,6 +13,7 @@ import { Banner, Button, Card, CopyBlock, Empty, ErrorBlock, FilePicker, Page, S
 import { addFundsPath } from "@/pages/billing/balance";
 import { money } from "@/pages/billing/billing";
 import { nameForFile } from "@/pages/train/upload";
+import { AskComposer, AskMessages, sendMessage, useConversation } from "@/pages/ask/conversation";
 import {
   MAX_UPLOAD_BYTES,
   blockedBy,
@@ -37,6 +38,9 @@ import {
   uploadContent,
   withKey,
   keyCovers,
+  modelStepTitle,
+  opensConversation,
+  whereItLives,
   siteOrigin,
   type Costs,
   type Snippets,
@@ -148,6 +152,7 @@ function Steps({ status }: { status: QuickstartStatus | null }) {
             <span className="min-w-0">
               <span className="text-[13.5px] text-ink">{step.title}</span>
               {step.error ? <span className="block text-[12.5px] text-bad">{step.error.message}</span> : null}
+              {step.note ? <span className="block text-[12.5px] text-ink-3">{step.note}</span> : null}
             </span>
             <Status value={step.state} tone={stepTone(step.state)} />
           </li>
@@ -339,7 +344,7 @@ function Started({ status, costs, blocked, onChanged }: { status: QuickstartStat
       ) : null}
       {searchable ? <TrySearch status={status} /> : null}
       {searchable ? <Website status={status} /> : null}
-      {searchable ? <Train status={status} costs={costs} blocked={blocked} onChanged={onChanged} /> : null}
+      {searchable ? <ModelStep status={status} costs={costs} blocked={blocked} onChanged={onChanged} /> : null}
     </>
   );
 }
@@ -550,11 +555,150 @@ function Website({ status }: { status: QuickstartStatus }) {
   );
 }
 
+/** Step 4 (lake#1182, docs/ui/quickstart.md#step-4-decide-what-to-build): an Ask Orama conversation
+ * about the dataset just added, opened on its own once search works. The agent proposes what is
+ * worth building (a model, a derived target, clustering, opportunities, an app such as an analysis
+ * dashboard, an analysis, a generated corpus) and the person confirms in the chat. Confirming a
+ * model runs train_quickstart, and the step becomes the training below. "Choose the columns myself"
+ * stays as a small fallback. Never a dead end. */
+function ModelStep({ status, costs, blocked, onChanged }: { status: QuickstartStatus; costs: Costs | undefined; blocked: boolean; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const opened = useRef("");
+  const open = useCallback(
+    (restart = false) => {
+      setBusy(true);
+      setError(null);
+      act<QuickstartStatus>("start_quickstart_conversation", {
+        customer_id: status.customer_id,
+        workspace_id: status.workspace_id,
+        quickstart_id: status.quickstart_id,
+        ...(restart ? { restart: true } : {}),
+      })
+        .then(onChanged, setError)
+        .finally(() => setBusy(false));
+    },
+    [status.customer_id, status.workspace_id, status.quickstart_id, onChanged],
+  );
+  // Opened once per quickstart, as soon as search works: the person never has to ask for it.
+  useEffect(() => {
+    if (opensConversation(status, blocked) && opened.current !== status.quickstart_id) {
+      opened.current = status.quickstart_id ?? "";
+      open();
+    }
+  }, [status, blocked, open]);
+  const training = !!status.training || !!status.model;
+  if (training) {
+    return (
+      <>
+        <Train status={status} costs={costs} blocked={blocked} onChanged={onChanged} />
+        {status.conversation ? (
+          <details className="text-[12.5px]" data-testid="quickstart-conversation-done">
+            <summary className="cursor-pointer text-ink-2">The conversation about {status.dataset?.name ?? "this dataset"}</summary>
+            <QuickstartConversation status={status} onChanged={onChanged} />
+          </details>
+        ) : null}
+      </>
+    );
+  }
+  return (
+    <Card
+      label="Step 4"
+      title={modelStepTitle(status)}
+      tone="active"
+      actions={
+        status.conversation ? (
+          <Button variant="ghost" loading={busy} onClick={() => open(true)} data-testid="quickstart-conversation-restart">
+            <RotateCcw size={14} aria-hidden /> Start over
+          </Button>
+        ) : null
+      }
+    >
+      <div data-testid="quickstart-model-step">
+        <p className="mt-0 text-[13px] text-ink-2">
+          Ask Orama has read {status.dataset?.name ?? "your dataset"} and proposes what is worth building on it: a model, opportunities, an app such as a dashboard, an analysis, or generated data first. Talk it through, then confirm what you want; nothing runs before you confirm.
+        </p>
+        {isBlocked(error) || (blocked && !status.conversation) ? (
+          <TopUp customerId={status.customer_id} />
+        ) : status.conversation ? (
+          <QuickstartConversation status={status} onChanged={onChanged} />
+        ) : error ? (
+          <>
+            <ErrorBlock error={error} />
+            <Button variant="primary" loading={busy} onClick={() => open()} data-testid="quickstart-conversation-open">
+              <MessageSquare size={14} aria-hidden /> Ask Orama what to build
+            </Button>
+          </>
+        ) : (
+          <div data-testid="quickstart-conversation-opening">
+            <p className="text-[12.5px] text-ink-3">Opening Ask Orama on {status.dataset?.name ?? "your dataset"}…</p>
+            <Skeleton lines={2} />
+          </div>
+        )}
+        <details className="mt-3 text-[12.5px]" data-testid="quickstart-choose-columns">
+          <summary className="cursor-pointer text-ink-2">Choose the columns myself</summary>
+          <Train status={status} costs={costs} blocked={blocked} onChanged={onChanged} bare />
+        </details>
+      </div>
+    </Card>
+  );
+}
+
+/** The quickstart's Ask Orama conversation (lake#1182): the shared conversation, held in the
+ * quickstart's workspace, with every message carrying the dataset's context (`conversation.page`). */
+function QuickstartConversation({ status, onChanged }: { status: QuickstartStatus; onChanged: () => void }) {
+  const opened = status.conversation!;
+  const scope = useMemo(() => ({ customerId: status.customer_id, workspaceId: status.workspace_id }), [status.customer_id, status.workspace_id]);
+  const [task, setTask] = useState(opened.task_id ?? "");
+  useEffect(() => {
+    setTask(opened.task_id ?? "");
+  }, [opened.conversation_id, opened.task_id]);
+  const onSettled = useCallback(() => setTask(""), []);
+  const conversation = useConversation({ kind: "ask", conversationId: opened.conversation_id, taskId: task, onSettled, scope });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const send = async (message: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const answer = await sendMessage({ ...scope, conversationId: opened.conversation_id, kind: "ask", agent: "agent-ask-orama", message, from: "", page: opened.page });
+      setTask(answer.task_id ?? "");
+      return true;
+    } catch (e) {
+      setError(e);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="grid gap-2" data-testid="quickstart-conversation" data-conversation={opened.conversation_id}>
+      <AskMessages
+        conversationId={opened.conversation_id}
+        list={conversation.list}
+        loading={conversation.messages.isLoading}
+        error={conversation.messages.error ?? conversation.settleError ?? conversation.task.error}
+        working={conversation.working}
+        task={conversation.task.data}
+        agent="agent-ask-orama"
+        scope={scope}
+        onConfirmed={() => onChanged()}
+        empty={<p>Ask Orama is reading {status.dataset?.name ?? "your dataset"}.</p>}
+        after={(capability) => {
+          const where = whereItLives(capability);
+          return where ? <Link to={`/w/${encodeURIComponent(status.workspace_id)}${where.path}`}>Open {where.label}</Link> : null;
+        }}
+      />
+      <AskComposer busy={busy} error={error} onSend={send} compact label="Reply to Ask Orama" placeholder="Which idea is the most interesting? Can it predict something?" />
+    </div>
+  );
+}
+
 /** Step 4: one click trains a model on the same dataset, with its progress; once trained it is
  * published by the same click, so the website code grows its answers. Any column types train
  * (lake#1181): the choices list only columns the model can predict, with their detected types, and
  * the page shows what Lake does with every column and the snapshot date its dates are read as of. */
-function Train({ status, costs, blocked, onChanged }: { status: QuickstartStatus; costs: Costs | undefined; blocked: boolean; onChanged: () => void }) {
+function Train({ status, costs, blocked, onChanged, bare }: { status: QuickstartStatus; costs: Costs | undefined; blocked: boolean; onChanged: () => void; bare?: boolean }) {
   const columns = status.dataset?.columns ?? [];
   const known = detected(columns);
   const names = columns.length ? columns.map((c) => c.name) : status.index?.fields ?? [];
@@ -586,11 +730,16 @@ function Train({ status, costs, blocked, onChanged }: { status: QuickstartStatus
   const running = model?.state === "running" || status.state === "trained";
   const failed = model?.state === "failed" || answers?.state === "failed";
   const preparation = status.training?.preparation ?? null;
-  const asked = status.training?.target_value ? `${status.training.target} is ${status.training.target_value}` : status.training?.target;
-  return (
-    <Card label="Step 4" title="Train a Model on the Same Data" tone={done ? "default" : "active"} actions={model ? <Status value={done ? "published" : model.state} tone={done ? "success" : stepTone(model.state)} /> : null}>
+  const derived = status.training?.derived_target;
+  const asked = derived ? derived.rule : status.training?.target_value ? `${status.training.target} is ${status.training.target_value}` : status.training?.target;
+  const clustered = status.model?.serves === false;
+  const body = (
       <div data-testid="quickstart-train">
-        {done ? (
+        {clustered ? (
+          <p className="m-0 text-[13px] text-ink-2" data-testid="quickstart-clustered">
+            The clustering model is trained: it groups the rows of {status.dataset?.name ?? "your dataset"} into segments. <Link to={`/w/${encodeURIComponent(status.workspace_id)}/train/models`}>Train → Models</Link> shows them. A clustering model answers no question per search result, so it is not added to your website.
+          </p>
+        ) : done ? (
           <p className="m-0 text-[13px] text-ink-2">
             The model is trained and published: the search above and your website code show how likely {asked ?? "each result"} is for each result. <Link to="/ship/models">Ship → Models</Link> has its scores and traffic.
           </p>
@@ -599,11 +748,9 @@ function Train({ status, costs, blocked, onChanged }: { status: QuickstartStatus
             <Brain size={14} aria-hidden className="inline" /> {status.state === "trained" ? "Trained. Publishing it…" : `Training on ${status.dataset?.name ?? "your dataset"}${model?.progress?.status ? ` (${model.progress.status})` : ""}. This page follows it; you can leave and come back.`}
           </p>
         ) : known && targets.length === 0 ? (
-          <div data-testid="quickstart-no-target">
-            <Banner tone="warn" title="Nothing to Predict Yet">
-              The model answers a yes-or-no question, so it needs a column with two values (such as yes and no) or a category of a few values. None of this dataset's columns is one. Add such a column to the file and start another quickstart.
-            </Banner>
-          </div>
+          <p className="m-0 text-[12.5px] text-ink-2" data-testid="quickstart-no-target">
+            No column here is a yes-or-no answer or a short category, so there is no column to pick. Ask Orama above can derive one (such as a price above a threshold), group the rows with clustering, or suggest another way to start.
+          </p>
         ) : (
           <>
             <p className="mt-0 text-[13px] text-ink-2">Lake learns to answer a yes-or-no question about one column from the others, then answers it for every search result.</p>
@@ -678,8 +825,13 @@ function Train({ status, costs, blocked, onChanged }: { status: QuickstartStatus
             )}
           </>
         )}
-        {(running || done) && preparation ? <Prepared preparation={preparation} /> : null}
+        {(running || done || clustered) && preparation ? <Prepared preparation={preparation} /> : null}
       </div>
+  );
+  if (bare) return body;
+  return (
+    <Card label="Step 4" title="Train a Model on the Same Data" tone={done || clustered ? "default" : "active"} actions={model ? <Status value={done ? "published" : clustered ? "trained" : model.state} tone={done || clustered ? "success" : stepTone(model.state)} /> : null}>
+      {body}
     </Card>
   );
 }

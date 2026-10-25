@@ -371,6 +371,109 @@ json step(std::string_view name,
     return {{"step", name}, {"title", title}, {"state", state}, {"error", std::move(error)}};
 }
 
+// ---- the conversation (lake#1182) ----
+
+// The most of the columns' description the conversation's first turn carries.
+constexpr std::size_t max_page_columns_text = 6000;
+
+// What the Ask Orama conversation about this quickstart knows from the first turn on, as
+// send_ask_message's `page` (its values are text): where the person is, the dataset, its row
+// count, each column with its detected kind and whether it can be predicted, and the search index.
+// So the agent starts from "here is what you could build with this dataset", never "which
+// dataset?".
+json conversation_page(const json& record) {
+    const json dataset = record.value("dataset", json(nullptr));
+    const json index = record.value("index", json(nullptr));
+    json page{{"path", "/"},
+              {"quickstart", "model step: decide what to build on the dataset just added"},
+              {"quickstart_id", text(record, "id")}};
+    if (dataset.is_object()) {
+        page["dataset"] = text(dataset, "name");
+        page["dataset_id"] = text(dataset, "id");
+        page["dataset_path"] = text(dataset, "database") + "." + text(dataset, "name");
+        if (dataset.contains("rows") && dataset["rows"].is_number()) {
+            page["rows"] = qc::value_text(dataset["rows"]);
+        }
+        std::string columns;
+        std::string predictable;
+        const json listed = dataset.value("columns", json::array());
+        for (const json& column : listed.is_array() ? listed : json::array()) {
+            const std::string name = text(column, "name");
+            std::string said = name;
+            if (!text(column, "title").empty()) {
+                said += ": " + text(column, "title");
+            } else if (!text(column, "type").empty()) {
+                said += ": " + text(column, "type");
+            }
+            if (column.contains("predict") && column["predict"].value("can", false)) {
+                said += " (can be predicted)";
+                predictable += (predictable.empty() ? "" : ", ") + name;
+            }
+            if (columns.size() + said.size() + 2 > max_page_columns_text) {
+                columns += "; and more columns (list_datasets has them all)";
+                break;
+            }
+            columns += (columns.empty() ? "" : "; ") + said;
+        }
+        if (!columns.empty()) {
+            page["columns"] = columns;
+        }
+        page["predictable_columns"] =
+            predictable.empty() ? std::string("none: no column is a yes-or-no answer or a short "
+                                              "category")
+                                : predictable;
+    }
+    if (index.is_object()) {
+        page["search_index"] = text(index, "id");
+        page["search_index_published"] = index.value("published", false) ? "yes" : "no";
+    }
+    if (!text(record, "snapshot_date").empty()) {
+        page["snapshot_date"] = text(record, "snapshot_date");
+    }
+    return page;
+}
+
+// The conversation as quickstart_status names it: its id, its first turn, the page every turn
+// sends, and the calls that read and continue it. Null until it is started.
+json conversation_of(const json& record) {
+    const json conversation = record.value("conversation", json(nullptr));
+    if (!conversation.is_object()) {
+        return nullptr;
+    }
+    const std::string customer_id = text(record, "customer_id");
+    const std::string workspace_id = text(record, "workspace_id");
+    const std::string id = text(conversation, "id");
+    const json page = conversation_page(record);
+    return {{"conversation_id", id},
+            {"task_id",
+             text(conversation, "task_id").empty() ? json(nullptr)
+                                                   : json(text(conversation, "task_id"))},
+            {"started_at", conversation.value("started_at", json(nullptr))},
+            {"page", page},
+            {"read",
+             {{"capability", "get_ask_conversation"},
+              {"input",
+               {{"customer_id", customer_id},
+                {"workspace_id", workspace_id},
+                {"conversation_id", id}}}}},
+            {"reply",
+             {{"capability", "send_ask_message"},
+              {"input",
+               {{"customer_id", customer_id},
+                {"workspace_id", workspace_id},
+                {"conversation_id", id},
+                {"page", page},
+                {"message", ""}}}}}};
+}
+
+// The person's first message when they write none.
+std::string opening_message(const json& record) {
+    const json dataset = record.value("dataset", json(nullptr));
+    const std::string name = dataset.is_object() ? text(dataset, "name") : std::string();
+    return "I just added the dataset " + (name.empty() ? std::string("in the Quickstart") : name) +
+           ". What could I build with it? Which ideas are the most interesting?";
+}
+
 // The answer every quickstart capability gives: its steps in order with their state, the ids, the
 // calls that reach what it made, and what to do next.
 json status_of(const json& record, const json& progress) {
@@ -387,6 +490,10 @@ json status_of(const json& record, const json& progress) {
         model_id = progress["model_id"];
     }
     const bool model_published = model.is_object() && model.value("published", false);
+    // A segmentation / clustering model answers no question per row, so it is not published for
+    // the website (lake#1182): its model answers step is skipped and the quickstart ends there.
+    const bool model_serves = !(model.is_object() && model.value("serves", true) == false);
+    const json conversation = record.value("conversation", json(nullptr));
 
     json steps = json::array();
     steps.push_back(step("workspace", "Workspace", "done"));
@@ -425,12 +532,19 @@ json status_of(const json& record, const json& progress) {
         model_step["progress"] = progress;
     }
     steps.push_back(std::move(model_step));
-    steps.push_back(step("model_answers",
-                         "Model Answers on Your Website",
-                         model_published                                 ? "done"
-                         : error_of(record, "model_answers").is_object() ? "failed"
-                                                                         : "pending",
-                         error_of(record, "model_answers")));
+    json answers_step = step("model_answers",
+                             "Model Answers on Your Website",
+                             model_published                                 ? "done"
+                             : !model_serves                                 ? "skipped"
+                             : error_of(record, "model_answers").is_object() ? "failed"
+                                                                             : "pending",
+                             error_of(record, "model_answers"));
+    if (!model_serves) {
+        answers_step["note"] = "A clustering model groups rows into segments; it answers no "
+                               "question per search result, so it is not published for the "
+                               "website. Train → Models shows its segments.";
+    }
+    steps.push_back(std::move(answers_step));
 
     std::string state = "in_progress";
     std::string next;
@@ -458,6 +572,11 @@ json status_of(const json& record, const json& progress) {
             state = "done";
             next = "Done: quickstart_snippets answers the website code with search results and "
                    "model answers. start_quickstart without a quickstart_id starts another.";
+        } else if (!model_serves && !model_id.empty()) {
+            state = "done";
+            next = "Done: the clustering model is trained (Train → Models shows its segments) and "
+                   "quickstart_snippets answers the website's search code. start_quickstart "
+                   "without a quickstart_id starts another.";
         } else if (model_state == "running") {
             state = "training";
             next = "The model is training: read quickstart_status until the model step is done, "
@@ -465,10 +584,20 @@ json status_of(const json& record, const json& progress) {
         } else if (model_state == "done") {
             state = "trained";
             next = "Call train_quickstart again to publish the model.";
+        } else if (index_published && !conversation.is_object()) {
+            state = "search_ready";
+            next = "Search works: quickstart_snippets answers the website code. Next, decide what "
+                   "to build on this dataset: start_quickstart_conversation opens an Ask Orama "
+                   "conversation about it that proposes a model, opportunities, an app, an "
+                   "analysis or a generated corpus; or call train_quickstart with the columns "
+                   "yourself (paid: it runs on the workspace's compute).";
         } else if (index_published) {
             state = "search_ready";
-            next = "Search works: quickstart_snippets answers the website code. train_quickstart "
-                   "trains a model on the same dataset (paid: it runs on the workspace's compute).";
+            next = "Search works, and the Ask Orama conversation about this dataset is open: read "
+                   "it with get_ask_conversation, reply with send_ask_message (send `page` from "
+                   "`conversation.page`), and confirm what it proposes with confirm_ask_proposal; "
+                   "confirming a model runs train_quickstart. Or call train_quickstart with the "
+                   "columns yourself.";
         } else if (have_dataset) {
             next = "Call start_quickstart again with this quickstart_id to build and publish the "
                    "search index.";
@@ -489,6 +618,7 @@ json status_of(const json& record, const json& progress) {
              {"model", nullptr},
              {"search", nullptr},
              {"predict", nullptr},
+             {"conversation", conversation_of(record)},
              {"created_at", record.value("created_at", json(nullptr))},
              {"updated_at", record.value("updated_at", json(nullptr))}};
     // lake#1181: the date the dataset's dates are read as of, and the columns the console offers
@@ -500,6 +630,9 @@ json status_of(const json& record, const json& progress) {
                            : json(nullptr);
     if (!model_id.empty()) {
         out["model"] = {{"id", model_id}, {"published", model_published}};
+        if (!model_serves) {
+            out["model"]["serves"] = false;
+        }
     }
     if (index_published) {
         out["search"] = {{"capability", "search_index"},
@@ -551,6 +684,7 @@ json waiting_for(const std::string& customer_id,
             {"model", nullptr},
             {"search", nullptr},
             {"predict", nullptr},
+            {"conversation", nullptr},
             {"snapshot_date", nullptr},
             {"suggested", nullptr},
             {"created_at", nullptr},
@@ -1260,17 +1394,68 @@ liquid::runtime::task<ApiResult> train_quickstart(const json& input, ApiContext&
 
         std::string dataset_path = source_path;
         json preparation = nullptr;
+        json derived_kept = nullptr;
         std::optional<ApiResult> started;
         if (methodology == qc::prepared_methodology) {
             // Each column's kind from the engine's profile, read again with the column to predict
             // as its label, so the engine's leakage checks run (lake#1181).
             json detected = record["dataset"].value("columns", json::array());
-            if (choice.target.empty() && !qc::detected(detected)) {
+            // A target derived from a column (lake#1182): sent now, or kept from the training
+            // before unless another column to predict is sent.
+            const json derived_input = input.contains("derived_target") ? input.at("derived_target")
+                                       : chosen                         ? json(nullptr)
+                                       : before.is_object()
+                                           ? before.value("derived_target", json(nullptr))
+                                           : json(nullptr);
+            const bool derived_sent = input.contains("derived_target");
+            if ((choice.target.empty() || !derived_input.is_null()) && !qc::detected(detected)) {
                 auto first = take(co_await analyze(
                     context, customer_id, workspace_id, record["dataset"], as_of, {}));
                 if (first) {
                     detected = qc::detect_columns(*first, detected);
                 }
+            }
+            std::optional<qc::Derived> derived;
+            std::optional<std::vector<json>> derived_rows;
+            if (!derived_input.is_null()) {
+                if (!qc::detected(detected)) {
+                    co_return ApiResult::failure("engine_error",
+                                                 "Lake could not read this dataset's columns to "
+                                                 "derive a column to predict from them.",
+                                                 "/derived_target");
+                }
+                auto parsed = qc::parse_derived(derived_input, detected);
+                if (!parsed.derived) {
+                    if (derived_sent) {
+                        co_return ApiResult::failure(
+                            "invalid_input", parsed.problem.message, parsed.problem.path);
+                    }
+                    co_return co_await refuse(
+                        {{"code", "choose_columns"}, {"message", parsed.problem.message}});
+                }
+                auto rows =
+                    take(co_await read_rows(context, customer_id, workspace_id, record["dataset"]));
+                if (!rows) {
+                    co_return co_await refuse(
+                        {{"code", "cannot_prepare"}, {"message", rows.error()}});
+                }
+                qc::Derive made = qc::derive_target(detected, *rows, *parsed.derived);
+                if (!made.problem.empty()) {
+                    if (derived_sent) {
+                        co_return ApiResult::failure(
+                            "invalid_input", made.problem, "/derived_target");
+                    }
+                    co_return co_await refuse(
+                        {{"code", "choose_columns"}, {"message", made.problem}});
+                }
+                derived = std::move(parsed.derived);
+                derived_kept = derived_input;
+                derived_kept["name"] = derived->name;
+                derived_kept["rule"] = qc::derived_rule(*derived);
+                choice.target = derived->name;
+                choice.target_value = "yes";
+                detected = std::move(made.columns);
+                derived_rows = std::move(made.rows);
             }
             if (choice.target.empty() && qc::detected(detected)) {
                 const json suggested = qc::suggest(detected);
@@ -1282,14 +1467,20 @@ liquid::runtime::task<ApiResult> train_quickstart(const json& input, ApiContext&
                 }
             }
             json leakage = json::array();
-            auto analysis = take(co_await analyze(
-                context, customer_id, workspace_id, record["dataset"], as_of, choice.target));
-            if (analysis) {
-                detected = qc::detect_columns(*analysis, detected);
-                leakage = analysis->value("leakage_candidates", json::array());
+            // A derived column is not in the dataset, so the engine cannot check it for leakage;
+            // the column it is derived from is left out instead (derive_target).
+            if (!derived) {
+                auto analysis = take(co_await analyze(
+                    context, customer_id, workspace_id, record["dataset"], as_of, choice.target));
+                if (analysis) {
+                    detected = qc::detect_columns(*analysis, detected);
+                    leakage = analysis->value("leakage_candidates", json::array());
+                }
             }
             if (qc::detected(detected)) {
-                record["dataset"]["columns"] = detected;
+                if (!derived) {
+                    record["dataset"]["columns"] = detected;
+                }
                 if (choice.entity_column.empty() && !input.contains("entity_column")) {
                     const json suggested = qc::suggest(detected);
                     if (suggested["entity_column"].is_string() &&
@@ -1371,8 +1562,11 @@ liquid::runtime::task<ApiResult> train_quickstart(const json& input, ApiContext&
                                        {"applied", applied}};
                         train["entity_column"] = choice.entity_column;
                     } else {
-                        auto rows = take(co_await read_rows(
-                            context, customer_id, workspace_id, record["dataset"]));
+                        auto rows =
+                            derived_rows
+                                ? std::expected<std::vector<json>, std::string>(*derived_rows)
+                                : take(co_await read_rows(
+                                      context, customer_id, workspace_id, record["dataset"]));
                         if (!rows) {
                             co_return co_await refuse(
                                 {{"code", "cannot_prepare"}, {"message", rows.error()}});
@@ -1464,6 +1658,125 @@ liquid::runtime::task<ApiResult> train_quickstart(const json& input, ApiContext&
                 }
             }
         }
+        if (!started && qc::label_free(methodology)) {
+            // Segmentation / clustering (M-3, lake#1182): nothing to predict, so no target. The
+            // engine keys the segments by the column that names a row; without one that is unique
+            // Lake writes a numbered training copy of the usable columns.
+            json detected = record["dataset"].value("columns", json::array());
+            if (!qc::detected(detected)) {
+                auto first = take(co_await analyze(
+                    context, customer_id, workspace_id, record["dataset"], as_of, {}));
+                if (first) {
+                    detected = qc::detect_columns(*first, detected);
+                    record["dataset"]["columns"] = detected;
+                }
+            }
+            if (choice.entity_column.empty() && !input.contains("entity_column") &&
+                qc::detected(detected)) {
+                const json suggested = qc::suggest(detected);
+                if (suggested["entity_column"].is_string()) {
+                    choice.entity_column = suggested["entity_column"];
+                }
+            }
+            choice.target.clear();
+            choice.target_value.clear();
+            json train{{"customer_id", customer_id},
+                       {"workspace_id", workspace_id},
+                       {"name", name},
+                       {"methodology", methodology},
+                       {"holdout_fraction", setting("holdout_fraction", default_holdout)}};
+            std::optional<std::vector<json>> rows;
+            if (qc::detected(detected)) {
+                auto read =
+                    take(co_await read_rows(context, customer_id, workspace_id, record["dataset"]));
+                if (!read) {
+                    co_return co_await refuse(
+                        {{"code", "cannot_prepare"}, {"message", read.error()}});
+                }
+                rows = std::move(*read);
+            }
+            qc::Prepare made =
+                rows ? qc::prepare_unlabeled(detected, *rows, choice.entity_column) : qc::Prepare{};
+            if (rows && !made.prepared) {
+                co_return co_await refuse({{"code", "cannot_prepare"}, {"message", made.problem}});
+            }
+            if (made.prepared && made.prepared->entity == choice.entity_column) {
+                // A unique column names every row: the dataset trains as it is.
+                preparation = {{"methodology", methodology},
+                               {"copy", false},
+                               {"dataset_id", record["dataset"]["id"]},
+                               {"entity", choice.entity_column},
+                               {"used", made.prepared->used},
+                               {"dropped", made.prepared->dropped},
+                               {"label", nullptr},
+                               {"applied", json::array()}};
+                train["dataset_path"] = source_path;
+                train["entity_column"] = choice.entity_column;
+            } else if (made.prepared) {
+                const qc::Prepared& prepared = *made.prepared;
+                std::string format = "jsonl";
+                std::string content = prepared.content;
+                if (content.size() > qc::max_upload_bytes) {
+                    format = "csv";
+                    content = qc::csv_content(prepared);
+                }
+                if (content.size() > qc::max_upload_bytes) {
+                    co_return co_await refuse(
+                        {{"code", "cannot_prepare"},
+                         {"message",
+                          "The columns the model groups rows by are larger than Lake loads in "
+                          "one call (16 MiB). Train this dataset from Train → Models, or start "
+                          "the quickstart with a smaller file."}});
+                }
+                std::string table = text(record["dataset"], "name") + "_training";
+                if (table.size() > 63) {
+                    table = text(record["dataset"], "name").substr(0, 54) + "_training";
+                }
+                const ApiResult uploaded = take(co_await nested(context,
+                                                                "upload_dataset",
+                                                                {{"customer_id", customer_id},
+                                                                 {"workspace_id", workspace_id},
+                                                                 {"content", std::move(content)},
+                                                                 {"format", format},
+                                                                 {"table_name", table},
+                                                                 {"if_exists", "rename"}}));
+                if (!uploaded.ok) {
+                    if (uploaded.error.code == "payment_required") {
+                        co_return uploaded;
+                    }
+                    co_return co_await refuse(error_json(uploaded.error));
+                }
+                const std::string database = text(uploaded.value, "database").empty()
+                                                 ? std::string("datasets")
+                                                 : text(uploaded.value, "database");
+                const std::string copied =
+                    text(uploaded.value, "table").empty() ? table : text(uploaded.value, "table");
+                dataset_path = database + "." + copied;
+                preparation = {
+                    {"methodology", methodology},
+                    {"copy", true},
+                    {"dataset_id", datasets::id_of(database, copied)},
+                    {"format", format},
+                    {"entity", prepared.entity},
+                    {"used", prepared.used},
+                    {"dropped", prepared.dropped},
+                    {"label", nullptr},
+                    {"rows", prepared.rows},
+                    {"skipped", prepared.skipped},
+                    {"note", prepared.note.empty() ? json(nullptr) : json(prepared.note)},
+                    {"applied", json::array()}};
+                train["dataset_path"] = dataset_path;
+                train["entity_column"] = prepared.entity;
+                choice.entity_column = prepared.entity;
+            } else {
+                // The engine could not profile the dataset: trained as it is.
+                train["dataset_path"] = source_path;
+                if (!choice.entity_column.empty()) {
+                    train["entity_column"] = choice.entity_column;
+                }
+            }
+            started = take(co_await nested(context, "train_model", std::move(train)));
+        }
         if (!started) {
             // Another methodology, or an engine that cannot profile the dataset: trained as it
             // is, with the columns sent.
@@ -1498,6 +1811,7 @@ liquid::runtime::task<ApiResult> train_quickstart(const json& input, ApiContext&
                       {"as_of", as_of},
                       {"dataset_path", dataset_path},
                       {"preparation", preparation},
+                      {"derived_target", derived_kept},
                       {"attempt", attempt}};
         training["run_id"] = text(started->value, "run_id");
         training["started_at"] = now_text();
@@ -1515,6 +1829,18 @@ liquid::runtime::task<ApiResult> train_quickstart(const json& input, ApiContext&
                     {"error", nullptr},
                     {"started_at", record["training"]["started_at"]}};
         co_return ApiResult::success(status_of(record, progress));
+    }
+    // Trained. A segmentation / clustering model groups rows and answers no question per row:
+    // the engine's predict serves only gradient-boosted models, so it is not published for the
+    // website (lake#1182) and the quickstart is done.
+    if (qc::label_free(text(record.value("training", json::object()), "methodology"))) {
+        record["model"] = {{"id", model_id}, {"published", false}, {"serves", false}};
+        clear_error(record, "model_answers");
+        if (auto failure = take(co_await save())) {
+            co_return std::move(*failure);
+        }
+        context.audit_details["model_id"] = model_id;
+        co_return ApiResult::success(status_of(record, json(nullptr)));
     }
     // Trained: publish it, so the website can ask it.
     const ApiResult exposed = take(co_await nested(
@@ -1538,6 +1864,91 @@ liquid::runtime::task<ApiResult> train_quickstart(const json& input, ApiContext&
     }
     context.audit_details["model_id"] = model_id;
     co_return ApiResult::success(status_of(record, json(nullptr)));
+}
+
+// ---- start_quickstart_conversation (lake#1182) ----
+
+liquid::runtime::task<ApiResult> start_quickstart_conversation(const json& input,
+                                                               ApiContext& context) {
+    if (!context.store || !context.workspaces) {
+        co_return ApiResult::failure("store_unavailable", "workspaces are not configured");
+    }
+    if (context.acting_user_id.empty()) {
+        co_return ApiResult::failure("unauthorized",
+                                     "an Ask Orama conversation is held by a person");
+    }
+    const std::string customer_id = input.at("customer_id");
+    const std::string workspace_id = input.at("workspace_id");
+    auto state = take(co_await workspace_state(context, customer_id, workspace_id));
+    if (!state) {
+        co_return std::move(state.error());
+    }
+    if (!state->value("ready", false)) {
+        co_return ApiResult::failure("workspace_not_ready",
+                                     "the workspace is not ready yet; read quickstart_status",
+                                     "/workspace_id");
+    }
+    auto opened = workspace_records(context, customer_id, workspace_id);
+    if (!opened) {
+        co_return failed(opened.error());
+    }
+    auto loaded = take(
+        co_await load(*opened, customer_id, input.value("quickstart_id", std::string()), false));
+    if (!loaded) {
+        co_return std::move(loaded.error());
+    }
+    if (!loaded->record) {
+        co_return ApiResult::failure(
+            "invalid_input",
+            "this workspace has no quickstart yet; call start_quickstart first",
+            "/quickstart_id");
+    }
+    json record = loaded->record->body;
+    context.audit_details["quickstart_id"] = record.at("id");
+    if (!present(record, "dataset")) {
+        co_return ApiResult::failure(
+            "invalid_input",
+            "the quickstart has no dataset yet; call start_quickstart first",
+            "/quickstart_id");
+    }
+    const auto answer = [&]() -> liquid::runtime::task<ApiResult> {
+        const json progress =
+            present(record, "training") && !present(record, "model")
+                ? take(co_await training_progress(context, customer_id, workspace_id, record))
+                : json(nullptr);
+        co_return ApiResult::success(status_of(record, progress));
+    };
+    // Once: the conversation already open is answered, unless `restart` asks for a new one.
+    if (present(record, "conversation") && !input.value("restart", false)) {
+        co_return co_await answer();
+    }
+    std::string message = input.value("message", std::string());
+    if (message.empty()) {
+        message = opening_message(record);
+    }
+    // The same capability the Ask Orama page calls, as the same person: the conversation is kept
+    // in this workspace's Zetta, and the turn runs under their own permissions and metering.
+    json ask{{"customer_id", customer_id},
+             {"workspace_id", workspace_id},
+             {"message", message},
+             {"page", conversation_page(record)}};
+    if (const std::string agent = input.value("agent", std::string()); !agent.empty()) {
+        ask["agent"] = agent;
+    }
+    const ApiResult sent = take(co_await nested(context, "send_ask_message", std::move(ask)));
+    if (!sent.ok) {
+        co_return sent;
+    }
+    record["conversation"] = {{"id", text(sent.value, "conversation_id")},
+                              {"task_id", text(sent.value, "task_id")},
+                              {"message_id", text(sent.value, "message_id")},
+                              {"started_at", now_text()}};
+    Saved saved(*opened, loaded->record->revision, loaded->record->lake_revision);
+    if (auto written = take(co_await saved.save(record)); !written) {
+        co_return failed(written.error());
+    }
+    context.audit_details["conversation_id"] = record["conversation"]["id"];
+    co_return co_await answer();
 }
 
 // ---- quickstart_snippets ----
@@ -2094,7 +2505,9 @@ json status_output_schema() {
         {"properties",
          {{"step", {{"type", "string"}}},
           {"title", {{"type", "string"}}},
-          {"state", {{"type", "string"}, {"enum", {"pending", "running", "done", "failed"}}}},
+          {"state",
+           {{"type", "string"}, {"enum", {"pending", "running", "done", "failed", "skipped"}}}},
+          {"note", {{"type", "string"}}},
           {"error", {{"type", json::array({"object", "null"})}}},
           {"progress", {{"type", json::array({"object", "null"})}}}}},
         {"required", json::array({"step", "title", "state", "error"})}};
@@ -2123,6 +2536,14 @@ json status_output_schema() {
           {"model", {{"type", json::array({"object", "null"})}}},
           {"search", {{"type", json::array({"object", "null"})}}},
           {"predict", {{"type", json::array({"object", "null"})}}},
+          {"conversation",
+           {{"type", json::array({"object", "null"})},
+            {"description",
+             "the Ask Orama conversation about this dataset that decides what to build "
+             "(start_quickstart_conversation, lake#1182): {conversation_id, task_id, "
+             "started_at, page, read, reply}; `read` is the get_ask_conversation call, `reply` "
+             "the send_ask_message call (with `page`) that continues it; null until it is "
+             "started"}}},
           {"snapshot_date",
            {{"type", json::array({"string", "null"})},
             {"description",
@@ -2238,7 +2659,12 @@ void register_quickstart_capabilities(Registry& registry) {
             "quickstart's dataset (train_model; methodology M-1 and a 0.2 held-out share unless "
             "told otherwise, `target` the column to predict, `entity_column` the column that names "
             "a row), and once the run has finished, publishes the model (expose_model) so the "
-            "website can ask it. Any column types train (lake#1181): M-1 answers a yes-or-no "
+            "website can ask it. When no column is a yes-or-no answer, `derived_target` derives "
+            "one from another column (lake#1182: price above 50, a band, or the values that count "
+            "as yes). Methodology M-3 (segmentation / clustering) groups rows without a target; "
+            "its model is trained but not published for the website, because predict serves only "
+            "models that answer a question per row. Any column types train (lake#1181): M-1 "
+            "answers a yes-or-no "
             "question, so `target` is a column with two values or a category with `target_value` "
             "the value to look for (the most common unless sent); left out, the columns "
             "quickstart_status `suggested` names. Date and time columns are read as of "
@@ -2272,9 +2698,34 @@ void register_quickstart_capabilities(Registry& registry) {
              {"entity_column",
               string_schema("the column that identifies a row (default: a detected identifier; "
                             "without one Lake numbers the rows)")},
+             {"derived_target",
+              {{"type", "object"},
+               {"description",
+                "a yes-or-no column to predict derived from another column, when none is one "
+                "(lake#1182): {column, above, at_least, below, at_most, values, name}. A numeric "
+                "rule (above 50; or the band at_least 20 and below 50) reads a number column; "
+                "`values` (the values that count as yes) reads any column. Lake writes the "
+                "training copy with the derived column (yes or no, `name`, default the rule such "
+                "as price_above_50) and leaves the column it is derived from out of the inputs. "
+                "Replaces `target`"},
+               {"properties",
+                {{"column", {{"type", "string"}, {"minLength", 1}}},
+                 {"above", {{"type", "number"}}},
+                 {"at_least", {{"type", "number"}}},
+                 {"below", {{"type", "number"}}},
+                 {"at_most", {{"type", "number"}}},
+                 {"values",
+                  {{"type", "array"},
+                   {"items", {{"type", "string"}, {"minLength", 1}}},
+                   {"minItems", 1}}},
+                 {"name", {{"type", "string"}, {"minLength", 1}, {"maxLength", 63}}}}},
+               {"required", json::array({"column"})},
+               {"additionalProperties", false}}},
              {"methodology",
-              string_schema("a methodology id from list_methodologies (default "
-                            "M-1, tabular supervised learning)")},
+              string_schema("a methodology id from list_methodologies (default M-1, tabular "
+                            "supervised learning, a yes-or-no question); M-3 segmentation / "
+                            "clustering groups rows without a column to predict, and its model "
+                            "is not published for the website")},
              {"holdout_fraction",
               {{"type", "number"},
                {"exclusiveMinimum", 0},
@@ -2290,6 +2741,50 @@ void register_quickstart_capabilities(Registry& registry) {
         .action = "write",
         .resolve_object = customer_object,
         .async_handler = train_quickstart,
+    });
+    registry.add(Capability{
+        .name = "start_quickstart_conversation",
+        .title = "Talk through what to build",
+        .description =
+            "The quickstart process, model step (lake#1182): opens an Ask Orama conversation about "
+            "the quickstart's dataset, so the person (or an agent acting for them) decides what is "
+            "worth building on it. The first turn carries the dataset's name, row count, each "
+            "column with its detected kind and whether it can be predicted, and the search index "
+            "(`conversation.page`), so Ask Orama starts from what this dataset could become. It "
+            "proposes a model (train_quickstart, including a target derived from a column, such "
+            "as price above 50, or segmentation / clustering with methodology M-3), opportunities "
+            "from the Auto-Suggest Agent, an app such as an analysis dashboard from the "
+            "Application Agent, an "
+            "analysis in the conversation, or a generated corpus or labels first; nothing runs "
+            "until the person confirms it with confirm_ask_proposal, and confirming a model "
+            "carries the quickstart on. Kept in the workspace Zetta like any Ask Orama "
+            "conversation; quickstart_status names it in `conversation` with the calls that read "
+            "and continue it. Calling it again answers the open conversation; `restart` starts a "
+            "new one. `message` is the person's first message (default: what could I build with "
+            "this dataset). Ask Orama's model tokens are metered against the account.",
+        .input_schema = input_schema(
+            {{"workspace_id", workspace_schema("the workspace the quickstart is in")},
+             {"quickstart_id", quickstart_id_schema()},
+             {"message",
+              {{"type", "string"},
+               {"minLength", 1},
+               {"maxLength", 4000},
+               {"description",
+                "the person's first message (default: what could I build with this dataset, and "
+                "which ideas are the most interesting)"}}},
+             {"restart",
+              {{"type", "boolean"},
+               {"description", "start a new conversation even when one is open"}}},
+             {"agent",
+              string_schema("the chat agent to talk to, as send_ask_message's `agent` (default "
+                            "agent-ask-orama)")}},
+            json::array({"workspace_id"})),
+        .output_schema = status_output_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .async_handler = start_quickstart_conversation,
     });
     registry.add(Capability{
         .name = "quickstart_snippets",

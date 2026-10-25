@@ -28,6 +28,9 @@ import {
   valuesOf,
   withKey,
   agentPrompt,
+  modelStepTitle,
+  opensConversation,
+  whereItLives,
   DEFAULT_WEBSITE_VIEW,
   WEBSITE_VIEWS,
   type Column,
@@ -210,4 +213,30 @@ test("the agent prompt carries the key only where the page holds it", () => {
   assert.equal(agentPrompt(snippets, "lbk.abc"), "Authorization: Bearer lbk.abc ... Bearer lbk.abc");
   assert.equal(agentPrompt({ key }, "lbk.abc"), null, "a Lake that answers no prompt");
   assert.equal(agentPrompt(null, null), null);
+});
+
+// lake#1182: step 4 is an Ask Orama conversation, opened once search works.
+test("the model step opens its conversation once search works and nothing is training", () => {
+  const ready = { quickstart_id: "q1", index: { id: "i", fields: [], published: true }, conversation: null, training: null, model: null };
+  assert.equal(opensConversation(ready, false), true);
+  assert.equal(opensConversation(ready, true), false, "a blocked balance offers the top-up first");
+  assert.equal(opensConversation({ ...ready, index: { id: "i", fields: [], published: false } }, false), false);
+  assert.equal(opensConversation({ ...ready, conversation: { conversation_id: "c", task_id: null, page: {} } }, false), false, "once");
+  assert.equal(opensConversation({ ...ready, training: { target: "x" } }, false), false);
+  assert.equal(opensConversation(null, false), false);
+  assert.equal(modelStepTitle({ training: null, model: null }), "Decide What to Build");
+  assert.equal(modelStepTitle({ training: { target: "x" }, model: null }), "Train a Model on the Same Data");
+});
+
+test("a confirmed proposal links where what it made lives, and a model goes on in the page", () => {
+  assert.equal(whereItLives("train_quickstart"), null);
+  assert.deepEqual(whereItLives("create_app"), { path: "/ship/apps", label: "Ship → Apps" });
+  assert.deepEqual(whereItLives("generate_dataset"), { path: "/train/data", label: "Data → Datasets" });
+  assert.deepEqual(whereItLives("create_projects_from_opportunities"), { path: "/design/opportunities", label: "Design → Opportunities" });
+  assert.deepEqual(whereItLives("compile_intent"), { path: "/design/projects", label: "Design → Projects" });
+  assert.equal(whereItLives("set_app_env"), null);
+});
+
+test("a skipped step reads as neutral", () => {
+  assert.equal(stepTone("skipped"), "neutral");
 });

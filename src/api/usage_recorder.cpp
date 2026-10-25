@@ -248,6 +248,9 @@ const std::vector<std::pair<std::string_view, std::string_view>>& calls_only_cap
         {"rotate_network_connection_credential", "a desired network-policy record"},
         {"duplicate_methodology", "as create_methodology"},
         {"draft_methodology", "drafted files, kept nowhere"},
+        {"start_quickstart_conversation",
+         "an Ask Orama conversation record; its turn's model tokens are the model gateway's, as "
+         "send_ask_message's (lake#1182)"},
         {"create_webhook", "a forge record"},
         {"resolve_conflict", "a repository change, stored as its repository's storage"},
         {"resolve_drive_share_link", "a link's metadata"},

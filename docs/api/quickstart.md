@@ -10,13 +10,15 @@ A new person drops a dataset and Lake takes it to search and model answers on th
 2. **Search index.** Lake builds a search index over the dataset and publishes it.
 3. **Search on your website.** Code for a plain web page and for React, with Lake's host and the
    ids filled in, and the key the code needs.
-4. **Model.** One call trains a model on the same dataset.
+4. **Decide what to build, then the model.** An Ask Orama conversation about the dataset proposes
+   what is worth building (lake#1182): a model, opportunities, an app, an analysis or a corpus.
+   Confirming a model trains it on the same dataset (one call, `train_quickstart`).
 5. **Model answers on your website.** Once trained, the model is published and the code shows the
    model's answer beside each search result.
 
 Each step has a state (pending, running, done, failed with why). Calling again resumes from the
 step that has not finished. It is the console's home page ([../ui/quickstart.md](../ui/quickstart.md))
-and four capabilities in the one registry, so REST, OpenAPI, MCP, `llms.txt`, `llms-full.txt` and
+and five capabilities in the one registry, so REST, OpenAPI, MCP, `llms.txt`, `llms-full.txt` and
 the Lake skill all carry it. An agent on lake.live finds it first: the Quickstart group and flow
 come before every other, under a *Start Here* section.
 
@@ -50,7 +52,8 @@ proposed `quickstart_train`; it is `train_quickstart`, an action, beside `train_
 |---|---|---|---|
 | `start_quickstart` | action, paid | `customer_id`; `workspace_id?`; `quickstart_id?` (resume); `content` with `format` (`csv`, `jsonl`) and `name?`, or `dataset_id` (`<database>/<name>`); `fields?` (the columns to search) | The workspace (the account's first, made when it has none, while `workspace_id` is left out), the dataset, its index, publishing it |
 | `quickstart_status` | read | `customer_id`, `workspace_id`, `quickstart_id?` (default: the newest), `include_costs?` | Every step's state, the ids, the training's progress read live, `next`, the workspace's quickstarts; with `include_costs`, `costs` |
-| `train_quickstart` | action, paid | `customer_id`, `workspace_id`, `quickstart_id?`, `target?` (default: `suggested`), `target_value?` (the value of a category to look for), `entity_column?`, `as_of?` (the snapshot date), `methodology?` (default `M-1`), `holdout_fraction?` (default 0.2), `name?` | Prepares the columns ([columns](#columns)) and starts training; called again once trained, publishes the model; a failed run is trained again by the next call |
+| `start_quickstart_conversation` | action, paid (an Ask Orama turn, in model tokens) | `customer_id`, `workspace_id`, `quickstart_id?`, `message?` (the person's first message), `restart?` | Opens the Ask Orama conversation that decides what to build on the dataset ([the conversation](#the-conversation-lake1182)); calling again answers the open one |
+| `train_quickstart` | action, paid | `customer_id`, `workspace_id`, `quickstart_id?`, `target?` (default: `suggested`), `target_value?` (the value of a category to look for), `derived_target?` ([a derived target](#a-derived-target)), `entity_column?`, `as_of?` (the snapshot date), `methodology?` (default `M-1`; `M-3` for [clustering](#clustering)), `holdout_fraction?` (default 0.2), `name?` | Prepares the columns ([columns](#columns)) and starts training; called again once trained, publishes the model (a clustering model is not published); a failed run is trained again by the next call |
 | `quickstart_snippets` | action, authorized as a read (POST) | `customer_id`, `workspace_id`, `quickstart_id?`, `origins?` (the website's origins: makes the key now) | `snippets` (`html`, `react`, `curl`, each `{id, title, language, code}`), `prompt` ([the agent prompt](#the-agent-prompt)), `key` (`kind: "browser_key"`, `placeholder`, `capabilities`, `create`: the `create_browser_key` call, `secret` and `browser_key` when it made one, `note`), `mcp`, `ready`, `includes_model` |
 
 `start_quickstart` takes up to 64 MiB of JSON, as `upload_dataset` does; the engine takes at most
@@ -83,7 +86,9 @@ proposed `quickstart_train`; it is `train_quickstart`, an action, beside `train_
 ```
 
 `state` is one of `waiting_for_workspace`, `not_started`, `in_progress`, `search_ready`, `training`,
-`trained`, `done` or `failed`. A failed step carries `error: {code, message}`, the refusal of the
+`trained`, `done` or `failed`. A step's state is `pending`, `running`, `done`, `failed` or, for
+`model_answers` after a clustering model, `skipped` with a `note`. `conversation` names the
+[conversation](#the-conversation-lake1182), null until it is started. A failed step carries `error: {code, message}`, the refusal of the
 capability it called, word for word; `next` names the call that tries it again. The `model` step
 carries `progress` (`status` from `get_run`, `started_at`) while it trains.
 
@@ -275,12 +280,95 @@ The secret is in the prompt only when the same call made the key; the console pu
 holds, the same way it does for the code. The console shows the prompt first, in the *Copy agent
 prompt* tab, and the snippets in *Source code* ([../ui/quickstart.md](../ui/quickstart.md)).
 
+## The conversation (lake#1182)
+
+The model step starts with a conversation, not a guessed column. Before lake#1182 a dataset with no
+yes-or-no column ended in *Nothing to Predict Yet*; Steve, 2026-10-25: *"shouldn't this be an agent
+chat conversation?"*, approved with *"maybe it generates some potential opportunities... or apps?
+maybe a dashboard with analysis?"*.
+
+`start_quickstart_conversation` calls `send_ask_message` as the same person, nested through the
+registry, so the conversation is an ordinary Ask Orama conversation: kept in the workspace Zetta
+(`lake_ask_messages`), readable only by the person who had it, its turn metered as model tokens and
+refused `payment_required` while the balance is blocked. The quickstart record keeps only the
+conversation's id, first task and start time (`conversation`), in the same sealed `lake_quickstarts`
+record. Nothing is added to PostgreSQL.
+
+Every turn sends `page` (`conversation.page`, text values, as `send_ask_message` takes them):
+
+| Key | What it is |
+|---|---|
+| `path`, `quickstart`, `quickstart_id` | `/`, "model step: decide what to build on the dataset just added", the quickstart |
+| `dataset`, `dataset_id`, `dataset_path`, `rows` | The dataset's name, `<database>/<name>`, `<database>.<name>` and row count |
+| `columns` | Each column with its detected kind and *(can be predicted)*, at most 6,000 characters |
+| `predictable_columns` | The columns a model can predict, or `none: …` |
+| `search_index`, `search_index_published`, `snapshot_date` | The index and whether it is published; the snapshot date |
+
+So Ask Orama starts from "here is what you could build with this dataset", never "which dataset?"
+(lake#1191 is the same question on `/ask`). What it proposes is decided by Ask Orama
+(`oramasearch/agent-ask-orama`, prompt v15): ideas first (opportunities, an analysis, an analysis
+or dashboard app, models: a yes-or-no target, a [derived target](#a-derived-target),
+[clustering](#clustering)); a generated corpus only when the data supports nothing or the person
+asks. A proposal is confirmed with `confirm_ask_proposal`, which runs only the call Lake stated;
+confirming `train_quickstart` carries the quickstart on.
+
+`conversation` in the answer:
+
+```json
+{"conversation_id": "uuid", "task_id": "uuid", "started_at": "…",
+ "page": {"path": "/", "dataset": "movies", "rows": "40", "columns": "title: identifier; …", …},
+ "read": {"capability": "get_ask_conversation", "input": {"customer_id": "…", "workspace_id": "…", "conversation_id": "uuid"}},
+ "reply": {"capability": "send_ask_message", "input": {"customer_id": "…", "workspace_id": "…", "conversation_id": "uuid", "page": {…}, "message": ""}}}
+```
+
+An agent drives the Quickstart over API or MCP the same way the page does: follow `task_id` with
+`get_agent_task` and call `settle_ask_turn` once it has finished, read the conversation, reply with
+`reply` (its `message` filled in), and confirm a proposal with `confirm_ask_proposal`.
+
+**Dashboards.** Lake has no saved dataset dashboard: Home → Dashboard is the platform overview. An
+analysis dashboard is an App the Application Agent builds (it proposes; nothing deploys before the
+person confirms), or the analysis in the conversation. Saved dashboards are lake#1196.
+
+### A derived target
+
+`derived_target` makes the yes-or-no column M-1 predicts from another column, when none is one:
+
+| Field | Meaning |
+|---|---|
+| `column` | The column it is derived from (required) |
+| `above`, `at_least` | A lower bound, exclusive or inclusive (one of them) |
+| `below`, `at_most` | An upper bound, exclusive or inclusive (one of them) |
+| `values` | The values that count as yes, for any column (instead of bounds) |
+| `name` | The derived column's name (default: the rule, such as `price_above_50`) |
+
+A numeric rule reads a column of kind `numeric`; a band is both bounds (`at_least` 20 and `below`
+50). The derived column is `yes` where the rule holds and `no` where not; a row with an empty value,
+or not a number for a numeric rule, has no answer and is skipped. The column it is derived from is
+left out of the inputs, since it gives the answer away. It always trains on the training copy
+(`<name>_training`). `training.derived_target` keeps `{column, …, name, rule}`, and the next call
+trains with it again unless another `target` is sent. A rule no row (or every row) satisfies is
+refused `invalid_input` in plain words before anything is trained, as is a numeric rule on a column
+that is not a number. The rules are `parse_derived`, `derive_target` and `derived_rule` in
+`src/api/quickstart_columns.cpp`.
+
+### Clustering
+
+`methodology: "M-3"` (segmentation / clustering, k-means; runnable since zetta#1042 and in zetta
+v0.5.0) trains without a column to predict. The engine keys its segments by the column that names a
+row: a detected identifier, else `entity_column`; when that repeats or is empty in a row, Lake writes
+a numbered training copy of the usable columns (`prepare_unlabeled`). Once trained, the model is
+**not** published for the website: the engine's `predict` serves only gradient-boosted models, so a
+clustering model answers no question per search result. `model.serves` is `false`, `model_answers`
+is `skipped` with a note, and `state` is `done`; Train → Models shows the segments. Serving a
+segment per row is lake#1197.
+
 ## Where it lives
 
 Everything is in the user's workspace Zetta: the dataset, the index and the model are the engine's,
 and the quickstart's state is one sealed record per quickstart in the collection `lake_quickstarts`
 (found by the account, newest last; [workspace records](../architecture/workspace-records.md)). Its
-body holds the dataset, index, training settings and run id, model id, and each step's last error.
+body holds the dataset, index, training settings and run id, model id, the conversation's id
+(lake#1182), and each step's last error.
 Nothing of the quickstart's own is added to lake's PostgreSQL control plane: the workspace a person
 gets is the one `start_workspace` makes, and the website key is a browser key (`browser_keys`,
 decision 53), both of which multitenancy already holds. Audit goes to the workspace's own chain
@@ -309,6 +397,13 @@ decision 53), both of which multitenancy already holds. Audit goes to the worksp
 - `QuickstartZetta.ADatasetBecomesSearchAndModelAnswersOnARealEngine` runs the same against a real
   Zetta with `LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` set (a local `zetta --headless`): a
   real search through `search_index`, training, publishing and `predict` on the hits.
+- `Quickstart.TheModelStepIsAnAskOramaConversationAboutTheDataset` opens the conversation over an
+  agent bus (lake#1182): its page, its first message in the workspace, the task for Ask Orama, the
+  status naming it, a second call answering it, `restart`, another account refused.
+  `ATargetDerivedFromANumberColumnTrainsOnTheTrainingCopy` and
+  `AClusteringModelTrainsWithoutATargetAndIsNotPublishedForTheWebsite` cover a derived target and
+  M-3; `QuickstartColumns.ATargetDerived*`, `ADerivedTargetThatCannotTeachAnything*` and
+  `ClusteringNeedsNoTarget*` the rules.
 - By hand over MCP: `tools/call start_quickstart` with a CSV's text, `train_quickstart`,
   `quickstart_status` until `trained`, `train_quickstart` again, `quickstart_snippets` with
   `origins`; the key in the code answers `search_index` and `predict` with that `Origin`, and 403
@@ -320,6 +415,10 @@ decision 53), both of which multitenancy already holds. Audit goes to the worksp
 - What a kind is used for: `describe` in `src/api/quickstart_columns.cpp`; what is offered first:
   `suggest`; a refusal Lake fixes: `fix_for`, and its words: `explain_refusal`.
 
+- What the conversation knows: `conversation_page`; its first message: `opening_message`; what Ask
+  Orama proposes from it: agent-ask-orama's prompt (its Quickstart section).
+- A new derived rule: `Derived`, `parse_derived` and `holds` in `quickstart_columns.cpp`, and the
+  `derived_target` schema in `register_quickstart_capabilities`.
 - A new step: a field on the record, a `step(...)` in `status_of`, its call in the capability that
   owns it (as a nested registry call), its cost in `costs_for`, and the console's card.
 - A new snippet: a function beside `html_snippet` and an entry in `quickstart_snippets`; values go
