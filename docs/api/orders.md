@@ -99,9 +99,11 @@ The apex is anonymous, so the form cannot flood support:
   process. Checkout orders and order forms have separate in-all caps (lake#838), so order forms,
   which anyone can send, can never use up the cap a paying customer is counted against. Past a
   limit: `429`, nothing recorded.
-- **The address** is `X-Real-IP`, which the ingress (ingress-nginx) always sets itself, overwriting
-  any a sender wrote; else the last `X-Forwarded-For` hop (the one the nearest proxy appended); else
-  one bucket for every direct client. Lake never reads `CF-Connecting-IP` or the first
+- **The address** ([client addresses](../deployment/client-addresses.md), lake#1083), from a
+  trusted proxy (`LAKE_TRUSTED_PROXY_CIDRS`), is `X-Real-IP`, which the ingress (ingress-nginx)
+  always sets itself, overwriting any a sender wrote; else the last `X-Forwarded-For` hop (the one
+  the nearest proxy appended); else the proxy's own address. From any other peer it is the peer's
+  address, whatever headers it sent. Lake never reads `CF-Connecting-IP` or the first
   `X-Forwarded-For` hop: a sender that reaches the ingress without passing Cloudflare could write
   either and land in a fresh bucket with each request (lake#838). Which client address to trust is
   the ingress's decision: until it trusts Cloudflare's header from Cloudflare's ranges (https://github.com/oramasearch/orama-operator/issues/719),

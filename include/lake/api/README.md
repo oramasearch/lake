@@ -268,8 +268,12 @@ preserve raw counts and bill each direction separately. `test_model_gateway.cpp`
 `test_billing.cpp` cover provider-call refusal and invoice amounts, including a missing price.
 `authentication_work.hpp` limits authentication to two queued/running blocking jobs; its permit
 outlives the callable, so disconnects cannot release capacity early (lake#969).
-`ApiContext::client_address` is the address the trusted ingress hop decided (the HTTP server's
-`order_client_address`, `direct` without one), and the registry shares
+`client_address.hpp` (lake#1083) decides which address per-client limits count: what a trusted
+proxy (`ServerOptions::trusted_proxies`, `LAKE_TRUSTED_PROXY_CIDRS`, default loopback and the
+private ranges) reported in `X-Real-IP` or the last `X-Forwarded-For` hop, else the peer's own
+address. See [client addresses](../../../docs/deployment/client-addresses.md).
+`ApiContext::client_address` is that address (the HTTP server's `order_client_address`, `direct`
+when the peer is unknown), and the registry shares
 its client attempt table across transports. See [the contract](../../../docs/api/identity.md#authentication-attempt-limits).
 `ApiContext::recovery_client_address` carries ingress-derived transport metadata for anonymous
 recovery limits. It is never capability input; empty addresses share a bucket. See

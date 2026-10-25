@@ -28,8 +28,9 @@ capability, so application pools get the same behaviour.
 
 REST, hosted application forms and MCP also share 100 failed attempts per trusted client address
 per fifteen minutes, across these operations and account-deletion step-up. The HTTP adapter
-reuses the order/recovery address rule: ingress-nginx's rewritten `X-Real-IP`, else the final
-`X-Forwarded-For` hop, else a shared direct-client bucket. It ignores `CF-Connecting-IP` and earlier
+reuses the order/recovery address rule ([client addresses](../deployment/client-addresses.md)):
+from a trusted proxy, ingress-nginx's rewritten `X-Real-IP`, else the final `X-Forwarded-For` hop,
+else the proxy's address; from any other peer, the peer's address. It ignores `CF-Connecting-IP` and earlier
 forwarded hops. Deployments must preserve ingress header sanitizing and prevent direct access
 around that ingress. Capability input cannot supply transport metadata; in-process callers share
 a client bucket. TAAP, passkeys and external identity-provider verification are outside these

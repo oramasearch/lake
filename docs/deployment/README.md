@@ -8,6 +8,8 @@
 - [How the operator applies a lake version](operator-interface.md): `lake migrate` (the schema
   from the image) and `lake manifest` (Stripe events, products, environment), with their JSON and
   exit codes (lake#1119, orama-operator#936).
+- [Client addresses](client-addresses.md): which address per-client limits count, and the
+  trusted proxies (`LAKE_TRUSTED_PROXY_CIDRS`).
 - [Stripe](stripe.md) and [Resend](resend.md): payment and transactional email setup.
 
 The [documentation index](../README.md) lists the remaining deployment records and runbooks.

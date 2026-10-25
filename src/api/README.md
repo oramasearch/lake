@@ -380,6 +380,10 @@ sign-in results may include a JWT; API-token issuance retains only its derived s
 lock, before any thread opens a repository: liquid creates it without a lock, and two first uses
 at once break it for the process ([store volume](../../docs/deployment/store-volume.md#liquids-local-identity)).
 
+`client_address.cpp` (lake#1083) parses `LAKE_TRUSTED_PROXY_CIDRS` and picks the address a
+request's per-client limits count: the one a trusted proxy reported, else the connection's peer,
+which `HttpConnections::peer` gives the route ([client addresses](../../docs/deployment/client-addresses.md)).
+
 `http_connections.hpp` (lake#534) accepts and serves `http_server.cpp`'s connections: one session
 coroutine per connection up to `LAKE_HTTP_MAX_CONNECTIONS` (503 above it), a request worker only
 while a route runs (taken after any store-root wait, given back by the capabilities declared
