@@ -30,6 +30,7 @@
 #include "lake/control/memory_store.hpp"
 #include "lake/control/zetta_control.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "api/quickstart_columns.hpp"
 #include "workspace_fixture.hpp"
 
 namespace {
@@ -167,6 +168,15 @@ struct Engine {
             return json{{"hits", json::array()}};
         }
         if (capability == "train_model") {
+            // zetta v0.5.0's segmentation (src/core/ml/segmentation_methodology.cpp) refuses a
+            // held-out share, word for word (lake#1203).
+            if (input.value("methodology", std::string()) == "M-3" &&
+                (input.contains("holdout_fraction") || input.contains("top_k"))) {
+                return ZettaControlResult<json>(std::unexpected(ZettaControlError{
+                    "invalid_input",
+                    "segmentation has no supervised holdout or ranked top_k; configure its K "
+                    "range in the graph hints"}));
+            }
             ++run_count;
             return json{{"run_id", "run-" + std::to_string(run_count)},
                         {"status", "running"},
@@ -930,7 +940,19 @@ TEST(Quickstart, AClusteringModelTrainsWithoutATargetAndIsNotPublishedForTheWebs
     EXPECT_EQ(trains[0]["methodology"], "M-3");
     EXPECT_EQ(trains[0]["entity_column"], "customer_id") << "the detected identifier";
     EXPECT_EQ(trains[0]["dataset_path"], "datasets.people") << "unique names: as it is";
+    // lake#1203: segmentation has no held-out share, and the engine chooses the segments itself.
+    EXPECT_FALSE(trains[0].contains("holdout_fraction"));
+    EXPECT_EQ(training.value["training"]["holdout_fraction"], nullptr);
     EXPECT_TRUE(copies(q).empty());
+    // What a confirm in the conversation says, and what Ask Orama's page says, while it trains
+    // (lake#1204).
+    const auto started = lake::api::quickstart_columns::confirm_outcome(training.value);
+    ASSERT_TRUE(started);
+    EXPECT_TRUE(started->ok);
+    EXPECT_NE(started->text.find("Training started: a clustering model on people"),
+              std::string::npos)
+        << started->text;
+    EXPECT_NE(started->text.find("Train → Models shows the segments"), std::string::npos);
 
     q.engine.run_status = "succeeded";
     auto finished = q.by(me, "train_quickstart", {{"workspace_id", me.workspace_id}});
@@ -943,6 +965,81 @@ TEST(Quickstart, AClusteringModelTrainsWithoutATargetAndIsNotPublishedForTheWebs
     EXPECT_FALSE(answers["note"].get<std::string>().empty());
     EXPECT_EQ(count(q.engine_calls(), "expose_model"), 0U);
     EXPECT_EQ(finished.value["predict"], nullptr);
+    const auto trained = lake::api::quickstart_columns::confirm_outcome(finished.value);
+    ASSERT_TRUE(trained);
+    EXPECT_NE(trained->text.find("The clustering model is trained"), std::string::npos);
+}
+
+// lake#1203, lake#1204: a clustering the engine refuses to start is said in plain words on the
+// model step, the choices are kept so Try again trains the same clustering, and a confirm in the
+// conversation is a failure, not "Done: train_quickstart".
+TEST(Quickstart, ARefusedClusteringIsSaidPlainlyAndTryAgainKeepsIt) {
+    Quickstart q;
+    People::load(q.engine);
+    const auto& me = q.first;
+    ASSERT_TRUE(q.by(me,
+                     "start_quickstart",
+                     {{"workspace_id", me.workspace_id},
+                      {"content", "customer_id\nc-0\n"},
+                      {"format", "csv"},
+                      {"name", "people"}})
+                    .ok);
+    q.engine.fail_next["train_model"] = {
+        "invalid_input", "segmentation: the table has no eligible feature columns"};
+    auto refused =
+        q.by(me, "train_quickstart", {{"workspace_id", me.workspace_id}, {"methodology", "M-3"}});
+    ASSERT_TRUE(refused.ok) << refused.error.message;
+    EXPECT_EQ(refused.value["state"], "failed");
+    const json model = Quickstart::step(refused.value, "model");
+    EXPECT_EQ(model["state"], "failed");
+    const std::string message = model["error"]["message"];
+    for (const char* internal : {"segmentation", "configure", "feature column", "train_model",
+                                 "graph hints", "K range"}) {
+        EXPECT_EQ(message.find(internal), std::string::npos) << internal << ": " << message;
+    }
+    EXPECT_NE(message.find("Clustering groups rows"), std::string::npos) << message;
+    EXPECT_EQ(model["error"]["detail"], "segmentation: the table has no eligible feature columns")
+        << "the engine's reason, for an agent";
+    EXPECT_EQ(refused.value["training"]["methodology"], "M-3") << "kept for Try again";
+    EXPECT_EQ(refused.value["training"]["run_id"], nullptr);
+    const auto outcome = lake::api::quickstart_columns::confirm_outcome(refused.value);
+    ASSERT_TRUE(outcome);
+    EXPECT_FALSE(outcome->ok);
+    EXPECT_EQ(outcome->text, message);
+
+    // The status reads it again without a run, and Ask Orama's page says it failed and why.
+    auto status = q.by(me, "quickstart_status", {{"workspace_id", me.workspace_id}});
+    ASSERT_TRUE(status.ok) << status.error.message;
+    EXPECT_EQ(status.value["state"], "failed");
+
+    // Try again: the same clustering, with nothing sent.
+    auto again = q.by(me, "train_quickstart", {{"workspace_id", me.workspace_id}});
+    ASSERT_TRUE(again.ok) << again.error.message;
+    EXPECT_EQ(again.value["state"], "training") << again.value.dump(2);
+    const auto trains = calls_of(q, "train_model");
+    ASSERT_EQ(trains.size(), 2U);
+    EXPECT_EQ(trains[1]["methodology"], "M-3");
+    EXPECT_FALSE(trains[1].contains("holdout_fraction"));
+    EXPECT_EQ(again.value["training"]["attempt"], 2);
+
+    // The engine's segmentation refusal word for word (the lake-dev failure of lake#1203), and a
+    // failed run: in plain words, never "configure its K range".
+    const lake::api::quickstart_columns::Choice none{};
+    for (const char* reason :
+         {"segmentation has no supervised holdout or ranked top_k; configure its K range in the "
+          "graph hints",
+          "segmentation: the global sample has fewer rows than minimum_k",
+          "segmentation: a row is missing entity column 'id'"}) {
+        const std::string said =
+            lake::api::quickstart_columns::explain_run_failure(reason, none, "M-3");
+        EXPECT_EQ(said.find("configure"), std::string::npos) << said;
+        EXPECT_EQ(said.find("segmentation"), std::string::npos) << said;
+        EXPECT_EQ(said.find("minimum_k"), std::string::npos) << said;
+        EXPECT_FALSE(said.empty());
+    }
+    EXPECT_EQ(lake::api::quickstart_columns::clustering_problem(json(1)).empty(), false);
+    EXPECT_TRUE(lake::api::quickstart_columns::clustering_problem(json(2)).empty());
+    EXPECT_TRUE(lake::api::quickstart_columns::clustering_problem(json(nullptr)).empty());
 }
 
 // Ask Orama on lake's agent bus, as the deployed Lake runs it: a turn is a task the agent claims.
@@ -1023,6 +1120,7 @@ TEST(Quickstart, TheModelStepIsAnAskOramaConversationAboutTheDataset) {
     EXPECT_EQ(page["quickstart_id"], opened.value["quickstart_id"]);
     EXPECT_NE(page["columns"].get<std::string>().find("popular"), std::string::npos);
     EXPECT_EQ(page["predictable_columns"], "genre, popular");
+    EXPECT_EQ(page["quickstart_state"], "deciding") << "lake#1204: where the Quickstart is";
     for (const auto& [key, value] : page.items()) {
         EXPECT_TRUE(value.is_string()) << key << ": send_ask_message's page takes text";
     }
@@ -1680,6 +1778,108 @@ TEST(QuickstartZetta, ADatedDatasetWithAnyColumnTypesTrainsAndAnswersOnARealEngi
     auto predicted = call("predict", {{"model_id", model_id}, {"rows", rows}});
     ASSERT_TRUE(predicted.ok) << predicted.error.message;
     ASSERT_EQ(predicted.value["ranked"].size(), rows.size());
+    std::error_code ignored;
+    std::filesystem::remove_all(dir, ignored);
+}
+
+// lake#1203 on a real Zetta: the Quickstart's clustering (M-3), as Ask Orama proposes it, trains
+// end to end. On lake-dev the engine refused it ("segmentation has no supervised holdout or ranked
+// top_k; configure its K range in the graph hints") because Lake sent a held-out share. The rows
+// are named by a text id, as Steve's customers file is.
+TEST(QuickstartZetta, AClusteringModelTrainsOnARealEngine) {
+    const char* url = std::getenv("LAKE_TEST_ZETTA_URL");
+    const char* token = std::getenv("LAKE_TEST_ZETTA_TOKEN");
+    if (url == nullptr || token == nullptr || *url == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_ZETTA_URL and LAKE_TEST_ZETTA_TOKEN are not set";
+    }
+    lake::control::install_zetta_control_transport();
+    struct Shutdown {
+        ~Shutdown() {
+            lake::control::shutdown_zetta_control_transport();
+        }
+    } shutdown;
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const std::filesystem::path dir =
+        lake::test::fixture_path("quickstart-clustering-" + lake::control::new_uuid_v4());
+    std::filesystem::create_directories(dir);
+    auto service = std::make_shared<lake::control::WorkspaceService>(
+        lake::control::WorkspaceConfig{dir.string(), 0},
+        store,
+        std::make_shared<lake::control::ZettaWorkspaceCaller>());
+    const std::string identity = "taap:1:ed25519:quickstart-clustering";
+    const auto user = store->create_user({identity, "clustering@example.test", "Clustering"});
+    ASSERT_TRUE(user);
+    const auto customer = store->create_customer({"individual", user->id, "", "qsclustering"});
+    ASSERT_TRUE(customer);
+    const auto object = store->find_policy_object("customer", customer->id);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(store->create_grant({identity, object->id, "admin", "a", "admin", "r"}));
+    const auto workspace = store->create_workspace({customer->id, "home", "dev", ""});
+    ASSERT_TRUE(workspace) << workspace.error().message;
+    const auto zetta_service = store->get_service(workspace->zetta_service_id);
+    ASSERT_TRUE(zetta_service);
+    ASSERT_TRUE(store->set_service_status(zetta_service->id, "Ready", "", url));
+    std::ofstream(dir / (zetta_service->slug + ".json"))
+        << json{{"kind", "zetta"}, {"token", token}}.dump();
+
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const auto call = [&](const std::string& name, json input) {
+        lake::api::ApiContext context;
+        context.store = store.get();
+        context.workspaces = service.get();
+        context.authorized = true;
+        context.acting_identity = identity;
+        context.acting_user_id = user->id;
+        context.session_credential = true;
+        context.scopes = {"*"};
+        context.instance_kek = std::string(kek);
+        context.external_origin = "https://lake.test";
+        context.request_id = lake::control::new_uuid_v4();
+        input["customer_id"] = customer->id;
+        input["workspace_id"] = workspace->id;
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(completed);
+        return completed ? std::move(*completed) : lake::api::ApiResult{};
+    };
+
+    // Customers in three clear groups: a text id names each row, as in Steve's file.
+    const std::vector<std::string> countries{"Canada", "France", "Japan"};
+    std::string csv = "Customer Id,Country,Age,Orders,Spend\n";
+    for (int i = 0; i < 90; ++i) {
+        const int group = i % 3;
+        csv += "C" + std::to_string(48'000 + i * 7) + "x," +
+               countries[static_cast<std::size_t>(group)] + "," +
+               std::to_string(22 + group * 20 + i % 5) + "," + std::to_string(1 + group * 10 + i % 3) +
+               "," + std::to_string(40 + group * 400 + i % 11) + "\n";
+    }
+    const std::string table = "qsc_" + lake::control::new_uuid_v4().substr(0, 8);
+    auto started = call("start_quickstart", {{"content", csv}, {"format", "csv"}, {"name", table}});
+    ASSERT_TRUE(started.ok) << started.error.code << ": " << started.error.message;
+    ASSERT_EQ(started.value["state"], "search_ready") << started.value.dump(2);
+
+    // The proposal Ask Orama makes: methodology M-3, nothing else.
+    auto training = call("train_quickstart", {{"methodology", "M-3"}});
+    ASSERT_TRUE(training.ok) << training.error.message;
+    ASSERT_EQ(training.value["state"], "training") << training.value.dump(2);
+    EXPECT_EQ(training.value["training"]["methodology"], "M-3");
+    EXPECT_EQ(training.value["training"]["holdout_fraction"], nullptr);
+    json status;
+    for (int attempt = 0; attempt < 240; ++attempt) {
+        status = call("quickstart_status", json::object()).value;
+        if (status["state"] != "training") {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    ASSERT_EQ(status["state"], "trained") << status.dump(2);
+    auto finished = call("train_quickstart", json::object());
+    ASSERT_TRUE(finished.ok) << finished.error.message;
+    ASSERT_EQ(finished.value["state"], "done") << finished.value.dump(2);
+    EXPECT_EQ(finished.value["model"]["serves"], false);
+    const std::string model_id = finished.value["model"]["id"];
+    ASSERT_FALSE(model_id.empty());
+    EXPECT_EQ(Quickstart::step(finished.value, "model_answers")["state"], "skipped");
     std::error_code ignored;
     std::filesystem::remove_all(dir, ignored);
 }

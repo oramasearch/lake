@@ -39,6 +39,12 @@ import {
   withKey,
   keyCovers,
   modelStepTitle,
+  modelView,
+  showsTraining,
+  isClustering,
+  elapsed,
+  failureReason,
+  fixMessage,
   opensConversation,
   whereItLives,
   siteOrigin,
@@ -337,11 +343,13 @@ function DropStep({
  * the model's answers. */
 function Started({ status, costs, blocked, onChanged }: { status: QuickstartStatus; costs: Costs | undefined; blocked: boolean; onChanged: () => void }) {
   const searchable = !!status.index?.published;
+  const stopped = status.state === "failed" && status.steps.some((s) => s.state === "failed" && (s.step === "dataset" || s.step === "search_index"));
   return (
     <>
-      {status.state === "failed" && status.steps.some((s) => s.state === "failed" && (s.step === "dataset" || s.step === "search_index")) ? (
-        <Resume status={status} onChanged={onChanged} />
-      ) : null}
+      {stopped ? <Resume status={status} onChanged={onChanged} /> : null}
+      {/* lake#1204: a dataset whose search is not built yet (the page was left part way) goes on
+          from here, never a page with only the step list. */}
+      {!stopped && !searchable ? <Resume status={status} onChanged={onChanged} building /> : null}
       {searchable ? <TrySearch status={status} /> : null}
       {searchable ? <Website status={status} /> : null}
       {searchable ? <ModelStep status={status} costs={costs} blocked={blocked} onChanged={onChanged} /> : null}
@@ -349,12 +357,19 @@ function Started({ status, costs, blocked, onChanged }: { status: QuickstartStat
   );
 }
 
-/** A dataset or search step failed: try it again from where it stopped. */
-function Resume({ status, onChanged }: { status: QuickstartStatus; onChanged: () => void }) {
+/** A dataset or search step failed: why, and try it again from where it stopped. `building`:
+ * nothing failed, but the search index is not built yet; the same call builds it. */
+function Resume({ status, onChanged, building }: { status: QuickstartStatus; onChanged: () => void; building?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const failed = status.steps.find((s) => s.state === "failed" && (s.step === "dataset" || s.step === "search_index"));
   return (
-    <Card label="Try again" title="Resume the Quickstart" tone="exception">
+    <Card label={building ? "Step 2" : "Try again"} title={building ? "Build the Search Index" : "Resume the Quickstart"} tone={building ? "active" : "exception"}>
+      <p className="mt-0 text-[13px] text-ink-2" data-testid="quickstart-resume-why">
+        {building
+          ? `${status.dataset?.name ?? "Your dataset"} is in your workspace; its search index is not built yet. Build it to search your data here and on your website.`
+          : failed?.error?.message ?? "A step stopped before it finished. Try it again from where it stopped."}
+      </p>
       {isBlocked(error) ? <TopUp customerId={status.customer_id} /> : error ? <ErrorBlock error={error} /> : null}
       <Button
         variant="primary"
@@ -368,7 +383,7 @@ function Resume({ status, onChanged }: { status: QuickstartStatus; onChanged: ()
             .finally(() => setBusy(false));
         }}
       >
-        Try the failed step again
+        {building ? "Build the search index" : "Try the failed step again"}
       </Button>
     </Card>
   );
@@ -587,13 +602,21 @@ function ModelStep({ status, costs, blocked, onChanged }: { status: QuickstartSt
       open();
     }
   }, [status, blocked, open]);
-  const training = !!status.training || !!status.model;
+  // lake#1204: once a model is asked for (Confirm in the conversation, or the columns), the step
+  // becomes the training, and the page brings it into view.
+  const training = showsTraining(status);
+  const [talking, setTalking] = useState(false);
+  const shown = useRef(training);
+  useEffect(() => {
+    if (training && !shown.current) document.querySelector("[data-testid='quickstart-train-card']")?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+    shown.current = training;
+  }, [training]);
   if (training) {
     return (
       <>
-        <Train status={status} costs={costs} blocked={blocked} onChanged={onChanged} />
+        <Train status={status} costs={costs} blocked={blocked} onChanged={onChanged} onAsk={() => setTalking(true)} />
         {status.conversation ? (
-          <details className="text-[12.5px]" data-testid="quickstart-conversation-done">
+          <details className="text-[12.5px]" data-testid="quickstart-conversation-done" open={talking} onToggle={(e) => setTalking((e.currentTarget as HTMLDetailsElement).open)}>
             <summary className="cursor-pointer text-ink-2">The conversation about {status.dataset?.name ?? "this dataset"}</summary>
             <QuickstartConversation status={status} onChanged={onChanged} />
           </details>
@@ -694,11 +717,14 @@ function QuickstartConversation({ status, onChanged }: { status: QuickstartStatu
   );
 }
 
-/** Step 4: one click trains a model on the same dataset, with its progress; once trained it is
- * published by the same click, so the website code grows its answers. Any column types train
- * (lake#1181): the choices list only columns the model can predict, with their detected types, and
- * the page shows what Lake does with every column and the snapshot date its dates are read as of. */
-function Train({ status, costs, blocked, onChanged, bare }: { status: QuickstartStatus; costs: Costs | undefined; blocked: boolean; onChanged: () => void; bare?: boolean }) {
+/** Step 4 once a model is asked for (lake#1181, lake#1204): its training, followed live, then
+ * published by the page, so the website code grows its answers. Every state says what is happening
+ * and gives one next action: training (how long so far, and what comes next); failed (why in plain
+ * words, Try again, and Ask Orama to fix it); done (what to do now; for clustering, where the
+ * segments are). With `bare` it is the "Choose the columns myself" form under the conversation:
+ * the choices list only columns the model can predict, with their detected types, and the page
+ * shows what Lake does with every column and the snapshot date its dates are read as of. */
+function Train({ status, costs, blocked, onChanged, onAsk, bare }: { status: QuickstartStatus; costs: Costs | undefined; blocked: boolean; onChanged: () => void; onAsk?: () => void; bare?: boolean }) {
   const columns = status.dataset?.columns ?? [];
   const known = detected(columns);
   const names = columns.length ? columns.map((c) => c.name) : status.index?.fields ?? [];
@@ -706,9 +732,9 @@ function Train({ status, costs, blocked, onChanged, bare }: { status: Quickstart
   const [choice, setChoice] = useState<Choice>(() => startingChoice(status));
   const set = (change: Partial<Choice>) => setChoice((before) => ({ ...before, ...change }));
   const [busy, setBusy] = useState(false);
+  const [asking, setAsking] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const model = status.steps.find((s) => s.step === "model");
-  const answers = status.steps.find((s) => s.step === "model_answers");
   const values = known ? valuesOf(columns, choice.target) : [];
   const train = (input: Row) => {
     setBusy(true);
@@ -725,114 +751,189 @@ function Train({ status, costs, blocked, onChanged, bare }: { status: Quickstart
       train({});
     }
   }, [status.state, status.quickstart_id, blocked]);
+  // "Ask Orama to fix it": what failed goes into the conversation, which proposes the corrected
+  // change as a card to confirm (opened first when the person chose the columns themselves).
+  const askToFix = async () => {
+    setAsking(true);
+    setError(null);
+    try {
+      const message = fixMessage(status);
+      if (status.conversation) {
+        await sendMessage({ customerId: status.customer_id, workspaceId: status.workspace_id, conversationId: status.conversation.conversation_id, kind: "ask", agent: "agent-ask-orama", message, from: "", page: status.conversation.page });
+      } else {
+        await act("start_quickstart_conversation", { customer_id: status.customer_id, workspace_id: status.workspace_id, quickstart_id: status.quickstart_id, message });
+      }
+      onAsk?.();
+      onChanged();
+    } catch (e) {
+      setError(e);
+    } finally {
+      setAsking(false);
+    }
+  };
 
-  const done = answers?.state === "done";
-  const running = model?.state === "running" || status.state === "trained";
-  const failed = model?.state === "failed" || answers?.state === "failed";
+  const view = bare ? "choose" : modelView(status);
+  const clustering = isClustering(status.training?.methodology);
   const preparation = status.training?.preparation ?? null;
   const derived = status.training?.derived_target;
   const asked = derived ? derived.rule : status.training?.target_value ? `${status.training.target} is ${status.training.target_value}` : status.training?.target;
-  const clustered = status.model?.serves === false;
-  const body = (
-      <div data-testid="quickstart-train">
-        {clustered ? (
-          <p className="m-0 text-[13px] text-ink-2" data-testid="quickstart-clustered">
-            The clustering model is trained: it groups the rows of {status.dataset?.name ?? "your dataset"} into segments. <Link to={`/w/${encodeURIComponent(status.workspace_id)}/train/models`}>Train → Models</Link> shows them. A clustering model answers no question per search result, so it is not added to your website.
-          </p>
-        ) : done ? (
-          <p className="m-0 text-[13px] text-ink-2">
-            The model is trained and published: the search above and your website code show how likely {asked ?? "each result"} is for each result. <Link to="/ship/models">Ship → Models</Link> has its scores and traffic.
-          </p>
-        ) : running ? (
-          <p className="m-0 text-[13px] text-ink-2" data-testid="quickstart-training">
-            <Brain size={14} aria-hidden className="inline" /> {status.state === "trained" ? "Trained. Publishing it…" : `Training on ${status.dataset?.name ?? "your dataset"}${model?.progress?.status ? ` (${model.progress.status})` : ""}. This page follows it; you can leave and come back.`}
-          </p>
-        ) : known && targets.length === 0 ? (
-          <p className="m-0 text-[12.5px] text-ink-2" data-testid="quickstart-no-target">
-            No column here is a yes-or-no answer or a short category, so there is no column to pick. Ask Orama above can derive one (such as a price above a threshold), group the rows with clustering, or suggest another way to start.
-          </p>
-        ) : (
-          <>
-            <p className="mt-0 text-[13px] text-ink-2">Lake learns to answer a yes-or-no question about one column from the others, then answers it for every search result.</p>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <label>
-                <span className="label m-0 block">Column to predict</span>
-                <select className="w-full" value={choice.target} onChange={(e) => set({ target: e.target.value, value: valuesOf(columns, e.target.value)[0] ?? "" })} data-testid="quickstart-target">
-                  {choice.target ? null : <option value="">Choose a column</option>}
-                  {targets.map((t) => (
-                    <option key={t.name} value={t.name}>
-                      {t.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {values.length ? (
-                <label>
-                  <span className="label m-0 block">Value to look for</span>
-                  <select className="w-full" value={choice.value} onChange={(e) => set({ value: e.target.value })} data-testid="quickstart-target-value">
-                    {values.map((v) => (
-                      <option key={v} value={v}>
-                        {v}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              ) : null}
-              <label>
-                <span className="label m-0 block">Column that names a row</span>
-                <select className="w-full" value={choice.entity} onChange={(e) => set({ entity: e.target.value })} data-testid="quickstart-entity">
-                  <option value="">None: Lake numbers the rows</option>
-                  {(known ? columns : names.map((name) => ({ name, kind: null }))).filter((c) => c.name !== choice.target).map((c) => (
-                    <option key={c.name} value={c.name}>
-                      {c.kind === "identifier" ? `${c.name} (identifier)` : c.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {known ? (
-                <label>
-                  <span className="label m-0 block">Snapshot date</span>
-                  <input type="date" className="w-full" value={choice.asOf} onChange={(e) => set({ asOf: e.target.value })} data-testid="quickstart-as-of" />
-                </label>
-              ) : null}
-            </div>
-            {values.length ? (
-              <p className="mb-0 text-[12.5px] text-ink-2">
-                The model answers how likely a row's {choice.target} is {choice.value || "the value you choose"}.
-              </p>
-            ) : null}
-            {known ? <ColumnList columns={columns} choice={choice} /> : null}
-            {model?.error ? (
-              <p className="text-[12.5px] text-bad" role="alert" data-testid="quickstart-model-problem">
-                {model.error.message}
-              </p>
-            ) : null}
-            {answers?.error ? <p className="text-[12.5px] text-bad">{answers.error.message}</p> : null}
-            <div className="mt-2">
-              <CostNote costs={costs} step="model" />
-            </div>
-            {isBlocked(error) || blocked ? (
-              <TopUp customerId={status.customer_id} />
-            ) : (
-              <>
-                {error ? <ErrorBlock error={error} /> : null}
-                <div className="mt-3">
-                  <Button variant="primary" loading={busy} disabled={!choice.target} onClick={() => train(known ? trainInput(choice, columns, status.snapshot_date) : { target: choice.target, ...(choice.entity ? { entity_column: choice.entity } : {}) })} data-testid="quickstart-train-button">
-                    <Brain size={14} aria-hidden /> {trainLabel(failed)}
-                  </Button>
-                </div>
-              </>
-            )}
-          </>
-        )}
-        {(running || done || clustered) && preparation ? <Prepared preparation={preparation} /> : null}
+  const dataset = status.dataset?.name ?? "your dataset";
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (view !== "training") return;
+    const timer = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(timer);
+  }, [view]);
+  const since = elapsed(status.training?.started_at ?? model?.progress?.started_at, now);
+  const segmentsPath = `/w/${encodeURIComponent(status.workspace_id)}/train/model?${new URLSearchParams({ customer_id: status.customer_id, id: status.model?.id ?? "" })}`;
+
+  const form = (
+    <>
+      <p className="mt-0 text-[13px] text-ink-2">Lake learns to answer a yes-or-no question about one column from the others, then answers it for every search result.</p>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label>
+          <span className="label m-0 block">Column to predict</span>
+          <select className="w-full" value={choice.target} onChange={(e) => set({ target: e.target.value, value: valuesOf(columns, e.target.value)[0] ?? "" })} data-testid="quickstart-target">
+            {choice.target ? null : <option value="">Choose a column</option>}
+            {targets.map((t) => (
+              <option key={t.name} value={t.name}>
+                {t.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        {values.length ? (
+          <label>
+            <span className="label m-0 block">Value to look for</span>
+            <select className="w-full" value={choice.value} onChange={(e) => set({ value: e.target.value })} data-testid="quickstart-target-value">
+              {values.map((v) => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        <label>
+          <span className="label m-0 block">Column that names a row</span>
+          <select className="w-full" value={choice.entity} onChange={(e) => set({ entity: e.target.value })} data-testid="quickstart-entity">
+            <option value="">None: Lake numbers the rows</option>
+            {(known ? columns : names.map((name) => ({ name, kind: null }))).filter((c) => c.name !== choice.target).map((c) => (
+              <option key={c.name} value={c.name}>
+                {c.kind === "identifier" ? `${c.name} (identifier)` : c.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        {known ? (
+          <label>
+            <span className="label m-0 block">Snapshot date</span>
+            <input type="date" className="w-full" value={choice.asOf} onChange={(e) => set({ asOf: e.target.value })} data-testid="quickstart-as-of" />
+          </label>
+        ) : null}
       </div>
+      {values.length ? (
+        <p className="mb-0 text-[12.5px] text-ink-2">
+          The model answers how likely a row's {choice.target} is {choice.value || "the value you choose"}.
+        </p>
+      ) : null}
+      {known ? <ColumnList columns={columns} choice={choice} /> : null}
+      <div className="mt-2">
+        <CostNote costs={costs} step="model" />
+      </div>
+      {isBlocked(error) || blocked ? (
+        <TopUp customerId={status.customer_id} />
+      ) : (
+        <>
+          {error ? <ErrorBlock error={error} /> : null}
+          <div className="mt-3">
+            <Button variant={view === "failed" ? "secondary" : "primary"} loading={busy} disabled={!choice.target} onClick={() => train(known ? trainInput(choice, columns, status.snapshot_date) : { target: choice.target, ...(choice.entity ? { entity_column: choice.entity } : {}) })} data-testid="quickstart-train-button">
+              <Brain size={14} aria-hidden /> {trainLabel(view === "failed")}
+            </Button>
+          </div>
+        </>
+      )}
+    </>
+  );
+
+  const body = (
+    <div data-testid="quickstart-train" data-view={view}>
+      {view === "clustered" ? (
+        <div data-testid="quickstart-clustered">
+          <p className="m-0 text-[13px] text-ink-2">
+            The clustering model is trained: it grouped the rows of {dataset} into segments. A clustering model answers no question per search result, so it is not added to your website; your search is ready on the website step above.
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button variant="primary" to={segmentsPath} data-testid="quickstart-see-segments">
+              <Brain size={14} aria-hidden /> See the segments
+            </Button>
+          </div>
+        </div>
+      ) : view === "done" ? (
+        <div data-testid="quickstart-done">
+          <p className="m-0 text-[13px] text-ink-2">
+            The model is trained and published: the search above and your website code show how likely {asked ?? "each result"} is for each result. Next, copy the agent prompt or the code from the website step and put it on your site. <Link to="/ship/models">Ship → Models</Link> has its scores and traffic.
+          </p>
+        </div>
+      ) : view === "publishing" ? (
+        <p className="m-0 text-[13px] text-ink-2" data-testid="quickstart-publishing">
+          <Brain size={14} aria-hidden className="inline" /> Trained. Publishing it for your website…
+        </p>
+      ) : view === "training" ? (
+        <div data-testid="quickstart-training">
+          <p className="m-0 text-[13px] text-ink-2">
+            <Brain size={14} aria-hidden className="inline" /> Training {clustering ? "a clustering model" : asked ? `a model that predicts ${asked}` : "a model"} on {dataset}
+            {since ? ` (${since} so far)` : ""}. This page follows it; you can leave and come back.
+          </p>
+          <p className="mb-0 mt-1 text-[12.5px] text-ink-3">
+            {clustering ? "When it finishes, this step shows where to see the segments." : "When it finishes, Lake publishes the model, and the search above shows its answer beside each result."}
+          </p>
+        </div>
+      ) : view === "failed" ? (
+        <div data-testid="quickstart-failed">
+          <p className="m-0 text-[13px] text-bad" role="alert" data-testid="quickstart-model-problem">
+            {failureReason(status)}
+          </p>
+          {isBlocked(error) || blocked ? (
+            <TopUp customerId={status.customer_id} />
+          ) : (
+            <>
+              {error ? <ErrorBlock error={error} /> : null}
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button variant="primary" loading={busy} onClick={() => train({})} data-testid="quickstart-try-again">
+                  <RotateCcw size={14} aria-hidden /> Try again
+                </Button>
+                <Button loading={asking} onClick={() => void askToFix()} data-testid="quickstart-ask-fix">
+                  <MessageSquare size={14} aria-hidden /> Ask Orama to fix it
+                </Button>
+              </div>
+            </>
+          )}
+          {!clustering && targets.length ? (
+            <details className="mt-3 text-[12.5px]" data-testid="quickstart-change-choices">
+              <summary className="cursor-pointer text-ink-2">Change the choices</summary>
+              {form}
+            </details>
+          ) : null}
+        </div>
+      ) : known && targets.length === 0 ? (
+        <p className="m-0 text-[12.5px] text-ink-2" data-testid="quickstart-no-target">
+          No column here is a yes-or-no answer or a short category, so there is no column to pick. Ask Orama above can derive one (such as a price above a threshold), group the rows with clustering, or suggest another way to start.
+        </p>
+      ) : (
+        form
+      )}
+      {(view === "training" || view === "done" || view === "clustered" || view === "publishing") && preparation ? <Prepared preparation={preparation} /> : null}
+    </div>
   );
   if (bare) return body;
+  const badge = view === "done" ? "published" : view === "clustered" ? "trained" : view === "publishing" ? "trained" : model?.state ?? "pending";
   return (
-    <Card label="Step 4" title="Train a Model on the Same Data" tone={done || clustered ? "default" : "active"} actions={model ? <Status value={done ? "published" : clustered ? "trained" : model.state} tone={done || clustered ? "success" : stepTone(model.state)} /> : null}>
-      {body}
-    </Card>
+    <div data-testid="quickstart-train-card">
+      <Card label="Step 4" title={clustering ? "Group the Rows into Segments" : "Train a Model on the Same Data"} tone={view === "done" || view === "clustered" ? "default" : view === "failed" ? "exception" : "active"} actions={<Status value={badge} tone={view === "done" || view === "clustered" ? "success" : stepTone(model?.state ?? "pending")} />}>
+        {body}
+      </Card>
+    </div>
   );
 }
 

@@ -4,8 +4,10 @@
 // dropped on the page, the live search, a website key and the plain web page code, which it serves
 // from another origin and searches there; then step 4, the Ask Orama conversation about the
 // dataset: it waits for Ask Orama's proposals, asks for a model when none is proposed, confirms the
-// train_quickstart proposal in the chat, and follows training and publishing to the model's answers
-// on the page and on the website. A screenshot per step and a log.json. It leaves the dataset, index,
+// train_quickstart proposal in the chat, checks the page moves to training at once and the chat says
+// what started (lake#1204), and follows training and publishing to the model's answers on the page
+// and on the website. Then a failure: a one-row dataset asked for clustering, whose page must show
+// the reason in plain words with Try again and Ask Orama to fix it. A screenshot per step and a log.json. It leaves the dataset, index,
 // model, key and conversation in the signed-in account's workspace; delete them from Data, Ship
 // (the index's Website Keys) and Ask Orama after a run.
 //
@@ -88,6 +90,16 @@ async function modelProposal() {
   return (await confirm.count()) ? { proposal, confirm } : null;
 }
 
+/** A failed model step on the page (lake#1204): the reason in plain words (no engine internals)
+ * and its two next actions, Try again and Ask Orama to fix it. */
+async function failureShown(name) {
+  const reason = await page.getByTestId("quickstart-model-problem").innerText().catch(() => "");
+  const plain = !!reason && !/configure|graph hints|K range|segmentation|holdout|train_model|train_quickstart/i.test(reason);
+  const actions = (await visible("quickstart-try-again")) && (await visible("quickstart-ask-fix"));
+  await shot(name);
+  check(name, plain && actions, { reason, actions });
+}
+
 /** Ask Orama's turn is over: no working notice in the conversation, and it has answered. */
 const answered = async () => (await page.getByTestId("quickstart-conversation").locator(".ask-working").count()) === 0 && (await page.getByTestId("quickstart-conversation").locator(".ask-agent").count()) > 0;
 
@@ -153,10 +165,20 @@ try {
   await proposed.confirm.click();
   await until(page, async () => (await stepState("model")) !== "pending", { minutes: 2, every: 2000 });
   note("model-confirmed", { model: await stepState("model") });
+  // lake#1204: the confirm moves step 4 to its training at once, and the conversation says what
+  // started and what comes next, never "Done: train_quickstart".
+  const moved = await until(page, () => visible("quickstart-train-card"), { minutes: 1, every: 1000 });
+  const outcome = await page.getByTestId("quickstart-conversation").locator(".ask-agent").last().innerText().catch(() => "");
+  check("confirm-moves-to-training", moved && !/Done: train_quickstart/.test(outcome), { view: await page.getByTestId("quickstart-train").getAttribute("data-view").catch(() => null), outcome: outcome.slice(0, 300) });
+  if (await visible("quickstart-training")) {
+    check("training-says-what-next", /This page follows it/.test(await page.getByTestId("quickstart-training").innerText()), {});
+    await shot("training");
+  }
 
   // 6. Training is followed and the page publishes the model.
   const published = await until(page, async () => (await stepState("model_answers")) === "done" || (await stepState("model")) === "failed", { minutes: 15, every: 3000 });
   await shot("trained");
+  if ((await stepState("model")) === "failed") await failureShown("model-failed");
   check("model", published && (await stepState("model_answers")) === "done", { model: await stepState("model"), answers: await stepState("model_answers"), errors: await errorText(page) });
   if ((await stepState("model_answers")) !== "done") throw new Error("the model was not published");
 
@@ -175,7 +197,30 @@ try {
   await shotOf(website, "website-answers");
   await shot("done");
 
-  // 8. Ask Orama has its own page.
+  // 8. A failure shows the reason and a next action (lake#1204): a one-row dataset cannot be
+  // clustered, so confirming Ask Orama's clustering proposal fails on the model step.
+  await page.goto(`${base}/`, { waitUntil: "domcontentloaded" });
+  if (!(await settled())) throw new Error("the Quickstart page did not read its status");
+  if (await visible("quickstart-start-another")) await page.getByTestId("quickstart-start-another").click();
+  fs.writeFileSync(csv, "title,rating\nOnly one film,8.1\n");
+  if (!(await dropFile())) throw new Error("the drop zone never took the one-row file");
+  await page.getByTestId("quickstart-start").click();
+  if (!(await until(page, () => visible("quickstart-search"), { minutes: 10, every: 3000 }))) throw new Error("the one-row search index was not ready");
+  await page.getByTestId("quickstart-conversation").waitFor({ timeout: 120000 });
+  await until(page, answered, { minutes: 6, every: 3000 });
+  const box = page.getByTestId("quickstart-conversation").locator("textarea[name=message]");
+  await box.fill("Group the rows with clustering (methodology M-3). Propose it so I can confirm.");
+  await box.press("Enter");
+  await page.waitForTimeout(3000);
+  await until(page, async () => (await answered()) && !!(await modelProposal()), { minutes: 6, every: 3000 });
+  const clustering = await modelProposal();
+  check("clustering-proposed", !!clustering, { errors: await errorText(page) });
+  if (clustering) await clustering.confirm.click();
+  const failedShown = !!clustering && (await until(page, () => visible("quickstart-failed"), { minutes: 3, every: 2000 }));
+  check("failure-path", failedShown, { model: await stepState("model").catch(() => null) });
+  if (failedShown) await failureShown("failure-path-shown");
+
+  // 9. Ask Orama has its own page.
   await page.goto(`${base}/ask`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(2000);
   await shot("ask-orama");

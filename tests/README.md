@@ -564,7 +564,11 @@ refused with the top-up link before any step, another account's workspace refuse
 workspace waiting for one, input refusals, and the OpenAPI, MCP, `llms.txt`, `llms-full.txt` and
 skill listings. `QuickstartZetta.*` runs the whole process against a real Zetta named by
 `LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` and skips without them, including a dated dataset of
-every column kind (lake#1181). `test_quickstart_columns.cpp` (`QuickstartColumns.*`) covers the
+every column kind (lake#1181) and a clustering (M-3) model trained to `done` (lake#1203). Run a
+local `zetta --headless --mcp-listen 127.0.0.1:<port> --admin-token <token> --data-dir <dir>` from the
+zetta pin and point both variables at it. `Quickstart.ARefusedClusteringIsSaidPlainlyAndTryAgainKeepsIt`
+covers a refused training in plain words, Try again and the confirm's words (lake#1204); the test
+double refuses M-3 with a held-out share as zetta v0.5.0 does. `test_quickstart_columns.cpp` (`QuickstartColumns.*`) covers the
 quickstart's pure column rules: detection, suggestions, the training copy and refusals in plain words.
 
 `test_transcripts.cpp` covers the pure parts of speech-to-text and transcripts (lake#561):

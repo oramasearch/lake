@@ -38,6 +38,7 @@
 #include "lake/control/store.hpp"
 #include "lake/control/store_buckets.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "quickstart_columns.hpp"
 #include "store_mounts.hpp"
 #include "workspace_bus.hpp"
 #include "workspace_records_api.hpp"
@@ -5799,7 +5800,16 @@ liquid::runtime::task<ApiResult> confirm_ask_proposal(const json& input, ApiCont
     // MCP connection's call_mcp_tool from Ask Orama, lake#652); proposal_call filled them.
     const auto target = context.registry->find(capability);
     const json& proposed = call->at("input");
-    const ApiResult done = called(co_await call_capability(context, capability, proposed));
+    ApiResult done = called(co_await call_capability(context, capability, proposed));
+    // A Quickstart model is said as what started and what comes next (lake#1204); a training the
+    // engine refused is a failure, in plain words, so Ask Orama proposes the corrected change.
+    std::optional<quickstart_columns::Outcome> quickstart;
+    if (capability == "train_quickstart" && done.ok) {
+        quickstart = quickstart_columns::confirm_outcome(done.value);
+        if (quickstart && !quickstart->ok) {
+            done = ApiResult::failure("training_failed", quickstart->text);
+        }
+    }
     context.audit_details["ok"] = done.ok;
     // Input the capability refused is said plainly, naming what is missing (lake#794). The stored
     // outcome keeps the error's code and whether pressing Try again could help: only a refusal
@@ -5816,7 +5826,9 @@ liquid::runtime::task<ApiResult> confirm_ask_proposal(const json& input, ApiCont
                 why += '.';
             }
         }
-        if (!retry) {
+        if (quickstart) {
+            // The Quickstart's own words already say what to do next.
+        } else if (!retry) {
             why += " Ask Orama again with what to use and it will propose the change again.";
         }
     }
@@ -5832,8 +5844,11 @@ liquid::runtime::task<ApiResult> confirm_ask_proposal(const json& input, ApiCont
                                                             workspace_id,
                                                             conversation_id,
                                                             "assistant",
-                                                            done.ok ? "Done: " + capability + "."
-                                                                    : "That did not work: " + why,
+                                                            done.ok && quickstart
+                                                                ? quickstart->text
+                                                            : done.ok
+                                                                ? "Done: " + capability + "."
+                                                                : "That did not work: " + why,
                                                             std::move(recorded)));
     if (!outcome) {
         co_return ApiResult::failure(outcome.error().code,

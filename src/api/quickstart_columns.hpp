@@ -193,8 +193,31 @@ std::optional<Fixes> fix_for(const Refusal& refused, const json& columns, const 
 // A refusal Lake could not fix, in plain words with what to choose; never the engine's code.
 std::string explain_refusal(const Refusal& refused, const json& columns, const Choice& choice);
 
-// A failed training run's reason (get_run's `error`) in plain words.
-std::string explain_run_failure(std::string_view reason, const Choice& choice);
+// A failed training run's reason (get_run's `error`), or the engine's refusal to start one, in
+// plain words for a person (lake#1204): what went wrong and what to do, never the engine's own
+// text, a capability or an internal setting. The engine's reason is kept beside it as `detail`.
+// `methodology` words the clustering (M-3) reasons.
+std::string explain_run_failure(std::string_view reason,
+                                const Choice& choice,
+                                std::string_view methodology = {});
+
+// Whether a quickstart clustering model (M-3) can train on a dataset of `rows` rows, or the
+// refusal in plain words (lake#1203). The engine chooses the number of segments itself, between
+// its minimum_k (2) and maximum_k (8) and never more than the rows; zetta v0.5.0's train_model
+// takes no K range, and segmentation refuses `holdout_fraction`, so Lake sends neither.
+inline constexpr int clustering_minimum_rows = 2;
+std::string clustering_problem(const json& rows);
+
+// What a confirmed train_quickstart did, as Ask Orama's conversation says it (lake#1204): what
+// started and what comes next, never "Done: train_quickstart". `status` is train_quickstart's
+// answer (quickstart_status's shape). A training the engine refused answers success with a failed
+// model step: that is a failure (`ok` false), in the step's own plain words. nullopt when `status`
+// is not a quickstart's.
+struct Outcome {
+    bool ok = true;
+    std::string text;
+};
+std::optional<Outcome> confirm_outcome(const json& status);
 
 // A snapshot date as typed (2026-10-24, or an ISO-8601 timestamp): the same text when it is one,
 // empty otherwise.

@@ -19,9 +19,12 @@ stands, and you can leave and come back: the page goes on from where you stopped
    building on it: a model (even when no column is a yes-or-no answer: it can derive one, such as
    a price above a threshold, or group your rows with clustering), opportunities, an app such as
    a dashboard, an analysis, or generated data first. Ask it anything, then press **Confirm** on
-   what you want; nothing runs before you confirm. Confirming a model trains it, and the page
-   follows the training; you can leave and come back. **Choose the columns myself** lets you pick
-   the column to predict instead.
+   what you want; nothing runs before you confirm. Confirming a model trains it: the step turns
+   into the training at once and says how long it has run; you can leave and come back. If training
+   fails, the page says why in plain words, with **Try again** and **Ask Orama to fix it** (Ask
+   Orama proposes the corrected change for you to confirm). A clustering model groups your rows into
+   segments: **See the segments** opens them, and it is not added to your website. **Choose the
+   columns myself** lets you pick the column to predict instead.
 5. **Model answers on your website.** When the model is trained, Lake publishes it. The search box
    on the page shows its answer beside each result. Make a new website key (the first one can only
    search) and copy the code again: your site shows the answers too.

@@ -835,9 +835,31 @@ std::string explain_refusal(const Refusal& refused, const json& columns, const C
            " Choose other columns, or change the file and start again.";
 }
 
-std::string explain_run_failure(std::string_view reason, const Choice& choice) {
+std::string explain_run_failure(std::string_view reason,
+                                const Choice& choice,
+                                std::string_view methodology) {
     const std::string word = lowered(reason);
     const std::string target = choice.target.empty() ? std::string("the column") : choice.target;
+    if (label_free(methodology) || word.find("segmentation") != std::string::npos) {
+        // Clustering (M-3): the engine's segmentation reasons, said for a person (lake#1203).
+        if (word.find("no eligible feature") != std::string::npos ||
+            word.find("no feature column") != std::string::npos) {
+            return "Clustering groups rows by their numbers and short categories, and this "
+                   "dataset has none to group by. Ask Orama to suggest another model.";
+        }
+        if (word.find("fewer rows") != std::string::npos ||
+            word.find("no rows") != std::string::npos || word.find("empty") != std::string::npos) {
+            return "Clustering needs at least " + std::to_string(clustering_minimum_rows) +
+                   " rows, and the dataset has fewer. Add a file with more rows and start "
+                   "again.";
+        }
+        if (word.find("entity") != std::string::npos) {
+            return "Lake could not tell the rows apart by the column chosen to name a row. Try "
+                   "again without one: Lake numbers the rows.";
+        }
+        return "Lake could not train the clustering model. Try again, or let Ask Orama fix "
+               "it.";
+    }
     if (word.find("single class") != std::string::npos ||
         word.find("one value") != std::string::npos) {
         return "Every row the model trained on has the same answer for " + target +
@@ -851,15 +873,64 @@ std::string explain_run_failure(std::string_view reason, const Choice& choice) {
         return "The model had no rows to learn from. Check the file has rows with a value in " +
                target + ".";
     }
-    std::string_view last = reason;
-    if (const auto at = last.rfind(": "); at != std::string_view::npos && at + 2 < last.size()) {
-        last = last.substr(at + 2);
+    // Anything else: never the engine's own words (lake#1204), which name its internals; they stay
+    // in the error's `detail` for an agent.
+    return "Lake could not train the model on these choices. Try again, or let Ask Orama fix "
+           "it.";
+}
+
+std::string clustering_problem(const json& rows) {
+    if (rows.is_number() && rows.get<double>() < clustering_minimum_rows) {
+        return "Clustering needs at least " + std::to_string(clustering_minimum_rows) +
+               " rows, and the dataset has fewer. Add a file with more rows and start again.";
     }
-    std::string out = "Training stopped: " + std::string(last);
-    if (!out.empty() && out.back() != '.') {
-        out += '.';
+    return {};
+}
+
+std::optional<Outcome> confirm_outcome(const json& status) {
+    if (!status.is_object() || !status.contains("steps") || !status["steps"].is_array()) {
+        return std::nullopt;
     }
-    return out + " Change the choices and train again.";
+    const auto text_at = [](const json& value, const char* key) {
+        return value.is_object() && value.contains(key) && value[key].is_string()
+                   ? value[key].get<std::string>()
+                   : std::string();
+    };
+    json model_step = json::object();
+    for (const json& step : status["steps"]) {
+        if (text_at(step, "step") == "model") {
+            model_step = step;
+        }
+    }
+    const bool clustering =
+        label_free(text_at(status.value("training", json(nullptr)), "methodology"));
+    const std::string dataset = text_at(status.value("dataset", json(nullptr)), "name");
+    const std::string on = dataset.empty() ? std::string() : " on " + dataset;
+    const std::string state = text_at(status, "state");
+    if (text_at(model_step, "state") == "failed") {
+        const std::string why = text_at(model_step.value("error", json(nullptr)), "message");
+        return Outcome{false, why.empty() ? std::string("Lake could not train the model.") : why};
+    }
+    if (state == "training") {
+        return Outcome{true,
+                       std::string(clustering ? "Training started: a clustering model"
+                                              : "Training started: the model") +
+                           on +
+                           ". The Quickstart page shows its progress; you can leave and come "
+                           "back. " +
+                           (clustering ? "When it finishes, Train → Models shows the segments."
+                                       : "When it finishes, Lake publishes the model, and search "
+                                         "shows its answer beside each result.")};
+    }
+    if (state == "done" || state == "trained") {
+        return Outcome{true,
+                       clustering ? "The clustering model is trained" + on +
+                                        ". Train → Models shows the segments."
+                                  : "The model is trained" + on +
+                                        ". Search on the Quickstart page shows its answer beside "
+                                        "each result."};
+    }
+    return std::nullopt;
 }
 
 std::string snapshot_date(std::string_view typed) {

@@ -302,6 +302,7 @@ liquid::runtime::task<json> training_progress(ApiContext& context,
     const json training = record.value("training", json(nullptr));
     const std::string run_id = text(training, "run_id");
     if (run_id.empty()) {
+        // No run: the engine refused to start it, and the model step holds why (lake#1204).
         co_return json(nullptr);
     }
     auto run = take(
@@ -356,7 +357,9 @@ liquid::runtime::task<json> training_progress(ApiContext& context,
         // In plain words (lake#1181), with the engine's own reason beside it for an agent.
         const qc::Choice choice{text(training, "target"), text(training, "target_value"), {}};
         progress["error"] = {{"code", "run_failed"},
-                             {"message", qc::explain_run_failure(reason, choice)},
+                             {"message",
+                              qc::explain_run_failure(
+                                  reason, choice, text(training, "methodology"))},
                              {"detail", reason}};
     } else {
         progress["state"] = "running";
@@ -381,12 +384,62 @@ constexpr std::size_t max_page_columns_text = 6000;
 // count, each column with its detected kind and whether it can be predicted, and the search index.
 // So the agent starts from "here is what you could build with this dataset", never "which
 // dataset?".
-json conversation_page(const json& record) {
+//
+// It also says where the Quickstart is (lake#1204), so Ask Orama follows it after a confirm:
+// `quickstart_state` (deciding, training, failed, trained or done), `model` (what is training, or
+// trained), `model_problem` (why it failed, in plain words) and `quickstart_next` (the person's
+// one next step). `progress` is training_progress's answer, or null.
+json conversation_page(const json& record, const json& progress = nullptr) {
     const json dataset = record.value("dataset", json(nullptr));
     const json index = record.value("index", json(nullptr));
     json page{{"path", "/"},
               {"quickstart", "model step: decide what to build on the dataset just added"},
               {"quickstart_id", text(record, "id")}};
+    const json training = record.value("training", json(nullptr));
+    const json model = record.value("model", json(nullptr));
+    const bool clustering = qc::label_free(text(training, "methodology"));
+    const std::string what =
+        clustering ? std::string("a clustering model (M-3) that groups the rows into segments")
+        : !text(training, "target").empty()
+            ? "a model that predicts " + text(training, "target") +
+                  (text(training, "target_value").empty()
+                       ? std::string()
+                       : " is " + text(training, "target_value"))
+            : std::string("a model");
+    json problem = error_of(record, "model");
+    if (!problem.is_object() && progress.is_object() && progress.value("state", "") == "failed" &&
+        progress["error"].is_object()) {
+        problem = progress["error"];
+    }
+    if (model.is_object() && !text(model, "id").empty()) {
+        const bool done = model.value("published", false) || model.value("serves", true) == false;
+        page["quickstart_state"] = done ? "done" : "trained";
+        page["quickstart"] = "done: the model is trained";
+        page["model"] = what + ", trained (model " + text(model, "id") + ")";
+        page["quickstart_next"] =
+            clustering ? "See the segments in Train → Models; the search is on the website step."
+            : done     ? "Search on the page shows the model's answer beside each result; copy the "
+                         "website code to put both on the website."
+                       : "Lake is publishing the model for the website.";
+    } else if (problem.is_object()) {
+        page["quickstart_state"] = "failed";
+        page["quickstart"] = "model step: training failed";
+        page["model"] = what;
+        page["model_problem"] = text(problem, "message");
+        page["quickstart_next"] = "Propose the corrected train_quickstart as a card the person "
+                                  "confirms, or the person presses Try again.";
+    } else if (training.is_object() && !text(training, "run_id").empty()) {
+        page["quickstart_state"] = "training";
+        page["quickstart"] = "model step: training";
+        page["model"] = what + ", training since " + text(training, "started_at");
+        page["quickstart_next"] =
+            clustering ? "Wait for training to finish (quickstart_status follows it); then the "
+                         "segments are in Train → Models."
+                       : "Wait for training to finish (quickstart_status follows it); then Lake "
+                         "publishes the model and search shows its answers.";
+    } else {
+        page["quickstart_state"] = "deciding";
+    }
     if (dataset.is_object()) {
         page["dataset"] = text(dataset, "name");
         page["dataset_id"] = text(dataset, "id");
@@ -435,7 +488,7 @@ json conversation_page(const json& record) {
 
 // The conversation as quickstart_status names it: its id, its first turn, the page every turn
 // sends, and the calls that read and continue it. Null until it is started.
-json conversation_of(const json& record) {
+json conversation_of(const json& record, const json& progress) {
     const json conversation = record.value("conversation", json(nullptr));
     if (!conversation.is_object()) {
         return nullptr;
@@ -443,7 +496,7 @@ json conversation_of(const json& record) {
     const std::string customer_id = text(record, "customer_id");
     const std::string workspace_id = text(record, "workspace_id");
     const std::string id = text(conversation, "id");
-    const json page = conversation_page(record);
+    const json page = conversation_page(record, progress);
     return {{"conversation_id", id},
             {"task_id",
              text(conversation, "task_id").empty() ? json(nullptr)
@@ -554,8 +607,13 @@ json status_of(const json& record, const json& progress) {
             if (entry["step"] == "model" && entry["error"].is_object()) {
                 // What to choose, in plain words (lake#1181), then the call that trains again.
                 next = text(entry["error"], "message") +
-                       " Then call train_quickstart again with this quickstart_id, sending "
-                       "target, target_value, entity_column or as_of to change them.";
+                       (qc::label_free(text(training, "methodology"))
+                            ? " Then call train_quickstart again with this quickstart_id to train "
+                              "the same clustering again (its choices are kept), or send "
+                              "methodology and the columns to train another model."
+                            : " Then call train_quickstart again with this quickstart_id, "
+                              "sending target, target_value, entity_column or as_of to change "
+                              "them.");
                 break;
             }
             next = "Call " +
@@ -618,7 +676,7 @@ json status_of(const json& record, const json& progress) {
              {"model", nullptr},
              {"search", nullptr},
              {"predict", nullptr},
-             {"conversation", conversation_of(record)},
+             {"conversation", conversation_of(record, progress)},
              {"created_at", record.value("created_at", json(nullptr))},
              {"updated_at", record.value("updated_at", json(nullptr))}};
     // lake#1181: the date the dataset's dates are read as of, and the columns the console offers
@@ -1311,7 +1369,9 @@ liquid::runtime::task<ApiResult> train_quickstart(const json& input, ApiContext&
     json progress = nullptr;
     if (model_id.empty() && present(record, "training")) {
         progress = take(co_await training_progress(context, customer_id, workspace_id, record));
-        const std::string training_state = progress.value("state", std::string());
+        // A training the engine refused to start has no run (lake#1204): nothing to read.
+        const std::string training_state =
+            progress.is_object() ? progress.value("state", std::string()) : std::string();
         if (training_state == "running" || training_state == "unknown") {
             co_return ApiResult::success(status_of(record, progress));
         }
@@ -1384,7 +1444,30 @@ liquid::runtime::task<ApiResult> train_quickstart(const json& input, ApiContext&
 
         // A refusal Lake could not fix, or a choice it cannot train: kept on the model step in
         // plain words, never the engine's code.
+        // The choices are kept as a training with no run (lake#1204), so Try again trains the same
+        // model (a clustering stays a clustering) and the page shows the failure on the model
+        // step instead of the conversation that proposed it.
+        std::string dataset_path = source_path;
+        json derived_kept = nullptr;
         const auto refuse = [&](json error) -> liquid::runtime::task<ApiResult> {
+            record["training"] = {
+                {"name", name},
+                {"methodology", methodology},
+                {"target", choice.target.empty() ? json(nullptr) : json(choice.target)},
+                {"target_value",
+                 choice.target_value.empty() ? json(nullptr) : json(choice.target_value)},
+                {"entity_column",
+                 choice.entity_column.empty() ? json(nullptr) : json(choice.entity_column)},
+                {"holdout_fraction",
+                 qc::label_free(methodology) ? json(nullptr)
+                                             : setting("holdout_fraction", default_holdout)},
+                {"as_of", as_of},
+                {"dataset_path", dataset_path},
+                {"preparation", nullptr},
+                {"derived_target", derived_kept},
+                {"attempt", attempt},
+                {"run_id", nullptr},
+                {"refused_at", now_text()}};
             set_error(record, "model", std::move(error));
             if (auto failure = take(co_await save())) {
                 co_return std::move(*failure);
@@ -1392,9 +1475,7 @@ liquid::runtime::task<ApiResult> train_quickstart(const json& input, ApiContext&
             co_return ApiResult::success(status_of(record, json(nullptr)));
         };
 
-        std::string dataset_path = source_path;
         json preparation = nullptr;
-        json derived_kept = nullptr;
         std::optional<ApiResult> started;
         if (methodology == qc::prepared_methodology) {
             // Each column's kind from the engine's profile, read again with the column to predict
@@ -1680,11 +1761,19 @@ liquid::runtime::task<ApiResult> train_quickstart(const json& input, ApiContext&
             }
             choice.target.clear();
             choice.target_value.clear();
+            // lake#1203: segmentation has no held-out share (zetta refuses `holdout_fraction` for
+            // M-3), and the engine chooses the number of segments itself, between its own
+            // minimum_k and maximum_k (2 to 8) and never more than the rows. Lake checks the rows
+            // can make two segments, and sends nothing else.
+            if (const std::string problem =
+                    qc::clustering_problem(record["dataset"].value("rows", json(nullptr)));
+                !problem.empty()) {
+                co_return co_await refuse({{"code", "cannot_prepare"}, {"message", problem}});
+            }
             json train{{"customer_id", customer_id},
                        {"workspace_id", workspace_id},
                        {"name", name},
-                       {"methodology", methodology},
-                       {"holdout_fraction", setting("holdout_fraction", default_holdout)}};
+                       {"methodology", methodology}};
             std::optional<std::vector<json>> rows;
             if (qc::detected(detected)) {
                 auto read =
@@ -1784,8 +1873,10 @@ liquid::runtime::task<ApiResult> train_quickstart(const json& input, ApiContext&
                        {"workspace_id", workspace_id},
                        {"name", name},
                        {"methodology", methodology},
-                       {"dataset_path", source_path},
-                       {"holdout_fraction", setting("holdout_fraction", default_holdout)}};
+                       {"dataset_path", source_path}};
+            if (!qc::label_free(methodology)) {
+                train["holdout_fraction"] = setting("holdout_fraction", default_holdout);
+            }
             if (!choice.target.empty()) {
                 train["target"] = choice.target;
             }
@@ -1798,7 +1889,11 @@ liquid::runtime::task<ApiResult> train_quickstart(const json& input, ApiContext&
             if (started->error.code == "payment_required") {
                 co_return *started;
             }
-            co_return co_await refuse(error_json(started->error));
+            // In plain words for the person (lake#1204); the engine's own reason is the detail.
+            co_return co_await refuse(
+                {{"code", started->error.code},
+                 {"message", qc::explain_run_failure(started->error.message, choice, methodology)},
+                 {"detail", started->error.message}});
         }
         json training{{"name", name},
                       {"methodology", methodology},
@@ -1807,7 +1902,9 @@ liquid::runtime::task<ApiResult> train_quickstart(const json& input, ApiContext&
                        choice.target_value.empty() ? json(nullptr) : json(choice.target_value)},
                       {"entity_column",
                        choice.entity_column.empty() ? json(nullptr) : json(choice.entity_column)},
-                      {"holdout_fraction", setting("holdout_fraction", default_holdout)},
+                      {"holdout_fraction",
+                       qc::label_free(methodology) ? json(nullptr)
+                                                   : setting("holdout_fraction", default_holdout)},
                       {"as_of", as_of},
                       {"dataset_path", dataset_path},
                       {"preparation", preparation},

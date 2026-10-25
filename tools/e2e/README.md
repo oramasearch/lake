@@ -24,8 +24,11 @@ the sign-in lands on Quickstart at `/`, a blocked balance is topped up on Stripe
 (`lib.ensureFunds`), a CSV is dropped (attached again until the drop zone shows it and *Add it and
 build search* is enabled), searched on the page, the plain web page code is served from another
 origin and searched there, then step 4's Ask Orama conversation is driven (lake#1182): it waits for
-the answer, asks for a model when none was proposed, confirms the `train_quickstart` proposal, and
-the model's answers appear on the page and on that website. `lib.signIn` waits for
+the answer, asks for a model when none was proposed, confirms the `train_quickstart` proposal, checks
+the card moved to the training at once and the conversation did not say *Done: train_quickstart*
+(lake#1204), and the model's answers appear on the page and on that website. Then a failure path: a
+one-row file, clustering asked for and confirmed, and the page must show the reason in plain words
+with **Try again** and **Ask Orama to fix it**. `lib.signIn` waits for
 `domcontentloaded` and the `quickstart-page` test id, never the `load` event, which lake-dev does
 not fire. Both take `<base-url> <ticket-file> <output-dir>`
 ([docs/deployment/browser-testing.md](../../docs/deployment/browser-testing.md)). `quickstart.mjs`

@@ -28,6 +28,12 @@ import {
   valuesOf,
   withKey,
   agentPrompt,
+  modelView,
+  showsTraining,
+  isClustering,
+  elapsed,
+  failureReason,
+  fixMessage,
   modelStepTitle,
   opensConversation,
   whereItLives,
@@ -239,4 +245,54 @@ test("a confirmed proposal links where what it made lives, and a model goes on i
 
 test("a skipped step reads as neutral", () => {
   assert.equal(stepTone("skipped"), "neutral");
+});
+
+// lake#1204: after the conversation's Confirm, the model step moves on by itself, and every state
+// has one next action.
+const steps = (model: string, answers = "pending", error: { code: string; message: string } | null = null) =>
+  [
+    { step: "workspace", title: "Workspace", state: "done" as const, error: null },
+    { step: "model", title: "Model", state: model as "pending", error: model === "failed" ? error : null },
+    { step: "model_answers", title: "Model Answers on Your Website", state: answers as "pending", error: null },
+  ];
+
+test("confirming a model moves the step to its training at once, and each state is named", () => {
+  const nothing = { state: "search_ready" as const, steps: steps("pending"), training: null, model: null };
+  assert.equal(modelView(nothing), "choose");
+  assert.equal(showsTraining(nothing), false, "the conversation");
+  const confirmed = { state: "training" as const, steps: steps("running"), training: { run_id: "r", methodology: "M-3" }, model: null };
+  assert.equal(modelView(confirmed), "training");
+  assert.equal(showsTraining(confirmed), true);
+  // Refused before a run started (lake#1203 on dev): the training view with why, not the conversation.
+  const refused = { state: "failed" as const, steps: steps("failed", "pending", { code: "invalid_input", message: "Lake could not train the clustering model." }), training: { run_id: null, methodology: "M-3" }, model: null };
+  assert.equal(modelView(refused), "failed");
+  assert.equal(showsTraining(refused), true);
+  assert.equal(showsTraining({ ...refused, training: null }), true, "a failed model step alone moves it");
+  assert.equal(modelView({ state: "trained" as const, steps: steps("done"), training: { run_id: "r" }, model: { id: "m", published: false } }), "publishing");
+  assert.equal(modelView({ state: "done" as const, steps: steps("done", "done"), training: { run_id: "r" }, model: { id: "m", published: true } }), "done");
+  assert.equal(modelView({ state: "done" as const, steps: steps("done", "skipped"), training: { run_id: "r", methodology: "M-3" }, model: { id: "m", published: false, serves: false } }), "clustered");
+});
+
+test("a failure is said in the step's plain words, and Ask Orama is asked for the corrected change", () => {
+  const failed = { steps: steps("failed", "pending", { code: "invalid_input", message: "Clustering needs at least 2 rows." }), training: { methodology: "M-3" } };
+  assert.equal(failureReason(failed), "Clustering needs at least 2 rows.");
+  assert.match(failureReason({ steps: steps("failed") }), /Try again/);
+  const said = fixMessage(failed);
+  assert.match(said, /^The clustering model did not train: Clustering needs at least 2 rows\./);
+  assert.match(said, /Propose the corrected change/);
+  assert.doesNotMatch(said, /configure|train_quickstart|K range/);
+  assert.match(fixMessage({ steps: failed.steps, training: { target: "churned" } }), /^The model that predicts churned/);
+  assert.equal(isClustering("M-3"), true);
+  assert.equal(isClustering("segmentation"), true);
+  assert.equal(isClustering("M-1"), false);
+  assert.equal(isClustering(null), false);
+});
+
+test("training says how long it has run", () => {
+  const start = Date.parse("2026-10-25T21:20:00Z");
+  assert.equal(elapsed("2026-10-25T21:20:00Z", start + 20_000), "under a minute");
+  assert.equal(elapsed("2026-10-25T21:20:00Z", start + 5 * 60_000), "5 min");
+  assert.equal(elapsed("2026-10-25T21:20:00Z", start + 125 * 60_000), "2 h 5 min");
+  assert.equal(elapsed("", start), "");
+  assert.equal(elapsed(undefined, start), "");
 });
