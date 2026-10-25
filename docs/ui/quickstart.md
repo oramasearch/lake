@@ -12,7 +12,7 @@ each result, on the page and on the website.
 | Steps | Every step with its state (done, running, failed and why, pending) | `quickstart_status` (polled every 5 s while the workspace starts and every 3 s while the model trains) |
 | Step 1: Drop a Dataset | A drop zone for a CSV, JSON or JSON Lines file of up to 16 MiB; a JSON array is sent as one line per object; Parquet is refused with what to do. Without a workspace, one is made and the page holds the file until it is ready, then starts again by itself | `start_quickstart` |
 | Step 2: Search Your Data | A search box over the published index, results as you type; once the model is published, its answer beside each result | `search_index`, `predict` |
-| Step 3: Search on Your Website | Make a website key (shown once), then the code for a plain web page, React or curl with the key, Lake's host and the ids filled in. A key made before the model was published can only search: the page says so and offers a new one | `quickstart_snippets`, `create_token` |
+| Step 3: Search on Your Website | The website's address (`https://…`; `http://` only for localhost, checked as it is typed) and Make a website key: one click makes a browser key bound to the index (and the model), the workspace and that address, shown once, and the code for a plain web page, React or curl with the key, Lake's host and the ids filled in (lake#1152, [browser keys](../api/browser-keys.md)). A key made before the model was published can only search: the page says so and offers a new one. *Website keys* links to the index's page, which lists and revokes them | `quickstart_snippets` (POSTed; with `origins` it makes the key through `create_browser_key`) |
 | Step 4: Train a Model on the Same Data | The column to predict (first guess: the file's last column) and the column that names a row (first guess: its first text column), what training costs, Train a model; the progress while it runs; once trained, the page publishes the model by itself, as part of the same click | `train_quickstart`, `quickstart_status` |
 
 **Start another** opens the drop zone again; **Your quickstarts** opens an earlier one. A person who
@@ -34,7 +34,8 @@ agent in Ask Orama* go to `/ask`.
 - `frontend/src/pages/quickstart/QuickstartPage.tsx`: the page.
 - `frontend/src/pages/quickstart/quickstart.ts`: the pure rules (a file's format, the first model's
   columns, polling, publishing a trained model, the key in the code, whether the key covers the
-  model, the balance), tested by `frontend/tests/quickstart.test.ts`.
+  model, the website's address as the origin a browser key lists (`siteOrigin`), the balance),
+  tested by `frontend/tests/quickstart.test.ts`.
 - `frontend/src/pages/ask/home.ts`: what `/` shows each viewer and where the old Ask Orama links
   go, tested by `frontend/tests/home.test.ts`.
 
@@ -44,7 +45,7 @@ Stable `data-testid`s for walkthroughs: `quickstart-page`, `quickstart-steps`,
 `quickstart-step-<step>` (with `data-state`), `quickstart-drop`, `quickstart-start`,
 `quickstart-start-another`, `quickstart-choose`, `quickstart-resume`, `quickstart-search`,
 `quickstart-hits`, `quickstart-hit`, `quickstart-answer`, `quickstart-website`,
-`quickstart-create-key`, `quickstart-snippet-<html|react|curl>`, `quickstart-train`,
+`quickstart-site`, `quickstart-create-key`, `quickstart-snippet-<html|react|curl>`, `quickstart-train`,
 `quickstart-target`, `quickstart-entity`, `quickstart-train-button`, `quickstart-training`,
 `quickstart-cost-<step>`, `quickstart-top-up`. `Button` passes `data-testid` through.
 

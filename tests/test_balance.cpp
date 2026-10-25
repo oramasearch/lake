@@ -1561,6 +1561,7 @@ TEST(PaidWorkContract, EveryCapabilityThatStartsPaidWorkIsMarked) {
         {"create_invitation", "an identity"},
         {"create_grant", "a permission"},
         {"create_token", "a credential"},
+        {"create_browser_key", "a credential"},
         {"create_encryption_key", "a key record"},
         {"create_federation_issuer", "a configuration"},
         {"create_pki_authority", "a credential"},

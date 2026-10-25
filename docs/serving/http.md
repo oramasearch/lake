@@ -454,7 +454,12 @@ browser session."}}` when:
 
 A missing `Origin` and a missing `Sec-Fetch-Site` pass: a non-browser client sends neither, and a
 browser sends `Origin` on every cross-origin unsafe request. Bearer-authenticated calls are not
-affected, from any origin. The check is a router middleware that runs right after the response
+affected, from any origin, with one exception: a **browser key** (`lbk.…`, lake#1152,
+[`../api/browser-keys.md`](../api/browser-keys.md)) is refused (`403 unauthorized`) unless `Origin`
+names one of the origins it lists, and the answer to a call made with one carries
+`Access-Control-Allow-Origin: <that origin>` and `Vary: Origin`, or no `Access-Control-Allow-Origin`
+at all, instead of CORS's `*` (`restrict_cors_to_browser_key`). A preflight carries no credential and
+is answered as every preflight is. The check is a router middleware that runs right after the response
 reset and CORS, before any route, so it covers `/v1`, `/mcp` and the remaining form routes
 (`/logout`, `/session`, `/identity/clerk-session`) alike. The one exception is the SAML Assertion
 Consumer Service, `POST /v1/saml/<provider id>/acs`: the identity provider's form post is cross-site

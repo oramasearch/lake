@@ -237,6 +237,7 @@ add_library(lake-core STATIC
   src/api/web_app.cpp
   src/control/lake_identity.cpp
   src/control/saml.cpp
+  src/control/browser_keys.cpp
   src/control/callers.cpp
   src/control/agents.cpp
   src/control/pki.cpp
@@ -295,6 +296,7 @@ add_library(lake-core STATIC
   src/api/workspace_record_capabilities.cpp
   src/api/solution_capabilities.cpp
   src/api/quickstart_capabilities.cpp
+  src/api/browser_key_capabilities.cpp
   src/api/methodology_capabilities.cpp
   src/api/transcript_capabilities.cpp
   src/api/deletion_capabilities.cpp

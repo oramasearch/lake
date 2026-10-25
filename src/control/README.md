@@ -4,6 +4,12 @@
 into one across a `push_back`, `emplace_back` or `erase` on the same vector; copy the id first.
 `upsert_scim_group` read the team's policy object through an iterator after pushing member objects
 onto `policy_objects_`, a heap-use-after-free AddressSanitizer found (lake#1175).
+`browser_keys.cpp` is the origin rule a browser key's list follows and the principal its `lbk.`
+credential resolves to (lake#1152). Both stores keep the row (`browser_keys`, migration
+`0102_browser_keys`: the SHA-256, never the secret), resolve the credential while it is unrevoked,
+unexpired and its workspace is not deleted, and count its calls a minute; PostgreSQL in one `UPDATE`
+so every replica shares the minute. Revoking sessions does not touch it. See
+[browser keys](../../docs/api/browser-keys.md).
 
 Both stores reject disabled or missing users when resolving agent launch, schedule and task
 credentials (lake#951). Creation, claims and renewal serialize with offboarding on the user row

@@ -33,7 +33,7 @@ are each one's own, unchanged:
 | Dataset | `upload_dataset` with `if_exists: "rename"` (so its CSV check and name rule apply), or an existing `dataset_id` checked with the engine's `get_dataset` |
 | Search index | `create_index`, then `expose_index` |
 | Model | `train_model` (methodology `M-1` and a 0.2 held-out share unless told otherwise), then `expose_model` once its run has succeeded |
-| Website key | `create_token` with scopes `search_index` (and `predict` once there is a model), called by the person or the agent |
+| Website key | `create_browser_key` bound to the index (and the model once published) and the website's origins: nested in `quickstart_snippets` when it is sent `origins`, or called by the person or the agent ([browser-keys.md](browser-keys.md)) |
 
 The quickstart's own reads for its bookkeeping (the training run's `get_run`, the model the run made
 from `list_models`, the dataset's columns from `get_dataset`) go through `call_workspace`, the path
@@ -50,7 +50,7 @@ proposed `quickstart_train`; it is `train_quickstart`, an action, beside `train_
 | `start_quickstart` | action, paid | `customer_id`; `workspace_id?`; `quickstart_id?` (resume); `content` with `format` (`csv`, `jsonl`) and `name?`, or `dataset_id` (`<database>/<name>`); `fields?` (the columns to search) | The workspace (the account's first, made when it has none, while `workspace_id` is left out), the dataset, its index, publishing it |
 | `quickstart_status` | read | `customer_id`, `workspace_id`, `quickstart_id?` (default: the newest), `include_costs?` | Every step's state, the ids, the training's progress read live, `next`, the workspace's quickstarts; with `include_costs`, `costs` |
 | `train_quickstart` | action, paid | `customer_id`, `workspace_id`, `quickstart_id?`, `target?`, `entity_column?`, `methodology?` (default `M-1`), `holdout_fraction?` (default 0.2), `name?` | Starts training; called again once trained, publishes the model; a failed run is trained again by the next call |
-| `quickstart_snippets` | read | `customer_id`, `workspace_id`, `quickstart_id?` | `snippets` (`html`, `react`, `curl`, each `{id, title, language, code}`), `key` (`placeholder`, `scopes`, `create`: the `create_token` call, `note`), `mcp`, `ready`, `includes_model` |
+| `quickstart_snippets` | action, authorized as a read (POST) | `customer_id`, `workspace_id`, `quickstart_id?`, `origins?` (the website's origins: makes the key now) | `snippets` (`html`, `react`, `curl`, each `{id, title, language, code}`), `key` (`kind: "browser_key"`, `placeholder`, `capabilities`, `create`: the `create_browser_key` call, `secret` and `browser_key` when it made one, `note`), `mcp`, `ready`, `includes_model` |
 
 `start_quickstart` takes up to 64 MiB of JSON, as `upload_dataset` does; the engine takes at most
 16 MiB of content.
@@ -123,27 +123,36 @@ rates are given, not a total.
 
 ## The website key
 
-Lake already gives browsers a key for a published index: a Lake API token scoped to `search_index`
-alone ([search.md](search.md), Ship → Search Index's *Create a search key*). Lake's CORS answers any
-origin and reflects the request's headers, and a bearer call is never refused as cross-site
-([../serving/http.md](../serving/http.md#cross-site-requests)), so a page on any site can call
-`GET /v1/search_index` and `POST /v1/predict` with it. The quickstart uses that and invents nothing:
+The code goes into a public web page, so its key is a **browser key** (lake#1152,
+[browser-keys.md](browser-keys.md)): bound to the quickstart's index (and its model once
+published) in this workspace, callable only for `search_index` and `predict` on them, only from the
+website origins it lists (Lake checks `Origin`, and its CORS answer names only those origins), at
+most 600 calls a minute, and lasting until it is revoked. It belongs to the workspace, not to the
+sign-in that made it, so signing out leaves the website working.
 
-- `quickstart_snippets` answers the code with `YOUR_LAKE_SEARCH_KEY` where the key goes, and
-  `key.create`, the `create_token` call to make it (`scopes: ["search_index"]`, plus `predict` once
-  the model is published). The console makes the key and puts it into the code it shows; an agent
-  does the same. The secret is shown once and is never stored or answered by the quickstart.
-- The key can only search published indexes and ask published models of the accounts its maker can
-  read. It changes nothing. Anyone who opens the website can read it, and every search and answer is
-  billed to the account.
-- It keeps the expiry it was made with, at most what was left of the sign-in that made it (30 days
-  at most), unless it is a standing key that never expires, which the account must allow. Signing
-  out does not end it (lake#1163). It is revoked on Tokens.
-
-What Lake does not have yet, so it is not claimed: a key bound to one index or model, and one bound
-to the website's origin. `create_token` refuses a token credential (it needs a signed-in session), so an agent that
-connects with an API token gets the code with the placeholder and asks the person for a key.
-Filed as [lake#1152](https://github.com/oramasearch/lake/issues/1152).
+- **With `origins`** (`["https://www.example.com"]`), `quickstart_snippets` makes the key through a
+  nested `create_browser_key` call as the same caller (its authorization, write on the account, and
+  its central audit are its own), answers its secret once in `key.secret` with the key's record in
+  `key.browser_key`, and puts the secret in the code where it says `YOUR_LAKE_SEARCH_KEY`. Every
+  call with `origins` makes a new key; the earlier ones keep working until revoked. A refusal (an
+  origin that is not `https://host[:port]`, or `http://` other than localhost) is
+  `create_browser_key`'s, word for word, and nothing is made. The console sends the address the
+  person typed.
+- **Without `origins`** it makes nothing: the code carries `YOUR_LAKE_SEARCH_KEY`, and `key.create`
+  is the `create_browser_key` call with the account, workspace, index (and model) filled in and
+  `origins: ["https://www.example.com"]` to replace. Changing nothing, it is authorized as a read; it
+  is POSTed because with `origins` it writes.
+- The curl snippet sends `Origin` with the key's first origin (or `https://www.example.com`), since a
+  browser key answers only calls that name one of its origins.
+- A key made before the model was published binds no model and can only search: once the model is
+  published, `key.capabilities` lists `predict`, which that key lacks, and the console offers a new
+  key.
+- An agent on an API token, or an MCP client, can make the key: `create_browser_key` needs write on
+  the account, not a signed-in session (`create_token` still refuses a token credential).
+- Keys are listed and revoked with `list_browser_keys` and `revoke_browser_key`, and in the console
+  on the index's page (Ship → Search Index, *Website Keys*). Every search and answer is billed to the
+  account. The quickstart never stores a key: the secret is answered once, and the control plane
+  keeps only its hash.
 
 ## Where it lives
 
@@ -151,14 +160,16 @@ Everything is in the user's workspace Zetta: the dataset, the index and the mode
 and the quickstart's state is one sealed record per quickstart in the collection `lake_quickstarts`
 (found by the account, newest last; [workspace records](../architecture/workspace-records.md)). Its
 body holds the dataset, index, training settings and run id, model id, and each step's last error.
-Nothing is added to lake's PostgreSQL control plane: the workspace a person gets is the one
-`start_workspace` makes, which multitenancy already holds. Audit goes to the workspace's own chain
+Nothing of the quickstart's own is added to lake's PostgreSQL control plane: the workspace a person
+gets is the one `start_workspace` makes, and the website key is a browser key (`browser_keys`,
+decision 53), both of which multitenancy already holds. Audit goes to the workspace's own chain
 (`audit_routing.cpp`).
 
 ## Verify
 
 - `ctest --test-dir build -R Quickstart` runs `Quickstart.*` (`tests/test_quickstart.cpp`) over a
-  test double of the workspace engine: the whole process, a failed step kept and resumed, a blocked
+  test double of the workspace engine: the whole process (with the browser key made through
+  `quickstart_snippets` with `origins`, searching from that origin), a failed step kept and resumed, a blocked
   balance refused with the top-up link and nothing started, another account's workspace refused,
   a person with no workspace waiting for one, input refusals, and the OpenAPI, MCP, `llms.txt`,
   `llms-full.txt` and skill listings.
@@ -166,8 +177,9 @@ Nothing is added to lake's PostgreSQL control plane: the workspace a person gets
   Zetta with `LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` set (a local `zetta --headless`): a
   real search through `search_index`, training, publishing and `predict` on the hits.
 - By hand over MCP: `tools/call start_quickstart` with a CSV's text, `train_quickstart`,
-  `quickstart_status` until `trained`, `train_quickstart` again, `quickstart_snippets`, then the
-  `key.create` call; the key answers `search_index` and `predict` from another origin.
+  `quickstart_status` until `trained`, `train_quickstart` again, `quickstart_snippets` with
+  `origins`; the key in the code answers `search_index` and `predict` with that `Origin`, and 403
+  with another.
 - In a browser: `tools/e2e/quickstart.mjs` ([../deployment/browser-testing.md](../deployment/browser-testing.md)).
 
 ## How to change it
@@ -176,5 +188,5 @@ Nothing is added to lake's PostgreSQL control plane: the workspace a person gets
   owns it (as a nested registry call), its cost in `costs_for`, and the console's card.
 - A new snippet: a function beside `html_snippet` and an entry in `quickstart_snippets`; values go
   in through `script_value`, which never closes a script.
-- A narrower website key: when Lake can scope a token to one index or origin, `key.create` names it
-  here and the page follows; nothing else changes.
+- The website key: what a browser key may do is [browser-keys.md](browser-keys.md#how-to-change-it);
+  what the quickstart asks for is `create_input` in `quickstart_snippets`.

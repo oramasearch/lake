@@ -326,6 +326,13 @@ migration `0083_methodology_deployments`), its operator status, `methodology_dep
 `methodology_deployment_endpoint_valid` (only a serve Service's in-cluster URL). `methodologies.hpp`
 adds the chunked artifact bounds (8 MiB chunks, 1 GiB in all) and the predict row limit.
 
+`store.hpp` holds browser keys (lake#1152, migration `0102_browser_keys`): `BrowserKey`,
+`NewBrowserKey`, `IssuedBrowserKey`, `BrowserKeyAdmission`, the `lbk.` prefix, the origin rule
+`browser_key_origin` and `browser_key_principal` (no person; `Principal::browser_key` carries the
+binding the registry checks), and the Store calls `create_browser_key`, `list_browser_keys`,
+`revoke_browser_key` and `admit_browser_key_call` (one row's minute, shared by every replica). See
+[browser-keys.md](../../../docs/api/browser-keys.md).
+
 `authentication_limits.hpp` provides the bounded fixed-window attempt table used by both stores
 and HTTP client admission (lake#969). Full tables fail closed without evicting active budgets.
 The store's protected account admission uses resolved user ids across all password/MFA/recovery

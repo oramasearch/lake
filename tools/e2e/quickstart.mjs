@@ -3,7 +3,7 @@
 // live search, a website key and the plain web page code, which it serves from another origin and
 // searches there; then training, publishing and the model's answers on the page and on the website.
 // A screenshot per step and a log.json. It leaves the dataset, index, model and key in the
-// signed-in account's workspace; delete them from Data, Ship and Tokens after a run.
+// signed-in account's workspace; delete them from Data and Ship (the index's Website Keys) after a run.
 //
 //   node tools/e2e/quickstart.mjs <base-url> <ticket-file> <output-dir>
 //
@@ -88,7 +88,8 @@ try {
   note("search", { hits: await page.getByTestId("quickstart-hit").count() });
   await shot("searched");
 
-  // 4. A website key and the plain web page code, run from another origin.
+  // 4. A browser key for the website's origin (lake#1152) and the plain web page code, run there.
+  await page.getByTestId("quickstart-site").fill(new URL(siteUrl).origin);
   await page.getByTestId("quickstart-create-key").click();
   await page.getByText("Your website key").waitFor({ timeout: 30000 });
   sitePage = `<!doctype html><meta charset="utf-8"><title>site</title>\n${await page.getByTestId("quickstart-snippet-html").locator("code").innerText()}`;
@@ -111,6 +112,7 @@ try {
   await page.getByTestId("quickstart-search").fill("dreams");
   await page.getByTestId("quickstart-answer").first().waitFor({ timeout: 30000 });
   note("page-answers", { answers: await page.getByTestId("quickstart-answer").count() });
+  await page.getByTestId("quickstart-site").fill(new URL(siteUrl).origin);
   await page.getByTestId("quickstart-create-key").click();
   await page.getByText("Your website key").waitFor({ timeout: 30000 });
   sitePage = `<!doctype html><meta charset="utf-8"><title>site</title>\n${await page.getByTestId("quickstart-snippet-html").locator("code").innerText()}`;

@@ -11,9 +11,10 @@ stands, and you can leave and come back: the page goes on from where you stopped
    makes one; keep the page open while it starts, and your dataset goes in as soon as it is ready.
 2. **Search your data.** Lake builds a search index over every column and publishes it. Type in the
    search box: results appear as you type.
-3. **Search on your website.** Press **Make a website key**, then copy the code for a plain web page
-   or a React component. Lake's address, your account, workspace and index are already in it, and so
-   is the key. Paste it into your site and search there.
+3. **Search on your website.** Type your website's address (such as `https://www.example.com`) and
+   press **Make a website key**, then copy the code for a plain web page or a React component.
+   Lake's address, your account, workspace and index are already in it, and so is the key. Paste it
+   into your site and search there.
 4. **Train a model.** Choose the column to predict and the column that names a row (Lake guesses the
    last column and the first text column), then press **Train a model**. The page follows the
    training; you can leave and come back.
@@ -33,10 +34,12 @@ If your balance does not cover new work, the page shows **Add funds** instead of
 
 ## The Website Key
 
-Anyone who opens your website can read the key in its code. The key can only search published
-indexes and ask published models of the accounts you can read; it cannot change anything. It lasts
-as long as the sign-in that made it, at most 30 days. Revoke it on **Tokens** at any time
-([Tokens and Keys](/docs/tokens)).
+Anyone who opens your website can read the key in its code, so the key is made to be read: it can
+only search this index (and ask this model), only from the website address you typed, a limited
+number of times a minute, and it cannot change anything. It belongs to your workspace, not to your
+sign-in: signing out leaves your website working. It lasts until you revoke it on the index's page
+(**Ship → Search Indexes**, the index, **Website Keys**), where you can also make keys for other
+addresses. Every search and answer your website asks for is billed to your account.
 
 ## From Code and AI Agents
 
@@ -47,7 +50,7 @@ The quickstart is four tools, the same over REST and MCP:
 | `start_quickstart` | Adds the dataset (`content` and `format`, or a `dataset_id`), making a workspace when there is none, and builds and publishes its search index |
 | `quickstart_status` | Where each step stands, and what to call next; with `include_costs`, what the paid steps cost and your balance |
 | `train_quickstart` | Trains a model on the same dataset; called again once it is trained, publishes it |
-| `quickstart_snippets` | The website code, and the `create_token` call that makes its key |
+| `quickstart_snippets` | The website code; with `origins` (your website's address), it also makes the website key and puts it in the code. Without, it names the `create_browser_key` call that makes it |
 
 ```sh
 curl -s -X POST https://<your lake>/v1/start_quickstart \

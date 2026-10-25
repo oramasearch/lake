@@ -26,6 +26,12 @@ the kind check widened once, `account_balance_credits_grant_check`, a partial in
 `balance_grants_guard`. Additive; the operator vendors the schema and selects the guard before the
 new binary rolls. See [billing.md](../docs/api/billing.md#credits-from-orama) and
 [schema.md](../docs/control-plane/schema.md#credits-from-orama-migration-0100_balance_grants).
+Migration `0102_browser_keys` (lake#1152) adds `browser_keys`: each browser key's SHA-256, binding
+(account, workspace, index, optional model), origins, calls a minute with the current minute's
+count, maker, expiry and revocation, and the guard `browser_keys_guard`. Additive; apply before the
+new binary, and have the operator vendor the schema and select the guard. `0100` and `0101` are
+lake#1155's and lake#1156's. See [browser-keys.md](../docs/api/browser-keys.md) and
+[schema.md](../docs/control-plane/schema.md#browser-keys-migration-0102_browser_keys).
 
 Migration `0099_account_balances` (lake#1114, liquid-bridge decision 67) adds the prepaid balance:
 `account_balances` (each account's settings, last refresh, email marks and auto top-up, with a

@@ -525,6 +525,10 @@ struct ApiContext {
     // setting the identity fields above for that call alone, and refuses it everywhere else. Its
     // TAAP identity is never an acting identity elsewhere: a Lake account may hold the same one.
     std::optional<control::Principal> application_session;
+    // A browser key's binding (lake#1152, docs/api/browser-keys.md), set when one authenticated
+    // the call: Registry::call admits it only to search_index and predict on what it is bound to,
+    // from one of its origins (`caller_origin`), within its calls a minute.
+    std::optional<control::BrowserKey> browser_key;
     std::vector<std::string> scopes;
     control::AuthorizationCache authorization_cache;
     std::string audit_customer_id;

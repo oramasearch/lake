@@ -1583,6 +1583,26 @@ public:
     control::Result<control::IssuedSession> create_token(const control::NewToken& value) override {
         return call("create_token", [&] { return store_->create_token(value); });
     }
+    control::Result<control::IssuedBrowserKey>
+    create_browser_key(const control::NewBrowserKey& value) override {
+        return call("create_browser_key", [&] { return store_->create_browser_key(value); });
+    }
+    control::Result<std::vector<control::BrowserKey>>
+    list_browser_keys(const std::string& customer_id, const std::string& workspace_id) override {
+        return call("list_browser_keys",
+                    [&] { return store_->list_browser_keys(customer_id, workspace_id); });
+    }
+    control::Result<control::BrowserKey>
+    revoke_browser_key(const std::string& customer_id,
+                       const std::string& id,
+                       const std::string& revoked_by) override {
+        return call("revoke_browser_key",
+                    [&] { return store_->revoke_browser_key(customer_id, id, revoked_by); });
+    }
+    control::Result<control::BrowserKeyAdmission>
+    admit_browser_key_call(const std::string& id) override {
+        return call("admit_browser_key_call", [&] { return store_->admit_browser_key_call(id); });
+    }
     control::Result<std::vector<control::Session>>
     list_sessions(const std::string& user_id, const std::string& pool_id) override {
         return call("list_sessions", [&] { return store_->list_sessions(user_id, pool_id); });

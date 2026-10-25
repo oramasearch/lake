@@ -533,9 +533,20 @@ read, a revoked invitation that cannot be accepted, the grants that are kept, a 
 leaves nothing in its workspace, a conversation removed for its person only, the engine deletions'
 fields and an older engine's `not_supported`, and the log each is audited in.
 
+`test_browser_keys.cpp` covers browser keys (lake#1152, docs/api/browser-keys.md, `Stores/BrowserKeys.*`
+over the memory and PostgreSQL stores) through the registry with credentials resolved as the HTTP
+server resolves them: refusals for another index, model, workspace, account or capability; origin
+refusals and the origin rule; a key that outlives its maker's sign-in and the token made under it;
+revocation by the account and not by another; creation by a scoped API token and refusal for a
+token without the scope or a read-only person; the calls a minute; usage metered to the key's
+workspace; a deleted workspace's key; and (PostgreSQL) expiry and the table's checks. The CORS
+answer is `HttpResponseIsolation.ABrowserKeyAnswersOnlyItsWebsiteAndOutlivesSignOut` in
+`test_http_server.cpp`.
+
 `test_quickstart.cpp` covers the quickstart process (lake#1128, docs/api/quickstart.md) over a test
 double of the workspace engine and two accounts with billing on: the whole process from a dropped CSV
-to a published model and its website code, a failed step kept with why and resumed, a blocked balance
+to a published model and its website code (the browser key made with `origins` and used from that
+origin), a failed step kept with why and resumed, a blocked balance
 refused with the top-up link before any step, another account's workspace refused, a person with no
 workspace waiting for one, input refusals, and the OpenAPI, MCP, `llms.txt`, `llms-full.txt` and
 skill listings. `QuickstartZetta.*` runs the whole process against a real Zetta named by

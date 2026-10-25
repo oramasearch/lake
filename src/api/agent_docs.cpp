@@ -40,8 +40,9 @@ constexpr std::array group_rules{
               "is none, adds the dataset, builds and publishes its search index), "
               "quickstart_status (each step's state and what to call next), train_quickstart "
               "(trains a model on the same data, then publishes it) and quickstart_snippets (the "
-              "plain web page, React and curl code with the hosts and ids filled in, and the "
-              "create_token call for the key). A step that fails says why and is resumed by the "
+              "plain web page, React and curl code with the hosts and ids filled in; with "
+              "`origins` it also makes the browser key the code needs). A step that fails says why "
+              "and is resumed by the "
               "next call; paid steps answer 402 payment_required with the top-up link while the "
               "balance is blocked.",
               [](std::string_view n) {
@@ -108,6 +109,19 @@ constexpr std::array group_rules{
               "of them (search_workspace_index), and publish or withdraw one's endpoint. "
               "search_index searches a published index.",
               [](std::string_view n) { return engine_capability_group(n) == "Search indexes"; }},
+    // Browser keys (lake#1152, docs/api/browser-keys.md): before Identity, whose rule takes
+    // anything named like a token.
+    GroupRule{"Browser keys",
+              "The key a website's own page holds: bound to one search index (and optionally one "
+              "model) of one workspace, callable only for search_index and predict on them, only "
+              "from the website origins it lists, so many times a minute, and lasting until it is "
+              "revoked, not until its maker signs out. create_browser_key answers its secret once; "
+              "list_browser_keys and revoke_browser_key manage them. An API token, an agent or an "
+              "MCP client with write on the account may make one.",
+              [](std::string_view n) {
+                  return n == "create_browser_key" || n == "list_browser_keys" ||
+                         n == "revoke_browser_key";
+              }},
     GroupRule{"Datasets",
               "Load data into a workspace (upload_dataset, create_dataset_from_query from a saved "
               "connection), read what a dataset holds and how to featurize it (analyze_dataset, "
@@ -396,13 +410,14 @@ constexpr std::array group_rules{
 };
 
 // The order groups are shown in.
-constexpr std::array<std::string_view, 31> group_order{"Quickstart",
+constexpr std::array<std::string_view, 32> group_order{"Quickstart",
                                                        "Workspace: Design, Train and Ship",
                                                        "Projects and pipelines",
                                                        "Training and runs",
                                                        "Experiments",
                                                        "Models",
                                                        "Search indexes",
+                                                       "Browser keys",
                                                        "Datasets",
                                                        "Connections",
                                                        "Decisions",
@@ -594,9 +609,10 @@ const std::vector<Flow>& flows() {
            "model, model_answers), `next`, and with `include_costs` what the paid steps cost "
            "against the balance"},
           {"quickstart_snippets",
-           "`customer_id`, `workspace_id`: plain web page, React and curl code; call "
-           "`key.create` (create_token) and put its `secret` where the code says "
-           "YOUR_LAKE_SEARCH_KEY"},
+           "`customer_id`, `workspace_id`, `origins` (your website's address, such as "
+           "[\"https://www.example.com\"]): plain web page, React and curl code with a browser "
+           "key made for that website already in it (`key.secret`, shown once). Without "
+           "`origins` it makes nothing, and `key.create` is the create_browser_key call"},
           {"train_quickstart",
            "`customer_id`, `workspace_id`, `target` (the column to predict), `entity_column` "
            "(the column that names a row): starts training; read quickstart_status until the "
@@ -791,7 +807,11 @@ const std::vector<Flow>& flows() {
           {"expose_index", "`index_id` to publish it (`unexpose_index` to stop)"},
           {"search_index",
            "`index_id`, `query`; optional `field`, `top_k`, `fields` (which row fields each "
-           "hit carries)"}}},
+           "hit carries)"},
+          {"create_browser_key",
+           "`workspace_id`, `index_id`, `origins` (the website's address), optional `model_id`: "
+           "the key a web page holds, which searches only that index from only that website; "
+           "its `secret` is answered once"}}},
     };
     return all;
 }

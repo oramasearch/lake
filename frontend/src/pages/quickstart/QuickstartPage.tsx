@@ -25,6 +25,7 @@ import {
   uploadContent,
   withKey,
   keyCovers,
+  siteOrigin,
   type Costs,
   type Snippets,
   type Status as QuickstartStatus,
@@ -426,24 +427,28 @@ function TrySearch({ status }: { status: QuickstartStatus }) {
 
 type Lang = "html" | "react" | "curl";
 
-/** Steps 3 and 5: the code for a website, with Lake's host and the ids filled in, and a key made
- * here and put into it. */
+/** Steps 3 and 5: the code for a website, with Lake's host and the ids filled in, and a browser key
+ * made here in one click for the website's address and put into it (lake#1152). */
 function Website({ status }: { status: QuickstartStatus }) {
-  const snippets = useRead<Snippets>("quickstart_snippets", {
+  const where = {
     customer_id: status.customer_id,
     workspace_id: status.workspace_id,
     ...(status.quickstart_id ? { quickstart_id: status.quickstart_id } : {}),
-  });
+  };
+  // Without `origins` quickstart_snippets changes nothing: it is POSTed, as a read.
+  const snippets = usePostRead<Snippets>("quickstart_snippets", where);
   const [lang, setLang] = useState<Lang>("html");
-  const [made, setMade] = useState<{ secret: string; scopes: string[] } | null>(null);
+  const [site, setSite] = useState("");
+  const [made, setMade] = useState<Snippets | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const value = snippets.data;
-  const snippet = value?.snippets.find((s) => s.id === lang);
-  const placeholder = value?.key?.placeholder ?? "YOUR_LAKE_SEARCH_KEY";
+  const typed = site ? siteOrigin(site) : null;
   // A key made before the model was published can only search: the code needs a new one.
-  const stale = !!made && !!value?.key && !keyCovers(made.scopes, value.key.scopes);
-  const secret = made && !stale ? made.secret : null;
+  const stale = !!made?.key && !!value?.key && !keyCovers(made.key.capabilities, value.key.capabilities);
+  const shown = made && !stale ? made : value;
+  const snippet = shown?.snippets.find((s) => s.id === lang);
+  const secret = made && !stale ? made.key?.secret ?? null : null;
   return (
     <Card label={status.model?.published ? "Steps 3 and 5" : "Step 3"} title={status.model?.published ? "Search and Model Answers on Your Website" : "Search on Your Website"}>
       {snippets.isLoading ? (
@@ -453,30 +458,36 @@ function Website({ status }: { status: QuickstartStatus }) {
       ) : value && value.ready ? (
         <div data-testid="quickstart-website">
           <ol className="mt-0 pl-4 text-[13px] text-ink-2">
-            <li>Make a key for your website. It can only search{value.includes_model ? " and ask your published model" : ""}, and it is shown once.</li>
+            <li>Type your website's address and make its key. The key only searches this index{value.includes_model ? " and asks your model" : ""}, only from that address, and it is shown once.</li>
             <li>Copy the code into your page: a plain web page or a React component.</li>
             <li>Open the page and search. {value.includes_model ? "Each result shows the model's answer beside it." : "Train a model below to add its answers."}</li>
           </ol>
           {error ? <ErrorBlock error={error} /> : null}
           {stale ? <Banner tone="info">Your key can only search. Make a new key that can also ask your model, and copy the code again.</Banner> : null}
           {secret ? (
-            <CopyBlock value={secret} label="Your website key" />
+            <CopyBlock value={secret} label={`Your website key for ${made?.key?.browser_key?.origins.join(", ") ?? "your website"}`} />
           ) : (
-            <Button
-              loading={busy}
-              data-testid="quickstart-create-key"
-              onClick={() => {
-                if (!value.key) return;
+            <form
+              className="flex flex-wrap items-end gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!typed || "error" in typed) return;
                 setBusy(true);
                 setError(null);
-                const scopes = value.key.scopes;
-                act<{ secret?: string }>(value.key.create.capability, value.key.create.input)
-                  .then((issued) => setMade(issued.secret ? { secret: issued.secret, scopes } : null), setError)
+                act<Snippets>("quickstart_snippets", { ...where, origins: [typed.origin] })
+                  .then(setMade, setError)
                   .finally(() => setBusy(false));
               }}
             >
-              <KeyRound size={14} aria-hidden /> Make a website key
-            </Button>
+              <label className="grid min-w-[16rem] flex-1 gap-1 text-[12px] text-ink-2">
+                Your website's address
+                <input type="url" value={site} onChange={(e) => setSite(e.target.value)} placeholder="https://www.example.com" data-testid="quickstart-site" aria-invalid={!!typed && "error" in typed} />
+              </label>
+              <Button type="submit" loading={busy} disabled={!typed || "error" in typed} data-testid="quickstart-create-key">
+                <KeyRound size={14} aria-hidden /> Make a website key
+              </Button>
+              {typed && "error" in typed ? <p className="m-0 basis-full text-[12px] text-bad">{typed.error}</p> : null}
+            </form>
           )}
           <div className="mt-3">
             <StateTabs<Lang>
@@ -492,10 +503,14 @@ function Website({ status }: { status: QuickstartStatus }) {
           </div>
           {snippet ? (
             <div data-testid={`quickstart-snippet-${snippet.id}`}>
-              <CopyBlock value={withKey(snippet.code, placeholder, secret)} multiline />
+              <CopyBlock value={withKey(snippet.code, value.key?.placeholder ?? "YOUR_LAKE_SEARCH_KEY", secret)} multiline />
             </div>
           ) : null}
-          {value.key ? <p className="mb-0 text-[12px] text-ink-3">{value.key.note} <Link to="/tokens">Tokens</Link></p> : null}
+          {shown?.key ? (
+            <p className="mb-0 text-[12px] text-ink-3">
+              {shown.key.note} <Link to={`/w/${encodeURIComponent(status.workspace_id)}/ship/index?${new URLSearchParams({ customer_id: status.customer_id, id: status.index?.id ?? "" })}`}>Website keys</Link>
+            </p>
+          ) : null}
           <p className="mb-0 text-[12px] text-ink-3">
             <Code2 size={12} aria-hidden className="inline" /> An AI agent reaches the same index through the MCP tool <code>search_index</code> at <code>{value.origin}/mcp</code>.
           </p>

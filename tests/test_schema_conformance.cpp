@@ -769,6 +769,19 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     auto quickstart_id = transcript_scope;
     quickstart_id["quickstart_id"] = started.at("quickstart_id");
     http.call("quickstart_snippets", quickstart_id);
+    // Browser keys (docs/api/browser-keys.md, lake#1152): bound to the quickstart's index.
+    engine["get_index"] = {{"index_id", "index-schema"}, {"exposed", true}};
+    auto browser_key = transcript_scope;
+    browser_key.update(
+        {{"index_id", "index-schema"}, {"origins", json::array({"https://shop.example.test"})}});
+    const auto made_key = http.call("create_browser_key", browser_key);
+    auto keyed_snippets = quickstart_id;
+    keyed_snippets["origins"] = json::array({"https://shop.example.test"});
+    http.call("quickstart_snippets", keyed_snippets);
+    http.call("list_browser_keys", {{"customer_id", transcript_scope.at("customer_id")}});
+    http.call(
+        "revoke_browser_key",
+        {{"customer_id", transcript_scope.at("customer_id")}, {"id", made_key.at("key").at("id")}});
     auto quickstart_training = quickstart_id;
     quickstart_training["target"] = "popular";
     http.call("train_quickstart", quickstart_training);

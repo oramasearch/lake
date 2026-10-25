@@ -114,3 +114,9 @@ storing it would hide a typo. A token can never hold a scope its issuing credent
 (`unauthorized`). Agent-task credentials carry workspace action names the registry does not list
 (`create_study`, `compile_intent`); lake issues those itself and `create_token` never does.
 
+A key for a website's own page is not a token: it is a **browser key** (`create_browser_key`,
+`lbk.<id>.<secret>`, lake#1152), bound to one index (and optionally one model) of one workspace and
+to the website origins it lists, rate limited, and lasting until revoked rather than until its
+maker's sign-in ends. Unlike `create_token`, an API token may make one. See
+[browser-keys.md](browser-keys.md).
+

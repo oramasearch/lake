@@ -16,8 +16,16 @@ region serves. `http_server.cpp` answers them from the region picker's middlewar
 `expose_index`, `train_model`, `expose_model`), so authorization, the balance gate, audit and
 metering stay each capability's own; its bookkeeping reads (`get_run`, `list_models`,
 `get_dataset`) use `call_workspace`. The state is a sealed `lake_quickstarts` record per quickstart
-in the workspace Zetta. The website code is built here and never carries a key; `key.create` is the
-`create_token` call. See [quickstart.md](../../docs/api/quickstart.md).
+in the workspace Zetta. The website code is built here; with `origins` it makes a browser key through
+a nested `create_browser_key` and puts the secret in the code, otherwise `key.create` names that call.
+See [quickstart.md](../../docs/api/quickstart.md).
+
+`browser_key_capabilities.cpp` registers `create_browser_key`, `list_browser_keys` and
+`revoke_browser_key` (lake#1152). A browser key acts as no person: `authorize_browser_key` in
+`registry.cpp` admits it only to `search_index` and `predict` on its binding, from its origins
+(`ApiContext::caller_origin`), within its calls a minute (`Store::admit_browser_key_call`), before
+any handler; `restrict_cors_to_browser_key` in `http_server.cpp` answers its CORS to those origins
+alone. See [browser-keys.md](../../docs/api/browser-keys.md).
 
 `stream_person` in `agent_stream_triggers.cpp` is shared with `mcp_connection_streams.cpp` and
 requires a present, enabled account (lake#951). Disabled/missing principals trigger idempotent

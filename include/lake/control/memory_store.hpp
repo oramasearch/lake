@@ -596,6 +596,13 @@ public:
                                     const std::string& state,
                                     const std::string& browser_binding) override;
     Result<IssuedSession> create_token(const NewToken&) override;
+    Result<IssuedBrowserKey> create_browser_key(const NewBrowserKey&) override;
+    Result<std::vector<BrowserKey>> list_browser_keys(const std::string& customer_id,
+                                                      const std::string& workspace_id) override;
+    Result<BrowserKey> revoke_browser_key(const std::string& customer_id,
+                                          const std::string& id,
+                                          const std::string& revoked_by_taap_id) override;
+    Result<BrowserKeyAdmission> admit_browser_key_call(const std::string& id) override;
     Result<std::vector<Session>> list_sessions(const std::string& user_id,
                                                const std::string& pool_id) override;
     Result<void> revoke_session(const std::string& user_id, const std::string& session_id) override;
@@ -874,6 +881,16 @@ private:
     std::map<std::pair<std::string, std::string>, std::int64_t> saml_assertions_;
     std::vector<Device> devices_;
     std::vector<Session> sessions_;
+    // Browser keys (lake#1152): the row, its secret's SHA-256, expiry and the current minute's
+    // calls, as `browser_keys` keeps them.
+    struct StoredBrowserKey {
+        BrowserKey key;
+        std::string secret_sha256;
+        std::int64_t expires_unix = 0;
+        std::int64_t window_started_unix = 0;
+        int window_calls = 0;
+    };
+    std::vector<StoredBrowserKey> browser_keys_;
     std::vector<std::pair<std::string, std::string>> session_secrets_;
     std::vector<OfflineGrant> offline_grants_;
     struct RecoveryRecord {

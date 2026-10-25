@@ -1684,6 +1684,36 @@ Session session_of(const pqxx::row& r) {
                    r[12].as<std::string>()};
 }
 
+// A browser key's row (lake#1152, migration 0102_browser_keys); timestamps as RFC 3339 UTC seconds.
+constexpr const char* browser_key_columns =
+    "id::text, customer_id::text, workspace_id::text, index_id, model_id, name, "
+    "array_to_json(origins)::text, rate_limit_per_minute, coalesce(created_by_user_id::text, ''), "
+    "created_by_taap_id, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+    "coalesce(to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), "
+    "coalesce(to_char(revoked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), "
+    "revoked_by_taap_id, "
+    "coalesce(to_char(last_used_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '')";
+
+BrowserKey browser_key_of(const pqxx::row& r) {
+    BrowserKey key;
+    key.id = r[0].as<std::string>();
+    key.customer_id = r[1].as<std::string>();
+    key.workspace_id = r[2].as<std::string>();
+    key.index_id = r[3].as<std::string>();
+    key.model_id = r[4].as<std::string>();
+    key.name = r[5].as<std::string>();
+    key.origins = nlohmann::json::parse(r[6].as<std::string>()).get<std::vector<std::string>>();
+    key.rate_limit_per_minute = r[7].as<int>();
+    key.created_by_user_id = r[8].as<std::string>();
+    key.created_by_taap_id = r[9].as<std::string>();
+    key.created_at = r[10].as<std::string>();
+    key.expires_at = r[11].as<std::string>();
+    key.revoked_at = r[12].as<std::string>();
+    key.revoked_by_taap_id = r[13].as<std::string>();
+    key.last_used_at = r[14].as<std::string>();
+    return key;
+}
+
 // ls1.<public UUID>.<256-bit random secret>; reject malformed input before opening a transaction.
 std::optional<std::string> session_lookup_id(std::string_view bearer) {
     if (bearer.size() != 105 || !bearer.starts_with("ls1.") || bearer[40] != '.') {
@@ -10281,6 +10311,128 @@ public:
                                  in.parent_session_id);
         });
     }
+    Result<IssuedBrowserKey> create_browser_key(const NewBrowserKey& in) override {
+        if (in.customer_id.empty() || in.workspace_id.empty() || in.index_id.empty() ||
+            in.origins.empty() || in.origins.size() > browser_key_max_origins ||
+            in.rate_limit_per_minute < 1 || in.rate_limit_per_minute > browser_key_max_rate_limit ||
+            in.expires_in_seconds < 0) {
+            return std::unexpected(StoreError{
+                "invalid_input",
+                "a browser key names its account, workspace and index, lists 1 to 20 origins and "
+                "makes 1 to 6000 calls a minute"});
+        }
+        const std::string random = identity_crypto::random_secret();
+        if (random.size() < 32) {
+            return std::unexpected(StoreError{"store_error", "could not generate a browser key"});
+        }
+        const std::string id = new_uuid_v4();
+        const std::string secret = std::string(browser_key_credential_prefix) + id + "." + random;
+        const std::string digest = identity_crypto::sha256_hex(secret);
+        return with_tx<IssuedBrowserKey>([&](pqxx::work& tx) -> Result<IssuedBrowserKey> {
+            const pqxx::result live = tx.exec_params(
+                "SELECT 1 FROM workspaces WHERE id = $1::uuid AND customer_id = $2::uuid "
+                "AND desired <> 'deleted'",
+                in.workspace_id,
+                in.customer_id);
+            if (live.empty()) {
+                return std::unexpected(StoreError{
+                    "invalid_input", "workspace_id must name a workspace Zetta in this account"});
+            }
+            const pqxx::result rows = tx.exec_params(
+                std::string(
+                    "INSERT INTO browser_keys (id, customer_id, workspace_id, index_id, "
+                    "model_id, name, origins, rate_limit_per_minute, secret_sha256, "
+                    "created_by_user_id, created_by_taap_id, expires_at) VALUES "
+                    "($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, "
+                    "ARRAY(SELECT json_array_elements_text($7::json)), $8, $9, "
+                    "NULLIF($10, '')::uuid, $11, "
+                    "CASE WHEN $12::bigint > 0 THEN now() + make_interval(secs => $12::bigint) "
+                    "END) RETURNING ") +
+                    browser_key_columns,
+                id,
+                in.customer_id,
+                in.workspace_id,
+                in.index_id,
+                in.model_id,
+                in.name,
+                nlohmann::json(in.origins).dump(),
+                in.rate_limit_per_minute,
+                digest,
+                in.created_by_user_id,
+                in.created_by_taap_id,
+                in.expires_in_seconds);
+            return IssuedBrowserKey{browser_key_of(rows[0]), secret};
+        });
+    }
+    Result<std::vector<BrowserKey>> list_browser_keys(const std::string& customer_id,
+                                                      const std::string& workspace_id) override {
+        return with_tx<std::vector<BrowserKey>>(
+            [&](pqxx::work& tx) -> Result<std::vector<BrowserKey>> {
+                const pqxx::result rows =
+                    tx.exec_params(std::string("SELECT ") + browser_key_columns +
+                                       " FROM browser_keys WHERE customer_id = $1::uuid AND "
+                                       "($2 = '' OR workspace_id = NULLIF($2, '')::uuid) "
+                                       "ORDER BY created_at DESC, id",
+                                   customer_id,
+                                   workspace_id);
+                std::vector<BrowserKey> keys;
+                for (const pqxx::row& row : rows) {
+                    keys.push_back(browser_key_of(row));
+                }
+                return keys;
+            });
+    }
+    Result<BrowserKey> revoke_browser_key(const std::string& customer_id,
+                                          const std::string& id,
+                                          const std::string& revoked_by_taap_id) override {
+        if (!uuid_text(id)) {
+            return std::unexpected(
+                StoreError{"not_found", "no browser key " + id + " in this account"});
+        }
+        return with_tx<BrowserKey>([&](pqxx::work& tx) -> Result<BrowserKey> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("UPDATE browser_keys SET revoked_at = coalesce(revoked_at, now()), "
+                            "revoked_by_taap_id = CASE WHEN revoked_at IS NULL THEN $3 ELSE "
+                            "revoked_by_taap_id END WHERE id = $1::uuid AND customer_id = "
+                            "$2::uuid RETURNING ") +
+                    browser_key_columns,
+                id,
+                customer_id,
+                revoked_by_taap_id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no browser key " + id + " in this account"});
+            }
+            return browser_key_of(rows[0]);
+        });
+    }
+    Result<BrowserKeyAdmission> admit_browser_key_call(const std::string& id) override {
+        // One statement: the minute starts again a minute after it began, and every replica
+        // counts in the same row.
+        return with_tx<BrowserKeyAdmission>([&](pqxx::work& tx) -> Result<BrowserKeyAdmission> {
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE browser_keys SET "
+                "window_calls = CASE WHEN window_started_at IS NULL OR "
+                "window_started_at <= now() - interval '1 minute' THEN 1 "
+                "ELSE window_calls + 1 END, "
+                "window_started_at = CASE WHEN window_started_at IS NULL OR "
+                "window_started_at <= now() - interval '1 minute' THEN now() "
+                "ELSE window_started_at END "
+                "WHERE id = $1::uuid RETURNING window_calls, rate_limit_per_minute, "
+                "greatest(1, ceil(extract(epoch FROM window_started_at + interval '1 minute' - "
+                "now())))::int",
+                id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "session is not active"});
+            }
+            const int calls = rows[0][0].as<int>();
+            const int limit = rows[0][1].as<int>();
+            if (calls > limit) {
+                return BrowserKeyAdmission{false, rows[0][2].as<int>()};
+            }
+            return BrowserKeyAdmission{true, 0};
+        });
+    }
     Result<std::vector<Session>> list_sessions(const std::string& user_id,
                                                const std::string& pool_id) override {
         return with_tx<std::vector<Session>>([&](pqxx::work& tx) -> Result<std::vector<Session>> {
@@ -10433,6 +10585,33 @@ public:
         return principal;
     }
 
+    // A browser key (lake#1152): live until revoked or expired, while its workspace is.
+    Result<Principal> browser_key_credential(const std::string& secret) {
+        const auto parsed = parse_agent_credential(secret, browser_key_credential_prefix);
+        if (!parsed || !uuid_text(parsed->first)) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        const std::string digest = identity_crypto::sha256_hex(secret);
+        return with_tx<Principal>([&](pqxx::work& tx) -> Result<Principal> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + browser_key_columns +
+                    ", secret_sha256, (expires_at IS NOT NULL AND expires_at <= now()) "
+                    "FROM browser_keys WHERE id = $1::uuid AND revoked_at IS NULL AND EXISTS "
+                    "(SELECT 1 FROM workspaces WHERE workspaces.id = browser_keys.workspace_id "
+                    "AND workspaces.desired <> 'deleted')",
+                parsed->first);
+            if (rows.empty() || !constant_time_hex_equal(digest, rows[0][15].as<std::string>())) {
+                return std::unexpected(StoreError{"not_found", "session is not active"});
+            }
+            if (rows[0][16].as<bool>()) {
+                return std::unexpected(StoreError{"expired", "the browser key has expired"});
+            }
+            tx.exec_params("UPDATE browser_keys SET last_used_at = now() WHERE id = $1::uuid",
+                           parsed->first);
+            return browser_key_principal(browser_key_of(rows[0]), digest);
+        });
+    }
+
     Result<Principal> resolve_principal(const std::string& secret) {
         if (auto principal = build_principal(secret)) {
             return principal;
@@ -10445,6 +10624,9 @@ public:
         }
         if (secret.starts_with(methodology_run_credential_prefix)) {
             return methodology_run_credential(secret);
+        }
+        if (secret.starts_with(browser_key_credential_prefix)) {
+            return browser_key_credential(secret);
         }
         if (secret.starts_with(agent_launch_credential_prefix)) {
             return launch_principal(secret);
