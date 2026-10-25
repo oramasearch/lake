@@ -563,19 +563,24 @@ Expect:
 As: owner · Needs: TD-DATASET; agent-autosuggest Available
 
 1. In `W1`, open **Design → Opportunities** and press **Scan my workspace**.
-2. Leave the page for **Design → Projects**, then come back with **Back**.
-3. Wait for the scan to finish.
+2. Leave the page for **Design → Projects**, then open **Design → Opportunities** from the rail (a new
+   address, no `?task=`). Also open it in a second tab.
+3. Leave the page again and wait until the scan has had time to finish; then open **Design →
+   Opportunities** from the rail.
 
 Expect:
 - Step 1: an `agent_turn` with `agent: "agent-autosuggest"`, `kind: "discover"`, `message: "What could
-  this workspace build from its data?"`; the address gets `?task=<id>`.
-- While it works: "Scanning your workspace…" with "The Auto-Suggest Agent is reading your datasets and
-  matching them to the solutions catalogue. You can leave this page; the Opportunities are kept when it
-  finishes. This page checks again every 3 seconds."
-- Step 2 still shows the scan (the `task=` is kept).
-- When done: figures **Recommended** (sub "from the latest scan"), **Made into projects**, **Not yet**
-  (sub "the data does not support yet"), **Dismissed**; the banner says "Last scanned <relative time>",
-  "Scan again after your data changes; earlier Opportunities stay." and **Scan again**.
+  this workspace build from its data?"`; the address stays `/w/<W1 id>/design/opportunities`.
+- While it works: "Scanning… started <relative time>" with "The Auto-Suggest Agent is reading your
+  datasets and matching them to the solutions catalogue. You can leave this page; the Opportunities are
+  kept when it finishes and shown here, on any tab or device. This page checks again every 3 seconds."
+  The button says **Scanning…** and cannot be pressed.
+- Step 2 shows the same running scan in both tabs (`list_opportunities` answers it as `last_scan`;
+  lake#1195).
+- Step 3, and every tab when it finishes: figures **Recommended** (sub "from the latest scan"), **Made
+  into projects**, **Not yet** (sub "the data does not support yet"), **Dismissed**; the banner says
+  "Last scanned <relative time>", "Scan again after your data changes; earlier Opportunities stay." and
+  **Scan again**. Nobody had to be on the page when it finished.
 - A failed scan shows "The scan did not finish" with its message.
 
 #### DSGN-041 · What an Opportunity card shows · P1
