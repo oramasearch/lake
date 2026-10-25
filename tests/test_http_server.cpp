@@ -4503,6 +4503,29 @@ TEST(HttpServer, WorkspaceMcpSessionsLearnThatExportedToolsChanged) {
     EXPECT_FALSE(told(post(call, fresh)));
 }
 
+// A server reports Orama's published terms and privacy policy by default, and the configured ones
+// when they are set (LAKE_TERMS_URL, LAKE_PRIVACY_URL; liquid-bridge#15).
+TEST(HttpServer, ViewerCarriesTheTermsAndPrivacyLinks) {
+    for (const bool configured : {false, true}) {
+        lake::api::ServerOptions options;
+        options.port = 0;
+        options.worker_coroutines = 1;
+        options.store = std::make_shared<lake::control::InMemoryStore>();
+        if (configured) {
+            options.terms_url = "https://acme.example/terms";
+            options.privacy_url = "";
+        }
+        lake::api::ApiServer server(options);
+        ASSERT_TRUE(server.start()) << server.reason();
+        HttpConnection connection(server.port());
+        const auto viewer =
+            nlohmann::json::parse(response_body(connection.request("GET", "/v1/viewer")))["value"];
+        EXPECT_EQ(viewer["legal"]["terms_url"],
+                  configured ? "https://acme.example/terms" : "https://www.orama.com/legal/terms");
+        EXPECT_EQ(viewer["legal"]["privacy_url"], configured ? "" : "https://www.orama.com/legal/privacy");
+    }
+}
+
 // With Clerk, the web app mounts Clerk's sign-in (docs/api/clerk.md); lake keeps the exchange and
 // sends sign-out through Clerk's page so its session ends too.
 TEST(HttpServer, ClerkExchangeRefusesAForgedTokenAndSignOutEndsClerkToo) {

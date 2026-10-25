@@ -324,6 +324,39 @@ Then:
      lands on Lake signed in. The audit log has an `authentication` event on `saml/<provider id>`
      with outcome `success`; a refused response has outcome `denied` and the reason.
 
+## Terms and privacy
+
+Every sign-up and sign-in form links to the instance's terms of service and privacy policy, so a
+person sees both before an account is created
+([liquid-bridge#15](https://github.com/oramasearch/liquid-bridge/issues/15)). Under the form, Clerk's
+and lake's own alike, the page says *By creating an account, you agree to the Terms of Service and
+acknowledge the Privacy Policy.* (*By signing in, …* on sign-in). Both links open in a new tab, so a
+half-filled form is kept.
+
+| Variable | Default | What |
+|---|---|---|
+| `LAKE_TERMS_URL` | `https://www.orama.com/legal/terms` | the terms of service |
+| `LAKE_PRIVACY_URL` | `https://www.orama.com/legal/privacy` | the privacy policy |
+
+- **Unset** keeps the default: Orama's pages, published by orama-website-v2 (`/legal/terms`,
+  `/legal/privacy`). lake.live needs nothing set.
+- **`off`** removes that link. With both off, the sentence is gone. An enterprise or on-prem install
+  sets its own pages, or `off`.
+- **Anything else** must be an absolute `https://` (or `http://`) URL. Lake refuses to start on a
+  malformed one, and says which variable is wrong. The web app links only `http:` and `https:` URLs.
+- `viewer.legal` reports both (`{terms_url, privacy_url}`, empty for no link;
+  [web-app.md](../api/web-app.md)). They are instance configuration, not secrets: set them in the
+  Lake CR's `spec.env`.
+- **Clerk's own consent.** Clerk can also ask for consent in its form (its dashboard's legal
+  compliance setting). Lake does not rely on it: the sentence is Lake's, so it is the same with or
+  without Clerk. Turning Clerk's on is a change to the Clerk instance, so it is the operator's.
+- **What the documents say is not Lake's.** The text lives on the website and is approved by Steve
+  and counsel. Lake only links to it.
+
+Proof: `WebApp.ViewerReportsTheTermsAndPrivacyLinks`, `WebApp.LegalUrlSettingsKeepTheDefaultTurnOffOrRefuse`
+(`tests/test_api.cpp`), `HttpServer.ViewerCarriesTheTermsAndPrivacyLinks` (`tests/test_http_server.cpp`),
+and `frontend/tests/legal-links.test.ts`.
+
 ## Troubleshooting
 
 | What you see | Cause | Fix |

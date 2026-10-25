@@ -9,6 +9,7 @@
 #include "lake/api/billing.hpp"
 #include "lake/api/clerk.hpp"
 #include "lake/api/client_address.hpp"
+#include "lake/api/legal_links.hpp"
 #include "lake/api/oidc_jwks.hpp"
 #include "lake/api/orders.hpp"
 #include "lake/api/regions.hpp"
@@ -200,6 +201,10 @@ struct ServerOptions {
     // and sign-up are Clerk's and lake's own identity pages leave the navigation; empty or `xxx`
     // keeps lake's own sign-in, as an on-prem install uses. See docs/api/clerk.md.
     std::string clerk_publishable_key;
+    // The terms of service and privacy policy sign-up and sign-in link to (LAKE_TERMS_URL,
+    // LAKE_PRIVACY_URL, liquid-bridge#15); `viewer` reports them as `legal`. Empty: no link.
+    std::string terms_url = std::string(default_terms_url);
+    std::string privacy_url = std::string(default_privacy_url);
     // LAKE_CLERK_SECRET_KEY: checks current ban/lock state at every template exchange.
     // Missing key or an unavailable Backend API refuses exchange. Never returned or logged.
     std::string clerk_secret_key;

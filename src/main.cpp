@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 
 #include <nlohmann/json.hpp>
 
@@ -295,6 +296,18 @@ int main(int argc, char** argv) {
     opts.clerk_publishable_key = env_or("LAKE_CLERK_PUBLISHABLE_KEY", "");
     opts.clerk_webhook_secret = env_or("LAKE_CLERK_WEBHOOK_SECRET", "");
     opts.clerk_secret_key = env_or("LAKE_CLERK_SECRET_KEY", "");
+    // The terms and privacy policy sign-up and sign-in link to (liquid-bridge#15): unset keeps
+    // Orama's published pages, `off` shows no link, and a malformed URL stops lake.
+    for (const auto& [name, target, fallback] :
+         {std::tuple{"LAKE_TERMS_URL", &opts.terms_url, lake::api::default_terms_url},
+          std::tuple{"LAKE_PRIVACY_URL", &opts.privacy_url, lake::api::default_privacy_url}}) {
+        const auto url = lake::api::legal_url_setting(name, std::getenv(name), fallback);
+        if (!url) {
+            std::println(stderr, "lake: {}", url.error());
+            return 2;
+        }
+        *target = *url;
+    }
     // The Zettas lake may reach (lake#1097): rendered by the operator. A malformed list stops lake
     // rather than widen or narrow it; an empty one leaves only Zettas on loopback reachable.
     if (const std::string allow = env_or("ZETTA_EGRESS_ALLOW", "");
