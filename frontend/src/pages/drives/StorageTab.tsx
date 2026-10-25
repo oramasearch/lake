@@ -152,7 +152,7 @@ export function StorageTab({ drives, onOpenAsDrive }: { drives: Drive[]; onOpenA
                     render: (store) => {
                       const phase = storePhase(store);
                       return (
-                        <div className="min-w-0">
+                        <div className="min-w-0" data-testid="store-status">
                           <Status value={phase} tone={phaseTone(phase)} />
                           {text(store, "message") && <div className="mt-0.5 text-[12px] text-ink-3">{text(store, "message")}</div>}
                         </div>

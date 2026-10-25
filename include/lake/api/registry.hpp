@@ -513,6 +513,14 @@ struct ApiContext {
     std::string external_origin;
     // LAKE_CLERK_PUBLISHABLE_KEY as configured; `viewer` derives Clerk's frontend host from it.
     std::string clerk_publishable_key;
+    // LAKE_TERMS_URL and LAKE_PRIVACY_URL as configured (ServerOptions); `viewer` reports them as
+    // `legal` for the sign-up and sign-in pages. Empty: no link.
+    std::string terms_url;
+    std::string privacy_url;
+    // LAKE_SIGN_IN_SSO_PROVIDER (lake#1136): the enterprise SSO provider that is the only way in
+    // for people. The registry refuses Lake's other sign-in methods in its own pool while it is set
+    // (sso_only_refusal), and `viewer` names it for the sign-in page. Empty: the usual sign-in.
+    std::string sign_in_sso_provider;
     // The instance registries' catalog (npm, Python, one-component OCI) as {available, oci, npm,
     // python}, read from the store root by the HTTP server (list_packages). Empty outside HTTP.
     std::function<nlohmann::json()> artifact_catalog;
@@ -525,6 +533,10 @@ struct ApiContext {
     // setting the identity fields above for that call alone, and refuses it everywhere else. Its
     // TAAP identity is never an acting identity elsewhere: a Lake account may hold the same one.
     std::optional<control::Principal> application_session;
+    // A browser key's binding (lake#1152, docs/api/browser-keys.md), set when one authenticated
+    // the call: Registry::call admits it only to search_index and predict on what it is bound to,
+    // from one of its origins (`caller_origin`), within its calls a minute.
+    std::optional<control::BrowserKey> browser_key;
     std::vector<std::string> scopes;
     control::AuthorizationCache authorization_cache;
     std::string audit_customer_id;

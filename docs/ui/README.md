@@ -25,7 +25,9 @@ can do nothing the API cannot.
   and its Storage tab (lake#656; New storage asks each provider for what it needs, lake#664): [drives.md](drives.md).
 - Data → Connections, the databases a workspace reads (lake#651): [connections.md](connections.md).
 - The prepaid balance's banner on every page, Add funds and the Billing page's Balance and Auto
-  Top-Up cards (lake#1114): [balance.md](balance.md).
+  Top-Up cards (lake#1114): [balance.md](balance.md). Coupon codes (lake#1156): Administration →
+  Coupons, Billing → Redeem a Code and a `?code=` link kept through sign-up
+  ([balance.md#coupon-codes](balance.md#coupon-codes)).
 - A database's or connection's safe mode, in the query editor's status bar and on each connection,
   and the dialog a warning opens (lake#906): [safe-mode.md](safe-mode.md).
 - Network, a workspace's connections, developer access (tunnels), private networks, egress and DNS,
@@ -33,7 +35,9 @@ can do nothing the API cannot.
 - The Organization, Administration and Account pages: [organization.md](organization.md).
 - Regions: the top bar's region and its links to the other regions, the region on sign-in and
   sign-up, and on Workspaces (lake#757): [regions.md](regions.md). The apex host's region picker is
-  server-rendered: [../api/regions.md](../api/regions.md#the-apex-picker).
+  server-rendered: [../api/regions.md](../api/regions.md#the-apex-picker). Its order sheet's cards
+  (the paid ones list their own domain, white-labelled, on request: lake#1129) are in
+  [regions.md](regions.md#the-order-sheet).
 - Deleting and revoking (organizations, invitations, grants, secret mounts, datasets, models,
   runs, search indexes, Ask Orama conversations): one typed confirmation that first lists what
   goes, [deletion.md](deletion.md).
@@ -64,7 +68,8 @@ pip, git, API clients) never gets the app.
 operator sign-in, passkey sign-in and the public share pages).
 
 - **The rail** lists lake's groups in order: the top items (for a signed-in person the **Home**
-  group: **Ask Orama** at `/`, then **Dashboard** at `/dashboard`; lake#600), Data, Design, Train,
+  group: **Quickstart** at `/`, **Ask Orama** at `/ask`, then **Dashboard** at `/dashboard`;
+  lake#1128, lake#600), Data, Design, Train,
   Ship, then Organization
   for an account or Administration for the operator, then Developer. The items come from `NAV` in
   `frontend/src/routes.tsx`, and the viewer matrix is in [front-door.md](front-door.md#navigation).
@@ -105,8 +110,12 @@ operator sign-in, passkey sign-in and the public share pages).
   `lib/agents.ts`, lake#763) names every agent by its Agent Library name and shows the chosen one's
   purpose under it, with **Where you meet it** to expand; a library agent this Lake does not run is
   listed as *not running on this Lake* and cannot be picked; every library agent is offered, the Eval Generator Agent and the two corpus agents included (lake#788).
-- **The Ask Orama home** (`/`, `pages/ask/AskHome.tsx`, lake#600) is where a signed-in person
-  lands. It is the panel's conversation (`pages/ask/thread.ts`, the same `sessionStorage` entry)
+- **Quickstart** (`/`, `pages/quickstart/QuickstartPage.tsx`, lake#1128) is where a signed-in
+  person lands: drop a dataset, get search and model answers on a website ([quickstart.md](quickstart.md)).
+- **Website keys** (lake#1152): the Quickstart's one-click key for the website's address, and Ship →
+  Search Index's *Website Keys* card, which makes, lists and revokes the index's browser keys
+  ([browser-keys.md](browser-keys.md)).
+- **Ask Orama's page** (`/ask`, `pages/ask/AskHome.tsx`; the home from lake#600 until lake#1128). It is the panel's conversation (`pages/ask/thread.ts`, the same `sessionStorage` entry)
   across the page's width, in one centred 880px column like the expanded panel, with the message box
   at the foot. Empty, it greets the person, says what Lake is for, and explains what they can do
   (lake#764): up to four suggested questions drawn from the workspace's datasets, projects and runs
@@ -153,7 +162,8 @@ Files are under `frontend/src/pages/`.
 
 | Route | File | Shows | Capabilities |
 |---|---|---|---|
-| `/` | `home/HomePage.tsx`, `ask/AskHome.tsx` | a signed-in person: Ask Orama, full page (lake#600); the operator and visitors: what lake is for and their next step ([front-door.md](front-door.md)); `/?ws=` (an old Command Center link) opens `/dashboard` | `viewer`; signed in, the Ask Orama capabilities below, `delete_ask_conversation` and engine `list_datasets`, `list_projects`, `list_runs` |
+| `/` | `home/HomePage.tsx`, `quickstart/QuickstartPage.tsx` | a signed-in person: Quickstart ([quickstart.md](quickstart.md), lake#1128); the operator and visitors: what lake is for and their next step ([front-door.md](front-door.md)); `/?ws=` (an old Command Center link) opens `/dashboard`; `/?conversation=`, `/?agent=`, `/?from=` (old Ask Orama home links) open `/ask` | `viewer`; signed in, `quickstart_status`, `start_quickstart`, `train_quickstart`, `quickstart_snippets`, `search_index`, `predict`, `create_token` |
+| `/ask` | `ask/AskPage.tsx`, `ask/AskHome.tsx` | Ask Orama, full page, for a signed-in person (lake#600, its own route since lake#1128); `/w/<id>/ask` redirects here | the Ask Orama capabilities below, `delete_ask_conversation` and engine `list_datasets`, `list_projects`, `list_runs` |
 | `/dashboard` | `home/CommandCenter.tsx` | Home → Dashboard: the whole platform at a glance across the chosen workspaces (`?ws=`, the multi-select shared with Usage), what needs attention, each workspace's figures, recent activity, and a **Usage** button for the selection | `workspace_status`, `workspace_sql`, `list_transcripts`, `list_apps`, engine `list_projects`, `list_agents`, `list_runs`, `list_models`, `list_indexes` |
 | `/sign-in`, `/sign-up`, `/mfa`, `/passkey-sign-in` | `account/SignInPage.tsx`, `SignUpPage.tsx`, `MfaPage.tsx`, `PasskeySignInPage.tsx` | lake's own sign-in and sign-up, or Clerk's (`account/ClerkSignIn.tsx`); see [identity.md](identity.md) for MFA recovery codes and authentication cooldown notices | `sign_in_password`, `verify_mfa`, `start_oauth`, `sign_up_password`, `begin_passkey_sign_in`, `sign_in_passkey`, `enroll_mfa`, `disable_mfa` |
 | `/login` | `account/LoginPage.tsx` | the operator-token form, posted to `POST /session` | none |
@@ -254,6 +264,7 @@ Workspaces)
 | `/usage/accounts` | `usage/AccountsPage.tsx` | the operator's usage across every account | `list_customers`, `usage_over_time` |
 | `/billing?customer_id=` | `billing/BillingPage.tsx` | Billing, only where the lake bills: this month's usage × rate = cost so far and the invoices, with no plan to choose; the operator issues an invoice ([billing.md](billing.md), lake#564, lake#635) | `billing_account`, `price_list`, `bill_preview`, `list_invoices`, `issue_invoice` |
 | `/billing/add-funds?customer_id=` | `billing/AddFundsPage.tsx` | Add funds to the prepaid balance: the balance, its limit and the suggested amount, and a Stripe Checkout; the page every balance email, the banner and every 402 answer link to ([balance.md](balance.md), lake#1114) | `account_balance`, `start_top_up` |
+| `/coupons` | `admin/CouponsPage.tsx` | the operator's coupon codes for ads, where the lake bills: each code's state and report, per-campaign sums, New code with the ad's link, Disable ([balance.md](balance.md#coupon-codes), lake#1156) | `list_coupons`, `create_coupon`, `disable_coupon` |
 | `/billing/invoices/:invoiceId` | `billing/InvoicePage.tsx` | one invoice, printable; the operator records a payment or voids it | `get_invoice`, `record_invoice_payment`, `void_invoice` |
 | `/billing/plans` | `billing/PriceListPage.tsx` | the operator's price list editor: dimension, GPU and model input/output rates, preserving published model classes when edited; published from a month | `price_list`, `set_price_list` |
 | `/metering?customer_id=` | `admin/MeteringPage.tsx` | Repository Usage by Hour: repository transfer and build time, the storage limit | `metering_usage`, `set_storage_quota` |

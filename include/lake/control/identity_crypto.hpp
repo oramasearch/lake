@@ -15,6 +15,13 @@ namespace lake::control::identity_crypto {
 std::string random_secret();
 std::string hash_secret(std::string_view secret);
 bool verify_secret(std::string_view encoded, std::string_view secret);
+// Runs verify_secret against a fixed dummy hash and returns false. The dummy is made once per
+// process by hash_secret, so it carries the same Argon2id parameters as every stored credential.
+// A refusal for an unknown subject, or one with no stored secret, calls this so it costs what a
+// wrong secret for a real subject costs: the timing does not tell them apart (lake#1101).
+bool verify_secret_against_dummy(std::string_view secret);
+// How many times verify_secret_against_dummy has run in this process, for tests.
+std::uint64_t dummy_secret_verifications();
 // New recovery codes are 128 random bits with a version prefix; legacy codes are refused.
 std::string new_recovery_code();
 std::string recovery_selector(std::string_view code);
@@ -63,14 +70,20 @@ struct OidcClaims {
     std::string email;
     std::string display_name;
     std::int64_t issued_at = 0; // Clerk rejects templates predating an upstream revocation
+    // `sid`: the Clerk session id its default session token carries, signed (lake#1163). A
+    // custom JWT template never carries it.
+    std::string session_id;
 };
 
+// `audience_absent`: the token must carry no `aud` at all, as Clerk's default session token does
+// (lake#1163); `client_id` is then not consulted. Otherwise `aud` must name `client_id`.
 std::optional<OidcClaims> verify_oidc_id_token(std::string_view token,
                                                std::string_view jwks,
                                                std::string_view issuer,
                                                std::string_view client_id,
                                                std::string_view nonce,
-                                               long now_unix = 0);
+                                               long now_unix = 0,
+                                               bool audience_absent = false);
 
 struct VerifiedPasskeyRegistration {
     std::string credential_id;

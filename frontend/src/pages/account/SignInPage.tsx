@@ -10,6 +10,8 @@ import { type IdentityProofChallenge, looksSigned, signCommand, signedOutput } f
 import { useSession } from "@/lib/session";
 import { AuthFrame, useSignedInRedirect } from "./AuthFrame";
 import { ClerkSignIn } from "./ClerkSignIn";
+import { LegalNotice } from "./LegalNotice";
+import { SsoSignIn } from "./SsoSignIn";
 import { AccountRegionNote } from "@/components/Region";
 import { landingAfterSignIn, leaveFor, messageOf, NO_WORKSPACE, returnQuery, returnTarget } from "./signIn";
 
@@ -18,6 +20,7 @@ export default function SignInPage() {
   const signedIn = useSignedInRedirect((administrator) => landingAfterSignIn(administrator));
   if (signedIn) return null;
   if (viewer.clerk.enabled) return <ClerkSignIn mode="sign-in" />;
+  if (viewer.sign_in_sso) return <SsoSignIn provider={viewer.sign_in_sso} mode="sign-in" />;
   return <NativeSignIn />;
 }
 
@@ -32,6 +35,7 @@ function NativeSignIn() {
           <PasswordPanel />
           <OAuthPanel />
         </div>
+        <LegalNotice mode="sign-in" />
         <p className="muted">
           <Link to={`/sign-up${kept}`}>Create an account</Link> · <Link to="/login">Operator sign-in</Link>
         </p>

@@ -122,7 +122,8 @@ Expect:
 - Breadcrumb Account › Sessions. Eyebrow "Account", title "Sessions and Devices", sub "Revocation
   takes effect on the next request."
 - Card "This session" titled with its name (or kind), the badge "Active", rows "Kind", "Started"
-  (relative, full date on hover) and "Expires", and the danger **Revoke and sign out**.
+  (relative, full date on hover) and "Expires", and the danger **Revoke and sign out** and
+  **Sign out everywhere** (lake#1163; it ends every session, key and device of the account).
 - Section "Sessions" with "<active> active of <total>.", a search "Search sessions…", kind chips
   "Any kind" plus one per kind with a count ("Session", "API token", …), and state chips "Any
   state", "Active", "Revoked".
@@ -241,7 +242,7 @@ As: owner
 Expect:
 - Breadcrumb Account › Tokens. Eyebrow "Account", title "API Tokens", sub "Create named, scoped
   sessions and revoke them here." and the primary **New token**.
-- With tokens: stats "Tokens", "Active" and "Never expire" ("survive sign-out"); a search "Search
+- With tokens: stats "Tokens", "Active" and "Never expire" ("no expiry"); a search "Search
   tokens…" and chips "Any state", "Active <n>", "Revoked <n>"; the table "Token" (name and kind),
   "Scopes", "Expires", "Status", **Revoke**.
 - With none: no stats, and "No API tokens" / "A token lets a script, an agent or Liquid act with

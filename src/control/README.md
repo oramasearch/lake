@@ -1,5 +1,16 @@
 # Control stores
 
+`InMemoryStore` keeps its records in `std::vector`s: never hold an iterator, pointer or reference
+into one across a `push_back`, `emplace_back` or `erase` on the same vector; copy the id first.
+`upsert_scim_group` read the team's policy object through an iterator after pushing member objects
+onto `policy_objects_`, a heap-use-after-free AddressSanitizer found (lake#1175).
+`browser_keys.cpp` is the origin rule a browser key's list follows and the principal its `lbk.`
+credential resolves to (lake#1152). Both stores keep the row (`browser_keys`, migration
+`0102_browser_keys`: the SHA-256, never the secret), resolve the credential while it is unrevoked,
+unexpired and its workspace is not deleted, and count its calls a minute; PostgreSQL in one `UPDATE`
+so every replica shares the minute. Revoking sessions does not touch it. See
+[browser keys](../../docs/api/browser-keys.md).
+
 Both stores reject disabled or missing users when resolving agent launch, schedule and task
 credentials (lake#951). Creation, claims and renewal serialize with offboarding on the user row
 (or the memory-store mutex), so a cached stream context cannot create fresh authority afterwards.
@@ -341,12 +352,18 @@ Authentication budgets are enforced in both stores against resolved user ids bef
 (lake#969). Recovery credentials select their single Argon2id hash by a versioned SHA-256
 selector in the existing unique subject index; legacy rows are never scanned. PostgreSQL uses
 private authentication transactions, with row locks for one-use recovery; memory verifies
-snapshots outside its shared mutex and rechecks them before committing.
+snapshots outside its shared mutex and rechecks them before committing. A refusal for an unknown
+email, a missing password credential, an unmatched recovery selector or an unknown recovery runs
+`identity_crypto::verify_secret_against_dummy`, one Argon2id check against a per-process dummy
+made by `hash_secret`, so its timing matches a wrong secret (lake#1101).
 See [the contract and tests](../../docs/api/identity.md#authentication-attempt-limits).
 Clerk revocation (lake#948, migration `0094_clerk_revocation`) keeps user-state ordering and a
 separate account-wide revocation watermark in PostgreSQL and memory. Old template JWTs cannot
 re-exchange after a session event; account restrictions revoke all sessions, tokens and devices, and a newer
-unban/unlock permits only new credentials. See [the contract](../../docs/api/clerk.md#webhooks).
+unban/unlock permits only new credentials. A session event revokes browser sessions only (lake#1163,
+migration `0103_clerk_session_binding`): those bound to the ended Clerk session (`sessions.clerk_session_id`
+in PostgreSQL, `clerk_session_of_` in memory) and unbound ones unless the event is older than the
+watermark; never API keys, static tokens or devices. See [the contract](../../docs/api/clerk.md#webhooks).
 
 Clerk suspension and permanent disablement use `User::may_act()` for bearer issuance,
 delegation and stream authority. Suspended users' agent credentials are withdrawn just as on

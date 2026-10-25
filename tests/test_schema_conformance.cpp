@@ -228,6 +228,33 @@ void check_membership(HttpEvidence& http, const json& user) {
     http.call("remove_member", {{"id", membership.at("id")}});
 }
 
+// Coupon codes (lake#1156): the operator creates, lists and disables a code; a person who signed
+// up after it redeems it for their own account.
+void check_coupons(HttpEvidence& http, lake::control::Store& store) {
+    const auto created = http.call("create_coupon",
+                                   {{"code", "schema-50"},
+                                    {"amount_micros", 50'000'000},
+                                    {"credit_days", 90},
+                                    {"max_redemptions", 10},
+                                    {"campaign", "schema"}});
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto session =
+        checked(store.sign_up_password({"lake",
+                                        "schema-coupon-" + suffix + "@example.test",
+                                        "correct horse battery staple",
+                                        "Schema coupon",
+                                        "schema",
+                                        "{}"}));
+    const std::string personal = checked(store.list_customers(2, session.session.user_id)).at(0).id;
+    const std::string operator_bearer = http.bearer;
+    http.bearer = session.secret;
+    http.call("redeem_coupon", {{"customer_id", personal}, {"code", "SCHEMA50"}});
+    http.bearer = operator_bearer;
+    http.call("list_coupons");
+    http.read("list_coupons", "?campaign=schema");
+    http.call("disable_coupon", {{"coupon_id", created.at("coupon").at("id")}});
+}
+
 // create_organization_space and convert_personal_space serve a signed-in person and refuse the
 // operator credential, so they are called with a person's session.
 void check_person_organizations(HttpEvidence& http, lake::control::Store& store) {
@@ -716,6 +743,50 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     auto copy_id = transcript_scope;
     copy_id["id"] = copy.at("solution").at("id");
     http.call("delete_solution", copy_id);
+    // The quickstart process (docs/api/quickstart.md, lake#1128) over canned engine answers.
+    auto& engine = experiments.caller->answers;
+    engine["upload_dataset"] = {{"database", "datasets"}, {"table", "schema_movies"}, {"rows", 2}};
+    engine["get_dataset"] = {{"name", "schema_movies"},
+                             {"database", "datasets"},
+                             {"rows", 2},
+                             {"columns",
+                              json::array({{{"name", "title"}, {"type", "string"}},
+                                           {{"name", "popular"}, {"type", "integer"}}})}};
+    engine["create_index"] = {{"index_id", "index-schema"},
+                              {"fields", json::array({"popular", "title"})},
+                              {"exposed", false}};
+    engine["expose_index"] = {{"index_id", "index-schema"}, {"exposed", true}};
+    engine["train_model"] = {{"run_id", "run-schema"}, {"status", "running"}};
+    engine["get_run"] = {{"id", "run-schema"}, {"status", "succeeded"}};
+    engine["list_models"] = {
+        {"models", json::array({{{"id", "model-quickstart"}, {"run_id", "run-schema"}}})}};
+    engine["expose_model"] = {{"model_id", "model-quickstart"}, {"exposed", true}};
+    auto quickstart = transcript_scope;
+    quickstart.update({{"content", "title,popular\nAlien,1\nBig,0\n"},
+                       {"format", "csv"},
+                       {"name", "schema_movies"}});
+    const auto started = http.call("start_quickstart", quickstart);
+    auto quickstart_id = transcript_scope;
+    quickstart_id["quickstart_id"] = started.at("quickstart_id");
+    http.call("quickstart_snippets", quickstart_id);
+    // Browser keys (docs/api/browser-keys.md, lake#1152): bound to the quickstart's index.
+    engine["get_index"] = {{"index_id", "index-schema"}, {"exposed", true}};
+    auto browser_key = transcript_scope;
+    browser_key.update(
+        {{"index_id", "index-schema"}, {"origins", json::array({"https://shop.example.test"})}});
+    const auto made_key = http.call("create_browser_key", browser_key);
+    auto keyed_snippets = quickstart_id;
+    keyed_snippets["origins"] = json::array({"https://shop.example.test"});
+    http.call("quickstart_snippets", keyed_snippets);
+    http.call("list_browser_keys", {{"customer_id", transcript_scope.at("customer_id")}});
+    http.call(
+        "revoke_browser_key",
+        {{"customer_id", transcript_scope.at("customer_id")}, {"id", made_key.at("key").at("id")}});
+    auto quickstart_training = quickstart_id;
+    quickstart_training["target"] = "popular";
+    http.call("train_quickstart", quickstart_training);
+    http.call("quickstart_status", quickstart_id);
+    http.call("train_quickstart", quickstart_id);
     // A workspace's own methodologies (docs/api/methodologies.md, lake#655): the engine's
     // registry is canned; the code is committed to a real repository of the workspace.
     json own_methodology{{"id", "W-0000000a"},
@@ -930,6 +1001,15 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.call("set_balance_overdraft",
               {{"customer_id", customer.id}, {"overdraft_micros", 75'000'000}});
     http.call("set_balance_overdraft", {{"customer_id", customer.id}});
+    // Credits from Orama (lake#1134): given, then its unused remainder revoked.
+    const auto granted = http.call("grant_balance_credit",
+                                   {{"customer_id", customer.id},
+                                    {"amount_micros", 5'000'000},
+                                    {"reason", "schema conformance"},
+                                    {"expires_at", "2030-01-01T00:00:00Z"}});
+    http.call("revoke_balance_credit",
+              {{"credit_id", granted.at("credit").at("id")}, {"reason", "schema conformance"}});
+    check_coupons(http, *store);
     http.call("start_top_up", {{"customer_id", customer.id}, {"amount_micros", 25'000'000}});
     http.call("set_auto_top_up", {{"customer_id", customer.id}, {"enabled", true}});
     http.call("set_auto_top_up", {{"customer_id", customer.id}, {"enabled", false}});

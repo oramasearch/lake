@@ -2,17 +2,20 @@
 // the balance's view and its 402 gate, the warning every answer carries, the payment provider's
 // notices (a top-up paid, a card saved, an auto top-up that failed), the refresh of the charges by
 // the store root's owner with its emails and auto top-ups, and the capabilities account_balance,
-// start_top_up, set_auto_top_up, set_balance_overdraft and refresh_account_balance. Registered
-// with billing only (LAKE_BILLING): with billing off nothing here runs.
+// start_top_up, set_auto_top_up, set_balance_overdraft, refresh_account_balance, and the grants
+// from Orama (lake#1134) grant_balance_credit and revoke_balance_credit. Registered with billing
+// only (LAKE_BILLING): with billing off nothing here runs.
 
 #include "lake/api/balance.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <charconv>
 #include <chrono>
 #include <format>
 #include <limits>
+#include <map>
 #include <set>
 #include <string>
 #include <utility>
@@ -20,6 +23,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "lake/api/brand.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/policy.hpp"
 
@@ -106,6 +110,33 @@ bool month_is_final(const control::BalanceCharge& charge) {
     const std::string final_after =
         std::format("{:%FT%T}Z", std::chrono::sys_days{next / 1} + std::chrono::hours{1});
     return !charge.refreshed_at.empty() && charge.refreshed_at >= final_after;
+}
+
+// A whole-second UTC time, "YYYY-MM-DDTHH:MM:SSZ", or nullopt when `text` is not one.
+std::optional<std::chrono::sys_seconds> utc_seconds(std::string_view text) {
+    if (text.size() != 20 || text[4] != '-' || text[7] != '-' || text[10] != 'T' ||
+        text[13] != ':' || text[16] != ':' || text[19] != 'Z') {
+        return std::nullopt;
+    }
+    const auto field = [&](std::size_t at, std::size_t width, int& out) {
+        const char* first = text.data() + at;
+        const auto parsed = std::from_chars(first, first + width, out);
+        return parsed.ec == std::errc{} && parsed.ptr == first + width;
+    };
+    int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+    if (!field(0, 4, year) || !field(5, 2, month) || !field(8, 2, day) || !field(11, 2, hour) ||
+        !field(14, 2, minute) || !field(17, 2, second) || month < 1 || day < 1 || hour > 23 ||
+        minute > 59 || second > 59) {
+        return std::nullopt;
+    }
+    const std::chrono::year_month_day date{std::chrono::year{year},
+                                           std::chrono::month{static_cast<unsigned>(month)},
+                                           std::chrono::day{static_cast<unsigned>(day)}};
+    if (!date.ok()) {
+        return std::nullopt;
+    }
+    return std::chrono::sys_days{date} + std::chrono::hours{hour} + std::chrono::minutes{minute} +
+           std::chrono::seconds{second};
 }
 
 ApiResult no_store() {
@@ -241,6 +272,8 @@ json balance_schema() {
               {"first_top_up_micros", {{"type", "integer"}}},
               {"minimum_top_up_micros", {{"type", "integer"}}},
               {"first_top_up_at", {{"type", "string"}}},
+              {"first_grant_at", {{"type", "string"}}},
+              {"grants_unused_micros", {{"type", "integer"}}},
               {"exempt", {{"type", "string"}}},
               {"refreshed_at", {{"type", "string"}}},
               {"refresh_error", {{"type", "string"}}},
@@ -363,10 +396,16 @@ BalanceView balance_view(const control::AccountBalance& balance,
     }
     if (balance.first_top_up_at.empty()) {
         // A new account starts at $0 and adds the first top-up before anything that costs money:
-        // the overdraft is credit extended only to accounts that have paid once (lake#1114).
-        view.state = "blocked";
-        view.reason = "first_top_up";
+        // the overdraft is credit extended only to accounts that have paid once (lake#1114). A
+        // grant from Orama is spent down to $0 and never past it (lake#1134).
+        view.overdraft_micros = 0;
         view.add_micros = settings.first_top_up_micros;
+        if (view.balance_micros <= 0) {
+            view.state = "blocked";
+            view.reason = "first_top_up";
+        } else if (view.balance_micros < settings.warning_micros) {
+            view.state = "low";
+        }
         return view;
     }
     if (view.balance_micros <= -view.overdraft_micros) {
@@ -402,6 +441,8 @@ json balance_json(const control::AccountBalance& balance,
             {"first_top_up_micros", runtime.settings.first_top_up_micros},
             {"minimum_top_up_micros", runtime.settings.minimum_top_up_micros},
             {"first_top_up_at", balance.first_top_up_at},
+            {"first_grant_at", balance.first_grant_at},
+            {"grants_unused_micros", balance.grants_unused_micros},
             {"exempt", view.exempt},
             {"refreshed_at", balance.charges_refreshed_at},
             {"refresh_error", balance.refresh_error},
@@ -411,8 +452,12 @@ json balance_json(const control::AccountBalance& balance,
 std::span<const PaidWork> paid_work_capabilities() {
     // The one list (docs/api/billing.md#the-gate). PaidWorkContract.* fails when a capability whose
     // name says it creates, starts or grows something is neither here nor classified as free.
-    static constexpr std::array<PaidWork, 51> list{{
+    static constexpr std::array<PaidWork, 53> list{{
         {"create_workspace", "starts a workspace engine, billed by its CPU, RAM and volume"},
+        // The quickstart process (lake#1128) calls the paid capabilities below it; refusing it
+        // first means a blocked account gets the top-up link before any step starts.
+        {"start_quickstart", "makes a workspace, stores a dataset and builds a search index"},
+        {"train_quickstart", "trains a model on billed compute and serves it"},
         {"start_workspace", "starts a stopped workspace engine"},
         {"update_workspace", "starts a stopped workspace engine (`desired: running`)"},
         {"create_app", "creates an app that runs on billed compute"},
@@ -567,7 +612,13 @@ balance_refusal(const Capability& capability, const json& input, ApiContext& con
     }
     const std::string link = add_funds_link(link_origin(*context.balance, context), customer_id);
     const std::string message =
-        view.reason == "first_top_up"
+        view.reason == "first_top_up" && !balance->first_grant_at.empty()
+            ? std::format("{} costs money, and this account's credit from Orama is used up. Add "
+                          "{} to go on: {}",
+                          capability.name,
+                          usd(view.add_micros),
+                          link)
+        : view.reason == "first_top_up"
             ? std::format("{} costs money, and this account has not added funds yet. Add {} to "
                           "start: {}",
                           capability.name,
@@ -611,7 +662,12 @@ json balance_warning(const json& input, ApiContext& context) {
     }
     const std::string link = add_funds_link(link_origin(*context.balance, context), customer_id);
     std::string message;
-    if (view.reason == "first_top_up") {
+    if (view.reason == "first_top_up" && !balance->first_grant_at.empty()) {
+        message = std::format("This account's credit from Orama is used up. Add {} to start "
+                              "anything that costs money again: {}",
+                              usd(view.add_micros),
+                              link);
+    } else if (view.reason == "first_top_up") {
         message = std::format("Add {} to this account's balance to start anything that costs "
                               "money: {}",
                               usd(view.add_micros),
@@ -821,6 +877,55 @@ Email balance_email(BalanceCrossing crossing,
                              opening,
                              add,
                              link);
+    // In the instance brand's words (lake#1135): unchanged for Lake's own.
+    const Brand& brand = instance_brand();
+    email.subject = brand.apply(email.subject);
+    email.text = brand.apply(email.text);
+    return email;
+}
+
+namespace {
+
+// "2026-12-31 23:59 UTC" from "2026-12-31T23:59:59Z".
+std::string utc_minute(std::string_view at) {
+    if (at.size() < 16) {
+        return std::string(at);
+    }
+    return std::format("{} {} UTC", at.substr(0, 10), at.substr(11, 5));
+}
+
+} // namespace
+
+Email balance_grant_email(std::int64_t amount_micros,
+                          std::string_view expires_at,
+                          const BalanceView& view,
+                          bool paid_before,
+                          std::string_view link,
+                          const std::vector<std::string>& to) {
+    Email email;
+    email.to = to;
+    email.subject =
+        std::format("Orama added {} of credit to your Lake account", usd(amount_micros));
+    const std::string expiry =
+        expires_at.empty()
+            ? std::string("It does not expire.")
+            : std::format("Whatever is left of it on {} stops counting then; what it paid for "
+                          "stays paid.",
+                          utc_minute(expires_at));
+    const std::string after =
+        paid_before ? std::string()
+                    : std::format("\n\nWhen the credit is used up, Lake stops starting anything "
+                                  "that costs money until you add your first top-up of {}.",
+                                  usd(view.add_micros));
+    email.text = std::format("Orama added a credit of {} to your Lake account. Your balance is now "
+                             "{}.\n\nThe credit is used before any money you add. {} It is a "
+                             "credit, not cash: it is never refunded or paid out.{}\n\nSee your "
+                             "balance here:\n{}\n\nLake\n",
+                             usd(amount_micros),
+                             usd(view.balance_micros),
+                             expiry,
+                             after,
+                             link);
     return email;
 }
 
@@ -865,7 +970,7 @@ liquid::runtime::task<std::string> refresh_charges(ApiContext& context,
         co_return kept.error().message;
     }
     std::vector<control::BalanceCharge> fresh;
-    for (const std::string& period : months_since(balance.first_top_up_at)) {
+    for (const std::string& period : months_since(balance.charges_since())) {
         const auto found = std::ranges::find(*kept, period, &control::BalanceCharge::period);
         if (found != kept->end() && (!found->invoice_id.empty() || month_is_final(*found))) {
             continue;
@@ -903,6 +1008,87 @@ liquid::runtime::task<std::string> refresh_charges(ApiContext& context,
         }
     }
     co_return std::string();
+}
+
+// Ends the account's grants past their expiry (and `revoke_id`, when given) against its charges
+// now, and audits each that expired centrally (a revocation is its capability's own audit).
+control::Result<std::vector<control::BalanceCredit>> end_grants(ApiContext& context,
+                                                                const std::string& customer_id,
+                                                                const std::string& revoke_id,
+                                                                std::string principal,
+                                                                std::string action) {
+    auto ended = context.store->end_balance_grants(customer_id, now_text(), revoke_id);
+    if (!ended) {
+        return ended;
+    }
+    for (const control::BalanceCredit& grant : *ended) {
+        if (grant.end_reason != "expired") {
+            continue;
+        }
+        static_cast<void>(record(context,
+                                 customer_id,
+                                 "billing.balance.credit_expired",
+                                 principal,
+                                 action,
+                                 "success",
+                                 {{"credit_id", grant.id},
+                                  {"amount_micros", grant.amount_micros},
+                                  {"used_micros", grant.amount_micros - grant.forfeited_micros},
+                                  {"forfeited_micros", grant.forfeited_micros},
+                                  {"expires_at", grant.expires_at}}));
+    }
+    return ended;
+}
+
+// One credit as account_balance lists it; a grant with its reason, expiry, what stopped counting
+// and, while it counts, what it has left (`unused_micros`).
+json credit_json(const control::BalanceCredit& credit, std::int64_t unused_micros) {
+    json row{{"id", credit.id},
+             {"kind", credit.kind},
+             {"label",
+              credit.kind == "grant"         ? "Credit from Orama"
+              : credit.kind == "auto_top_up" ? "Auto top-up"
+                                             : "Top-up"},
+             {"amount_micros", credit.amount_micros},
+             {"provider", credit.provider},
+             {"reference", credit.reference},
+             {"created_at", credit.created_at}};
+    if (credit.kind == "grant") {
+        row["reason"] = credit.reason;
+        row["expires_at"] = credit.expires_at;
+        row["ended_at"] = credit.ended_at;
+        row["end_reason"] = credit.end_reason;
+        row["forfeited_micros"] = credit.forfeited_micros;
+        row["counting_micros"] = credit.amount_micros - credit.forfeited_micros;
+        row["unused_micros"] = credit.ended_at.empty() ? unused_micros : 0;
+    }
+    return row;
+}
+
+// What each of the account's grants has left, by id (grant_allocation over all of them).
+std::map<std::string, std::int64_t> grants_left(control::Store& store,
+                                                const control::AccountBalance& balance) {
+    std::map<std::string, std::int64_t> out;
+    if (balance.first_grant_at.empty()) {
+        return out;
+    }
+    const auto credits = store.balance_credits(balance.customer_id, 0);
+    if (!credits) {
+        return out;
+    }
+    std::vector<control::BalanceCredit> grants;
+    for (const control::BalanceCredit& credit : *credits) {
+        if (credit.kind == "grant") {
+            grants.push_back(credit);
+        }
+    }
+    const std::vector<std::int64_t> used =
+        control::grant_allocation(grants, balance.charges_micros);
+    for (std::size_t index = 0; index < grants.size(); ++index) {
+        out[grants[index].id] =
+            std::max<std::int64_t>(grants[index].amount_micros - used[index], 0);
+    }
+    return out;
 }
 
 // The crossing's mark on the row.
@@ -1136,7 +1322,7 @@ refresh_account_balances(ApiContext& context,
             continue;
         }
         ++report.accounts;
-        if (!balance->first_top_up_at.empty()) {
+        if (!balance->charges_since().empty()) {
             auto read = co_await refresh_charges(context, *balance);
             const std::string problem = read ? *read : read.error().message;
             const std::string at = now_text();
@@ -1152,6 +1338,14 @@ refresh_account_balances(ApiContext& context,
                     return true;
                 }));
             ++(problem.empty() ? report.refreshed : report.held);
+            // Only against charges just read in full: a held read would forfeit what the grant
+            // in fact paid for (lake#1134). An expired grant counts until then.
+            if (problem.empty()) {
+                if (const auto ended =
+                        end_grants(context, account, {}, "lake", "balance_refresh")) {
+                    report.grants_expired += static_cast<int>(ended->size());
+                }
+            }
             balance = context.store->account_balance(account);
             if (!balance) {
                 continue;
@@ -1159,7 +1353,7 @@ refresh_account_balances(ApiContext& context,
         }
         const BalanceView view =
             balance_view(*balance, runtime.settings, account_exemption(*balance));
-        if (view.exempt.empty() && !balance->first_top_up_at.empty()) {
+        if (view.exempt.empty() && !balance->charges_since().empty()) {
             // The most serious crossing not yet told, once; it covers the milder ones.
             if (view.state == "blocked") {
                 notify_once(context,
@@ -1190,6 +1384,103 @@ refresh_account_balances(ApiContext& context,
     co_return report;
 }
 
+namespace {
+// The instance's balance runtime, or the defaults (a registry without a server: tests).
+std::shared_ptr<const BalanceRuntime> balance_runtime_of(const ApiContext& context) {
+    static const auto defaults = std::make_shared<const BalanceRuntime>();
+    return context.balance ? context.balance : defaults;
+}
+} // namespace
+
+json balance_credit_json(const control::BalanceCredit& credit, std::int64_t unused_micros) {
+    return credit_json(credit, unused_micros);
+}
+
+std::string balance_usd(std::int64_t micros) {
+    return usd(micros);
+}
+
+std::optional<std::chrono::sys_seconds> balance_utc_seconds(std::string_view text) {
+    return utc_seconds(text);
+}
+
+std::expected<BalanceGrantOutcome, ApiResult> give_balance_grant(ApiContext& context,
+                                                                 const BalanceGrantRequest& grant) {
+    if (!context.store) {
+        return std::unexpected(no_store());
+    }
+    control::BalanceCredit credit;
+    credit.customer_id = grant.customer_id;
+    credit.kind = "grant";
+    credit.amount_micros = grant.amount_micros;
+    credit.provider = "orama";
+    credit.reference = grant.reference;
+    credit.reason = grant.reason;
+    credit.granted_by = control::utf8_prefix(grant.granted_by, 255);
+    credit.expires_at = grant.expires_at;
+    const auto applied = context.store->apply_balance_credit(credit);
+    if (!applied) {
+        return std::unexpected(from_store(applied.error()));
+    }
+    const auto runtime = balance_runtime_of(context);
+    BalanceRuntime shown = *runtime;
+    shown.origin = link_origin(*runtime, context);
+    const BalanceView view =
+        balance_view(applied->balance, runtime->settings, account_exemption(applied->balance));
+    BalanceGrantOutcome outcome;
+    outcome.duplicate = applied->duplicate;
+    outcome.balance = balance_json(applied->balance, view, shown);
+    outcome.balance_micros = view.balance_micros;
+    if (applied->duplicate) {
+        // A retry with the same reference: granted once, emailed once. The earlier credit, when
+        // the account still lists it.
+        if (const auto credits = context.store->balance_credits(grant.customer_id, 0)) {
+            const auto earlier = std::ranges::find_if(*credits, [&](const auto& kept) {
+                return kept.provider == "orama" && kept.reference == grant.reference;
+            });
+            if (earlier != credits->end()) {
+                outcome.credit = *earlier;
+            }
+        }
+        return outcome;
+    }
+    outcome.credit = applied->credit;
+    // The email, once per grant (its id keys the send).
+    const std::string to = balance_email_recipient(*context.store, grant.customer_id);
+    if (!runtime->mailer) {
+        outcome.email_error = runtime->email_unavailable_reason.empty()
+                                  ? "email is not configured on this Lake"
+                                  : runtime->email_unavailable_reason;
+    } else if (to.empty()) {
+        outcome.email_error = "the account has no email address to send to";
+    } else {
+        const Email message = balance_grant_email(
+            grant.amount_micros,
+            grant.expires_at,
+            view,
+            !applied->balance.first_top_up_at.empty(),
+            std::format("{}/billing?customer_id={}", shown.origin, grant.customer_id),
+            {to});
+        const auto sent = runtime->mailer(message, "lake-balance-grant-" + applied->credit.id);
+        if (sent) {
+            outcome.emailed = true;
+            static_cast<void>(record(context,
+                                     grant.customer_id,
+                                     "billing.balance.email",
+                                     context.acting_identity.empty() ? std::string("operator")
+                                                                     : context.acting_identity,
+                                     grant.action,
+                                     "success",
+                                     {{"crossing", "grant"},
+                                      {"credit_id", applied->credit.id},
+                                      {"balance_micros", view.balance_micros}}));
+        } else {
+            outcome.email_error = control::utf8_prefix(sent.error(), 500);
+        }
+    }
+    return outcome;
+}
+
 void register_balance_capabilities(Registry& registry,
                                    std::shared_ptr<PaymentProviders> providers) {
     // The instance's balance runtime, or the defaults (a registry without a server: tests).
@@ -1208,7 +1499,12 @@ void register_balance_capabilities(Registry& registry,
             "`state`: ok, low, negative or blocked (past the limit, or no first top-up yet: "
             "nothing that costs money starts). `add_micros` is how much to add and "
             "`add_funds_url` where. `credits` and `charges` are the history, newest first; "
-            "charges are refreshed every few minutes, and a month's charge equals its bill.",
+            "charges are refreshed every few minutes, and a month's charge equals its bill. A "
+            "credit of kind `grant` is a credit from Orama (label \"Credit from Orama\"), with "
+            "its `reason`, `expires_at`, what it has left (`unused_micros`) and, once it expired "
+            "or was revoked, the part that stopped counting (`forfeited_micros`); "
+            "`grants_unused_micros` sums what the grants have left. Grants are spent before paid "
+            "money.",
         .input_schema =
             object_schema({{"customer_id", {{"type", "string"}}}}, json::array({"customer_id"})),
         .output_schema =
@@ -1254,13 +1550,11 @@ void register_balance_capabilities(Registry& registry,
                     balance_view(*balance, runtime->settings, account_exemption(*balance)),
                     shown);
                 json credit_rows = json::array();
+                const auto left = grants_left(*context.store, *balance);
                 for (const control::BalanceCredit& credit : *credits) {
-                    credit_rows.push_back({{"id", credit.id},
-                                           {"kind", credit.kind},
-                                           {"amount_micros", credit.amount_micros},
-                                           {"provider", credit.provider},
-                                           {"reference", credit.reference},
-                                           {"created_at", credit.created_at}});
+                    const auto found = left.find(credit.id);
+                    credit_rows.push_back(
+                        credit_json(credit, found == left.end() ? 0 : found->second));
                 }
                 json charge_rows = json::array();
                 for (const control::BalanceCharge& charge : *charges) {
@@ -1637,7 +1931,275 @@ void register_balance_capabilities(Registry& registry,
                    {"refresh_error", balance->refresh_error},
                    {"emails", report.emails},
                    {"auto_top_ups", report.auto_top_ups},
-                   {"auto_top_up_failures", report.auto_top_up_failures}}}});
+                   {"auto_top_up_failures", report.auto_top_up_failures},
+                   {"grants_expired", report.grants_expired}}}});
+        }});
+    registry.add(Capability{
+        .name = "grant_balance_credit",
+        .title = "Give an account a credit",
+        .description =
+            "Operator or instance administrator only. Gives one account a credit from Orama "
+            "(a design partner, a prize, a make-good): `amount_micros` (millionths of a US "
+            "dollar, whole cents, $0.01 to $10,000) added to its prepaid balance, recorded as a "
+            "credit of kind `grant` beside its top-ups. Name the account by `customer_id`, or a "
+            "person by `email` (their personal account). `reason` is required and shown to the "
+            "account; `expires_at` (UTC, YYYY-MM-DDTHH:MM:SSZ, in the future, within 10 years) "
+            "is when the unused part stops counting. A grant is spent before paid money and "
+            "pays only for usage after it is given. It is not cash and does not unlock the "
+            "overdraft: an account that has never paid stops at $0. Clears the low-balance "
+            "emails' marks, emails the account once, and is audited "
+            "(billing.balance.credit_granted). `reference` makes a retry safe: the same "
+            "reference grants once.",
+        .input_schema = object_schema(
+            {{"customer_id", {{"type", "string"}}},
+             {"email", {{"type", "string"}, {"maxLength", 320}}},
+             {"amount_micros",
+              {{"type", "integer"},
+               {"minimum", 10'000},
+               {"maximum", control::balance_grant_most_micros},
+               {"description", "whole cents, in millionths of a US dollar"}}},
+             {"reason", {{"type", "string"}, {"minLength", 1}, {"maxLength", 1000}}},
+             {"expires_at", {{"type", "string"}, {"description", "UTC, YYYY-MM-DDTHH:MM:SSZ"}}},
+             {"reference",
+              {{"type", "string"},
+               {"minLength", 1},
+               {"maxLength", 200},
+               {"description", "an idempotency key: the same reference grants once"}}}},
+            json::array({"amount_micros", "reason"})),
+        .output_schema = object_schema({{"customer_id", {{"type", "string"}}},
+                                        {"duplicate", {{"type", "boolean"}}},
+                                        {"credit", {{"type", "object"}}},
+                                        {"emailed", {{"type", "boolean"}}},
+                                        {"email_error", {{"type", "string"}}},
+                                        {"balance", balance_schema()}},
+                                       json::array({"customer_id", "duplicate", "balance"})),
+        .kind = CapabilityKind::Action,
+        .object = "billing balance",
+        .action = "admin",
+        .resolve_object = administrator_only,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!instance_administrator(context)) {
+                return ApiResult::failure("unauthorized",
+                                          "the operator or the instance administrator is required");
+            }
+            if (!context.store) {
+                return no_store();
+            }
+            const std::string named = input.value("customer_id", std::string());
+            const std::string email = input.value("email", std::string());
+            if (named.empty() == email.empty()) {
+                return ApiResult::failure("invalid_input",
+                                          "name the account by customer_id or a person by email, "
+                                          "not both",
+                                          named.empty() ? "/customer_id" : "/email");
+            }
+            std::string customer_id = named;
+            if (!email.empty()) {
+                const auto personal = context.store->personal_account_by_email(email);
+                if (!personal) {
+                    return personal.error().code == "not_found"
+                               ? ApiResult::failure("not_found",
+                                                    "no person with that email has a personal "
+                                                    "account on this Lake",
+                                                    "/email")
+                               : from_store(personal.error());
+                }
+                customer_id = personal->id;
+            } else if (const auto customer = account_named(context, customer_id); !customer) {
+                return customer.error();
+            }
+            const std::int64_t amount = input.at("amount_micros").get<std::int64_t>();
+            if (amount % 10'000 != 0) {
+                return ApiResult::failure(
+                    "invalid_input", "the amount is whole cents", "/amount_micros");
+            }
+            const std::string reason = input.at("reason").get<std::string>();
+            if (reason.find_first_not_of(" \t\r\n") == std::string::npos) {
+                return ApiResult::failure(
+                    "invalid_input", "say why the credit is given", "/reason");
+            }
+            if (reason.size() > 1000) {
+                return ApiResult::failure(
+                    "invalid_input", "the reason is at most 1,000 bytes", "/reason");
+            }
+            const std::string reference = input.value("reference", std::string());
+            if (input.contains("reference") &&
+                (reference.empty() || reference.size() > 200 ||
+                 !std::ranges::all_of(reference, [](char c) {
+                     return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' ||
+                            c == '.' || c == ':';
+                 }))) {
+                return ApiResult::failure("invalid_input",
+                                          "the reference is 1 to 200 letters, digits, '-', '_', "
+                                          "'.' or ':'",
+                                          "/reference");
+            }
+            const std::string expires_at = input.value("expires_at", std::string());
+            if (!expires_at.empty()) {
+                const auto at = utc_seconds(expires_at);
+                const auto now =
+                    std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+                if (!at) {
+                    return ApiResult::failure("invalid_input",
+                                              "expires_at is a UTC time, YYYY-MM-DDTHH:MM:SSZ",
+                                              "/expires_at");
+                }
+                if (*at <= now || *at > now + std::chrono::days{3660}) {
+                    return ApiResult::failure("invalid_input",
+                                              "expires_at is in the future and within 10 years",
+                                              "/expires_at");
+                }
+            }
+            BalanceGrantRequest grant;
+            grant.customer_id = customer_id;
+            grant.amount_micros = amount;
+            grant.reason = reason;
+            grant.expires_at = expires_at;
+            grant.reference = "grant-" + (reference.empty() ? control::new_uuid_v4() : reference);
+            grant.granted_by =
+                context.operator_credential ? std::string("operator") : context.acting_identity;
+            const auto given = give_balance_grant(context, grant);
+            if (!given) {
+                return given.error();
+            }
+            json out{{"customer_id", customer_id},
+                     {"duplicate", given->duplicate},
+                     {"balance", given->balance}};
+            if (given->duplicate) {
+                // A retry with the same reference: granted once, emailed once.
+                audit(context,
+                      customer_id,
+                      "billing.balance.credit_granted",
+                      {{"duplicate", true}, {"reference", grant.reference}});
+                return ApiResult::success(std::move(out));
+            }
+            out["credit"] = credit_json(given->credit, amount);
+            out["emailed"] = given->emailed;
+            if (!given->email_error.empty()) {
+                out["email_error"] = given->email_error;
+            }
+            audit(context,
+                  customer_id,
+                  "billing.balance.credit_granted",
+                  {{"credit_id", given->credit.id},
+                   {"amount_micros", amount},
+                   {"reason", reason},
+                   {"expires_at", expires_at},
+                   {"granted_by", given->credit.granted_by},
+                   {"by_email", !email.empty()},
+                   {"reference", grant.reference},
+                   {"emailed", given->emailed},
+                   {"balance_micros", given->balance_micros}});
+            return ApiResult::success(std::move(out));
+        }});
+
+    registry.add(Capability{
+        .name = "revoke_balance_credit",
+        .title = "Revoke a credit from Orama",
+        .description =
+            "Operator or instance administrator only. Revokes a grant (`credit_id`, from "
+            "account_balance's credits): what it has not paid for stops counting. What it paid "
+            "for stays paid; it never takes money back. The account's usage is read first, so "
+            "the remainder is exact; refused (store_unavailable) when it cannot be read, and "
+            "conflict when the grant already expired or was revoked. Audited "
+            "(billing.balance.credit_revoked).",
+        .input_schema = object_schema({{"credit_id", {{"type", "string"}}},
+                                       {"reason", {{"type", "string"}, {"maxLength", 1000}}}},
+                                      json::array({"credit_id"})),
+        .output_schema =
+            object_schema({{"customer_id", {{"type", "string"}}},
+                           {"credit", {{"type", "object"}}},
+                           {"revoked_micros", {{"type", "integer"}}},
+                           {"balance", balance_schema()}},
+                          json::array({"customer_id", "credit", "revoked_micros", "balance"})),
+        .kind = CapabilityKind::Action,
+        .object = "billing balance",
+        .action = "admin",
+        .resolve_object = administrator_only,
+        .async_handler = [runtime_of](const json& input,
+                                      ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!instance_administrator(context)) {
+                co_return ApiResult::failure(
+                    "unauthorized", "the operator or the instance administrator is required");
+            }
+            if (!context.store) {
+                co_return no_store();
+            }
+            const std::string credit_id = input.at("credit_id");
+            if (input.value("reason", std::string()).size() > 1000) {
+                co_return ApiResult::failure(
+                    "invalid_input", "the reason is at most 1,000 bytes", "/reason");
+            }
+            const auto credit = context.store->balance_credit(credit_id);
+            if (!credit) {
+                co_return credit.error().code == "not_found"
+                    ? ApiResult::failure("not_found", "no credit " + credit_id, "/credit_id")
+                    : from_store(credit.error());
+            }
+            if (credit->kind != "grant") {
+                co_return ApiResult::failure("invalid_input",
+                                             "only a credit from Orama can be revoked; a paid "
+                                             "top-up is refunded through the payment provider",
+                                             "/credit_id");
+            }
+            if (!credit->ended_at.empty()) {
+                co_return ApiResult::failure("conflict",
+                                             "the credit already " + credit->end_reason + " on " +
+                                                 credit->ended_at);
+            }
+            // Read the usage first, so the remainder is what it is now.
+            const auto before = context.store->account_balance(credit->customer_id);
+            if (!before) {
+                co_return from_store(before.error());
+            }
+            ApiContext inner = context;
+            auto read = co_await refresh_charges(inner, *before);
+            const std::string problem = read ? *read : read.error().message;
+            if (!problem.empty()) {
+                co_return ApiResult::failure("store_unavailable",
+                                             "the account's usage could not be read, so what "
+                                             "the credit paid for is not known; try again: " +
+                                                 problem);
+            }
+            auto ended = end_grants(inner,
+                                    credit->customer_id,
+                                    credit_id,
+                                    context.acting_identity.empty() ? std::string("operator")
+                                                                    : context.acting_identity,
+                                    "revoke_balance_credit");
+            if (!ended) {
+                co_return from_store(ended.error());
+            }
+            const auto revoked = std::ranges::find(*ended, credit_id, &control::BalanceCredit::id);
+            if (revoked == ended->end()) {
+                co_return ApiResult::failure("conflict", "the credit no longer counts");
+            }
+            const auto balance = context.store->account_balance(credit->customer_id);
+            if (!balance) {
+                co_return from_store(balance.error());
+            }
+            const std::string reason = input.value("reason", std::string());
+            audit(context,
+                  credit->customer_id,
+                  "billing.balance.credit_revoked",
+                  {{"credit_id", credit_id},
+                   {"amount_micros", revoked->amount_micros},
+                   {"used_micros", revoked->amount_micros - revoked->forfeited_micros},
+                   {"revoked_micros", revoked->forfeited_micros},
+                   {"reason", control::utf8_prefix(reason, 1000)},
+                   {"balance_micros", balance->balance_micros()}});
+            const auto runtime = runtime_of(context);
+            BalanceRuntime shown = *runtime;
+            shown.origin = link_origin(*runtime, context);
+            co_return ApiResult::success(
+                {{"customer_id", credit->customer_id},
+                 {"credit", credit_json(*revoked, 0)},
+                 {"revoked_micros", revoked->forfeited_micros},
+                 {"balance",
+                  balance_json(
+                      *balance,
+                      balance_view(*balance, runtime->settings, account_exemption(*balance)),
+                      shown)}});
         }});
 }
 

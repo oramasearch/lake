@@ -62,5 +62,7 @@ content-free volume snapshot policies and status the operator reads and writes (
 operator#260).
 
 [schema.md](schema.md) also describes `0094_clerk_revocation` (lake#948): ordered Clerk
-suspension and a persistent account-wide revocation watermark, with `clerk_revocation_guard`.
+suspension and a persistent account-wide revocation watermark, with `clerk_revocation_guard`; and
+`0103_clerk_session_binding` (lake#1163): each Clerk browser session's Clerk session id, so a
+session event ends only that browser, with `clerk_session_binding_guard`.
 [Schema](schema.md#authentication-attempts-migration-0098_authentication_attempts) describes shared password/MFA attempt budgets (lake#966).

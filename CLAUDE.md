@@ -129,6 +129,16 @@ recovers at a quorum of distinct participants. No share is stored: the coefficie
 from the root key. Not deployed; the operator must vendor the schema and select
 `root_recovery_participants_guard`. See [`docs/api/break-glass.md`](docs/api/break-glass.md).
 
+A white-labelled Lake shows its customer's brand (lake#1135, lake#1137, no migration):
+`LAKE_BRAND_FILE` and `LAKE_BRAND_*` (name, short name, company, assistant name, logo, favicon,
+accent, support address, email sender, legal footer) are validated at start; any setting makes a
+custom brand, which must give its name, support address and a sender off Lake's domains, or lake
+stops. The console's frame, sign-in and Ask (`viewer.brand`, written into index.html's first
+paint), the pages lake renders, the order and balance emails, `llms.txt`, `llms-full.txt`, the
+skill at `/skills/<short_name>/SKILL.md`, MCP and OpenAPI take the brand. Lake's own brand changes
+nothing. The operator must render the variables (orama-operator#947). See
+[`docs/serving/brand.md`](docs/serving/brand.md).
+
 The newest dated record, [`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md),
 and [`docs/design/status.md`](docs/design/status.md) still describe the 2026-10-01 deployment
 (`oramasearch/lake:20261001d`, `36679e1`); they have not been brought up to the release. Until they
@@ -404,6 +414,26 @@ new publication for the current month on a fresh and an existing instance.
 Not deployed; the operator must vendor the schema and select `model_token_prices_guard`.
 See [`docs/api/model-gateway.md`](docs/api/model-gateway.md).
 
+The quickstart process is the console's home (lake#1128, no migration): `start_quickstart`,
+`quickstart_status`, `train_quickstart` and `quickstart_snippets` take a dropped dataset to a
+published search index, website code (plain web page, React, curl) with a browser key (below), and a model trained and published on the same data. Each step is a
+nested registry call of an existing capability (balance gate, audit and metering unchanged); state
+is a sealed `lake_quickstarts` record per quickstart in the workspace Zetta. Signed-in people land
+on Quickstart at `/`; Ask Orama moved to `/ask`. The website key is a browser key (lake#1152, below). Not deployed. See [`docs/api/quickstart.md`](docs/api/quickstart.md) and
+[`docs/ui/quickstart.md`](docs/ui/quickstart.md).
+
+Browser keys (lake#1152, migration `0102_browser_keys`): the key a website's page holds, bound to one
+workspace, one search index and optionally one model, callable only for `search_index` and
+`predict` on them (`authorize_browser_key` in `Registry::call`, no policy: it acts as no person),
+only from the origins it lists (checked against `Origin`; `restrict_cors_to_browser_key` answers CORS
+to the calling origin alone), at most its calls a minute (one control-plane row every replica counts
+in), lasting until revoked or its optional expiry whatever happens to its maker's sign-in, and made
+by any credential with write on the account, API tokens and MCP clients included. Its SHA-256 and
+binding are `browser_keys` beside the other credentials (decision 53). `quickstart_snippets` is now
+POSTed and makes one with `origins`; Ship → Search Index lists and revokes them. Not deployed; the
+operator must vendor the schema and select `browser_keys_guard`. See
+[`docs/api/browser-keys.md`](docs/api/browser-keys.md).
+
 lake.live is prepaid (lake#1114, liquid-bridge decision 67, migration `0099_account_balances`): a
 balance per account, credits (Stripe Checkout top-ups, the first exactly `LAKE_BALANCE_FIRST_TOP_UP_USD`
 $20, and auto top-ups off a saved card, off by default) minus charges (each month's bill, refreshed
@@ -415,6 +445,22 @@ balance is not ok; emails go once per crossing; `viewer.balance` drives the bann
 `/billing/add-funds`. Billing on only. Not deployed; the operator must vendor the schema, select
 `account_balances_guard` and register `setup_intent.succeeded`, `payment_intent.succeeded` and
 `payment_intent.payment_failed`. See [`docs/api/billing.md#balance`](docs/api/billing.md#balance).
+Orama can give an account a credit (lake#1134, migration `0100_balance_grants`):
+`grant_balance_credit` / `revoke_balance_credit`, the operator or the instance administrator only,
+a credit of kind `grant` spent before paid money, never unlocking the overdraft, its unused part
+stopping at expiry or revocation. See
+[`docs/api/billing.md#credits-from-orama`](docs/api/billing.md#credits-from-orama).
+Coupon codes for ads follow (lake#1156, migration `0101_coupons`): `create_coupon`, `list_coupons`
+(per code and per campaign: redemptions, first paid top-ups, spend) and `disable_coupon` for the
+operator or the instance administrator, and `redeem_coupon` for a person, whose redemption is an
+ordinary grant through the grant path (`give_balance_grant`, reference
+`coupon:<coupon id>:<customer id>`); one per account and per verified email (a digest), new accounts
+only by default, a total cap, the code's expiry, ten failed attempts an hour per person and per
+client. Console: Administration → Coupons, Billing → Redeem a Code, and `?code=` kept through Clerk
+sign-up in localStorage and redeemed on the first signed-in page; the apex picker carries `?code=`
+to the chosen region. A code works only in the region it is created in (lake#1159). Not deployed;
+the operator must vendor the schema and select `coupons_guard`. See
+[`docs/api/billing.md#coupon-codes`](docs/api/billing.md#coupon-codes).
 
 Billing follows, for Orama Cloud only (lake#564, decision 56, migration `0073_billing`): billing
 records live in PostgreSQL as multitenancy (`billing_plans`, `billing_plan_prices`,
@@ -854,9 +900,11 @@ dev, accounts are added in the Clerk application `lake`, never through the site.
 
 ## Testing in a browser
 
-Sign in to lake.oramadev.net from a browser, and walk every page, with a one-time Clerk sign-in
-ticket: [`docs/deployment/browser-testing.md`](docs/deployment/browser-testing.md)
-(`tools/e2e/clerk-ticket.sh`, then `tools/e2e/walkthrough.mjs`). Do it after any roll that changes
+Sign in to lake-dev.oramadev.net (dev; `lake.oramadev.net` is retired) from a browser, and walk
+every page, with a one-time Clerk sign-in ticket:
+[`docs/deployment/browser-testing.md`](docs/deployment/browser-testing.md)
+(`tools/e2e/clerk-ticket.sh` with the key from Secret `lake/clerk-lake-dev`, then
+`tools/e2e/walkthrough.mjs`; sign-in lands on `/`). Do it after any roll that changes
 what a person sees, and look at the screenshots before calling a UI change done.
 
 ## Where to read Zetta
@@ -951,10 +999,14 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   bootstrapped, so treat an empty value as "not yet"), and `LAKE_ADMIN_TOKEN` from the
   minted-once `lake-<name>-admin` Secret. **Data plane: Zetta.** Recorded in the
   bridge `decisions.md` §6; "for now" is deliberate.
-- **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
+- **Schema.** `db/schema.sql` is the source of truth and is compiled into the binary; `lake migrate`
+  applies it (one transaction, advisory lock, the `PostgresSchema` Job's checks) and `lake manifest`
+  publishes it with the Stripe events and environment the image needs (lake#1119,
+  `docs/deployment/operator-interface.md`). Until orama-operator#936 runs them from the image, the
+  operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `account_balances_guard` in the source tree, versioned by content hash).
+  `browser_keys_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means
@@ -1075,7 +1127,11 @@ cluster runs that image. `v0.1.0` is `oramasearch/lake:20261012a`, also tagged `
 
 ## Never
 
-- Never run schema migrations from lake pods (the operator's PostgresSchema Job does, once).
+- Never run schema migrations from the lake server process (the operator does, once per image:
+  today its PostgresSchema Job, after orama-operator#936 a Job running `lake migrate`).
+- Never read an environment variable without declaring it in `environment_variables()`
+  (`src/api/manifest.cpp`), nor handle a Stripe event not in `stripe_webhook_events`; the operator
+  renders and subscribes from those lists.
 - Never add an auth path the API does not have; the UI session is the API bearer.
 - Never add a second attestation or signing framework. TAAP/1 is the security model.
 - Never make this repository public.

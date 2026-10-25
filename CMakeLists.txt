@@ -27,7 +27,7 @@ if(NOT DEFINED CMAKE_CXX_COMPILER AND NOT LAKE_USE_SYSTEM_COMPILER)
   endif()
 endif()
 
-project(lake VERSION 0.6.1 LANGUAGES C CXX)
+project(lake VERSION 0.7.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -77,6 +77,18 @@ add_custom_command(
     "-DOUTPUT_FILE=${LAKE_EMBEDDED_ENGINE_OPENAPI_CPP}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_engine_openapi.cmake"
   DEPENDS src/api/engine_openapi.json cmake/embed_engine_openapi.cmake
+  VERBATIM)
+
+# lake's control-plane schema (db/schema.sql), embedded so `lake migrate` applies the schema this
+# binary was built with and the operator vendors no copy (lake#1119, orama-operator#936).
+set(LAKE_EMBEDDED_SCHEMA_CPP "${CMAKE_CURRENT_BINARY_DIR}/generated/schema_sql.cpp")
+add_custom_command(
+  OUTPUT "${LAKE_EMBEDDED_SCHEMA_CPP}"
+  COMMAND "${CMAKE_COMMAND}"
+    "-DINPUT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/db/schema.sql"
+    "-DOUTPUT_FILE=${LAKE_EMBEDDED_SCHEMA_CPP}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_schema.cmake"
+  DEPENDS db/schema.sql cmake/embed_schema.cmake
   VERBATIM)
 
 # The web app (frontend/, React + Vite): built with npm and embedded into the binary, so lake
@@ -218,10 +230,14 @@ add_library(lake-core STATIC
   ${LAKE_EMBEDDED_FONTS_CPP}
   ${LAKE_EMBEDDED_GUIDE_CPP}
   ${LAKE_EMBEDDED_ENGINE_OPENAPI_CPP}
+  ${LAKE_EMBEDDED_SCHEMA_CPP}
+  src/control/schema.cpp
+  src/api/manifest.cpp
   ${LAKE_EMBEDDED_WEB_APP_CPP}
   src/api/web_app.cpp
   src/control/lake_identity.cpp
   src/control/saml.cpp
+  src/control/browser_keys.cpp
   src/control/callers.cpp
   src/control/agents.cpp
   src/control/pki.cpp
@@ -279,6 +295,8 @@ add_library(lake-core STATIC
   src/api/workspace_deletion.cpp
   src/api/workspace_record_capabilities.cpp
   src/api/solution_capabilities.cpp
+  src/api/quickstart_capabilities.cpp
+  src/api/browser_key_capabilities.cpp
   src/api/methodology_capabilities.cpp
   src/api/transcript_capabilities.cpp
   src/api/deletion_capabilities.cpp
@@ -318,6 +336,8 @@ add_library(lake-core STATIC
   src/api/usage_capabilities.cpp
   src/api/billing_capabilities.cpp
   src/api/balance.cpp
+  src/api/client_address.cpp
+  src/api/coupons.cpp
   src/api/stripe.cpp
   src/api/audit_routing.cpp
   src/api/audit_logs.cpp
@@ -342,8 +362,10 @@ add_library(lake-core STATIC
   src/control/network_records.cpp
   src/api/tunnel_clients.cpp
   src/api/regions.cpp
+  src/api/white_label.cpp
   src/api/orders.cpp
   src/api/resend.cpp
+  src/api/brand.cpp
   src/api/tunnel_client_capabilities.cpp
   src/audit/audit.cpp
   src/api/secrets_capabilities.cpp

@@ -69,7 +69,7 @@ export default function AgentPage() {
             <Button to={ws(`/design/agent?${qs({ id })}`)}>
               <PenLine size={14} aria-hidden /> Edit its design
             </Button>
-            <Button variant="primary" to={`/?${qs({ agent: id })}`}>
+            <Button variant="primary" to={`/ask?${qs({ agent: id })}`}>
               <MessageSquare size={14} aria-hidden /> Talk in Ask Orama
             </Button>
           </>

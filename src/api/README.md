@@ -1,5 +1,38 @@
 # API implementation
 
+A condition-variable wait releases its lock, so nothing it is given may point into a container
+another thread changes meanwhile: `run_search_jobs` copies the next job's deadline before
+`wait_until` and does not touch the job after it wakes (lake#1176, a container-overflow under
+AddressSanitizer).
+`agent_docs.cpp` also writes the apex host's `llms.txt`, `llms-full.txt` and skill
+(`apex_llms_txt`, `apex_llms_full_txt`, `apex_skill_md`, lake#1110): every region of
+`LAKE_REGIONS` with its MCP server and agent documents, then the same tools, flows and rules a
+region serves. `http_server.cpp` answers them from the region picker's middleware
+(`apex_agent_document`) for a `GET` of those paths on the apex. See
+[regions](../../docs/api/regions.md#the-apexs-agent-documents-lake1110).
+`quickstart_capabilities.cpp` is the quickstart process (lake#1128): `start_quickstart`,
+`quickstart_status`, `train_quickstart` and `quickstart_snippets`. Each step is a nested
+`Registry::call_async` as the same person (`start_workspace`, `upload_dataset`, `create_index`,
+`expose_index`, `train_model`, `expose_model`), so authorization, the balance gate, audit and
+metering stay each capability's own; its bookkeeping reads (`get_run`, `list_models`,
+`get_dataset`) use `call_workspace`. The state is a sealed `lake_quickstarts` record per quickstart
+in the workspace Zetta. The website code is built here; with `origins` it makes a browser key through
+a nested `create_browser_key` and puts the secret in the code, otherwise `key.create` names that call.
+See [quickstart.md](../../docs/api/quickstart.md).
+
+`browser_key_capabilities.cpp` registers `create_browser_key`, `list_browser_keys` and
+`revoke_browser_key` (lake#1152). A browser key acts as no person: `authorize_browser_key` in
+`registry.cpp` admits it only to `search_index` and `predict` on its binding, from its origins
+(`ApiContext::caller_origin`), within its calls a minute (`Store::admit_browser_key_call`), before
+any handler; `restrict_cors_to_browser_key` in `http_server.cpp` answers its CORS to those origins
+alone. See [browser-keys.md](../../docs/api/browser-keys.md).
+`brand.cpp` reads and validates the instance brand of a white-labelled Lake (lake#1135, lake#1137,
+[brand](../../docs/serving/brand.md)) and holds `instance_brand()`, which the server installs from
+`ServerOptions::brand`. `Brand::apply` rewrites lake's own copy in the brand's names; the order and
+balance emails (`orders.cpp`, `balance.cpp`), the pages of `web_ui.cpp`, `agent_docs.cpp`'s
+`llms.txt`, `llms-full.txt` and skill, `mcp.cpp`'s `initialize` and tools, `rest.cpp`'s OpenAPI
+document, `viewer` and `server_info` read it. Lake's own brand changes nothing.
+
 `stream_person` in `agent_stream_triggers.cpp` is shared with `mcp_connection_streams.cpp` and
 requires a present, enabled account (lake#951). Disabled/missing principals trigger idempotent
 workspace cleanup; storage errors leave records pending for retry. No notifications, launches or
@@ -197,13 +230,25 @@ and the `checkout.session.*` events, and `http_server.cpp` its routes on the ape
 pass (email and audit) on the maintenance thread.
 
 The prepaid balance (lake#1114, decision 67): `balance.cpp` registers `account_balance`,
-`start_top_up`, `set_auto_top_up`, `set_balance_overdraft` and `refresh_account_balance` (from
+`start_top_up`, `set_auto_top_up`, `set_balance_overdraft`, `refresh_account_balance`,
+`grant_balance_credit` and `revoke_balance_credit` (from
 `register_billing_capabilities`, so billing on only), holds the one list of capabilities that start
 paid work, the 402 gate and the answer warning that `registry.cpp` calls in `Registry::call`, the
 provider's balance notices, the emails once per crossing and the refresh the store root's owner
 runs (`ApiServer::Impl::run_balance_pass`, every `LAKE_BALANCE_REFRESH_SECONDS`). A refresh reads
 usage through `usage_over_time`'s handler, not a registry call, so it adds no audit event per
-account. `billing_capabilities.cpp` issues a topped-up account's invoice paid by the balance;
+account. Credits from Orama (lake#1134) are `balance.cpp`'s too: `grant_balance_credit` and
+`revoke_balance_credit` (the operator or the instance administrator), the grant email
+(`balance_grant_email`), and the refresh ending expired grants after a full read
+(`billing.balance.credit_expired`). `give_balance_grant` is the one grant path (the credit, its
+email) that `grant_balance_credit` and coupon redemptions both call. Coupon codes for ads
+(lake#1156) are `coupons.cpp`'s: `create_coupon`, `list_coupons` and `disable_coupon` (the operator
+or the instance administrator) and `redeem_coupon` (a person with `admin` on the account), which
+claims the redemption in the store, then gives the grant through `give_balance_grant` (reference
+`coupon:<coupon id>:<customer id>`), with the failed-attempt limit per person and per client and
+refusals audited with a digest of what was typed, never the code. `web_ui.cpp`'s `coupon_note` says
+on the apex picker and order sheet that a `?code=` goes to the chosen region.
+`billing_capabilities.cpp` issues a topped-up (or granted) account's invoice paid by the balance;
 `stripe.cpp` adds the top-up and card-setup Checkouts, the off-session PaymentIntent and the balance
 events; `console_capabilities.cpp`'s `viewer` answers `balance`.
 
@@ -375,7 +420,15 @@ sign-in results may include a JWT; API-token issuance retains only its derived s
 lock, before any thread opens a repository: liquid creates it without a lock, and two first uses
 at once break it for the process ([store volume](../../docs/deployment/store-volume.md#liquids-local-identity)).
 
-`http_connections.hpp` (lake#534) accepts and serves `http_server.cpp`'s connections: one session
+`client_address.cpp` (lake#1083, lake#1132) parses `LAKE_TRUSTED_PROXY_CIDRS` and `LAKE_PROXY_PORT`
+and picks the address a request's per-client limits count: the one the proxy reported when the
+request arrived on the proxy listener or from a trusted proxy, else the connection's peer.
+`HttpConnections::peer` and `HttpConnections::proxied` give the route its peer and listener
+([client addresses](../../docs/deployment/client-addresses.md)).
+
+`http_connections.hpp` (lake#534) accepts and serves `http_server.cpp`'s connections, on the main
+listener (`bind`) and, with `LAKE_PROXY_PORT`, the proxy listener (`bind_proxy`, lake#1132), which
+shares its routes, workers, limits and drain: one session
 coroutine per connection up to `LAKE_HTTP_MAX_CONNECTIONS` (503 above it), a request worker only
 while a route runs (taken after any store-root wait, given back by the capabilities declared
 `Capability::long_poll` through `ApiContext::leave_worker` and by streaming pulls, within the
@@ -411,6 +464,9 @@ The sign-up registry contract includes personal customer provisioning, with atom
 retry semantics shared by all transports. See `docs/api/provisioning.md`.
 The web app's sign-up calls `sign_up_password`, which sets the browser session, and creates a
 repository with `create_repository`. See `docs/api/provisioning.md` and `docs/ui/identity.md`.
+Under Clerk the Lake pool's password entries (`sign_up_password`, `sign_in_password`, `verify_mfa`,
+`recover_with_code`) refuse with `lake_pool_password_refusal` (`app_capabilities.cpp`), whose rule
+`lake_pool_password_sign_in` (`clerk.cpp`) is also `viewer`'s `password_sign_up` (lake#1098).
 
 The web app builds its navigation from the `viewer` read (`console_capabilities.cpp`); a protected
 download without a credential redirects to `/sign-in`. OpenAPI describes account tokens. The
@@ -753,3 +809,9 @@ recovery and registration work (lake#969). Registry admission uses the shared St
 reservations across REST, MCP and hosted forms, keyed by the trusted ingress address from
 `order_client_address`. See [authentication limits](../../docs/api/identity.md#authentication-attempt-limits)
 (lake#966).
+
+`white_label.cpp` reads a white-labelled Lake's host settings (`LAKE_HOST_ALIASES`,
+`LAKE_CONTROL_HOST`) and SSO-only sign-in (`LAKE_SIGN_IN_SSO_PROVIDER`), builds the redirect of a
+browser page on an alias to the public host (the `host_alias` middleware in `http_server.cpp`), and
+decides which sign-in capabilities the registry's `gate_instance_sign_in` refuses. See
+[white-label sign-in](../../docs/deployment/white-label-sign-in.md) (lake#1136).

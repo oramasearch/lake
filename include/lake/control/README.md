@@ -246,7 +246,17 @@ and `verify_event` (one event checked alone).
 (once per event id and per provider reference, in one transaction), `set_balance_charge` (a month
 an invoice froze stays), `balance_credits`, `balance_charges` and `balance_customers`, are the
 prepaid balance's records (migration `0099_account_balances`, lake#1114); `account_balance_problem`
-and `balance_credit_problem` are the checks both stores apply.
+and `balance_credit_problem` are the checks both stores apply. Credits from Orama (migration
+`0100_balance_grants`, lake#1134) are `BalanceCredit`s of kind `grant` with their own fields;
+`balance_credit`, `end_balance_grants` (expired ones and one revoked, in one transaction) and
+`personal_account_by_email` are their store calls, and `grant_allocation`, `grants_ending` and
+`grants_unused` the one rule both stores and the API use for how charges fall on grants. Coupon
+codes (migration `0101_coupons`, lake#1156) are `Coupon`, `CouponRedemption`, `CouponReport` and
+`CouponClaim`: `create_coupon`, `coupon_by_code`, `get_coupon`, `coupon_reports`, `disable_coupon`,
+`coupon_redemption`, `claim_coupon` (every check of a redemption under the coupon's row lock, with
+`resumed` for a claim whose grant was not given yet), `finish_coupon_redemption`, and the failed
+attempts `coupon_attempts_exhausted` / `coupon_attempt_failed`; `coupon_code_normalized`,
+`coupon_email_digest` (one inbox, one digest) and `coupon_problem` are the shared rules.
 
 
 `oci_records.hpp` holds a tenant image's manifests and tags in its routed workspace (lake#383
@@ -315,6 +325,13 @@ migration `0083_methodology_deployments`), its operator status, `methodology_dep
 (the `lmd.` credential, which reaches only `methodology_deployment_input`) and
 `methodology_deployment_endpoint_valid` (only a serve Service's in-cluster URL). `methodologies.hpp`
 adds the chunked artifact bounds (8 MiB chunks, 1 GiB in all) and the predict row limit.
+
+`store.hpp` holds browser keys (lake#1152, migration `0102_browser_keys`): `BrowserKey`,
+`NewBrowserKey`, `IssuedBrowserKey`, `BrowserKeyAdmission`, the `lbk.` prefix, the origin rule
+`browser_key_origin` and `browser_key_principal` (no person; `Principal::browser_key` carries the
+binding the registry checks), and the Store calls `create_browser_key`, `list_browser_keys`,
+`revoke_browser_key` and `admit_browser_key_call` (one row's minute, shared by every replica). See
+[browser-keys.md](../../../docs/api/browser-keys.md).
 
 `authentication_limits.hpp` provides the bounded fixed-window attempt table used by both stores
 and HTTP client admission (lake#969). Full tables fail closed without evicting active budgets.

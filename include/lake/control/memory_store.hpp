@@ -435,6 +435,26 @@ public:
                                                        int limit) override;
     Result<std::vector<BalanceCharge>> balance_charges(const std::string& customer_id) override;
     Result<std::vector<std::string>> balance_customers() override;
+    Result<BalanceCredit> balance_credit(const std::string& credit_id) override;
+    Result<std::vector<BalanceCredit>> end_balance_grants(const std::string& customer_id,
+                                                          const std::string& at,
+                                                          const std::string& revoke_id) override;
+    Result<Customer> personal_account_by_email(const std::string& email) override;
+    Result<Coupon> create_coupon(const Coupon& coupon) override;
+    Result<Coupon> coupon_by_code(const std::string& code) override;
+    Result<Coupon> get_coupon(const std::string& coupon_id) override;
+    Result<std::vector<CouponReport>> coupon_reports(const std::string& campaign) override;
+    Result<Coupon> disable_coupon(const std::string& coupon_id, const std::string& by) override;
+    Result<CouponRedemption> coupon_redemption(const std::string& coupon_id,
+                                               const std::string& customer_id) override;
+    Result<CouponClaim> claim_coupon(const CouponRedemption& redemption) override;
+    Result<void> finish_coupon_redemption(const std::string& redemption_id,
+                                          const std::string& credit_id) override;
+    Result<bool> coupon_attempts_exhausted(const std::vector<std::string>& keys,
+                                           int limit,
+                                           int window_seconds) override;
+    Result<void> coupon_attempt_failed(const std::vector<std::string>& keys,
+                                       int window_seconds) override;
     Result<CloudOrder> create_cloud_order(const NewCloudOrder& order) override;
     Result<CloudOrder> get_cloud_order(const std::string& id) override;
     Result<CloudOrder> transition_cloud_order(const CloudOrderTransition& change) override;
@@ -548,6 +568,7 @@ public:
     Result<ClerkUserProvisioned> provision_clerk_user(const ClerkIdentity&) override;
     Result<bool> apply_clerk_user_state(const ClerkUserState&) override;
     Result<void> revoke_clerk_sessions(const std::string& subject,
+                                       const std::string& session_id,
                                        std::int64_t revoked_at) override;
     Result<std::string> update_clerk_user(const ClerkIdentity&) override;
     Result<std::string> disable_clerk_user(const std::string& subject) override;
@@ -575,6 +596,13 @@ public:
                                     const std::string& state,
                                     const std::string& browser_binding) override;
     Result<IssuedSession> create_token(const NewToken&) override;
+    Result<IssuedBrowserKey> create_browser_key(const NewBrowserKey&) override;
+    Result<std::vector<BrowserKey>> list_browser_keys(const std::string& customer_id,
+                                                      const std::string& workspace_id) override;
+    Result<BrowserKey> revoke_browser_key(const std::string& customer_id,
+                                          const std::string& id,
+                                          const std::string& revoked_by_taap_id) override;
+    Result<BrowserKeyAdmission> admit_browser_key_call(const std::string& id) override;
     Result<std::vector<Session>> list_sessions(const std::string& user_id,
                                                const std::string& pool_id) override;
     Result<void> revoke_session(const std::string& user_id, const std::string& session_id) override;
@@ -718,6 +746,11 @@ private:
     std::vector<BalanceCredit> balance_credits_;
     std::map<std::pair<std::string, std::string>, BalanceCharge> balance_charges_;
     AccountBalance account_balance_locked(const std::string& customer_id) const;
+    // Coupon codes (migration 0101): the coupons in order, their redemptions, and the failed
+    // attempts per key (failures, when the window started).
+    std::vector<Coupon> coupons_;
+    std::vector<CouponRedemption> coupon_redemptions_;
+    std::map<std::string, std::pair<int, std::chrono::system_clock::time_point>> coupon_attempts_;
     // Cloud orders (migration 0089), their events, and when each order's next email is due.
     std::vector<CloudOrder> cloud_orders_;
     std::vector<CloudOrderEvent> cloud_order_events_;
@@ -817,6 +850,8 @@ private:
     std::set<std::string> clerk_webhook_deliveries_;
     std::map<std::string, ClerkUserState> clerk_user_states_;
     std::map<std::string, std::int64_t> clerk_revoked_before_;
+    // Lake browser session id -> the Clerk session it was exchanged from (lake#1163).
+    std::map<std::string, std::string> clerk_session_of_;
     // user id -> when its managed seed was destroyed by using its own identity (lake#762).
     std::map<std::string, std::string> managed_seed_destroyed_at_;
     struct IdentityLinkChallengeRecord {
@@ -846,6 +881,16 @@ private:
     std::map<std::pair<std::string, std::string>, std::int64_t> saml_assertions_;
     std::vector<Device> devices_;
     std::vector<Session> sessions_;
+    // Browser keys (lake#1152): the row, its secret's SHA-256, expiry and the current minute's
+    // calls, as `browser_keys` keeps them.
+    struct StoredBrowserKey {
+        BrowserKey key;
+        std::string secret_sha256;
+        std::int64_t expires_unix = 0;
+        std::int64_t window_started_unix = 0;
+        int window_calls = 0;
+    };
+    std::vector<StoredBrowserKey> browser_keys_;
     std::vector<std::pair<std::string, std::string>> session_secrets_;
     std::vector<OfflineGrant> offline_grants_;
     struct RecoveryRecord {

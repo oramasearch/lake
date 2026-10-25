@@ -50,7 +50,8 @@ Orama design tokens, the same IBM Plex faces and the same component classes the 
 | `src/pages/connections/` | Data → Connections: `connections.ts` (pure: words, inputs, the old Datasets links; tested by `tests/connections.test.ts`), `forms.tsx` (Add connection and the pull, shared with Datasets) ([connections.md](connections.md)). |
 | `src/pages/drives/` | Data → Drives: `storage.ts` (the `DriveStorage` interface and its four implementations), `StorageTab.tsx` and `stores.ts` (the Storage tab, lake#656), `paths.ts` and `targets.ts` (pure, tested by `tests/drives.test.ts`) ([drives.md](drives.md)). |
 | `src/lib/ask.ts`, `src/components/follow.tsx` | `openAsk` (a page opens Ask Orama about something), `focusAsk` (the top bar's Ask Orama on the home puts the cursor in its message box) and `useFollow` (a conversation follows new answers unless the person scrolled up). |
-| `src/pages/ask/` | Ask Orama: `AskHome.tsx` (the home of a signed-in person, `/`), `thread.ts` (the conversation the home and the panel share), `conversation.tsx` (messages, proposals, the message box), `home.ts` (what `/` shows each viewer, old `/ask` and `/?ws=` links, a link's hand-over, the starting questions; pure, tested by `tests/home.test.ts`) and `AskRedirect.tsx` (`/ask` to `/`). |
+| `src/pages/ask/` | Ask Orama: `AskPage.tsx` and `AskHome.tsx` (its page, `/ask`; the home from lake#600 until lake#1128), `thread.ts` (the conversation the page and the panel share), `conversation.tsx` (messages, proposals, the message box), `home.ts` (what `/` shows each viewer, old `/?conversation=` and `/?ws=` links, a link's hand-over, the starting questions; pure, tested by `tests/home.test.ts`) and `AskRedirect.tsx` (`/w/<id>/ask` to `/ask`). |
+| `src/pages/quickstart/` | Quickstart, the home of a signed-in person (`/`, lake#1128, [quickstart.md](quickstart.md)): `QuickstartPage.tsx` and its pure rules `quickstart.ts`, tested by `tests/quickstart.test.ts`. |
 
 ## The look
 
@@ -83,7 +84,11 @@ Streams (`docs/ui/apps.md`).
 Lake answers a page request with `index.html` and this request's `viewer` answer embedded as
 `<script id="lake-viewer" type="application/json">`. It is the same capability the app would
 call first, so the shell and the page start without a round trip. Because the answer is personal,
-the page is sent `Cache-Control: private, no-store`. Three more things keep later steps short:
+the page is sent `Cache-Control: private, no-store`. On a white-labelled Lake the answer's `brand`
+names the console, and lake also writes the brand's console title into `<title>` and its favicon
+and colours into `<head>`, so the first paint is the brand's with no build per brand
+([`../serving/brand.md`](../serving/brand.md), lake#1135). Three more things keep later steps
+short:
 
 - **The workspace status starts with the page's code.** A workspace page's gate reads
   `workspace_status` first; the session starts that read alongside the code.
@@ -124,6 +129,11 @@ the page is sent `Cache-Control: private, no-store`. Three more things keep late
   HTML, and only through `Markdown` (`src/lib/markdown.tsx`); see [Markdown](#markdown).
 - **Live views poll or long-poll the capability** that the server page's script called; nothing
   refreshes the whole page.
+- **The live browser scripts find controls by role and label** (`tools/e2e/`,
+  `docs/deployment/browser-testing.md`): a button's text, a field's label, a dialog, a table's
+  caption. Where a screen has nothing stable to find, it carries a `data-testid` (design `Panel`
+  takes `testId`): `change-pipeline`, `service-status`, `store-status` today (lake#1099). Renaming a
+  label or a test id a script uses changes that script in the same pull request.
 
 ## How a page runs
 

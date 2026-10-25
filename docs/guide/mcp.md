@@ -207,6 +207,10 @@ gives a block that downloads the skill and adds a short section to `~/.codex/AGE
 For any other agent, `/llms.txt` describes Lake in one page, and `/llms-full.txt` adds every tool's
 description and input schema. Both are public, so an agent without a key can read them.
 
+On Orama Cloud each region is its own Lake. The front door's copies (`lake.live/llms.txt`,
+`lake.live/llms-full.txt`, `lake.live/skills/lake/SKILL.md`) name every region with its MCP server;
+connect to the region where your account is, with a token made there.
+
 The skill, both text files and this page are generated from the capability registry, so they list
 exactly the tools the server has.
 

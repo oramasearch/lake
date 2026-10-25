@@ -810,3 +810,33 @@ html[data-resizing-ask] .ask-panel {
 .ask-agent-name .ask-icon-tile-sm {
   margin-right: 2px;
 }
+
+/* A white-labelled Lake's logo (lake#1135, components/BrandMark.tsx): its dark version, when it has
+   one, shows in the dark theme, chosen or system. */
+.brand-logo {
+  display: inline-flex;
+  align-items: center;
+}
+.brand-logo img {
+  display: block;
+  height: 100%;
+  width: auto;
+  max-width: 10rem;
+}
+.brand-logo .brand-logo-dark {
+  display: none;
+}
+:root[data-theme="dark"] .brand-logo .brand-logo-dark {
+  display: block;
+}
+:root[data-theme="dark"] .brand-logo .brand-logo-light {
+  display: none;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .brand-logo .brand-logo-dark {
+    display: block;
+  }
+  :root:not([data-theme="light"]) .brand-logo .brand-logo-light {
+    display: none;
+  }
+}

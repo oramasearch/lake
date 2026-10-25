@@ -8,6 +8,8 @@ same list. Every value below is read once at startup; SIGINT and SIGTERM stop th
 | Flag | Meaning |
 |---|---|
 | `lake version` (or `--version`) | print the version and exit |
+| `lake migrate [--control-db URI] [--wait-seconds N]` | apply the schema built into the binary to the control database (default `$LAKE_CONTROL_DB_URI`) idempotently, in one transaction under an advisory lock, print what it applied as JSON and exit 0 (applied or current), 1 (failed, rolled back), 2 (usage) or 3 (unreachable within `--wait-seconds`, default 0). Reads no other setting; the server never migrates ([`../deployment/operator-interface.md`](../deployment/operator-interface.md), lake#1119) |
+| `lake manifest` | print, as JSON, what this image needs from the operator: version, revision, schema (latest migration, guard tables), Stripe webhook events and products, and every environment variable with `required` and `secret` ([`../deployment/operator-interface.md`](../deployment/operator-interface.md#lake-manifest)) |
 | `--listen HOST:PORT` | the bind address; the default port is 4900 (Zetta is 4800) |
 | `--node NAME` | names the node; in a replicated deployment it is the stable region name ([`../control-plane/replication.md`](../control-plane/replication.md)) |
 | `--control-db URI` | Postgres URI of the control plane (default `$LAKE_CONTROL_DB_URI`) |
@@ -23,6 +25,13 @@ same list. Every value below is read once at startup; SIGINT and SIGTERM stop th
 With `--memory-store` the control plane is `InMemoryStore`; otherwise a non-empty control-DB URI
 selects the Postgres store. `server_info` reports which one as `store` (`memory`, `postgres`, or
 `none` when neither is configured).
+
+With no store, lake still starts and serves what needs none: `/healthz` answers 200 and `/readyz`,
+which is control-store readiness, 503;
+the owner loop skips its store sweeps (app authorization codes, unstarted agent launches and
+methodology runs), and SIGTERM stops it with exit 0. Before lake#1168 the loop called the null
+store on its first pass and lake died with SIGSEGV (exit 139) a moment after start;
+`StorelessStartup.LakeWithNoControlStoreServesAndStopsCleanly` starts the executable this way.
 
 ## Environment
 
@@ -52,7 +61,13 @@ selects the Postgres store. `server_info` reports which one as `store` (`memory`
 | `LAKE_HTTP_MIN_TRANSFER_RATE` | bytes per second a client must move while its request holds a worker, measured as a 10 s bucket of waiting time; default 1024, 0 turns it off | [`http.md`](http.md#connections-and-workers) |
 | `LAKE_HTTP_MAX_LONG_REQUESTS` | requests that left their worker (long polls, streaming pulls) at once; past it `429`; default 512 | [`http.md`](http.md#connections-and-workers) |
 | `LAKE_HTTP_MAX_LONG_REQUESTS_PER_CALLER` | the same per authenticated caller, or per client address; default 64 | [`http.md`](http.md#connections-and-workers) |
-| `LAKE_PUBLIC_HOST` | the Lake namespace value on every operator row; required when the operator Zetta client is enabled | [`../control-plane/platform.md`](../control-plane/platform.md) |
+| `LAKE_PROXY_PORT` | a second listener for the reverse proxy on the `--listen` host and this port: the same routes, workers and limits, with `X-Real-IP` / `X-Forwarded-For` believed from any peer. Unset: no second listener; not 1-65535: lake stops; the listen port: lake does not start (lake#1132) | [`../deployment/client-addresses.md`](../deployment/client-addresses.md) |
+| `LAKE_TRUSTED_PROXY_CIDRS` | peers whose `X-Real-IP` / `X-Forwarded-For` per-client limits believe on the main listener, comma-separated CIDRs, or `none`; any other peer is counted on its own address. Unset: loopback and the private ranges, so an image rolled before the operator sets it counts as before, or `none` when `LAKE_PROXY_PORT` is set; malformed: lake stops (lake#1083) | [`../deployment/client-addresses.md`](../deployment/client-addresses.md) |
+| `LAKE_PUBLIC_HOST` | the host every link, callback and passkey names, and, unless `LAKE_CONTROL_HOST` is set, the Lake namespace value on every operator row; required when the operator Zetta client is enabled | [`../control-plane/platform.md`](../control-plane/platform.md) |
+| `LAKE_TERMS_URL`, `LAKE_PRIVACY_URL` | the terms of service and privacy policy every sign-up and sign-in form links to (`viewer.legal`, liquid-bridge#15). Unset: Orama's published pages, `https://www.orama.com/legal/terms` and `https://www.orama.com/legal/privacy`. `off`: no link. Anything else must be an absolute `https://` (or `http://`) URL of at most 2048 characters with no space, quote or angle bracket, else lake does not start and says which variable is wrong | [`../deployment/sign-in.md`](../deployment/sign-in.md#terms-and-privacy) |
+| `LAKE_HOST_ALIASES` | other hosts that are this Lake too, comma-separated (a white-labelled Lake's Orama host, set by the operator once the customer's host is routed): a browser page opened there is redirected (302) to the same path on `LAKE_PUBLIC_HOST`; every other request is served as on `LAKE_PUBLIC_HOST`. An invalid host, or `LAKE_PUBLIC_HOST` itself, stops startup | [`../deployment/white-label-sign-in.md`](../deployment/white-label-sign-in.md) |
+| `LAKE_CONTROL_HOST` | this Lake's name on the operator's control rows; default `LAKE_PUBLIC_HOST`. The operator sets it to the Orama host when the public host moves to the customer's, so the rows keep matching | [`../control-plane/platform.md`](../control-plane/platform.md), [`../deployment/white-label-sign-in.md`](../deployment/white-label-sign-in.md) |
+| `LAKE_SIGN_IN_SSO_PROVIDER` | the enterprise SSO provider id that is the only way in for people: Lake's own password, passkey, social and email-recovery sign-in are refused in its own pool, and the sign-in page offers that provider alone. Never with a Clerk key (startup stops) | [`../api/sso.md`](../api/sso.md#the-customers-provider-as-the-only-way-in) |
 | `LAKE_EXTERNAL_ORIGIN` | browser-facing scheme, host and optional non-default port; used by clone/push instructions, with no default hostname | [`../ui/forge.md`](../ui/forge.md), [`../deployment/private-install.md`](../deployment/private-install.md) |
 | `LAKE_INTERNAL_URL` | Lake's HTTP(S) in-cluster Service URL; its authority prefixes build image targets and the full URL is handed to agents | [`../api/builds.md`](../api/builds.md), [`../api/agent-launches.md`](../api/agent-launches.md) |
 | `LAKE_MAX_REGISTRY_BLOB_BYTES` | maximum completed OCI blob size accepted by streamed `PATCH` and final `PUT` uploads; defaults to 4294967296 (4 GiB); all non-registry request bodies retain the 64 MiB adapter limit | [`../api/builds.md`](../api/builds.md), [`http.md`](http.md) |
@@ -69,6 +84,8 @@ selects the Postgres store. `server_info` reports which one as `store` (`memory`
 | `LAKE_RESEND_API_KEY` | Orama's Resend API key (`re_...`), a platform environment variable (on a Lake CR, `spec.env` with `valueFrom.secretKeyRef`), never a workspace secret and never logged: order email to support and customers. Unset, orders are still recorded and their email waits until lake restarts with it | [`../api/orders.md`](../api/orders.md#email) |
 | `LAKE_RESEND_FROM` | the sender of order email; default `Lake <orders@lake.live>`; its domain must be verified in Resend | [`../api/orders.md`](../api/orders.md#email) |
 | `LAKE_SUPPORT_EMAIL` | where order forms, paid orders and failures are emailed; default `support@orama.com` | [`../api/orders.md`](../api/orders.md#email) |
+| `LAKE_BRAND_FILE` | a JSON brand (a white-labelled Lake's name, logo, colours, addresses and legal footer); unset with no `LAKE_BRAND_*`: Lake's own brand, nothing changes. Invalid: lake stops | [`brand.md`](brand.md) |
+| `LAKE_BRAND_NAME`, `LAKE_BRAND_SHORT_NAME`, `LAKE_BRAND_COMPANY`, `LAKE_BRAND_ASSISTANT_NAME`, `LAKE_BRAND_CONSOLE_TITLE`, `LAKE_BRAND_BY_ORAMA`, `LAKE_BRAND_LOGO`, `LAKE_BRAND_LOGO_DARK`, `LAKE_BRAND_FAVICON`, `LAKE_BRAND_ACCENT`, `LAKE_BRAND_ACCENT_DARK`, `LAKE_BRAND_SUPPORT_EMAIL`, `LAKE_BRAND_EMAIL_FROM`, `LAKE_BRAND_LEGAL_NAME`, `LAKE_BRAND_TERMS_URL`, `LAKE_BRAND_PRIVACY_URL` | each brand setting, over the file's value; any one makes a custom brand, which needs the name, a support address and a sender off Lake's domains (`LAKE_BRAND_EMAIL_FROM` replaces `LAKE_RESEND_FROM`) | [`brand.md`](brand.md#the-setting) |
 | `LAKE_BALANCE_FIRST_TOP_UP_USD` | where billing is on, the first top-up of the prepaid balance, whole US dollars (default 20); a new account adds exactly this before anything that costs money | [`../api/billing.md`](../api/billing.md#balance) |
 | `LAKE_BALANCE_MINIMUM_TOP_UP_USD` | the smallest later top-up and auto top-up, whole dollars (default 20) | [`../api/billing.md`](../api/billing.md#balance) |
 | `LAKE_BALANCE_OVERDRAFT_USD` | how far below $0 a balance may go before paid work is refused with `402 payment_required`, whole dollars (default 50); the operator sets one account's with `set_balance_overdraft` | [`../api/billing.md`](../api/billing.md#the-gate) |
@@ -135,6 +152,9 @@ needs them ([`../api/billing.md`](../api/billing.md#balance), lake#1114).
 ## Change
 
 A new flag or variable is added to `usage()` and the table above in the same change, with its
-default, and the page that owns the behavior links back here.
+default, and the page that owns the behavior links back here. A new variable is also declared in
+`environment_variables()` (`src/api/manifest.cpp`), with whether a Lake cannot run without it and
+whether it is a secret, so `lake manifest` tells the operator to render it;
+`LakeManifest.DeclaresExactlyTheEnvironmentLakeReads` fails until it is.
 
 `LAKE_ORDER_ENTITLEMENT_GRACE_SECONDS` (lake#972) sets the grace on signed order subscription events and initial paid Checkout: default `259200` (three days), integer `0` through `2592000` (30 days). Invalid values stop startup. The policy is captured while entitled or on positive entitlement evidence; a negative event cannot extend an expired order. See [orders](../api/orders.md#recurring-entitlement-lsr-105-lake972).

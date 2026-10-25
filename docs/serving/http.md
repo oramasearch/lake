@@ -23,7 +23,9 @@ tick.
 
 | Route | Serves |
 |---|---|
-| any request whose `Host` is `LAKE_APEX_HOST`, apart from the stylesheet, fonts and probes | the region picker, before every other route, inside the order sheet (lake#831); `POST` with `region` sets the `lake_region` preference cookie and redirects to the region's host with the same path and query ([`../api/regions.md`](../api/regions.md#the-apex-picker), lake#757) |
+| `GET /llms.txt`, `/llms-full.txt`, `/skills/lake/SKILL.md` or `/developer/mcp/skill` whose `Host` is `LAKE_APEX_HOST` | the same document naming every region of `LAKE_REGIONS` with its MCP server, guides and skill, instead of the picker (`text/plain` or `text/markdown`, [`../api/regions.md`](../api/regions.md#the-apexs-agent-documents-lake1110), lake#1110) |
+| any other request whose `Host` is `LAKE_APEX_HOST`, apart from the stylesheet, fonts and probes | the region picker, before every other route, inside the order sheet (lake#831); `POST` with `region` sets the `lake_region` preference cookie and redirects to the region's host with the same path and query ([`../api/regions.md`](../api/regions.md#the-apex-picker), lake#757) |
+| any request whose `Host` is one of `LAKE_HOST_ALIASES` | after the region picker: a browser page (what the web app would answer) is redirected (302, `no-store`) to the same path and query on `LAKE_PUBLIC_HOST`; anything else has its `Host` rewritten to `LAKE_PUBLIC_HOST` and is served as there, so the alias is never taken for an application's custom domain ([`../deployment/white-label-sign-in.md`](../deployment/white-label-sign-in.md), lake#1136) |
 | on `LAKE_APEX_HOST`: `GET /order/<offer>`, `GET /order/price-list`, `POST /order`, `GET /orders/<id>?token=…` | the order sheet's forms, the published price list, an order (recorded, then Stripe Checkout or the confirmation; 32 KiB, rate limited, honeypot), and an order's status by its signed link ([`../api/orders.md`](../api/orders.md#routes), lake#831) |
 | a browser's `GET` or `HEAD` of any other path (`Accept: text/html`) | the web app's `index.html` (`no-cache`, `Content-Security-Policy: frame-ancestors 'self'; img-src 'self' data:`, [images](#images)): `/`, `/repositories`, `/w/<workspace_id>/design/projects` and every other page are the app's ([`../ui/web-app.md`](../ui/web-app.md)); the same path asked for by anything else is the 404 |
 | `GET /ui/<file>` | the app's content-hashed files (`public, max-age=31536000, immutable`) |
@@ -35,8 +37,8 @@ tick.
 | `POST /session` | the operator token form: a matching token becomes the Strict `lake_session` cookie and redirects to `/repositories`; a wrong one redirects to `/login?error=…` |
 | `POST /logout` | revokes the session, clears the cookie and redirects to `/` (to `/sign-in?signed_out=1` under Clerk) |
 | `POST /billing/stripe/webhook` | Stripe's payment notices (lake#620, [billing.md](../api/billing.md#webhooks)): no lake credential, the `Stripe-Signature` HMAC with a five-minute window is checked against the webhook secret in lake's secret store; each event applied once by id and audited centrally; `404` where the lake does not bill or has no Stripe keys |
-| `POST /identity/clerk-session` | exchanges a Clerk session token for the `lake_session` cookie ([`../api/clerk.md`](../api/clerk.md)) |
-| `POST /identity/clerk-webhook` | Clerk's user events through Svix (lake#765, [`../api/clerk.md`](../api/clerk.md#webhooks)): no lake credential, the `svix-signature` HMAC-SHA256 with `LAKE_CLERK_WEBHOOK_SECRET` and a five-minute `svix-timestamp` window; each `svix-id` applied once; `user.created`, `user.updated`, `user.deleted`, `session.revoked`, `session.removed`, `session.ended` audited centrally; session events revoke all linked-account credentials, ordered bans/locks suspend access and a newer unban/unlock allows new sign-ins (lake#948); `401` for a refused signature, `503` when the store fails (Clerk retries), `404` without the secret |
+| `POST /identity/clerk-session` | exchanges Clerk's `lake` template token (`token`) for the `lake_session` cookie, binding it to the Clerk session named by the signed `sid` of the default session token (`session_token`, lake#1163) ([`../api/clerk.md`](../api/clerk.md)) |
+| `POST /identity/clerk-webhook` | Clerk's user events through Svix (lake#765, [`../api/clerk.md`](../api/clerk.md#webhooks)): no lake credential, the `svix-signature` HMAC-SHA256 with `LAKE_CLERK_WEBHOOK_SECRET` and a five-minute `svix-timestamp` window; each `svix-id` applied once; `user.created`, `user.updated`, `user.deleted`, `session.revoked`, `session.removed`, `session.ended` audited centrally; session events revoke only the browser sessions bound to the ended Clerk session and unbound browser sessions, never API keys, static tokens or devices (lake#1163); ordered bans/locks suspend access and a newer unban/unlock allows new sign-ins (lake#948); `401` for a refused signature, `503` when the store fails (Clerk retries), `404` without the secret |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity; sets the cookie and redirects |
 | `GET /v1/saml/<provider id>/metadata`, `GET /v1/saml/<provider id>/start`, `POST /v1/saml/<provider id>/acs` | SAML sign-in ([`../api/sso.md#saml-sign-in`](../api/sso.md#saml-sign-in), lake#836), no credential: Lake's SP metadata (its URL is the entity id); a one-use AuthnRequest and a redirect to the IdP; the Assertion Consumer Service, which verifies the form's `SAMLResponse`, sets the cookie and redirects. The ACS is exempt from the cross-site check below |
 | `GET /file/raw`, `/file/download`, `/drive/download`, `/exports/download`, `/share/<token>/download` | the bytes of a repository file, a Drive file, a signed export or a shared file; without a credential a protected download redirects to `/sign-in` |
@@ -453,7 +455,12 @@ browser session."}}` when:
 
 A missing `Origin` and a missing `Sec-Fetch-Site` pass: a non-browser client sends neither, and a
 browser sends `Origin` on every cross-origin unsafe request. Bearer-authenticated calls are not
-affected, from any origin. The check is a router middleware that runs right after the response
+affected, from any origin, with one exception: a **browser key** (`lbk.…`, lake#1152,
+[`../api/browser-keys.md`](../api/browser-keys.md)) is refused (`403 unauthorized`) unless `Origin`
+names one of the origins it lists, and the answer to a call made with one carries
+`Access-Control-Allow-Origin: <that origin>` and `Vary: Origin`, or no `Access-Control-Allow-Origin`
+at all, instead of CORS's `*` (`restrict_cors_to_browser_key`). A preflight carries no credential and
+is answered as every preflight is. The check is a router middleware that runs right after the response
 reset and CORS, before any route, so it covers `/v1`, `/mcp` and the remaining form routes
 (`/logout`, `/session`, `/identity/clerk-session`) alike. The one exception is the SAML Assertion
 Consumer Service, `POST /v1/saml/<provider id>/acs`: the identity provider's form post is cross-site
@@ -505,4 +512,4 @@ A protected download without a credential redirects to `/sign-in`. The explicit 
 stays at `/login` (a web app page) with `POST /session` retaining its existing operator credential
 contract. See [the front-door contract](../ui/front-door.md).
 
-Password, MFA and recovery calls share [authentication attempt limits](../api/identity.md#authentication-attempt-limits) across REST, hosted forms and MCP (lake#966). Client admission reuses the trusted ingress address from `order_client_address`; account admission reserves capacity in the store before credential work.
+Password, MFA and recovery calls share [authentication attempt limits](../api/identity.md#authentication-attempt-limits) across REST, hosted forms and MCP (lake#966). Client admission reuses the address from `order_client_address`: the one the proxy reported on the proxy listener (`LAKE_PROXY_PORT`) or from a trusted proxy, else the peer's own ([client addresses](../deployment/client-addresses.md), lake#1083, lake#1132); account admission reserves capacity in the store before credential work.

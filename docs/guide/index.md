@@ -17,16 +17,19 @@ you automate it.
 
 ## Find Your Way Around
 
-Signing in, or opening Lake while signed in, lands you on **Ask Orama**, full page, in your current
-workspace. Ask it anything about your Lake in plain words; while the conversation is empty it
-suggests questions about your own datasets, projects and runs. It is the same conversation the
-**Ask Orama** button opens beside any other page ([Ask Orama](/docs/ask-orama)).
+Signing in, or opening Lake while signed in, lands you on **Quickstart**: drop a dataset and Lake
+takes you to search and model answers on your own website ([Quickstart](/docs/quickstart)). It is
+the quickest way to a first result.
+
+**Ask Orama** (Home → Ask Orama, `/ask`) answers anything about your Lake in plain words; while the
+conversation is empty it suggests questions about your own datasets, projects and runs. It is the
+same conversation the **Ask Orama** button opens beside any other page ([Ask Orama](/docs/ask-orama)).
 
 The rail on the left groups Lake's pages:
 
 | Group | Pages | What they are for |
 |---|---|---|
-| **Home** | Ask Orama, Dashboard | Ask about anything in your Lake; the whole platform at a glance |
+| **Home** | Quickstart, Ask Orama, Dashboard | Your first search and model on your website; ask about anything in your Lake; the whole platform at a glance |
 | **Data** | Repositories, Shared with Me, Search, Datasets, Transcripts | Where your data lives and is found |
 | **Design** | Projects, Opportunities, Solutions, Methodologies, Agents | Deciding what AI to build, designing its workflow and the agents that do it |
 | **Train** | Agents, Runs, Experiments, Models, Streams | Training models and agents, and watching them work |

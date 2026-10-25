@@ -74,7 +74,7 @@ export default function TokensPage() {
         <StatRow cols={3}>
           <Stat label="Tokens" value={tokens.length} icon={KeyRound} />
           <Stat label="Active" value={active.length} />
-          <Stat label="Never expire" value={active.filter((row) => !row.expires_at).length} sub="survive sign-out" />
+          <Stat label="Never expire" value={active.filter((row) => !row.expires_at).length} sub="no expiry" />
         </StatRow>
       )}
       <Toolbar>
@@ -250,7 +250,7 @@ function NewToken({ onClose, onCreated }: { onClose: () => void; onCreated: (sec
         </label>
         <label className="flex items-start gap-2 text-[13px]">
           <input type="checkbox" name="never_expires" checked={neverExpires} onChange={(e) => setNeverExpires(e.target.checked)} />
-          <span>Never expires (survives sign-out; needs your workspace's opt-in, a reason and named scopes)</span>
+          <span>Never expires (no expiry; needs your workspace's opt-in, a reason and named scopes)</span>
         </label>
         <Field label="Reason for a static or never-expiring token" error={fieldError(error, "reason")}>
           <input type="text" name="reason" value={reason} onChange={(e) => setReason(e.target.value)} />

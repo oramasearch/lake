@@ -1,5 +1,15 @@
 # Tests
 
+`test_api.cpp`'s `StorelessStartup.LakeWithNoControlStoreServesAndStopsCleanly` starts the `lake`
+executable with no control store and checks that it stays live (`/healthz` 200, `/readyz` 503), reports `store: none`,
+survives the owner loop's first pass and exits 0 on SIGTERM, not SIGSEGV (lake#1168). The SCIM
+tests (`Scim.*`, `ScimHttp.*`) and `WorkspaceStoreSearch.*` cover lake#1175 and lake#1176, which
+show only under AddressSanitizer; see [testing](../docs/build/testing.md#addresssanitizer).
+`test_brand.cpp` covers the instance brand (lake#1135, lake#1137): Lake's own brand leaves every
+email, page and agent surface as it was, a test brand reaches each with no "Lake", "Orama" or
+`lake.live` left, and invalid settings are refused naming the setting. `test_api.cpp`'s
+`BrandStartup.*` starts the binary with an invalid brand (exit 2) and a custom one (served).
+
 `test_workspace_records.cpp` runs `DisablingAUserRevokesAgentDelegation` and
 `DisabledUsersCannotDriveAgentOrMcpStreams` on memory and PostgreSQL (lake#951). They exercise
 retained launch/schedule/task credentials, direct disabled rows, lease renewal and queued claims,
@@ -146,8 +156,12 @@ confirmation (`Experiments.AgentDocsNameTheLiveReadAndTheConfirmation`; lake#449
 lake's experiment names translated to and from the engine's study names
 (`Experiments.LakeSaysExperimentAndTheEngineKeepsItsStudyNames`, lake#561).
 `Docs.AgentDocsSayLakeAndNeverSpace` (`test_markdown.cpp`, lake#647) renders llms.txt,
-llms-full.txt, the skill and every description in OpenAPI and `tools/list` and fails on `space` or
-a lowercase "lake" in their prose. `Docs.DeveloperDocsNeverSaySpace` (lake#669) reads every
+llms-full.txt, the skill (a region's and the apex's, lake#1110) and every description in OpenAPI
+and `tools/list` and fails on `space` or a lowercase "lake" in their prose.
+`RegionsApexAgentDocuments.*` (`test_regions.cpp`, lake#1110) builds the apex's llms.txt,
+llms-full.txt and skill from a three-region list (every region with every link, no apex `/mcp`),
+serves them on the apex host (content types, the picker still on every other path and on a
+`POST`), keeps a region host's own text, and leaves a Lake with no regions unchanged. `Docs.DeveloperDocsNeverSaySpace` (lake#669) reads every
 `docs/api/*.md` and `docs/guide/*.md` file, READMEs included, and fails on `space` or `spaces` as a
 word in their prose; code spans and blocks, workspace, namespace and whitespace are allowed.
 `Docs.GuidesSpeakOfExperiments` and `frontend/tests/wording.test.ts` keep "study" out of the guides
@@ -230,6 +244,16 @@ the process stderr file descriptor through a test-owned pipe, completes a keep-a
 closes that connection while it is idle. A request on a second connection follows before the test
 stops the server and asserts that the pipe stayed empty. `OutputPipe` captures stderr by default,
 or stdout.
+
+`test_client_address.cpp` (lake#1083) covers which address per-client limits count: a trusted
+peer's `X-Real-IP` and last `X-Forwarded-For` hop, an untrusted peer counted on its own address
+whatever it sends, the unset default (loopback and private ranges), `none`, and the parsing of
+`LAKE_TRUSTED_PROXY_CIDRS`; with lake#1132, the parsing of `LAKE_PROXY_PORT`, `none` as the default
+beside a proxy listener, and the believed form. `test_http_server.cpp`'s
+`AuthenticationClientBudgetIgnoresForwardedHeadersFromAnUntrustedPeer` proves it through the server,
+`ForwardedHeadersAreBelievedOnlyOnTheProxyListener` proves the proxy listener believes rotated
+addresses while the main one counts them as one client, and `ProxyListenerIsOptionalAndNeedsItsOwnPort`
+covers an unset port and a taken one.
 
 `test_http_connections.cpp` (lake#534) covers connections apart from request workers
 (`src/api/http_connections.hpp`) over raw sockets: two hundred idle connections beside a request
@@ -487,7 +511,11 @@ script refuses each contradiction it looks for (lake#448). `WebApp.FrontDoorDocQ
 holds the bold quotes in `docs/ui/front-door.md` to `frontend/src/pages/home/HomePage.tsx` and
 `signIn.ts`. Under Clerk the `viewer` read says `password_sign_up: false`
 (`HttpServer.ClerkExchangeRefusesAForgedTokenAndSignOutEndsClerkToo`,
-`WebApp.ViewerNamesClerkAndAnOrganizationNamesItsSpace`).
+`WebApp.ViewerNamesClerkAndAnOrganizationNamesItsSpace`), and the API agrees (lake#1098):
+`Identity.ClerkTurnsOffLakePoolPasswordSignUpAndSignIn` refuses `sign_up_password`,
+`sign_in_password`, `verify_mfa` and `recover_with_code` in the Lake pool under Clerk with
+`forbidden`, creates no account, and signs the same account in again once Clerk is off; the HTTP
+test checks `POST /v1/sign_up_password` answers 403 with no cookie.
 `OperatorContract.EveryStatementTheOperatorRunsPreparesAgainstTheSchema` and
 `OperatorContract.RowsLakeWritesAppearInTheOperatorsPolls` (`test_operator_contract.cpp`, in
 `lake-postgres-tests`) run a copy of every statement in orama-operator's
@@ -512,6 +540,25 @@ and PostgreSQL stores): an organization refused while it owns a workspace and th
 read, a revoked invitation that cannot be accepted, the grants that are kept, a secret mount that
 leaves nothing in its workspace, a conversation removed for its person only, the engine deletions'
 fields and an older engine's `not_supported`, and the log each is audited in.
+
+`test_browser_keys.cpp` covers browser keys (lake#1152, docs/api/browser-keys.md, `Stores/BrowserKeys.*`
+over the memory and PostgreSQL stores) through the registry with credentials resolved as the HTTP
+server resolves them: refusals for another index, model, workspace, account or capability; origin
+refusals and the origin rule; a key that outlives its maker's sign-in and the token made under it;
+revocation by the account and not by another; creation by a scoped API token and refusal for a
+token without the scope or a read-only person; the calls a minute; usage metered to the key's
+workspace; a deleted workspace's key; and (PostgreSQL) expiry and the table's checks. The CORS
+answer is `HttpResponseIsolation.ABrowserKeyAnswersOnlyItsWebsiteAndOutlivesSignOut` in
+`test_http_server.cpp`.
+
+`test_quickstart.cpp` covers the quickstart process (lake#1128, docs/api/quickstart.md) over a test
+double of the workspace engine and two accounts with billing on: the whole process from a dropped CSV
+to a published model and its website code (the browser key made with `origins` and used from that
+origin), a failed step kept with why and resumed, a blocked balance
+refused with the top-up link before any step, another account's workspace refused, a person with no
+workspace waiting for one, input refusals, and the OpenAPI, MCP, `llms.txt`, `llms-full.txt` and
+skill listings. `QuickstartZetta.*` runs the whole process against a real Zetta named by
+`LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` and skips without them.
 
 `test_transcripts.cpp` covers the pure parts of speech-to-text and transcripts (lake#561):
 `.vtt`/`.srt` cleaning, audio decoding and its 25 MiB limit, file names, the OpenAI multipart
@@ -648,7 +695,17 @@ gate and its exemptions, the answer warning, the emails once per crossing (a fak
 auto top-up (off by default, one charge per crossing, the daily limit, a decline turning it off),
 the Stripe requests and events, and `PaidWorkContract`, which fails on a capability that starts paid
 work without being on the list. `test_postgres.cpp`'s `*.AccountBalancesFollowTheContract` run the
-store contract on both stores.
+store contract on both stores. `BalanceGrant.*` covers credits from Orama (lake#1134): who may give
+and revoke, the input checks, by id and by email, the email once, no overdraft from a grant alone,
+expiry and revocation forfeiting only the unused part, and the allocation order;
+`*.BalanceGrantsFollowTheContract` run their store contract on both stores. `test_coupons.cpp`
+covers coupon codes (lake#1156): `Coupon.*` (who may create, list, disable and redeem; the create
+checks and generated codes; a redemption as an ordinary grant with its email and central audit; one
+per account and per inbox; the cap, expiry and disabling; new accounts only; the failed-attempt
+limit and refusals audited without the code; an interrupted redemption finished once; the campaign
+report) and `CouponStore.*FollowsTheContract` on both stores. `test_regions.cpp`'s
+`RegionsApex.ACouponCodeGoesToTheChosenRegion` and `test_orders.cpp`'s
+`OrdersApex.TheOrderSheetCarriesACouponCodeToTheRegion` check the apex carries `?code=`.
 
 The audit split by subject (decision 52, lake#317): `test_workspace_records.cpp`'s
 `AuditEventsAboutAWorkspaceLiveInItsOwnChain` covers the `AuditRecorder` and the readers across two
@@ -912,6 +969,9 @@ signature with a valid self-digest on append, replication and historical scans.
 authentication, proof rejection without writes, and honest partial catch-up (lake#974, LSR-107).
 `test_authentication_limits.cpp` exercises bounded account/client state, selector-backed recovery,
 legacy refusal, concurrent one-use consumption and worker saturation (lake#969).
+`AuthenticationStores.UnknownAccountsRunTheSameArgon2idCheckAsAWrongPassword` counts dummy-hash
+verifications to prove an unknown email runs one Argon2id check and gets the same 401 as a wrong
+password, in both stores (lake#1101).
 `HttpServer.RecoveryWorkCannotBlockHealthOrTheSharedStoreConnection` holds a recovery row lock
 while probing health and reading an unrelated store row; the client-limit HTTP test alternates
 REST/MCP, gives two ingress addresses behind one proxy peer separate budgets and still limits
@@ -938,6 +998,13 @@ cancellation, including refusal of later administrator approval. See
 `Stores/ClerkRevocation.SuspensionAlsoStopsEmailRecovery` in `test_clerk_webhooks.cpp` checks
 that a suspended account's email recovery is accepted but queues no mail until the suspension is
 lifted, on both stores.
+`Stores/ClerkRevocation.SessionEventsEndOnlyBrowserSessions` and
+`Stores/ClerkRevocation.SignOutKeepsKeysAndBansStillEndEverything` (lake#1163) check on both stores
+that a Clerk session event ends only the browser bound to the ended Clerk session (and unbound
+browsers), leaving other browsers, API keys, MCP keys, their descendants and devices working, while
+a ban, a lock or a deletion still ends everything. `Clerk.TheSessionTokenBindsTheBrowserToItsClerkSession`
+and `Clerk.SignOutEverywhereEndsEveryKeyAndDeviceOfOnlyThatPerson` in `test_clerk.cpp` cover the
+exchange's session token and the person's own account-wide revocation.
 `OrdersEntitlement.*` (lake#972, LSR-105) sends synthetic signed renewal, failed-collection and subscription-end events through production webhook handling against both stores. It checks grace expiry, recovery, retry-invoice binding, failure events that cannot restore expired access, stale and duplicate snapshots, identity mismatches, trials, early delivery and invalid signatures; PostgreSQL verifies that the desired-state view suspends an already-ready order without another event and restores it on payment. See [orders](../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
 
 The Stripe ownership fixture in `test_stripe.cpp` includes the event timestamp, customer, subscription and recurring period required to accept an order renewal; all ownership assertions remain in place.
@@ -947,3 +1014,9 @@ The Stripe ownership fixture in `test_stripe.cpp` includes the event timestamp, 
 `PostgresProvisioning.MfaVerificationLocksTheAccountBeforeItsFactors` holds an account row
 as deletion does and checks that authentication waits without holding its factor rows,
 then succeeds when the account transaction releases its lock (lake#966).
+
+`test_white_label.cpp` (lake#1136) covers a white-labelled Lake: `LAKE_HOST_ALIASES` and
+`LAKE_CONTROL_HOST` parsing and their startup errors, SSO-only sign-in never combined with Clerk, the
+redirect of browser pages on an alias to the public host while the API is served there
+(`WhiteLabelAliases.*`, a real server), and the registry refusing Lake's own sign-in methods in its
+own pool while `viewer` names the provider (`WhiteLabelSsoOnly.*`).

@@ -39,8 +39,10 @@ import { CommandPalette } from "./CommandPalette";
 import { ScreenBoundary } from "./ScreenBoundary";
 import { WorkspacePicker } from "./WorkspacePicker";
 import { BalanceBanner } from "./BalanceBanner";
+import { CouponWelcome } from "./CouponWelcome";
 import { RegionMenu } from "./Region";
-import { LakeMark } from "./LakeMark";
+import { BrandMark } from "./BrandMark";
+import { brandKicker, documentTitle, instanceBrand } from "@/lib/brand";
 import { resizingAsk, useAskWidth } from "@/lib/askWidth";
 import { focusAsk, onOpenAsk, type AskRequest } from "@/lib/ask";
 import { isAskHome } from "@/pages/ask/home";
@@ -105,6 +107,7 @@ function initials(name: string | undefined): string {
 type Group = { section: SectionKey; items: NavItem[] };
 
 export function Shell({ children }: { children: ReactNode }) {
+  const brand = instanceBrand();
   const session = useSession();
   const { viewer, workspaceId } = session;
   const location = useLocation();
@@ -167,10 +170,11 @@ export function Shell({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  // The document title: "Lake — <page>", or "Lake Console" on a page with no title (lake#642).
+  // The document title: "Lake — <page>", or "Lake Console" on a page with no title (lake#642), in
+  // the brand's name on a white-labelled Lake (lake#1135).
   useEffect(() => {
     const title = trailState.title ?? screen?.title;
-    document.title = title ? `Lake — ${title}` : "Lake Console";
+    document.title = documentTitle(instanceBrand(), title);
   }, [trailState.title, screen?.title]);
 
   // ⌘K or / opens search; G then a letter jumps to a group; never while typing.
@@ -345,13 +349,13 @@ export function Shell({ children }: { children: ReactNode }) {
           <Link
             to={workspaceId && viewer.signed_in ? `/w/${workspaceId}/design/projects` : "/"}
             className={cx("flex items-center gap-2.5 border-b border-hairline py-3 no-underline", rail ? "justify-center px-0" : "px-4")}
-            aria-label="Lake Console"
+            aria-label={brand.console_title}
           >
-            <LakeMark />
-            {!rail && (
+            <BrandMark brand={brand} />
+            {!rail && !brand.logo && (
               <div className="min-w-0 leading-tight">
-                <div className="font-mono text-[9.5px] tracking-[0.2em] text-ink-3 uppercase">Orama</div>
-                <div className="text-[15px] font-semibold tracking-[-0.01em] text-ink">Lake</div>
+                {brandKicker(brand) && <div className="font-mono text-[9.5px] tracking-[0.2em] text-ink-3 uppercase">{brandKicker(brand)}</div>}
+                <div className="text-[15px] font-semibold tracking-[-0.01em] text-ink">{brand.name}</div>
               </div>
             )}
           </Link>
@@ -407,6 +411,7 @@ export function Shell({ children }: { children: ReactNode }) {
             <SessionActions onAsk={toggleAsk} askOpen={ask && !askHome} />
           </header>
           <main id="main-content" tabIndex={-1}>
+            <CouponWelcome />
             <BalanceBanner />
             <ScreenBoundary>
               <Suspense fallback={<div className="page-container"><Skeleton /></div>}>{children}</Suspense>
@@ -503,7 +508,8 @@ function RailPerson({ rail, onToggle }: { rail: boolean; onToggle: () => void })
       document.removeEventListener("keydown", key);
     };
   }, [menu]);
-  const name = viewer.administrator ? "Lake operator" : viewer.display_name || viewer.email || "Account";
+  const brand = instanceBrand();
+  const name = viewer.administrator ? `${brand.name} operator` : viewer.display_name || viewer.email || "Account";
   const role = viewer.administrator ? "Operator" : viewer.signed_in ? "Account" : "Visitor";
   return (
     <div ref={box} className={cx("relative flex items-center border-t border-hairline py-2", rail ? "flex-col gap-2 px-0" : "gap-2 px-3")}>
@@ -527,7 +533,7 @@ function RailPerson({ rail, onToggle }: { rail: boolean; onToggle: () => void })
           )}
         </button>
       ) : (
-        !rail && <span className="flex-1 font-mono text-[10px] tracking-[0.06em] text-ink-3 uppercase">{viewer.version ? `Lake ${viewer.version}` : "Lake"}</span>
+        !rail && <span className="flex-1 font-mono text-[10px] tracking-[0.06em] text-ink-3 uppercase">{viewer.version ? `${brand.name} ${viewer.version}` : brand.name}</span>
       )}
       <button
         type="button"
@@ -619,15 +625,15 @@ function SessionActions({ onAsk, askOpen }: { onAsk: (e: React.MouseEvent) => vo
       type="button"
       onClick={onAsk}
       aria-pressed={askOpen}
-      aria-label="Ask Orama"
-      title="Ask Orama"
+      aria-label={instanceBrand().assistant_name}
+      title={instanceBrand().assistant_name}
       className={cx(
         "hit inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[6px] border px-2 text-[12.5px] font-medium transition-colors sm:px-2.5",
         askOpen ? "border-action bg-action text-on-action" : "border-rule bg-surface text-ink-2 hover:border-action hover:text-action",
       )}
     >
       <Sparkles size={14} />
-      <span className="hidden sm:inline">Ask Orama</span>
+      <span className="hidden sm:inline">{instanceBrand().assistant_name}</span>
     </button>
   );
 }

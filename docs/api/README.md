@@ -1,9 +1,25 @@
 # The `/v1` API and MCP
 
+lake#1152: [browser-keys.md](browser-keys.md) documents browser keys, `create_browser_key`,
+`list_browser_keys` and `revoke_browser_key`: the key a website's page holds, bound to one index
+(and optionally one model) of one workspace, callable only for `search_index` and `predict` on them
+from the origins it lists (checked against `Origin`, CORS answered to those origins alone), rate
+limited per key, lasting until revoked whatever happens to its maker's sign-in, and makeable by an
+API token or MCP client with write on the account. Its hash and binding are the control-plane table
+`browser_keys` (migration `0102_browser_keys`, decision 53). `quickstart_snippets` makes one when
+sent `origins`.
+
+lake#1128: [quickstart.md](quickstart.md) documents the quickstart process, `start_quickstart`,
+`quickstart_status`, `train_quickstart` and `quickstart_snippets`: a dataset to a published search
+index, website code with its browser key (lake#1152), a model trained and published on the
+same data, each step resumable, composed from the existing capabilities through the registry, its
+state in the workspace Zetta (`lake_quickstarts`). First in `llms.txt`, `llms-full.txt` and the skill.
+
 lake#963: [OAuth and enterprise OIDC](identity.md) require the initiating browser's per-flow
 HttpOnly cookie at callback, in addition to state, PKCE and nonce.
 
 lake#951: [Clerk offboarding](clerk.md#webhooks) revokes delegated agent credentials and workloads.
+lake#1163: a [Clerk session event](clerk.md#webhooks) (signing out) ends only the browser session bound to that Clerk session, never API keys, MCP keys or devices; `sign_out_everywhere` is the person's own account-wide revocation ([identity](identity.md#what)).
 [Agent streams](agent-launches.md#stream-triggers) and [MCP streams](mcp-connections.md#a-connections-agent-and-streams)
 reject missing/disabled people immediately and retain workspace cleanup for the next worker pass.
 [models.md](models.md) specifies authenticated customer reads for workspace dataset and model
@@ -36,11 +52,14 @@ public trust, admin revocation and pending session history.
 lake#831: [orders.md](orders.md) documents the apex order sheet: its offers and prices from one
 configuration (`LAKE_ORDER_SHEET`), Stripe Checkout for a private warehouse or dedicated cluster,
 the order form that skips payment, `cloud_orders` (migration `0089`), email through Resend, the
-signed status link, the abuse limits and the audit of every state change.
+signed status link, the abuse limits and the audit of every state change. Private Warehouse and
+every offer above it list their own domain, white-labelled, available on request (lake#1129).
 
 lake#757: [regions.md](regions.md) documents regions: the four variables the operator sets,
 `server_info`'s `region` and `regions`, and the apex host's region picker (closest region from
-`CF-IPCountry`, the `lake_region` preference cookie, the path and query kept).
+`CF-IPCountry`, the `lake_region` preference cookie, the path and query kept). lake#1110: on the
+apex, `/llms.txt`, `/llms-full.txt` and the skill name every region with its MCP server and agent
+documents instead of the picker ([regions.md](regions.md#the-apexs-agent-documents-lake1110)).
 
 lake#650: [engine-capabilities.md](engine-capabilities.md) documents every capability of a
 workspace's engine as a named Lake capability (its own route, OpenAPI operation and MCP tool, with
@@ -70,6 +89,9 @@ lake#623, lake#635, lake#637: [billing.md](billing.md#price-list) carries Orama 
 usage only (one rate per dimension, no plans, no fee, nothing included; Metis is priced by sales),
 time per minute, each rate with its reference rate, date and margin, worked bills, how a change of
 rates mid-month is billed, and when to revisit it.
+lake#1156 (migration `0101_coupons`): [billing.md#coupon-codes](billing.md#coupon-codes) documents
+coupon codes for ads, `create_coupon`, `list_coupons`, `disable_coupon` and `redeem_coupon`; a
+redemption is an ordinary credit from Orama.
 lake#654: [models.md](models.md#a-standalone-model-lake654) documents a standalone model, made on its
 own rather than by a project's pipeline: `train_model`, `retrain_model`, `register_model` and
 `move_model_to_project` (the workspace engine's, [engine-capabilities.md](engine-capabilities.md)),
@@ -317,7 +339,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 
 | Capability | Kind | Input | Value | Page |
 |---|---|---|---|---|
-| `server_info` | read, **no auth** | — | `{name, node, version, revision, api, store, deployments, region, regions, order_sheet_url}`; `revision` is the embedded full source commit or `unknown`; `deployments` says whether the platform mirror is configured ([platform.md](platform.md#a-lake-without-the-platform-mirror), lake#605); `region` (`{name, label}` or `null`) and `regions` (`[{name, label, host}]` or `[]`) are this Lake's region and the deployment's regions ([regions.md](regions.md), lake#757); `order_sheet_url` is where the apex order sheet is, or `null` ([orders.md](orders.md), lake#831) | [../deployment/production-2026-09-08.md](../deployment/production-2026-09-08.md) |
+| `server_info` | read, **no auth** | — | `{name, node, version, revision, api, store, deployments, billing, payment_provider, online_payment, region, regions, order_sheet_url, stripe_webhook_events}`; `revision` is the embedded full source commit or `unknown`; `deployments` says whether the platform mirror is configured ([platform.md](platform.md#a-lake-without-the-platform-mirror), lake#605); `region` (`{name, label}` or `null`) and `regions` (`[{name, label, host}]` or `[]`) are this Lake's region and the deployment's regions ([regions.md](regions.md), lake#757); `order_sheet_url` is where the apex order sheet is, or `null` ([orders.md](orders.md), lake#831); `stripe_webhook_events` is the sorted list of Stripe events this version handles, the one `lake manifest` prints, which the operator subscribes the Lake's endpoint to ([operator-interface.md](../deployment/operator-interface.md), lake#1119) | [../deployment/production-2026-09-08.md](../deployment/production-2026-09-08.md) |
 | `viewer` | read, **no auth** | `workspace_id?`, `customer_id?` | who is signed in, their accounts and current workspace, Clerk, sign-up, origin, agent models, version | [web-app.md](web-app.md) |
 | `my_permissions`, `list_packages`, `list_docs`, `get_doc`, `mcp_setup`, `resolve_model` | read (`list_docs`, `get_doc` and a public `resolve_model` need no credential) | see the page | permission flags, the Packages catalog, the Docs guides, Developer → MCP, a model's repository by name | [web-app.md](web-app.md) |
 | `latest_agent_task`, `render_pipeline` / `compile_pipeline` | read / action | `customer_id`, `workspace_id`, then `subject`, or `project` and `graph`, or `project` and `intent` | a project's background task, a pipeline drawn as SVG, a pipeline compiled from a description | [web-app.md](web-app.md) |
@@ -325,6 +347,8 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `delete_ask_conversation` | action, the person who had it | `customer_id`, `workspace_id`, `conversation_id`, `dry_run?` | `{conversation_id, messages, first_message, agent_tasks, dry_run, deleted}` | [ask-orama.md](ask-orama.md#deleting-a-conversation) |
 | `transcribe` | action, any signed-in caller | `name`, `audio_base64`, `language?` | `{text, seconds?, model}`: speech-to-text through OpenAI with lake's key; keeps nothing; `not_supported` without `LAKE_OPENAI_API_KEY` | [transcripts.md](transcripts.md) |
 | `create_transcript`, `list_transcripts`, `get_transcript`, `update_transcript`, `delete_transcript` | action / read / read / action / action | `customer_id`, `workspace_id`, then `title`, `source`, `text` or `audio_base64`; `q`, `limit`, `cursor`; or `id` | a transcript kept as a sealed `lake_transcripts` record in the workspace Zetta (the audio never kept), a searchable page of them, or `{deleted: true}` | [transcripts.md](transcripts.md) |
+| `create_browser_key`, `list_browser_keys`, `revoke_browser_key` | action / read / action, on the account (write / read / write) | `customer_id`, then `workspace_id`, `index_id`, `origins`, `model_id?`, `expires_in_seconds?`, `rate_limit_per_minute?` (create); `workspace_id?`, `index_id?` (list); `id` (revoke) | `{key, secret}` once, `{keys}`, `{key}`: browser keys ([browser-keys.md](browser-keys.md), lake#1152) |
+| `start_quickstart`, `quickstart_status`, `train_quickstart`, `quickstart_snippets` | action (paid) / read / action (paid) / action authorized as a read | `customer_id`, `workspace_id` (optional on start), `quickstart_id?`; the file's `content` and `format` or a `dataset_id`; `target`, `entity_column`, `methodology`, `holdout_fraction` | the quickstart's steps with their state, ids and `next`; the website code with the `create_token` call for its key | [quickstart.md](quickstart.md) |
 | `list_solutions`, `get_solution`, `create_solution`, `update_solution`, `delete_solution`, `duplicate_solution` | read / read / action / action / action / action | `customer_id`, `workspace_id`, then `source?`; `id`; `name`, `problem`, `decision`, `measurement`, `methodologies?`, `pipeline?`, `notes?`; or `id` and `name?` | Orama's catalogue (read-only) and the workspace's own, each marked `source` (`orama` or `workspace`) and `editable`; one of the workspace's own as a sealed `lake_solutions` record; `forbidden` for an edit or delete of Orama's | [solutions.md](solutions.md) |
 | `draft_methodology`, `create_methodology`, `get_methodology`, `update_methodology`, `delete_methodology`, `duplicate_methodology`, `validate_methodology`, `run_methodology`, `list_methodology_runs`, `get_methodology_run`, `stop_methodology_run` | read / action / read / action / action / action / action / action / read / read / action | `customer_id`, `workspace_id`, then `description`; `name` and `files`, `description` or `repository_id`; `id`; `id` and changes; `id`; `id`, `name?`; `id`, `dataset?`; `id`, `dataset`, `target?`, `params?`; `methodology_id?`; `run_id`; `run_id` | a workspace's own methodologies, Python in a workspace repository, registered by the engine as `W-<8 hex>` beside Orama's read-only ones (`forbidden` for an edit or delete of an `M-n`); Validate checks the code, then runs it on a sample; runs are untrusted code in the operator's sandbox, `Queued` past the workspace's cap of concurrent runs (orama-operator#293); a run's record is sealed `lake_methodology_runs` | [methodologies.md](methodologies.md) |
 | `methodology_run_input`, `methodology_run_artifact`, `methodology_run_output` | read / action / action | `run_id` and `offset?`, `limit?`; or `offset` and `chunk_base64`; or `result`, `artifact_base64?` or `artifact {bytes, sha256}?`, `log?` | the runner's side of a run, answering only that run's `lmr.` credential: its spec and data, page by page; an artifact over 24 MiB in 8 MiB chunks (lake#690); its result, once | [methodologies.md](methodologies.md#it-runs-as-untrusted-code) |
@@ -428,7 +452,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `export_transparency_replication_batch` | action | source tree-size cursor | verified log suffix with base/head commitments and current checkpoint | [replication.md](replication.md) |
 | `replicate_transparency_log` | action | source Lake URL | applied tree size, root, checkpoint sequence, and catch-up state | [replication.md](replication.md) |
 | `replicate_repository` | action | repository, source instance, source Lake URL | durable liquid cursor, transfer totals, and ref count | [replication.md](replication.md) |
-| `sign_up_password`, `sign_in_password`, `sign_in_taap`, `verify_mfa` | action, public entry | password (an identity document optional in Lake's pool, with `identity_proof` when given), one-use TAAP assertion, or MFA proof | browser session + secret | [identity.md](identity.md) |
+| `sign_up_password`, `sign_in_password`, `sign_in_taap`, `verify_mfa` | action, public entry | password (an identity document optional in Lake's pool, with `identity_proof` when given), one-use TAAP assertion, or MFA proof. The password entries and `recover_with_code` are `403 forbidden` in Lake's pool under Clerk (lake#1098) | browser session + secret | [identity.md](identity.md) |
 | `begin_identity_proof` | action, public entry | pool, identity document | a five-minute challenge to sign with `liquid sign artifact` before sign-up or a first OAuth sign-in binds the document | [identity.md](identity.md#proving-you-hold-the-key) |
 | `register_application`, `list_applications`, `get_application`, `update_application_theme`, `rotate_application_signing_key` | action/read | customer, application registration, theme, or application id | isolated pool registration and key metadata | [apps.md](apps.md) |
 | `application_jwks`, `issue_application_jwt` | public read / protected action | application, its `workspace_id` (JWT) and active user ids | Ed25519 JWKS or short-lived audience-bound JWT | [apps.md](apps.md) |
@@ -462,6 +486,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `usage_over_time` | read | `customer_id`, `workspace_ids?`, `dimensions?`, `from`, `to`, `granularity` (`hour`, `day`, `month`) | each dimension of usage over the period, added up across the chosen workspaces, with breakdowns by workspace and kind (and by agent, launch, model or object where they apply), read from each workspace's own Zetta (lake#564); app traffic through the ingress is `transfer` once its hour closes (lake#661) | [metering.md](metering.md#usage-over-time) |
 | `usage_limits`, `set_usage_limit` | read/action | `customer_id`; a `dimension`, `limit` and `warn_percent?` | the account's limits with this month's use and a state (ok, warning, over); storage's limit is the enforced quota (lake#564) | [metering.md](metering.md#limits) |
 | `price_list`, `set_price_list`, `billing_account`, `set_billing_contact`, `bill_preview`, `issue_invoice`, `resend_invoice`, `list_invoices`, `get_invoice`, `record_invoice_payment`, `void_invoice` | read/action | the price list's rates and `effective_from`; a `customer_id`, `period` (`YYYY-MM`) or `invoice_id` | Orama Cloud's billing, registered only where `LAKE_BILLING` is on (absent on enterprise installs): one price list with a rate per usage dimension that every account is billed at (lake#635; time per minute, lake#637), the month's bill from its usage, invoices and their payment state, and each account's billing contact, to which Stripe emails each invoice (lake#857), in PostgreSQL (decision 56, lake#564) | [billing.md](billing.md) |
+| `create_coupon`, `list_coupons`, `disable_coupon`, `redeem_coupon` | action/read | a code's amount, `credit_days`, expiry, cap, `new_accounts_only` and `campaign`; a `coupon_id` or `code`; a `customer_id` and `code` | coupon codes for ads (lake#1156), billing on only: the operator creates, reports on and disables codes; a person redeems one for an account they administer, and it becomes an ordinary credit from Orama, once per account and per verified email | [billing.md](billing.md#coupon-codes) |
 | `record_model_usage` | action | `model_name`, `input_tokens`, `output_tokens`, `task_id?` | an agent's own task, launch, schedule or bus credential reports the tokens of a model call made outside Lake; lake adds them to that workspace's usage (lake#564) | [metering.md](metering.md#model-tokens) |
 | `model_completion` | action | `endpoint` (`chat/completions`, `responses`, `embeddings`), `request` (the OpenAI body) | the model gateway: an agent's task, launch or schedule credential calls the model provider through Lake with Orama's key; the provider's answer, its tokens counted as the run's workspace's `model_tokens`, refused past the monthly limit; also served OpenAI-compatible at `POST /openai/v1/<endpoint>` (lake#248) | [model-gateway.md](model-gateway.md) |
 | `create_secret_mount`, `list_secret_mounts`, `get_secret_mount` | action/read | customer, `workspace_id`, optional organization (without it the account owns the mount, lake#561), mount fields | mount metadata with `owner_type` (in the mount's workspace Zetta) | [secrets.md](secrets.md) |

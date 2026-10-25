@@ -1,5 +1,7 @@
-/** Ask Orama as the home (lake#600), as pure rules so `npm test` runs them (tests/home.test.ts):
- * what `/` shows each viewer, where an old `/ask` link or an old Command Center link goes, what a
+/** The home and Ask Orama's page, as pure rules so `npm test` runs them (tests/home.test.ts): what
+ * `/` shows each viewer (Quickstart for a signed-in person since lake#1128; Ask Orama was the home
+ * from lake#600), where an old home link with a conversation, an `/ask` link or an old Command
+ * Center link goes, what a
  * link's query hands the shared conversation, and the starting questions an empty conversation
  * offers, drawn from the workspace. No imports. */
 
@@ -10,33 +12,41 @@ export type ThreadState = { conversation: string; task: string; agent: string };
 export const ASK_AGENT = "agent-ask-orama";
 export const EMPTY_THREAD: ThreadState = { conversation: "", task: "", agent: ASK_AGENT };
 
-/** Whether this viewer's home is Ask Orama: a signed-in person. The operator and visitors keep the
- * landing. */
+/** Whether this viewer has Ask Orama's page and the Quickstart home: a signed-in person. The
+ * operator and visitors keep the landing. */
 export function asksAtHome(viewer: Viewer): boolean {
   return viewer.signed_in && !viewer.administrator;
 }
 
-/** What `/` shows: the landing, Ask Orama, or (for an old Command Center link, `/?ws=`) a redirect
- * to the Dashboard with its query. */
-export function homeView(viewer: Viewer, search: string): { view: "landing" } | { view: "ask" } | { view: "redirect"; to: string } {
+/** The query keys that hand Ask Orama a conversation: a home link with one of these was an Ask Orama
+ * link while Ask Orama was the home (lake#600), and opens Ask Orama's page now. */
+const ASK_KEYS = ["conversation", "task", "agent", "from"];
+
+/** What `/` shows: the landing, Quickstart (lake#1128), or a redirect: an old Command Center link
+ * (`/?ws=`) to the Dashboard, an old Ask Orama home link (`/?conversation=`, `/?agent=`,
+ * `/?from=`) to `/ask`, each with its query. */
+export function homeView(viewer: Viewer, search: string): { view: "landing" } | { view: "quickstart" } | { view: "redirect"; to: string } {
   if (!asksAtHome(viewer)) return { view: "landing" };
-  if (new URLSearchParams(search).has("ws")) return { view: "redirect", to: `/dashboard${search.startsWith("?") ? search : `?${search}`}` };
-  return { view: "ask" };
+  const params = new URLSearchParams(search);
+  const query = search.startsWith("?") ? search : `?${search}`;
+  if (params.has("ws")) return { view: "redirect", to: `/dashboard${query}` };
+  if (ASK_KEYS.some((key) => params.has(key))) return { view: "redirect", to: askLinkTarget(search) };
+  return { view: "quickstart" };
 }
 
-/** Whether a pathname is the Ask Orama home for this viewer. Only `/`: `/w/<id>` opens the
- * workspace's Projects. */
+/** Whether a pathname is Ask Orama's page for this viewer: `/ask`, where the conversation is the
+ * page, so the side panel never opens over it. */
 export function isAskHome(pathname: string, viewer: Viewer): boolean {
-  return asksAtHome(viewer) && pathname === "/";
+  return asksAtHome(viewer) && pathname === "/ask";
 }
 
-/** Where an old Ask Orama page link (`/ask`, `/w/<id>/ask`) goes: the home, with its query.
- * `customer_id` is dropped: the home works in the session's workspace. */
+/** Where an Ask Orama link (`/w/<id>/ask`, an old home link with a conversation) goes: `/ask`, with
+ * its query. `customer_id` is dropped: the page works in the session's workspace. */
 export function askLinkTarget(search: string): string {
   const params = new URLSearchParams(search);
   params.delete("customer_id");
   const rest = params.toString();
-  return rest ? `/?${rest}` : "/";
+  return rest ? `/ask?${rest}` : "/ask";
 }
 
 /** What a home link's query asks of the shared conversation: `conversation` (with `task` and
@@ -56,9 +66,9 @@ export function linkThread(search: string): { adopt: Partial<ThreadState> | null
   return { adopt, keep };
 }
 
-/** The side panel's "Open as a page": the home, about the page the panel was opened from. */
+/** The side panel's "Open as a page": Ask Orama's page, about the page the panel was opened from. */
 export function homeLink(from: string): string {
-  return from && from !== "/" ? `/?${new URLSearchParams({ from }).toString()}` : "/";
+  return from && from !== "/" && from !== "/ask" ? `/ask?${new URLSearchParams({ from }).toString()}` : "/ask";
 }
 
 /** One run, as list_runs names it. */
@@ -101,8 +111,9 @@ export function greeting(displayName: string | undefined): string {
   return `Hello, ${first}. What would you like to know?`;
 }
 
-/** Where a sign-in lands when nothing names a page: a signed-in person's home, Ask Orama; the
- * operator, Repositories as before (lake's Clerk and OAuth routes answer the same, lake#600). */
+/** Where a sign-in lands when nothing names a page: a signed-in person's home, Quickstart
+ * (lake#1128); the operator, Repositories as before (lake's Clerk and OAuth routes answer the same,
+ * lake#600). */
 export function landingAfterSignIn(administrator: boolean): string {
   return administrator ? "/repositories" : "/";
 }

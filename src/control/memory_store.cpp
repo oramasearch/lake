@@ -3167,8 +3167,8 @@ std::optional<std::string> account_balance_problem(const AccountBalance& balance
 }
 
 std::optional<std::string> balance_credit_problem(const BalanceCredit& credit) {
-    if (credit.kind != "top_up" && credit.kind != "auto_top_up") {
-        return "a credit is a top_up or an auto_top_up";
+    if (credit.kind != "top_up" && credit.kind != "auto_top_up" && credit.kind != "grant") {
+        return "a credit is a top_up, an auto_top_up or a grant";
     }
     if (credit.amount_micros <= 0) {
         return "a credit is more than $0";
@@ -3177,7 +3177,209 @@ std::optional<std::string> balance_credit_problem(const BalanceCredit& credit) {
         credit.reference.size() > 255 || credit.event_id.size() > 255) {
         return "a credit needs its provider and the provider's reference";
     }
+    if (credit.kind != "grant") {
+        if (!credit.reason.empty() || !credit.granted_by.empty() || !credit.expires_at.empty() ||
+            credit.forfeited_micros != 0) {
+            return "only a grant has a reason, a giver, an expiry or a forfeited part";
+        }
+        return std::nullopt;
+    }
+    // account_balance_credits' checks on a grant (migration 0100, lake#1134).
+    if (credit.amount_micros > balance_grant_most_micros) {
+        return "a grant is at most $10,000";
+    }
+    if (credit.reason.empty() || credit.reason.size() > 1000 || credit.granted_by.size() > 255) {
+        return "a grant needs its reason (at most 1,000 bytes)";
+    }
+    if (credit.forfeited_micros < 0 || credit.forfeited_micros > credit.amount_micros) {
+        return "a grant's forfeited part is between $0 and its amount";
+    }
     return std::nullopt;
+}
+
+std::optional<std::string> coupon_code_normalized(std::string_view typed) {
+    std::string code;
+    for (const char c : typed) {
+        if (c == ' ' || c == '-' || c == '\t') {
+            continue;
+        }
+        const auto byte = static_cast<unsigned char>(c);
+        if (!std::isalnum(byte) || byte > 0x7f) {
+            return std::nullopt;
+        }
+        code.push_back(static_cast<char>(std::toupper(byte)));
+        if (code.size() > 32) {
+            return std::nullopt;
+        }
+    }
+    if (code.size() < 4) {
+        return std::nullopt;
+    }
+    return code;
+}
+
+std::string coupon_email_digest(std::string_view email) {
+    std::string address = lower(std::string(email));
+    const auto first = address.find_first_not_of(" \t");
+    const auto last = address.find_last_not_of(" \t");
+    if (first == std::string::npos) {
+        return {};
+    }
+    address = address.substr(first, last - first + 1);
+    const auto at = address.rfind('@');
+    if (at != std::string::npos && at > 0) {
+        std::string local = address.substr(0, at);
+        std::string domain = address.substr(at + 1);
+        if (const auto plus = local.find('+'); plus != std::string::npos && plus > 0) {
+            local.resize(plus);
+        }
+        if (domain == "googlemail.com") {
+            domain = "gmail.com";
+        }
+        if (domain == "gmail.com") {
+            std::erase(local, '.');
+        }
+        address = local + "@" + domain;
+    }
+    return identity_crypto::sha256_hex(address);
+}
+
+std::optional<std::string> coupon_problem(const Coupon& coupon) {
+    const auto code = coupon_code_normalized(coupon.code);
+    if (!code || *code != coupon.code) {
+        return "a code is 4 to 32 letters and digits, upper case";
+    }
+    if (coupon.amount_micros < 10'000 || coupon.amount_micros > balance_grant_most_micros ||
+        coupon.amount_micros % 10'000 != 0) {
+        return "a coupon gives whole cents, $0.01 to $10,000";
+    }
+    if (coupon.credit_days < 1 || coupon.credit_days > 3650) {
+        return "the credit lasts 1 to 3,650 days";
+    }
+    if (coupon.max_redemptions &&
+        (*coupon.max_redemptions < 1 || *coupon.max_redemptions > 10'000'000)) {
+        return "the most redemptions is 1 to 10,000,000";
+    }
+    if (!coupon.campaign.empty()) {
+        const bool first_ok = std::isalnum(static_cast<unsigned char>(coupon.campaign[0])) &&
+                              !std::isupper(static_cast<unsigned char>(coupon.campaign[0]));
+        const bool rest_ok = std::ranges::all_of(coupon.campaign, [](char c) {
+            const auto byte = static_cast<unsigned char>(c);
+            return byte < 0x80 && ((std::isalnum(byte) && !std::isupper(byte)) || c == '.' ||
+                                   c == '_' || c == '-');
+        });
+        if (!first_ok || !rest_ok || coupon.campaign.size() > 64) {
+            return "a campaign is 1 to 64 lower-case letters, digits, '.', '_' or '-', starting "
+                   "with a letter or digit";
+        }
+    }
+    if (coupon.created_by.empty() || coupon.created_by.size() > 255) {
+        return "a coupon names who created it";
+    }
+    return std::nullopt;
+}
+
+std::vector<std::int64_t> grant_allocation(const std::vector<BalanceCredit>& grants,
+                                           std::int64_t charges_micros) {
+    std::vector<std::int64_t> used(grants.size(), 0);
+    const std::int64_t top = std::max<std::int64_t>(charges_micros, 0);
+    const auto on_axis = [&](std::int64_t value) {
+        return std::clamp<std::int64_t>(value, 0, top);
+    };
+    // The points where a grant starts or ends paying, along the account's charges.
+    std::vector<std::int64_t> points{0, top};
+    for (const BalanceCredit& grant : grants) {
+        if (grant.kind != "grant") {
+            continue;
+        }
+        points.push_back(on_axis(grant.charges_at_grant_micros));
+        if (!grant.ended_at.empty()) {
+            points.push_back(on_axis(grant.charges_at_end_micros));
+        }
+    }
+    std::ranges::sort(points);
+    points.erase(std::unique(points.begin(), points.end()), points.end());
+    // The one that expires first pays first, then the oldest.
+    std::vector<std::size_t> order(grants.size());
+    for (std::size_t index = 0; index < order.size(); ++index) {
+        order[index] = index;
+    }
+    std::ranges::sort(order, [&](std::size_t a, std::size_t b) {
+        const BalanceCredit& left = grants[a];
+        const BalanceCredit& right = grants[b];
+        return std::forward_as_tuple(
+                   left.expires_at.empty(), left.expires_at, left.created_at, left.id) <
+               std::forward_as_tuple(
+                   right.expires_at.empty(), right.expires_at, right.created_at, right.id);
+    });
+    for (std::size_t point = 0; point + 1 < points.size(); ++point) {
+        const std::int64_t from = points[point];
+        const std::int64_t to = points[point + 1];
+        std::int64_t left = to - from;
+        for (const std::size_t index : order) {
+            if (left == 0) {
+                break;
+            }
+            const BalanceCredit& grant = grants[index];
+            if (grant.kind != "grant" || on_axis(grant.charges_at_grant_micros) > from ||
+                (!grant.ended_at.empty() && on_axis(grant.charges_at_end_micros) < to)) {
+                continue;
+            }
+            const std::int64_t cap = grant.ended_at.empty()
+                                         ? grant.amount_micros
+                                         : grant.amount_micros - grant.forfeited_micros;
+            const std::int64_t take = std::min(std::max<std::int64_t>(cap - used[index], 0), left);
+            used[index] += take;
+            left -= take;
+        }
+    }
+    // What an ended grant paid for is fixed by its record.
+    for (std::size_t index = 0; index < grants.size(); ++index) {
+        if (grants[index].kind == "grant" && !grants[index].ended_at.empty()) {
+            used[index] = grants[index].amount_micros - grants[index].forfeited_micros;
+        }
+    }
+    return used;
+}
+
+std::vector<BalanceCredit> grants_ending(const std::vector<BalanceCredit>& grants,
+                                         std::int64_t charges_micros,
+                                         std::string_view at,
+                                         std::string_view revoke_id) {
+    const std::vector<std::int64_t> used = grant_allocation(grants, charges_micros);
+    std::vector<BalanceCredit> out;
+    for (std::size_t index = 0; index < grants.size(); ++index) {
+        const BalanceCredit& grant = grants[index];
+        if (grant.kind != "grant" || !grant.ended_at.empty()) {
+            continue;
+        }
+        const bool revoked = !revoke_id.empty() && grant.id == revoke_id;
+        // Both are whole-second UTC text, so they compare as text.
+        const bool expired =
+            !grant.expires_at.empty() && grant.expires_at.substr(0, 19) <= at.substr(0, 19);
+        if (!revoked && !expired) {
+            continue;
+        }
+        BalanceCredit ended = grant;
+        ended.ended_at = std::string(at);
+        ended.end_reason = revoked ? "revoked" : "expired";
+        ended.charges_at_end_micros = std::max<std::int64_t>(charges_micros, 0);
+        ended.forfeited_micros =
+            std::clamp<std::int64_t>(grant.amount_micros - used[index], 0, grant.amount_micros);
+        out.push_back(std::move(ended));
+    }
+    return out;
+}
+
+std::int64_t grants_unused(const std::vector<BalanceCredit>& grants, std::int64_t charges_micros) {
+    const std::vector<std::int64_t> used = grant_allocation(grants, charges_micros);
+    std::int64_t unused = 0;
+    for (std::size_t index = 0; index < grants.size(); ++index) {
+        if (grants[index].kind == "grant" && grants[index].ended_at.empty()) {
+            unused += std::max<std::int64_t>(grants[index].amount_micros - used[index], 0);
+        }
+    }
+    return unused;
 }
 
 AccountBalance InMemoryStore::account_balance_locked(const std::string& customer_id) const {
@@ -3187,10 +3389,18 @@ AccountBalance InMemoryStore::account_balance_locked(const std::string& customer
     balance.credits_micros = 0;
     balance.charges_micros = 0;
     balance.credit_count = 0;
+    balance.first_grant_at.clear();
+    std::vector<BalanceCredit> grants;
     for (const BalanceCredit& credit : balance_credits_) {
         if (credit.customer_id == customer_id) {
-            balance.credits_micros += credit.amount_micros;
+            balance.credits_micros += credit.amount_micros - credit.forfeited_micros;
             ++balance.credit_count;
+            if (credit.kind == "grant") {
+                grants.push_back(credit);
+                if (balance.first_grant_at.empty() || credit.created_at < balance.first_grant_at) {
+                    balance.first_grant_at = credit.created_at;
+                }
+            }
         }
     }
     for (const auto& [key, charge] : balance_charges_) {
@@ -3198,6 +3408,7 @@ AccountBalance InMemoryStore::account_balance_locked(const std::string& customer
             balance.charges_micros += charge.amount_micros;
         }
     }
+    balance.grants_unused_micros = grants_unused(grants, balance.charges_micros);
     // A paid cloud order of the account's organization covers it (lake#1114): one being paid for,
     // provisioned or running, whose subscription is current (an order form has none).
     balance.paid_order = false;
@@ -3285,10 +3496,18 @@ Result<BalanceCreditResult> InMemoryStore::apply_balance_credit(const BalanceCre
     BalanceCredit stored = credit;
     stored.id = new_uuid_v4();
     stored.created_at = now_iso8601();
+    stored.ended_at.clear();
+    stored.end_reason.clear();
+    stored.charges_at_end_micros = 0;
+    stored.forfeited_micros = 0;
+    // A grant pays only for usage charged after it was given (lake#1134).
+    stored.charges_at_grant_micros =
+        credit.kind == "grant" ? account_balance_locked(credit.customer_id).charges_micros : 0;
     balance_credits_.push_back(stored);
     AccountBalance& row = balances_[credit.customer_id];
     row.customer_id = credit.customer_id;
-    if (row.first_top_up_at.empty()) {
+    // A grant is not a payment: the overdraft waits for the first paid top-up.
+    if (row.first_top_up_at.empty() && credit.kind != "grant") {
         row.first_top_up_at = stored.created_at;
     }
     row.limit_warning_notified_at.clear();
@@ -3352,6 +3571,65 @@ Result<std::vector<BalanceCharge>> InMemoryStore::balance_charges(const std::str
     return out;
 }
 
+Result<BalanceCredit> InMemoryStore::balance_credit(const std::string& credit_id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(balance_credits_, credit_id, &BalanceCredit::id);
+    if (found == balance_credits_.end()) {
+        return std::unexpected(StoreError{"not_found", "no credit " + credit_id});
+    }
+    return *found;
+}
+
+Result<std::vector<BalanceCredit>> InMemoryStore::end_balance_grants(const std::string& customer_id,
+                                                                     const std::string& at,
+                                                                     const std::string& revoke_id) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(customers_, [&](const Customer& c) { return c.id == customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+    }
+    std::vector<BalanceCredit> grants;
+    for (const BalanceCredit& credit : balance_credits_) {
+        if (credit.customer_id == customer_id && credit.kind == "grant") {
+            grants.push_back(credit);
+        }
+    }
+    const std::vector<BalanceCredit> ending =
+        grants_ending(grants, account_balance_locked(customer_id).charges_micros, at, revoke_id);
+    if (!revoke_id.empty() &&
+        std::ranges::none_of(ending, [&](const BalanceCredit& g) { return g.id == revoke_id; })) {
+        return std::unexpected(
+            StoreError{"conflict", "no grant " + revoke_id + " of this account still counts"});
+    }
+    for (const BalanceCredit& ended : ending) {
+        auto kept = std::ranges::find(balance_credits_, ended.id, &BalanceCredit::id);
+        *kept = ended;
+    }
+    if (!ending.empty()) {
+        AccountBalance& row = balances_[customer_id];
+        row.customer_id = customer_id;
+        ++row.version;
+        row.updated_at = now_iso8601();
+    }
+    return ending;
+}
+
+Result<Customer> InMemoryStore::personal_account_by_email(const std::string& email) {
+    std::lock_guard lock(mutex_);
+    const std::string wanted = lower(email);
+    for (const User& user : users_) {
+        if (wanted.empty() || lower(user.email) != wanted || deleted_users_.contains(user.id)) {
+            continue;
+        }
+        for (const Customer& customer : customers_) {
+            if (customer.customer_type == "individual" && customer.user_id == user.id &&
+                !deleted_customers_.contains(customer.id)) {
+                return customer;
+            }
+        }
+    }
+    return std::unexpected(StoreError{"not_found", "no personal account has that email"});
+}
+
 Result<std::vector<std::string>> InMemoryStore::balance_customers() {
     std::lock_guard lock(mutex_);
     std::vector<std::string> out;
@@ -3359,6 +3637,219 @@ Result<std::vector<std::string>> InMemoryStore::balance_customers() {
         out.push_back(customer_id);
     }
     return out;
+}
+
+namespace {
+// Now, as a whole-second UTC time: the form of a coupon's expires_at.
+std::string coupon_now() {
+    return std::format("{:%FT%T}Z",
+                       std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+}
+} // namespace
+
+Result<Coupon> InMemoryStore::create_coupon(const Coupon& coupon) {
+    if (const auto problem = coupon_problem(coupon)) {
+        return std::unexpected(StoreError{"invalid_input", *problem});
+    }
+    std::lock_guard lock(mutex_);
+    if (std::ranges::any_of(coupons_,
+                            [&](const Coupon& kept) { return kept.code == coupon.code; })) {
+        return std::unexpected(StoreError{"conflict", "the code " + coupon.code + " is taken"});
+    }
+    Coupon stored = coupon;
+    stored.id = new_uuid_v4();
+    stored.created_at = now_iso8601();
+    stored.redemptions = 0;
+    stored.disabled_at.clear();
+    stored.disabled_by.clear();
+    coupons_.push_back(stored);
+    return stored;
+}
+
+Result<Coupon> InMemoryStore::coupon_by_code(const std::string& code) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(coupons_, code, &Coupon::code);
+    if (code.empty() || found == coupons_.end()) {
+        return std::unexpected(StoreError{"not_found", "no such code"});
+    }
+    return *found;
+}
+
+Result<Coupon> InMemoryStore::get_coupon(const std::string& coupon_id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(coupons_, coupon_id, &Coupon::id);
+    if (found == coupons_.end()) {
+        return std::unexpected(StoreError{"not_found", "no coupon " + coupon_id});
+    }
+    return *found;
+}
+
+Result<std::vector<CouponReport>> InMemoryStore::coupon_reports(const std::string& campaign) {
+    std::lock_guard lock(mutex_);
+    std::vector<CouponReport> out;
+    for (auto coupon = coupons_.rbegin(); coupon != coupons_.rend(); ++coupon) {
+        if (!campaign.empty() && coupon->campaign != campaign) {
+            continue;
+        }
+        CouponReport report{.coupon = *coupon};
+        for (const CouponRedemption& redemption : coupon_redemptions_) {
+            if (redemption.coupon_id != coupon->id) {
+                continue;
+            }
+            if (!redemption.credit_id.empty()) {
+                ++report.redeemed;
+            }
+            const AccountBalance balance = account_balance_locked(redemption.customer_id);
+            if (!balance.first_top_up_at.empty() &&
+                balance.first_top_up_at >= redemption.created_at) {
+                ++report.topped_up;
+            }
+            std::int64_t at_grant = 0;
+            for (const BalanceCredit& credit : balance_credits_) {
+                if (credit.id == redemption.credit_id) {
+                    at_grant = credit.charges_at_grant_micros;
+                }
+                if (credit.customer_id == redemption.customer_id && credit.kind != "grant" &&
+                    credit.created_at > redemption.created_at) {
+                    report.paid_micros += credit.amount_micros;
+                }
+            }
+            report.spend_micros += std::max<std::int64_t>(balance.charges_micros - at_grant, 0);
+        }
+        out.push_back(std::move(report));
+    }
+    return out;
+}
+
+Result<Coupon> InMemoryStore::disable_coupon(const std::string& coupon_id, const std::string& by) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(coupons_, coupon_id, &Coupon::id);
+    if (found == coupons_.end()) {
+        return std::unexpected(StoreError{"not_found", "no coupon " + coupon_id});
+    }
+    if (found->disabled_at.empty()) {
+        found->disabled_at = now_iso8601();
+        found->disabled_by = utf8_prefix(by, 255);
+    }
+    return *found;
+}
+
+Result<CouponRedemption> InMemoryStore::coupon_redemption(const std::string& coupon_id,
+                                                          const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find_if(coupon_redemptions_, [&](const CouponRedemption& r) {
+        return r.coupon_id == coupon_id && r.customer_id == customer_id;
+    });
+    if (found == coupon_redemptions_.end()) {
+        return std::unexpected(StoreError{"not_found", "the account has not redeemed this code"});
+    }
+    return *found;
+}
+
+Result<CouponClaim> InMemoryStore::claim_coupon(const CouponRedemption& redemption) {
+    if (redemption.email_sha256.size() != 64 || redemption.redeemed_by.empty()) {
+        return std::unexpected(
+            StoreError{"invalid_input", "a redemption names the person and their email"});
+    }
+    std::lock_guard lock(mutex_);
+    const auto coupon = std::ranges::find(coupons_, redemption.coupon_id, &Coupon::id);
+    if (coupon == coupons_.end()) {
+        return std::unexpected(StoreError{"not_found", "no such code"});
+    }
+    const auto customer = std::ranges::find(customers_, redemption.customer_id, &Customer::id);
+    if (customer == customers_.end()) {
+        return std::unexpected(StoreError{"not_found", "no customer " + redemption.customer_id});
+    }
+    const auto conflict = [](std::string reason) {
+        return std::unexpected(StoreError{"conflict", std::move(reason)});
+    };
+    for (const CouponRedemption& kept : coupon_redemptions_) {
+        if (kept.coupon_id != coupon->id) {
+            continue;
+        }
+        if (kept.customer_id == redemption.customer_id) {
+            if (kept.credit_id.empty() && kept.email_sha256 == redemption.email_sha256) {
+                return CouponClaim{.resumed = true, .redemption = kept, .coupon = *coupon};
+            }
+            return conflict("already_redeemed");
+        }
+        if (kept.email_sha256 == redemption.email_sha256) {
+            return conflict("email_redeemed");
+        }
+    }
+    if (!coupon->disabled_at.empty()) {
+        return conflict("disabled");
+    }
+    if (!coupon->expires_at.empty() && coupon->expires_at <= coupon_now()) {
+        return conflict("expired");
+    }
+    if (coupon->max_redemptions && coupon->redemptions >= *coupon->max_redemptions) {
+        return conflict("used_up");
+    }
+    if (coupon->new_accounts_only) {
+        if (customer->created_at < coupon->created_at) {
+            return conflict("not_new_account");
+        }
+        const AccountBalance balance = account_balance_locked(customer->id);
+        const bool invoiced = std::ranges::any_of(invoices_, [&](const Invoice& invoice) {
+            return invoice.customer_id == customer->id && invoice.total_micros > 0 &&
+                   invoice.state != "void";
+        });
+        if (balance.credit_count > 0 || balance.charges_micros > 0 || invoiced) {
+            return conflict("account_used");
+        }
+    }
+    CouponRedemption stored = redemption;
+    stored.id = new_uuid_v4();
+    stored.credit_id.clear();
+    stored.created_at = now_iso8601();
+    stored.redeemed_by = utf8_prefix(redemption.redeemed_by, 255);
+    coupon_redemptions_.push_back(stored);
+    ++coupon->redemptions;
+    return CouponClaim{.resumed = false, .redemption = stored, .coupon = *coupon};
+}
+
+Result<void> InMemoryStore::finish_coupon_redemption(const std::string& redemption_id,
+                                                     const std::string& credit_id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(coupon_redemptions_, redemption_id, &CouponRedemption::id);
+    if (found == coupon_redemptions_.end()) {
+        return std::unexpected(StoreError{"not_found", "no redemption " + redemption_id});
+    }
+    if (std::ranges::none_of(balance_credits_,
+                             [&](const BalanceCredit& credit) { return credit.id == credit_id; })) {
+        return std::unexpected(StoreError{"invalid_input", "no credit " + credit_id});
+    }
+    found->credit_id = credit_id;
+    return {};
+}
+
+Result<bool> InMemoryStore::coupon_attempts_exhausted(const std::vector<std::string>& keys,
+                                                      int limit,
+                                                      int window_seconds) {
+    std::lock_guard lock(mutex_);
+    const auto now = std::chrono::system_clock::now();
+    return std::ranges::any_of(keys, [&](const std::string& key) {
+        const auto found = coupon_attempts_.find(key);
+        return found != coupon_attempts_.end() &&
+               now - found->second.second < std::chrono::seconds{window_seconds} &&
+               found->second.first >= limit;
+    });
+}
+
+Result<void> InMemoryStore::coupon_attempt_failed(const std::vector<std::string>& keys,
+                                                  int window_seconds) {
+    std::lock_guard lock(mutex_);
+    const auto now = std::chrono::system_clock::now();
+    for (const std::string& key : keys) {
+        auto& [failures, started] = coupon_attempts_[key];
+        if (failures == 0 || now - started >= std::chrono::seconds{window_seconds}) {
+            failures = 0;
+            started = now;
+        }
+        ++failures;
+    }
+    return {};
 }
 
 void InMemoryStore::cloud_order_event_locked(const std::string& id,
@@ -4019,6 +4510,11 @@ bool active_session_lineage(const std::vector<Session>& sessions,
     const Session* current = &session;
     std::set<std::string> visited;
     while (current) {
+        // A sign-in ancestor (browser or TAAP) ends the walk unchecked: signing out never ends a
+        // key made from it (lake#1163). It must still belong to the same user and pool.
+        if (current != &session && (current->kind == "browser" || current->kind == "taap")) {
+            return current->user_id == session.user_id && current->pool_id == session.pool_id;
+        }
         if (!visited.insert(current->id).second || !current->revoked_at.empty() ||
             current->user_id != session.user_id || current->pool_id != session.pool_id ||
             (!current->expires_at.empty() && std::stoll(current->expires_at) <= now)) {
@@ -4255,6 +4751,10 @@ Result<IssuedSession> InMemoryStore::sign_in_password(const PasswordSignIn& inpu
                 issued.session.reason.clear();
                 return issued;
             }
+            // An unknown email, or an account with no password, still runs one Argon2id check,
+            // so it answers as slowly as a wrong password (lake#1101).
+            lock.unlock();
+            identity_crypto::verify_secret_against_dummy(input.password);
             return std::unexpected(StoreError{"unauthorized", "invalid email or password"});
         });
 }
@@ -4317,9 +4817,13 @@ Result<MfaEnrollment> InMemoryStore::enroll_mfa(const std::string& user_id,
             const auto credential = std::ranges::find_if(passwords_, [&](const auto& value) {
                 return value.user_id == user_id && value.pool_id == pool;
             });
-            if (credential == passwords_.end())
+            if (credential == passwords_.end()) {
+                // An account with no password still runs one Argon2id check (lake#1101).
+                lock.unlock();
+                identity_crypto::verify_secret_against_dummy(proof.password);
                 return std::unexpected(
                     StoreError{"unauthorized", "MFA enrollment requires the current password"});
+            }
 
             outcome = AuthenticationOutcome::failure;
             const std::string password_hash = credential->password;
@@ -4516,6 +5020,8 @@ Result<IssuedSession> InMemoryStore::sign_in_totp(const PasswordSignIn& input) {
                 issued.session.reason.clear();
                 return issued;
             }
+            lock.unlock();
+            identity_crypto::verify_secret_against_dummy(input.password); // lake#1101
             return std::unexpected(StoreError{"unauthorized", "invalid credentials or TOTP code"});
         });
 }
@@ -4818,7 +5324,8 @@ Result<ClerkUserProvisioned> InMemoryStore::clerk_user_locked(const ClerkIdentit
 }
 
 Result<IssuedSession> InMemoryStore::sign_in_clerk(const ClerkIdentity& input) {
-    if (input.issued_at <= 0 || input.subject.empty() || input.subject.size() > 256) {
+    if (input.issued_at <= 0 || input.subject.empty() || input.subject.size() > 256 ||
+        input.session_id.size() > 256) {
         return std::unexpected(
             StoreError{"invalid_input", "a Clerk subject and token issue time are required"});
     }
@@ -4852,31 +5359,36 @@ Result<IssuedSession> InMemoryStore::sign_in_clerk(const ClerkIdentity& input) {
         add_session(sessions_, found->user_id, "lake", device.id, "browser", "", {"*"}, "", 86400);
     if (issued.secret.empty())
         return std::unexpected(StoreError{"store_error", "could not issue session"});
+    if (!input.session_id.empty())
+        clerk_session_of_[issued.session.id] = input.session_id;
     issued.session.reason.clear();
     return issued;
 }
 
 Result<void> InMemoryStore::revoke_clerk_sessions(const std::string& subject,
+                                                  const std::string& session_id,
                                                   std::int64_t revoked_at) {
-    if (subject.empty() || subject.size() > 256 || revoked_at < 0) {
-        return std::unexpected(
-            StoreError{"invalid_input", "a Clerk subject and revocation timestamp are required"});
+    if (subject.empty() || subject.size() > 256 || session_id.empty() ||
+        session_id.size() > 256 || revoked_at < 0) {
+        return std::unexpected(StoreError{
+            "invalid_input", "a Clerk subject, session id and revocation timestamp are required"});
     }
     std::lock_guard lock(mutex_);
     auto [revoked, inserted] = clerk_revoked_before_.try_emplace(subject, -1);
-    if (revoked_at < revoked->second)
-        return {};
-    revoked->second = revoked_at;
+    // An event older than the watermark still ends the browser bound to its own Clerk session;
+    // only the unbound browsers' account-wide revocation follows the watermark's order.
+    const bool current = revoked_at >= revoked->second;
+    revoked->second = std::max(revoked->second, revoked_at);
     for (const auto& credential : oauth_credentials_) {
         if (credential.pool_id == "lake" && credential.subject == "clerk:" + subject) {
             const auto now = now_iso8601();
             for (auto& session : sessions_) {
-                if (session.user_id == credential.user_id && session.revoked_at.empty())
+                if (session.user_id != credential.user_id || session.pool_id != "lake" ||
+                    session.kind != "browser" || !session.revoked_at.empty())
+                    continue;
+                const auto bound = clerk_session_of_.find(session.id);
+                if (bound == clerk_session_of_.end() ? current : bound->second == session_id)
                     session.revoked_at = now;
-            }
-            for (auto& device : devices_) {
-                if (device.user_id == credential.user_id && device.revoked_at.empty())
-                    device.revoked_at = now;
             }
         }
     }
@@ -5363,6 +5875,129 @@ Result<IssuedSession> InMemoryStore::create_token(const NewToken& input) {
     return issued;
 }
 
+namespace {
+
+std::int64_t unix_now() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+std::string browser_key_time(std::int64_t unix) {
+    return std::format("{:%FT%TZ}", std::chrono::sys_seconds{std::chrono::seconds{unix}});
+}
+
+Result<void> check_new_browser_key(const NewBrowserKey& input) {
+    if (input.customer_id.empty() || input.workspace_id.empty() || input.index_id.empty()) {
+        return std::unexpected(
+            StoreError{"invalid_input", "a browser key names its account, workspace and index"});
+    }
+    if (input.origins.empty() || input.origins.size() > browser_key_max_origins) {
+        return std::unexpected(StoreError{"invalid_input", "a browser key lists 1 to 20 origins"});
+    }
+    if (input.rate_limit_per_minute < 1 ||
+        input.rate_limit_per_minute > browser_key_max_rate_limit) {
+        return std::unexpected(
+            StoreError{"invalid_input", "rate_limit_per_minute is between 1 and 6000"});
+    }
+    if (input.expires_in_seconds < 0) {
+        return std::unexpected(StoreError{"invalid_input", "expires_in_seconds is positive"});
+    }
+    return {};
+}
+
+} // namespace
+
+Result<IssuedBrowserKey> InMemoryStore::create_browser_key(const NewBrowserKey& input) {
+    if (auto checked = check_new_browser_key(input); !checked) {
+        return std::unexpected(checked.error());
+    }
+    std::lock_guard lock(mutex_);
+    const auto workspace = std::ranges::find(workspaces_, input.workspace_id, &Workspace::id);
+    if (workspace == workspaces_.end() || workspace->customer_id != input.customer_id ||
+        workspace->desired == "deleted") {
+        return std::unexpected(StoreError{
+            "invalid_input", "workspace_id must name a workspace Zetta in this account"});
+    }
+    StoredBrowserKey stored;
+    stored.key.id = new_uuid_v4();
+    stored.key.customer_id = input.customer_id;
+    stored.key.workspace_id = input.workspace_id;
+    stored.key.index_id = input.index_id;
+    stored.key.model_id = input.model_id;
+    stored.key.name = input.name;
+    stored.key.origins = input.origins;
+    stored.key.rate_limit_per_minute = input.rate_limit_per_minute;
+    stored.key.created_by_user_id = input.created_by_user_id;
+    stored.key.created_by_taap_id = input.created_by_taap_id;
+    const std::int64_t now = unix_now();
+    stored.key.created_at = browser_key_time(now);
+    if (input.expires_in_seconds > 0) {
+        stored.expires_unix = now + input.expires_in_seconds;
+        stored.key.expires_at = browser_key_time(stored.expires_unix);
+    }
+    const std::string random = identity_crypto::random_secret();
+    if (random.size() < 32) {
+        return std::unexpected(StoreError{"store_error", "could not generate a browser key"});
+    }
+    IssuedBrowserKey issued{
+        stored.key, std::string(browser_key_credential_prefix) + stored.key.id + "." + random};
+    stored.secret_sha256 = identity_crypto::sha256_hex(issued.secret);
+    browser_keys_.push_back(std::move(stored));
+    return issued;
+}
+
+Result<std::vector<BrowserKey>> InMemoryStore::list_browser_keys(const std::string& customer_id,
+                                                                 const std::string& workspace_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<BrowserKey> out;
+    for (auto it = browser_keys_.rbegin(); it != browser_keys_.rend(); ++it) {
+        if (it->key.customer_id == customer_id &&
+            (workspace_id.empty() || it->key.workspace_id == workspace_id)) {
+            out.push_back(it->key);
+        }
+    }
+    return out;
+}
+
+Result<BrowserKey> InMemoryStore::revoke_browser_key(const std::string& customer_id,
+                                                     const std::string& id,
+                                                     const std::string& revoked_by_taap_id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find_if(
+        browser_keys_, [&](const StoredBrowserKey& row) { return row.key.id == id; });
+    if (found == browser_keys_.end() || found->key.customer_id != customer_id) {
+        return std::unexpected(
+            StoreError{"not_found", "no browser key " + id + " in this account"});
+    }
+    if (found->key.revoked_at.empty()) {
+        found->key.revoked_at = browser_key_time(unix_now());
+        found->key.revoked_by_taap_id = revoked_by_taap_id;
+    }
+    return found->key;
+}
+
+Result<BrowserKeyAdmission> InMemoryStore::admit_browser_key_call(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find_if(
+        browser_keys_, [&](const StoredBrowserKey& row) { return row.key.id == id; });
+    if (found == browser_keys_.end()) {
+        return std::unexpected(StoreError{"not_found", "session is not active"});
+    }
+    const std::int64_t now = unix_now();
+    if (now - found->window_started_unix >= 60) {
+        found->window_started_unix = now;
+        found->window_calls = 0;
+    }
+    ++found->window_calls;
+    if (found->window_calls > found->key.rate_limit_per_minute) {
+        return BrowserKeyAdmission{
+            false,
+            static_cast<int>(std::max<std::int64_t>(1, 60 - (now - found->window_started_unix)))};
+    }
+    return BrowserKeyAdmission{true, 0};
+}
+
 Result<std::vector<Session>> InMemoryStore::list_sessions(const std::string& user_id,
                                                           const std::string& pool_id) {
     std::lock_guard lock(mutex_);
@@ -5548,6 +6183,29 @@ Result<Principal> InMemoryStore::resolve_principal(const std::string& secret) {
                          "agent_schedule",
                          schedule->scopes,
                          std::nullopt};
+    }
+    if (secret.starts_with(browser_key_credential_prefix)) {
+        const auto parsed = parse_agent_credential(secret, browser_key_credential_prefix);
+        if (!parsed) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        const auto key = std::ranges::find_if(browser_keys_, [&](const StoredBrowserKey& row) {
+            return row.key.id == parsed->first;
+        });
+        if (key == browser_keys_.end() || !key->key.revoked_at.empty() ||
+            !constant_time_hex_equal(workload_digest, key->secret_sha256)) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        const auto workspace =
+            std::ranges::find(workspaces_, key->key.workspace_id, &Workspace::id);
+        if (workspace == workspaces_.end() || workspace->desired == "deleted") {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        if (key->expires_unix != 0 && key->expires_unix <= unix_now()) {
+            return std::unexpected(StoreError{"expired", "the browser key has expired"});
+        }
+        key->key.last_used_at = browser_key_time(unix_now());
+        return browser_key_principal(key->key, workload_digest);
     }
     if (secret.starts_with(methodology_run_credential_prefix)) {
         const auto parsed = parse_agent_credential(secret, methodology_run_credential_prefix);
@@ -6161,6 +6819,9 @@ Result<ScimGroup> InMemoryStore::upsert_scim_group(const NewScimGroup& input) {
     if (team_object == policy_objects_.end()) {
         return std::unexpected(StoreError{"store_error", "team policy object is missing"});
     }
+    // A copy, not the iterator: the erase and push_back on policy_objects_ below move or free the
+    // element it points at (lake#1175, a heap-use-after-free under AddressSanitizer).
+    const std::string team_object_id = team_object->id;
     std::vector<std::string> removed_membership_ids;
     for (const ScimGroupMember& member : scim_group_members_) {
         const bool belongs_to_group = member.provider_id == input.provider_id &&
@@ -6183,7 +6844,7 @@ Result<ScimGroup> InMemoryStore::upsert_scim_group(const NewScimGroup& input) {
         grants_.erase(std::remove_if(grants_.begin(),
                                      grants_.end(),
                                      [&](const Grant& grant) {
-                                         return grant.object_id == team_object->id &&
+                                         return grant.object_id == team_object_id &&
                                                 grant.principal_taap_id ==
                                                     membership->principal_taap_id;
                                      }),
@@ -6243,10 +6904,10 @@ Result<ScimGroup> InMemoryStore::upsert_scim_group(const NewScimGroup& input) {
                               now};
         memberships_.push_back(membership);
         policy_objects_.push_back(
-            PolicyObject{new_uuid_v4(), "member", membership.id, team_object->id, now, now, true});
+            PolicyObject{new_uuid_v4(), "member", membership.id, team_object_id, now, now, true});
         grants_.push_back(Grant{new_uuid_v4(),
                                 lake_user->taap_id,
-                                team_object->id,
+                                team_object_id,
                                 "read",
                                 membership.attestation_digest,
                                 membership.granted_by_taap_id,
@@ -8376,8 +9037,11 @@ Result<IssuedSession> InMemoryStore::recover_with_code(const std::string& pool_i
                 lock.unlock();
                 const auto recovery =
                     credential.recovery_hashes.find(identity_crypto::recovery_selector(code));
-                if (recovery == credential.recovery_hashes.end() ||
-                    !identity_crypto::verify_secret(recovery->second, code)) {
+                const bool code_matches =
+                    recovery == credential.recovery_hashes.end()
+                        ? identity_crypto::verify_secret_against_dummy(code) // lake#1101
+                        : identity_crypto::verify_secret(recovery->second, code);
+                if (!code_matches) {
                     return std::unexpected(
                         StoreError{"unauthorized", "invalid email or recovery code"});
                 }
@@ -8409,6 +9073,8 @@ Result<IssuedSession> InMemoryStore::recover_with_code(const std::string& pool_i
                 issued.session.reason.clear();
                 return issued;
             }
+            lock.unlock();
+            identity_crypto::verify_secret_against_dummy(code); // lake#1101
             return std::unexpected(StoreError{"unauthorized", "invalid email or recovery code"});
         });
 }
@@ -8648,12 +9314,16 @@ Result<IssuedSession> InMemoryStore::complete_recovery(const std::string& recove
                 return value.attempt.id == recovery_id;
             });
             // A cancelled, completed or unapproved attempt, or one whose token was cleared, is
-            // refused before any hash work; the check is repeated after the hash is verified
-            // (lake#968).
+            // refused without reading its hash; the check is repeated after the hash is verified
+            // (lake#968). The refusal still runs one Argon2id check, outside the lock, so it
+            // answers as slowly as a wrong token (lake#1101).
             if (found == recovery_attempts_.end() ||
                 (found->attempt.status != "cooling" && found->attempt.status != "approved") ||
-                found->token_hash.empty())
+                found->token_hash.empty()) {
+                lock.unlock();
+                identity_crypto::verify_secret_against_dummy(token);
                 return std::unexpected(StoreError{"unauthorized", "invalid recovery token"});
+            }
 
             const auto token_hash = found->token_hash;
             lock.unlock();

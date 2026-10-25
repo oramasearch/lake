@@ -15,10 +15,22 @@ a password-only response requiring MFA and an accepted email-recovery start do n
 Email-recovery initiation verifies no credential and does not change these failure counts;
 its mail/token budgets are tracked separately in lake#968.
 
+A refusal also takes as long for an unknown account as for a known one (lake#1101). Password
+sign-in, MFA sign-in, recovery-code sign-in, recovery completion and MFA enrollment, when the email
+has no account, the account has no password credential, the recovery code matches no selector or
+the recovery attempt is unknown or has no token, verify the given secret against a fixed dummy
+Argon2id hash before answering. The dummy is made once per process by the same function that hashes
+real credentials (`identity_crypto::hash_secret`), so it always has their parameters, and it never
+matches. Before this, an email with a password answered about 100 ms slower than one without, which
+told a caller which emails had Lake password accounts. The failure budgets above count these
+refusals exactly as before. Hosted application sign-in forms call the same `sign_in_password`
+capability, so application pools get the same behaviour.
+
 REST, hosted application forms and MCP also share 100 failed attempts per trusted client address
 per fifteen minutes, across these operations and account-deletion step-up. The HTTP adapter
-reuses the order/recovery address rule: ingress-nginx's rewritten `X-Real-IP`, else the final
-`X-Forwarded-For` hop, else a shared direct-client bucket. It ignores `CF-Connecting-IP` and earlier
+reuses the order/recovery address rule ([client addresses](../deployment/client-addresses.md)):
+from a trusted proxy, ingress-nginx's rewritten `X-Real-IP`, else the final `X-Forwarded-For` hop,
+else the proxy's address; from any other peer, the peer's address. It ignores `CF-Connecting-IP` and earlier
 forwarded hops. Deployments must preserve ingress header sanitizing and prevent direct access
 around that ingress. Capability input cannot supply transport metadata; in-process callers share
 a client bucket. TAAP, passkeys and external identity-provider verification are outside these
@@ -59,10 +71,20 @@ and MCP tools. `sign_up_password`, `sign_in_password`, `verify_mfa`,
 `begin_passkey_sign_in`, `sign_in_passkey`, `begin_identity_proof`, `start_oauth`, and
 `sign_in_taap` are unauthenticated entry points.
 `enroll_mfa`, `disable_mfa`, `begin_passkey_registration`, `register_passkey`,
-`create_token`, `list_sessions`, `revoke_session`, `list_devices`, and `revoke_device` require
-the same row-resolved session or operator credential as every other protected capability.
+`create_token`, `list_sessions`, `revoke_session`, `list_devices`, `revoke_device` and
+`sign_out_everywhere` require the same row-resolved session or operator credential as every other
+protected capability. `sign_out_everywhere` (lake#1163) revokes every session, API key, static
+token and device of the caller's own account, the calling credential included; an operator
+credential is refused, since it is no person. It is the person's account-wide sign-out: signing out
+of one browser, or a Clerk session event, ends browser sessions only and never a key or a device
+([clerk.md](clerk.md#webhooks)).
 The session and device lists authorize the authenticated principal through the registry's batched
 authorization path before returning any row.
+
+**Under Clerk the `lake` pool's password entries are off** (lake#1098). With a Clerk publishable
+key configured, `sign_up_password`, `sign_in_password`, `verify_mfa` and `recover_with_code` in the
+`lake` pool answer `403 forbidden` and issue no session; `viewer` reports the same rule as
+`password_sign_up: false` ([clerk.md](clerk.md)). Application pools are unaffected.
 
 `sign_up_password` and `sign_in_password` issue browser sessions. Passwords use OpenSSL 3.6.3
 `EVP_KDF` `ARGON2ID` with 64 MiB memory, three iterations, one lane, and a unique 128-bit salt.
@@ -313,12 +335,13 @@ durable identity.
   When omitted, the lifetime is the lesser of 30 days and that remaining lifetime. The store caps
   the persisted expiry at the parent’s exact timestamp, including time spent handling issuance.
 - **Tokens that never expire** (lake#234). `create_token` with `never_expires: true` from a
-  signed-in person issues a **standing** token: static, no expiry, and **no parent**, so signing out
-  or the browser session expiring does not end it. It needs a non-empty `reason` and named scopes
+  signed-in person issues a **standing** token: static, no expiry, and **no parent**, so neither
+  signing out (which ends no key, below) nor the browser session's expiry ends it. It needs a non-empty `reason` and named scopes
   (never `*`) within the issuer's scopes, the person's personal account must have
   `allow_non_expiring_credentials` on (`set_customer_credential_policy`), and the instance must not
   set `LAKE_ALLOW_NON_EXPIRING_CREDENTIALS=false`. Its authority is still the person's live grants on
-  every request; revoking it, `revoke_user_sessions`, or removing the person stops it. The tokens
+  every request; revoking it, `sign_out_everywhere`, `revoke_user_sessions`, or removing the person
+  stops it. The tokens
   page offers it as *Never expires* and lists such tokens as *Never expires* with their reason.
   Verify: `TokenAttenuation.NeverExpiringTokensNeedTheOptInAndSurviveSignOut`.
 - Browser and TAAP sessions are expiring issuers and cannot create static tokens. Static authority
@@ -327,10 +350,22 @@ durable identity.
   token capability adds no static-authority bootstrap flow.
 - Every session-derived token retains `parent_session_id`, the issuer’s immutable row ID. The
   store verifies that issuer belongs to the same user and pool and is still active before issue.
-  Every subsequent authentication verifies the entire ancestor chain, including each ancestor’s
-  expiry, revocation and linked device. Revoking a parent, any ancestor, or its device makes all
-  descendants unusable on their next request. Children do **not** survive their parent.
-  Parent deletion cascades to descendants. Ancestry revocation is evaluated at authentication;
+  Every subsequent authentication verifies the ancestor chain **up to the first sign-in session**
+  (a `browser` or `taap` session): each key ancestor's expiry, revocation and linked device.
+  Revoking a key, or any key it descends from, makes all its descendants unusable on their next
+  request; children do not survive a revoked parent key.
+- **Signing out never ends a key** (lake#1163; Steve, 2026-10-24: *"don't revoke api keys on
+  signout"*). A sign-in ancestor ends the walk without being checked, except that it must belong
+  to the same user and pool: when the browser or TAAP session a key was made from is revoked
+  (`/logout`, a Clerk session event, `revoke_session` on it), expires, or loses its device, the
+  key and its descendants keep working. A key made in a browser still keeps the expiry it was
+  issued with, capped at that browser session's expiry at issue time; a key that must outlive that
+  is made with *Never expires*. Keys end when they are revoked themselves, through
+  `sign_out_everywhere` or `revoke_user_sessions`, or when the account is banned, locked,
+  deprovisioned, deleted or disabled. Verify:
+  `HttpServer/HttpResponseIsolation.AKeyMadeInABrowserOutlivesThatBrowsersSignOut` and
+  `Stores/ClerkRevocation.SessionEventsEndOnlyBrowserSessions`.
+- Parent deletion cascades to descendants. Ancestry revocation is evaluated at authentication;
   a child’s own `revoked_at` need not change when an ancestor is revoked.
 - Application-pool API-token issuance returns only the derived session bearer, with its usual
   session lifecycle event. It does not also issue an independent application JWT.
@@ -729,7 +764,9 @@ failures from earlier authentication attempts.
 New recovery codes have the form `rc1_` followed by 32 lowercase hexadecimal characters
 (128 random bits). The SHA-256 selector in `credentials.subject`, indexed by the existing
 unique `(pool_id, kind, subject)` constraint, selects one Argon2id hash. Unknown selectors and
-malformed codes perform no recovery-code derivation. Password-plus-recovery sign-in performs
+malformed codes never scan stored hashes; `recover_with_code` verifies them against the dummy hash
+instead, so its refusals all cost one derivation (lake#1101), while MFA verification and
+disablement, whose caller is already signed in, refuse them without one. Password-plus-recovery sign-in performs
 one password derivation and at most one recovery derivation. Every recovery verifier, including
 fresh verification and MFA disablement, uses the same selector rule. Every successful use, including step-up, consumes the selected recovery row under lock.
 

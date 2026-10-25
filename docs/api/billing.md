@@ -426,7 +426,8 @@ to a place where they can top up ... and auto top up (default off)"*.
 dollars, kept in millionths:
 
 - **Credits** are paid top-ups: a Stripe Checkout the account's owner starts (`start_top_up`), or an
-  [auto top-up](#auto-top-up) off a saved card.
+  [auto top-up](#auto-top-up) off a saved card. Orama can also give an account a credit
+  ([credits from Orama](#credits-from-orama)): a credit of kind `grant`, spent before paid money.
 - **Charges** are the account's usage at the price list in force, one per month, refreshed every few
   minutes ([below](#charges)).
 - **The balance is credits minus charges.**
@@ -438,7 +439,7 @@ call is gated or warned.
 (migration `0099_account_balances`, guard `account_balances_guard`): `account_balances` (each
 account's row: its settings, the last refresh, which crossings' emails went, auto top-up),
 `account_balance_credits` (one row per payment, unique on the provider and its Checkout Session or
-PaymentIntent) and `account_balance_charges` (one row per account and month, with the price list
+PaymentIntent, and one per credit from Orama, migration `0100_balance_grants`) and `account_balance_charges` (one row per account and month, with the price list
 and, once invoiced, the invoice). Usage stays in each workspace Zetta: only the priced amount of a
 month reaches PostgreSQL, as an invoice's lines do.
 
@@ -449,7 +450,7 @@ month reaches PostgreSQL, as an invoice's lines do.
 | `ok` | the balance is at or above the warning amount (`LAKE_BALANCE_WARNING_USD`, $10) | nothing |
 | `low` | from $0 to under the warning amount | the banner and the API warning |
 | `negative` | below $0, above the overdraft limit | the banner, the warning, and the emails below |
-| `blocked` | at or past the overdraft limit (`LAKE_BALANCE_OVERDRAFT_USD`, $50 below zero), or the account has never topped up | paid work answers `402 payment_required` |
+| `blocked` | at or past the overdraft limit (`LAKE_BALANCE_OVERDRAFT_USD`, $50 below zero), or the account has never topped up and has no credit from Orama left (its limit is $0) | paid work answers `402 payment_required` |
 
 **New accounts start at $0 and add their first top-up before any paid action** (`blocked`, reason
 `first_top_up`). The overdraft is credit Orama extends only to accounts that have paid once. This is
@@ -470,7 +471,8 @@ credit covers it (`exempt: "paid_order"`; such an account reads `ok`).
 ### Charges
 
 The store root's owner refreshes every account with a balance row every
-`LAKE_BALANCE_REFRESH_SECONDS` (300). For each month from the first top-up's to this one it works
+`LAKE_BALANCE_REFRESH_SECONDS` (300). For each month from the first top-up's (or the first credit
+from Orama's, whichever came first) to this one it works
 out the month's bill as `bill_preview` does, from `usage_over_time` at the list in force for the
 month, and keeps its total as the month's charge. It reads usage without a capability call of its
 own (the handler directly), so a refresh every few minutes does not put an audit event per account
@@ -492,9 +494,10 @@ in the central log.
 `balance` (`provider_status` `paid`, instructions "Paid from your Lake account balance"), asks no
 provider for payment and sends no email. The month's charge is frozen to the invoice's total
 (`account_balance_charges.invoice_id`), and a refresh never moves it again. A balance below $0 is
-money the account owes, collected by its next top-up, never by a second bill. An account that has
-never topped up (an existing account from before the balance, or one a paid order covers) is
-invoiced as before, through Stripe.
+money the account owes, collected by its next top-up, never by a second bill. An account on a credit
+from Orama alone is invoiced the same way: the credit paid. An account with neither a top-up nor a
+credit (an existing account from before the balance, or one a paid order covers) is invoiced as
+before, through Stripe.
 
 ### The gate
 
@@ -503,6 +506,8 @@ Every capability that creates, starts or grows something that costs money is mar
 `src/api/balance.cpp`, applied by `Registry::add`, so the engine's capabilities registered from its
 schema are marked too:
 
+- the quickstart process: `start_quickstart`, `train_quickstart`, refused before any step starts
+  ([quickstart.md](quickstart.md#the-balance));
 - apps: `create_app`, `deploy_app`, `start_app`, `restart_app`, `scale_app`, `rollback_app`,
   `build_app`;
 - services and stores: `create_service`, `create_service_and_bind_to_app`, `connect_service`,
@@ -564,7 +569,9 @@ else its owner's email (the person's own, or an organization owner's):
   The Resend idempotency key is `lake-balance-<account>-<crossing>-<credits so far>`.
 - **Reset when funds are added.** Every credit clears the three balance marks.
 - Each says the balance, how much to add and the Add funds link. **It carries nothing a person
-  typed**: no account, person or workspace name. An account that has never topped up gets none.
+  typed**: no account, person or workspace name. An account that has never topped up and never had
+  a credit from Orama gets none; one on a credit alone is told near its $0 limit and at it.
+- A credit from Orama sends its own email, once (below).
 - Each sent email is audited centrally, `billing.balance.email`, with the crossing.
 
 ### Auto top-up
@@ -616,6 +623,174 @@ Starting, saving, crediting and failing are audited centrally (`billing.balance.
   `payment_intent.payment_failed`, beside the `checkout.session.completed` and
   `checkout.session.async_payment_succeeded` the order sheet registers.
 
+### Credits from Orama
+
+[lake#1134](https://github.com/oramasearch/lake/issues/1134), Steve, 2026-10-24: *"I need the
+ability to give cloud credits to certain users"*. The defaults below are lake#1134's; Steve may
+change any of them.
+
+**What a grant is.** The operator or the instance administrator gives one account a credit
+(`grant_balance_credit`): a design partner, a prize, a support make-good. It is a row of
+`account_balance_credits` of kind `grant`, provider `orama`, beside the paid top-ups, so **the
+balance is still the credits minus the charges**. It records the amount (whole cents, $0.01 to
+$10,000), a required `reason` (shown to the account), who gave it, an optional `expires_at`, and
+the account's charges at that moment.
+
+- **Not cash.** It is never refunded or paid out, and is listed apart from paid money ("Credit from
+  Orama", with its reason, expiry and what is left).
+- **No overdraft.** A grant never sets `first_top_up_at`. An account that has never paid spends a
+  grant down to $0 and stops there (`blocked`, reason `first_top_up`, limit $0); its first paid
+  top-up unlocks the overdraft as always.
+- **It clears the low-balance marks**, like any credit, so the next crossing is told again.
+- **One email**, through the same Resend path, keyed `lake-balance-grant-<credit id>`: the amount,
+  the balance after, the expiry, that it is spent before paid money and is not cash, and a link to
+  the Billing page. The reason is shown on the page, never mailed (emails carry nothing a person
+  typed). The answer says whether it went (`emailed`, `email_error`).
+- **A retry is safe.** `reference` is an idempotency key: the same reference grants once, emails
+  once, and answers `duplicate: true`.
+- **By email.** `email` names a person's personal account (case-insensitive); an organization's
+  account is named by its `customer_id`.
+
+**How charges fall on grants (the rule).** Usage is paid by grants before paid money. A grant pays
+only for usage charged **after it was given** (the charges then are recorded on it) and, once it has
+ended, before it ended. When several grants could pay, **the one that expires first pays first**,
+then the oldest. Lake works this out from the recorded charges (`grant_allocation` in
+`include/lake/control/store.hpp`), in integer micros.
+
+**Expiry and revocation.** When a grant ends, **its unused part stops counting**
+(`forfeited_micros`) and **what it paid for stays paid**; paid money is untouched. For example, with
+$20 paid and a $25 grant: $10 of usage is paid by the grant; when the grant expires, its $15 unused
+stops counting and the balance is $20, the paid money, whole.
+
+- **Expiry** is applied by the balance refresh, after a read of every workspace's usage succeeds, so
+  the unused part is measured against the usage up to then. An expired grant counts until that
+  refresh (at most `LAKE_BALANCE_REFRESH_SECONDS` late, longer while usage cannot be read: never
+  against charges that were not read). Audited `billing.balance.credit_expired` (principal `lake`).
+- **`revoke_balance_credit`** reads the account's usage first, then ends the grant at once. It never
+  takes back money already spent; it is refused (`store_unavailable`) when usage cannot be read, and
+  `conflict` when the grant already ended. Audited `billing.balance.credit_revoked`.
+- A grant ends once: both run in one transaction that locks the account's grants.
+
+**Giving a credit on lake.live.** In the console, the operator signs in and opens **Customers →
+Give credit** (an account ID or a person's email), or an account's **Billing → Give credit**; a
+credit that still counts has **Revoke** in the Billing page's history. Over REST or MCP, call
+`grant_balance_credit` with that Lake's admin token, the operator credential: it is the Secret
+**`lake-<name>-admin`**, key **`token`**, in the Lake's namespace on its cluster, where `<name>` is
+the `Lake` resource's name (the orama-operator creates it and gives it to lake as
+`LAKE_ADMIN_TOKEN`). Read it with `kubectl get secret` on that cluster when you need it; never paste
+the value into a document, an issue or a chat:
+
+```bash
+curl -s https://lake.live/v1/grant_balance_credit \
+  -H "Authorization: Bearer $LAKE_ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"email":"pat@example.com","amount_micros":25000000,"reason":"Design partner",
+       "expires_at":"2027-01-31T23:59:59Z","reference":"partner-pat-2026-10"}'
+```
+
+### Coupon codes
+
+[lake#1156](https://github.com/oramasearch/lake/issues/1156), Steve, 2026-10-24: *"create coupon
+codes that will grant someone a number of credits that I can use in my ads"*. The defaults below
+are lake#1156's; Steve may change any of them.
+
+**What a code is.** The operator or the instance administrator creates a code (`create_coupon`),
+such as `LAKE50`, worth an amount of credit. Whoever redeems it (`redeem_coupon`) gets an ordinary
+[credit from Orama](#credits-from-orama): the redemption calls the same grant path as
+`grant_balance_credit` (`give_balance_grant` in `src/api/balance.cpp`), so the spending order,
+expiry, no-overdraft rule, email and idempotency are the grant's, never a second mechanism.
+
+- **The grant.** Kind `grant`, provider `orama`, reason `Coupon code <CODE>` (shown to the account),
+  `granted_by` `coupon:<coupon id>`, `expires_at` the redemption plus the code's `credit_days`
+  (default 90), and the reference `coupon:<coupon id>:<customer id>`, so a retry, or a redemption
+  interrupted between its claim and its grant, grants once. The grant's email goes once
+  (`lake-balance-grant-<credit id>`).
+- **The code.** Typed (4 to 32 letters and digits; blanks and hyphens are dropped; case does not
+  matter) or, when left out, generated: 16 characters from `ABCDEFGHJKMNPQRSTVWXYZ23456789` (no
+  look-alikes), about 78 bits from OpenSSL's random source, so it cannot be guessed. Codes are
+  stored normalized (upper case), and `LAKE50`, `lake-50` and `Lake 50` are one code.
+- **Its settings.** The amount (whole cents, $0.01 to $10,000), `credit_days` (1 to 3,650), an
+  optional `expires_at` (when the code stops working, UTC, within 10 years), an optional
+  `max_redemptions` (the total cap), `new_accounts_only` (default **true**, the default for ads) and
+  an optional `campaign` label (lower-case letters, digits, `.`, `_`, `-`; up to 64) for
+  attribution.
+- **Stopping it.** `disable_coupon` (by `coupon_id` or `code`) refuses later redemptions at once;
+  credit already given stays. Calling it again changes nothing.
+
+**Who may redeem, and how often.**
+
+- **A person.** `redeem_coupon` takes `customer_id` and `code`; the caller needs `admin` on the
+  account (owners and admins), and must be a person signed in: the operator credential and an
+  agent's credential are refused (`unauthorized`).
+- **One redemption per account and per verified email.** The person's email (the one on their
+  account: Clerk's verified primary address on lake.live) is kept only as a SHA-256 digest of its
+  normalized form: lower-cased, a `+tag` dropped, and for Gmail (`gmail.com`, `googlemail.com`) the
+  dots of the local part dropped. So one inbox cannot redeem a code twice through two accounts. A
+  person without an email cannot redeem (`conflict`, reason `no_verified_email`).
+- **New accounts only** refuses an account created before the code (`not_new_account`) and one that
+  already has any credit (a top-up or a grant), any charged usage, or a non-void invoice with a
+  total (`account_used`). A new account cannot start paid work before its first credit, so it has no
+  charges to hide.
+- **The cap, the expiry and disabling** are checked under the coupon's row lock in the same
+  transaction that records the redemption (`used_up`, `expired`, `disabled`).
+- **Failed attempts are limited**: 10 refusals an hour per person and per client address (the
+  ingress-derived address that keys sign-in budgets), counted in `billing_coupon_attempts` by
+  SHA-256 digests of the keys. Past it, every attempt answers `rate_limited` (429), the right code
+  included, until the hour has passed. A refusal for a server error is not counted.
+
+A refusal answers `not_found` (an unknown code) or `conflict`, with `error.details.reason` one of
+`unknown`, `disabled`, `expired`, `used_up`, `already_redeemed`, `email_redeemed`,
+`not_new_account`, `account_used`, `no_verified_email`, and a sentence a person can read
+(`"This code has expired."`).
+
+**Audit and privacy.** Each redemption is audited centrally on `customer/<id>/billing`:
+`billing.coupon.redeemed` with who (the principal), the code, the campaign, the coupon, redemption
+and credit ids, the amount and the expiry. A refusal is `billing.coupon.refused` with its reason
+and a 12-hex-digit SHA-256 prefix of what was typed (`code_digest`), never the typed code: a guess
+is not written down anywhere, and request logs carry route patterns only. Creating, listing and
+disabling are audited on `billing/coupons` (`billing.coupon.created`, `billing.coupon.listed`,
+`billing.coupon.disabled`).
+
+**The ads report.** `list_coupons` answers every code, newest first (`campaign`: one campaign's
+only), with its `state` (active, disabled, expired, used_up), `redemptions` (claimed, what the cap
+counts) and, per code: `redeemed` (redemptions that became a credit), `topped_up` (redeeming
+accounts whose first paid top-up came after their redemption), `spend_micros` (what those accounts
+were charged for usage after their credit was given) and `paid_micros` (what they paid in top-ups
+since redeeming). `campaigns` sums the same per campaign. Counts and sums only: no workspace data,
+no names. An account that redeemed two codes of one campaign is counted under each.
+
+**Carried through sign-up.** An ad links to `https://lake.live/?code=LAKE50`. The apex region
+picker (and the order sheet, when it is on) posts back to the same path and query and continues to
+the chosen region's host with it (`region_continue_url`), and says "Your code LAKE50 goes with you".
+On the region's host the web app keeps the code in the browser for a day and redeems it on the first
+signed-in page for the person's own account ([Coupon codes in the console](../ui/balance.md#coupon-codes)).
+
+**Regions.** Each lake.live region is a separate Lake with its own control plane, and Lake has no
+way to call a sibling region today, so **a code works only in the region it was created in**. For an
+ad that reaches several regions, create the same code (the same string, amount and settings) in each
+region: in each region's console (**Administration → Coupons**), or with `create_coupon` and that
+region's admin token. `create_coupon` answers `region` and `other_regions` to remind you. Each
+region counts its own redemptions and cap. Creating it in every region from one form is a follow-up
+([lake#1159](https://github.com/oramasearch/lake/issues/1159)).
+
+**Where it lives.** Billing, so in the control plane (decision 56): `billing_coupons`,
+`billing_coupon_redemptions` and `billing_coupon_attempts`, migration `0101_coupons`
+([schema](../control-plane/schema.md#coupon-codes-migration-0101_coupons)).
+
+**On lake.live** (an ad for $50 lasting 90 days):
+
+```bash
+curl -s https://eu.lake.live/v1/create_coupon \
+  -H "Authorization: Bearer $LAKE_ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"code":"LAKE50","amount_micros":50000000,"credit_days":90,
+       "expires_at":"2026-12-31T23:59:59Z","campaign":"google-2026-11"}'
+# then the same on https://us.lake.live with that region's admin token
+curl -s "https://eu.lake.live/v1/list_coupons?campaign=google-2026-11" \
+  -H "Authorization: Bearer $LAKE_ADMIN_TOKEN"
+```
+
+`$LAKE_ADMIN_TOKEN` is the region's Secret `lake-<name>-admin`, key `token` (see
+[Giving a credit on lake.live](#credits-from-orama)); never paste it anywhere.
+
 ### Balance capabilities
 
 | Capability | Kind | Who | Input | What it does |
@@ -624,11 +799,23 @@ Starting, saving, crediting and failing are audited centrally (`billing.balance.
 | `start_top_up` | action | `admin` on the customer (owners, admins), operator | `customer_id`, `amount_micros?` | A Stripe Checkout that adds the amount: `{customer_id, amount_micros, checkout_url, session_id}`. The first top-up is exactly the first amount; later ones at least the minimum, whole cents. `conflict` where card payment is not set up. |
 | `set_auto_top_up` | action | `admin` on the customer, operator | `customer_id`, `enabled`, `threshold_micros?`, `amount_micros?`, `replace_card?` | Turns auto top-up on or off and sets its threshold and amount; `checkout_url` when a card must be saved first. |
 | `set_balance_overdraft` | action | operator, instance administrator | `customer_id`, `overdraft_micros?` | One account's overdraft in place of the instance's; left out, the instance's again. |
-| `refresh_account_balance` | action | operator, instance administrator | `customer_id` | Refreshes one account now as the owner loop does, and answers `{balance, refresh}`. |
+| `refresh_account_balance` | action | operator, instance administrator | `customer_id` | Refreshes one account now as the owner loop does, and answers `{balance, refresh}`; `refresh.grants_expired` counts the credits from Orama it ended. |
+| `grant_balance_credit` | action | operator, instance administrator | `customer_id` or `email`, `amount_micros` (10,000 to 10,000,000,000, whole cents), `reason` (1 to 1,000 bytes), `expires_at?` (UTC `YYYY-MM-DDTHH:MM:SSZ`, future, within 10 years), `reference?` (1 to 200 of `A-Z a-z 0-9 - _ . :`) | Gives the account a [credit from Orama](#credits-from-orama): `{customer_id, duplicate, credit, emailed, email_error?, balance}`. |
+| `revoke_balance_credit` | action | operator, instance administrator | `credit_id`, `reason?` | Ends a grant after reading usage: `{customer_id, credit, revoked_micros, balance}`; only the unused part stops counting. `invalid_input` for a paid top-up, `conflict` once it ended. |
+| `create_coupon` | action | operator, instance administrator | `amount_micros` (10,000 to 10,000,000,000, whole cents), `code?` (4 to 32 letters and digits after normalizing; left out: generated), `credit_days?` (1 to 3,650, default 90), `expires_at?` (UTC, future, within 10 years), `max_redemptions?` (1 to 10,000,000), `new_accounts_only?` (default true), `campaign?` | Creates a [coupon code](#coupon-codes): `{coupon, link, region, other_regions}`; `link` is `https://<apex>/?code=<CODE>` (this Lake's origin without an apex). `conflict` when the code is taken. |
+| `list_coupons` | read | operator, instance administrator | `campaign?` | `{coupons, campaigns}`: each code with `state`, `redemptions`, `redeemed`, `topped_up`, `spend_micros`, `paid_micros`; the same summed per campaign. |
+| `disable_coupon` | action | operator, instance administrator | `coupon_id` or `code` | Stops the code at once: `{coupon}`. Idempotent. |
+| `redeem_coupon` | action | `admin` on the customer, a person (not the operator or an agent) | `customer_id`, `code` | Gives the account the code's credit from Orama: `{customer_id, code, amount_micros, expires_at, message, credit, emailed, email_error?, balance}`. Refusals: `not_found`/`conflict` with `details.reason`, `rate_limited` past 10 failures an hour per person or client. |
 
 All are audited centrally on `customer/<id>/billing` (`billing.balance.read`,
 `billing.balance.top_up_started`, `billing.balance.auto_top_up_set`,
-`billing.balance.overdraft_set`, `billing.balance.refresh`).
+`billing.balance.overdraft_set`, `billing.balance.refresh`, `billing.balance.credit_granted` with
+who, how much, why and the expiry, `billing.balance.credit_revoked`, `billing.coupon.redeemed`,
+`billing.coupon.refused`); the coupon administration on `billing/coupons`.
+
+`account_balance` also answers `first_grant_at` and `grants_unused_micros`, and each credit's
+`label`; a grant's row adds `reason`, `expires_at`, `ended_at`, `end_reason` (`expired` or
+`revoked`), `forfeited_micros`, `counting_micros` and, while it counts, `unused_micros`.
 
 ### Verify the balance
 
@@ -652,8 +839,40 @@ All are audited centrally on `customer/<id>/billing` (`billing.balance.read`,
 - `MemoryBilling.AccountBalancesFollowTheContract` and `PostgresBilling.AccountBalancesFollowTheContract`
   (`tests/test_postgres.cpp`): the migration's tables and guard, the compare-and-swap row, credits
   once per event and per payment, charges frozen by an invoice, and the tables' checks.
-- `frontend/tests/balance.test.ts`: the banner, the Add funds link, the amounts, the history and
-  the return from Stripe.
+- `BalanceGrant.*` (`tests/test_balance.cpp`): only the operator or the instance administrator gives
+  or revokes (the account's own owner and a stranger are refused, and audited as denied); the
+  amount, reason, expiry, reference and account checks; a grant by id and by email credited,
+  listed as "Credit from Orama", audited and emailed once (a retry with the same reference neither
+  grants nor emails again); blocked to ok on a grant, the marks cleared, no overdraft from a grant
+  alone (it stops at $0 with the "used up" message); expiry ($25 granted, $10 spent, $15 stops
+  counting, paid money whole), never against a held read, never paying for usage before the grant;
+  revocation of the remainder only, once; the allocation order; an account on a grant alone
+  invoiced as paid from its balance.
+- `MemoryBilling.BalanceGrantsFollowTheContract` and `PostgresBilling.BalanceGrantsFollowTheContract`:
+  migration `0100_balance_grants` and its guard, a grant never setting `first_top_up_at`, the
+  charges at the grant, lookup by id, revocation and expiry each once with only the unused part
+  forfeited, a person's account by email, and the table's checks.
+- `frontend/tests/balance.test.ts`: the banner, the Add funds link, the amounts, the history (credits
+  from Orama and their expiry) and the return from Stripe, and the Give credit form's input.
+- `Coupon.*` (`tests/test_coupons.cpp`): codes normalized and emails digested per inbox; only the
+  operator or the instance administrator creates, lists or disables (the operator and a stranger
+  cannot redeem into an account); the create checks, generated codes (16 characters, no look-alikes,
+  all different) and the ad link with and without regions; a redemption as an ordinary grant (kind
+  `grant`, provider `orama`, reference `coupon:<coupon>:<customer>`, the balance, one email, audited
+  `billing.coupon.redeemed` with the code and campaign); a second redemption by the same account and
+  by the same inbox on another account refused; the cap, the code's expiry and disabling; new
+  accounts only (an older account, a topped-up one and one with charges refused); ten failed
+  attempts limiting the person and the client address, and refusals audited with a digest only; an
+  interrupted redemption finished once; the campaign report.
+- `CouponStore.MemoryFollowsTheContract` and `CouponStore.PostgresFollowsTheContract`: migration
+  `0101_coupons` and its guard, the code's uniqueness, every claim refusal, resuming an unfinished
+  claim, finishing, the attempts and the report, and the tables' checks.
+- `RegionsApex.ACouponCodeGoesToTheChosenRegion` and
+  `OrdersApex.TheOrderSheetCarriesACouponCodeToTheRegion`: the picker and the order sheet carry
+  `?code=` to the chosen region's host and say so.
+- `frontend/tests/coupons.test.ts`: `?code=` kept through sign-up (a day, out of the address, replaced
+  by a later link, forgotten once Lake answers, kept over a network failure), and the create form's
+  input.
 
 ## Order sheet subscriptions
 

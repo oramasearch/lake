@@ -53,6 +53,7 @@
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
 #include "lake/api/server.hpp"
+#include "lake/api/stripe.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/audit/audit.hpp"
@@ -3116,6 +3117,12 @@ TEST(Registry, ServerInfoNeedsNoAuth) {
     EXPECT_EQ(r.value["name"], "lake");
     EXPECT_EQ(r.value["store"], "memory");
     EXPECT_EQ(r.value["revision"], lake::build_revision_string());
+    // lake#1119: the Stripe events this version handles, as `lake manifest` publishes them.
+    nlohmann::json events = nlohmann::json::array();
+    for (const auto event : lake::api::stripe_webhook_events) {
+        events.push_back(std::string(event));
+    }
+    EXPECT_EQ(r.value["stripe_webhook_events"], events);
 }
 
 TEST(Telemetry, PrometheusCounterAndHistogram) {
@@ -8171,9 +8178,103 @@ std::pair<int, std::string> run_lake_until_ready(const std::vector<std::string>&
     return {exit_status, std::string(std::istreambuf_iterator<char>(written), {})};
 }
 
+// lake#1168: with no control store (no --memory-store, no control DB) lake used to dereference a
+// null store in its owner loop and die with SIGSEGV a moment after start. It now stays live (`/healthz`
+// 200, `/readyz` 503: readiness is the control store's), reports `store: none`, keeps serving past
+// the owner loop's first pass, and exits 0 on SIGTERM.
+TEST(StorelessStartup, LakeWithNoControlStoreServesAndStopsCleanly) {
+    TemporarySyncRoot temporary;
+    const unsigned short port = unused_loopback_port();
+    ASSERT_NE(port, 0);
+    const std::vector<std::string> removed{"LAKE_CONTROL_DB_URI", "LAKE_STORE_ROOT"};
+    std::vector<std::string> variables;
+    for (char** entry = environ; *entry != nullptr; ++entry) {
+        const std::string_view variable(*entry);
+        const std::string name(variable.substr(0, variable.find('=')));
+        if (std::ranges::find(removed, name) == removed.end()) {
+            variables.emplace_back(variable);
+        }
+    }
+    std::vector<std::string> argv{
+        LAKE_TEST_SERVER_PATH, "--listen", "127.0.0.1:" + std::to_string(port)};
+    std::vector<char*> raw_argv;
+    for (std::string& argument : argv) {
+        raw_argv.push_back(argument.data());
+    }
+    raw_argv.push_back(nullptr);
+    std::vector<char*> raw_environment;
+    for (std::string& variable : variables) {
+        raw_environment.push_back(variable.data());
+    }
+    raw_environment.push_back(nullptr);
+    const std::filesystem::path output = temporary.path() / "stdout.log";
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addopen(
+        &actions, STDOUT_FILENO, output.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    pid_t pid = -1;
+    const int spawned = ::posix_spawn(
+        &pid, raw_argv.front(), &actions, nullptr, raw_argv.data(), raw_environment.data());
+    posix_spawn_file_actions_destroy(&actions);
+    ASSERT_EQ(spawned, 0);
+    int status = 0;
+    bool exited = false;
+    bool ready = false;
+    for (int attempt = 0; attempt < 400 && !exited && !ready; ++attempt) {
+        if (::waitpid(pid, &status, WNOHANG) == pid) {
+            exited = true;
+            break;
+        }
+        // Live, not ready: /readyz is control-store readiness and answers 503 without a store.
+        ready = http_request(port, "GET", "/healthz", "", "application/json").find(" 200 ") !=
+                std::string::npos;
+        if (!ready) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+    // The owner loop's first pass runs right after the startup line; give it time to run, then
+    // check lake is still alive and serving.
+    for (int attempt = 0; attempt < 10 && !exited; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (::waitpid(pid, &status, WNOHANG) == pid) {
+            exited = true;
+        }
+    }
+    const std::string healthz =
+        exited ? std::string{} : http_request(port, "GET", "/healthz", "", "application/json");
+    const std::string readyz =
+        exited ? std::string{} : http_request(port, "GET", "/readyz", "", "application/json");
+    if (!exited) {
+        ::kill(pid, SIGTERM);
+        ASSERT_EQ(::waitpid(pid, &status, 0), pid);
+    }
+    std::ifstream written(output);
+    const std::string stdout_text(std::istreambuf_iterator<char>(written), {});
+    ASSERT_FALSE(exited) << "lake exited on its own (signal "
+                         << (WIFSIGNALED(status) ? WTERMSIG(status) : 0) << ", status "
+                         << (WIFEXITED(status) ? WEXITSTATUS(status) : -1) << "):\n"
+                         << stdout_text;
+    EXPECT_TRUE(ready) << stdout_text;
+    EXPECT_NE(healthz.find(" 200 "), std::string::npos) << healthz;
+    EXPECT_NE(readyz.find(" 503 "), std::string::npos) << readyz;
+    ASSERT_TRUE(WIFEXITED(status)) << "lake was killed by signal "
+                                   << (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+    EXPECT_EQ(WEXITSTATUS(status), 0) << stdout_text;
+    std::optional<json> startup;
+    std::istringstream lines(stdout_text);
+    for (std::string line; std::getline(lines, line);) {
+        const json parsed = json::parse(line, nullptr, false);
+        if (parsed.is_object() && parsed.value("event", "") == "startup") {
+            startup = parsed;
+        }
+    }
+    ASSERT_TRUE(startup) << stdout_text;
+    EXPECT_EQ(startup->at("store"), "none");
+}
+
 // lake#915 (LSR-004): the replication credential never defaults to the admin token, and a peer list
 // that is not a list of origins stops startup.
-TEST(ReplicationStartup, TheReplicationCredentialNeverDefaultsToTheAdminToken) {
+TEST(ReplicationStartup,TheReplicationCredentialNeverDefaultsToTheAdminToken) {
     TemporarySyncRoot temporary;
     const unsigned short port = unused_loopback_port();
     ASSERT_NE(port, 0);
@@ -8214,6 +8315,153 @@ TEST(ReplicationStartup, TheReplicationCredentialNeverDefaultsToTheAdminToken) {
         refused_port,
         temporary.path() / "refused.log");
     EXPECT_EQ(refused_status, 2) << refused_output;
+}
+
+// lake#1135, lake#1137: the lake binary reads the brand at start. An invalid brand stops it with
+// exit status 2; a custom brand is served by the running process on the console's first paint,
+// llms.txt, the skill under the brand's short name, MCP initialize and server_info.
+TEST(BrandStartup, AnInvalidBrandStopsLakeAndACustomOneIsServed) {
+    TemporarySyncRoot temporary;
+    const auto arguments_for = [&](unsigned short port) {
+        return std::vector<std::string>{
+            "--memory-store",
+            "--listen",
+            "127.0.0.1:" + std::to_string(port),
+            "--store-root",
+            (temporary.path() / "root").string(),
+            "--instance-kek",
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"};
+    };
+    const std::vector<std::string> unset{"LAKE_BRAND_FILE",
+                                         "LAKE_BRAND_SHORT_NAME",
+                                         "LAKE_BRAND_COMPANY",
+                                         "LAKE_BRAND_ASSISTANT_NAME",
+                                         "LAKE_BRAND_CONSOLE_TITLE",
+                                         "LAKE_BRAND_BY_ORAMA",
+                                         "LAKE_BRAND_LOGO",
+                                         "LAKE_BRAND_LOGO_DARK",
+                                         "LAKE_BRAND_FAVICON",
+                                         "LAKE_BRAND_ACCENT_DARK",
+                                         "LAKE_BRAND_LEGAL_NAME",
+                                         "LAKE_BRAND_TERMS_URL",
+                                         "LAKE_BRAND_PRIVACY_URL",
+                                         "LAKE_RESEND_FROM",
+                                         "LAKE_SUPPORT_EMAIL",
+                                         "LAKE_PUBLIC_HOST",
+                                         "LAKE_EXTERNAL_ORIGIN"};
+    for (const std::vector<std::string>& invalid :
+         {std::vector<std::string>{"LAKE_BRAND_ACCENT=#123456"},
+          std::vector<std::string>{"LAKE_BRAND_NAME=Acme Data",
+                                   "LAKE_BRAND_SUPPORT_EMAIL=help@acme.example"},
+          std::vector<std::string>{"LAKE_BRAND_NAME=Acme Data",
+                                   "LAKE_BRAND_SUPPORT_EMAIL=help@acme.example",
+                                   "LAKE_BRAND_EMAIL_FROM=hello@acme.example",
+                                   "LAKE_BRAND_ACCENT=blue"}}) {
+        const unsigned short port = unused_loopback_port();
+        ASSERT_NE(port, 0);
+        std::vector<std::string> environment = unset;
+        for (const char* name : {"LAKE_BRAND_NAME",
+                                 "LAKE_BRAND_SUPPORT_EMAIL",
+                                 "LAKE_BRAND_EMAIL_FROM",
+                                 "LAKE_BRAND_ACCENT"}) {
+            environment.emplace_back(name);
+        }
+        environment.insert(environment.end(), invalid.begin(), invalid.end());
+        const auto [status, output] = run_lake_until_ready(
+            arguments_for(port), environment, port, temporary.path() / "invalid.log");
+        EXPECT_EQ(status, 2) << invalid.back() << "\n" << output;
+    }
+
+    const unsigned short port = unused_loopback_port();
+    ASSERT_NE(port, 0);
+    std::vector<std::string> environment = unset;
+    environment.insert(environment.end(),
+                       {"LAKE_BRAND_NAME=Acme Data",
+                        "LAKE_BRAND_SUPPORT_EMAIL=help@acme.example",
+                        "LAKE_BRAND_EMAIL_FROM=Acme Data <hello@acme.example>",
+                        "LAKE_BRAND_ACCENT=#aa3300",
+                        "LAKE_PUBLIC_HOST=data.acme.example"});
+    // Started by hand, not by run_lake_until_ready (which stops it once ready), to read its
+    // surfaces while it runs.
+    std::vector<std::string> argv{LAKE_TEST_SERVER_PATH};
+    for (const std::string& argument : arguments_for(port)) {
+        argv.push_back(argument);
+    }
+    std::vector<std::string> variables;
+    for (char** entry = environ; *entry != nullptr; ++entry) {
+        const std::string_view variable(*entry);
+        const std::string name(variable.substr(0, variable.find('=')));
+        if (std::ranges::none_of(environment, [&name](const std::string& given) {
+                return given == name || given.starts_with(name + "=");
+            })) {
+            variables.emplace_back(variable);
+        }
+    }
+    for (const std::string& given : environment) {
+        if (given.find('=') != std::string::npos) {
+            variables.push_back(given);
+        }
+    }
+    std::vector<char*> raw_argv;
+    for (std::string& argument : argv) {
+        raw_argv.push_back(argument.data());
+    }
+    raw_argv.push_back(nullptr);
+    std::vector<char*> raw_environment;
+    for (std::string& variable : variables) {
+        raw_environment.push_back(variable.data());
+    }
+    raw_environment.push_back(nullptr);
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    const std::string log = (temporary.path() / "served.log").string();
+    posix_spawn_file_actions_addopen(
+        &actions, STDOUT_FILENO, log.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    pid_t pid = -1;
+    ASSERT_EQ(
+        ::posix_spawn(
+            &pid, raw_argv.front(), &actions, nullptr, raw_argv.data(), raw_environment.data()),
+        0);
+    posix_spawn_file_actions_destroy(&actions);
+    bool ready = false;
+    for (int attempt = 0; attempt < 200 && !ready; ++attempt) {
+        ready = http_request(port, "GET", "/readyz", "", "application/json").find(" 200 ") !=
+                std::string::npos;
+        if (!ready) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+    ASSERT_TRUE(ready);
+    const std::string llms = http_request(port, "GET", "/llms.txt", "", "text/plain");
+    const std::string skill =
+        http_request(port, "GET", "/skills/acme-data/SKILL.md", "", "text/plain");
+    const std::string console = http_request(
+        port, "GET", "/", "", "text/plain", {}, {}, "localhost", {{"Accept", "text/html"}});
+    const std::string initialize =
+        http_request(port,
+                     "POST",
+                     "/mcp",
+                     R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})",
+                     "application/json");
+    const std::string info = http_request(port, "GET", "/v1/server_info", "", "application/json");
+    ::kill(pid, SIGTERM);
+    static_cast<void>(::waitpid(pid, nullptr, 0));
+
+    EXPECT_NE(llms.find(" 200 "), std::string::npos) << llms.substr(0, 300);
+    EXPECT_NE(llms.find("# Acme Data\n"), std::string::npos);
+    EXPECT_NE(llms.find("https://data.acme.example/skills/acme-data/SKILL.md"), std::string::npos);
+    EXPECT_EQ(llms.find("Orama"), std::string::npos);
+    EXPECT_EQ(llms.find("lake.live"), std::string::npos);
+    EXPECT_NE(skill.find(" 200 "), std::string::npos) << skill.substr(0, 300);
+    EXPECT_NE(skill.find("name: acme-data\n"), std::string::npos);
+    EXPECT_NE(console.find("<title>Acme Data Console</title>"), std::string::npos)
+        << console.substr(0, 600);
+    EXPECT_NE(console.find("--orama-action-default:#aa3300"), std::string::npos);
+    EXPECT_NE(console.find(R"("console_title":"Acme Data Console")"), std::string::npos);
+    EXPECT_NE(initialize.find(R"("serverInfo":{"name":"acme-data","title":"Acme Data")"),
+              std::string::npos)
+        << initialize;
+    EXPECT_NE(info.find(R"("name":"acme-data")"), std::string::npos) << info;
 }
 
 TEST(SyncHttp, StorageQuotaThrottlesNewWritesAndKeepsExistingContentReadable) {
@@ -8989,7 +9237,8 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
                               user_context));
     EXPECT_FALSE(static_token.ok);
     EXPECT_EQ(static_token.error.code, "unauthorized");
-    EXPECT_FALSE(s.store.context_for(token.value["secret"]));
+    // Signing out never ends a key made from that sign-in (lake#1163).
+    EXPECT_TRUE(s.store.context_for(token.value["secret"]));
     auto audit_events = lake::test::audit_events(s.store, lake::audit::Filter{.limit = 100});
     ASSERT_TRUE(audit_events);
     EXPECT_TRUE(std::ranges::any_of(*audit_events, [](const lake::audit::Event& event) {
@@ -9504,6 +9753,101 @@ TEST(WebApp, PermissionsDocsMcpAndPackagesAreCapabilities) {
     EXPECT_EQ(packages.value["available"], true);
     EXPECT_EQ(packages.value["npm"][0]["name"], "left-pad");
     EXPECT_EQ(packages.value["oci"][0]["versions"][0], "latest");
+}
+
+// lake#1098: under Clerk, Clerk is the only way into the Lake pool. The password entries refuse by
+// the same rule that makes viewer say password_sign_up false, and work again without Clerk.
+TEST(Identity, ClerkTurnsOffLakePoolPasswordSignUpAndSignIn) {
+    Surface s;
+    s.ctx.authorized = false;
+    s.ctx.acting_identity.clear();
+    s.ctx.operator_credential = false;
+    const json ada = {{"email", "ada@example.com"}, {"password", "correct horse battery"}};
+    const json outsider = {{"email", "outsider@example.com"},
+                           {"password", "correct horse battery"}};
+
+    // Without Clerk: Lake's own sign-up and sign-in.
+    EXPECT_EQ(s.call("viewer").value["password_sign_up"], true);
+    const ApiResult signed_up = s.call("sign_up_password", ada);
+    ASSERT_TRUE(signed_up.ok) << signed_up.error.message;
+    ASSERT_TRUE(s.call("sign_in_password", ada).ok);
+
+    s.ctx.clerk_publishable_key = "pk_test_YWJvdmUtc2VhaG9yc2UtNzUzNS5jbGVyay5hY2NvdW50cy5kZXYk";
+    EXPECT_EQ(s.call("viewer").value["password_sign_up"], false);
+    const auto refused = [&](const std::string& capability, json input) {
+        const ApiResult result = s.call(capability, std::move(input));
+        EXPECT_FALSE(result.ok) << capability;
+        EXPECT_EQ(result.error.code, "forbidden") << capability << ": " << result.error.message;
+        EXPECT_FALSE(result.value.contains("secret")) << capability;
+    };
+    refused("sign_up_password", outsider);
+    refused("sign_up_password",
+            json{{"pool_id", "lake"},
+                 {"email", "x@example.com"},
+                 {"password", "correct horse battery"}});
+    refused("sign_in_password", ada);
+    json mfa = ada;
+    mfa["code"] = "000000";
+    refused("verify_mfa", mfa);
+    refused("recover_with_code", json{{"email", "ada@example.com"}, {"code", "abcd-efgh"}});
+    // Application pools keep their own password sign-in: the rule is the Lake pool's only.
+    const ApiResult application = s.call("sign_in_password",
+                                         json{{"pool_id", "app-unknown"},
+                                              {"email", "ada@example.com"},
+                                              {"password", "correct horse battery"}});
+    EXPECT_FALSE(application.ok);
+    EXPECT_NE(application.error.code, "forbidden") << application.error.message;
+
+    // The refusal changed nothing: the existing account signs in again once Clerk is off, and the
+    // refused sign-up created no account.
+    s.ctx.clerk_publishable_key.clear();
+    EXPECT_EQ(s.call("viewer").value["password_sign_up"], true);
+    EXPECT_TRUE(s.call("sign_in_password", ada).ok);
+    EXPECT_EQ(s.call("sign_in_password", outsider).error.code, "unauthenticated");
+}
+
+// Sign-up and sign-in link to the instance's terms and privacy policy (liquid-bridge#15): viewer
+// reports them to anyone, signed in or not, and an empty URL means no link.
+TEST(WebApp, ViewerReportsTheTermsAndPrivacyLinks) {
+    Surface s;
+    s.ctx.authorized = false;
+    s.ctx.acting_identity.clear();
+    s.ctx.operator_credential = false;
+    s.ctx.terms_url = "https://example.test/terms";
+    s.ctx.privacy_url = "https://example.test/privacy";
+    const ApiResult visitor = s.call("viewer");
+    ASSERT_TRUE(visitor.ok) << visitor.error.message;
+    EXPECT_EQ(visitor.value["legal"]["terms_url"], "https://example.test/terms");
+    EXPECT_EQ(visitor.value["legal"]["privacy_url"], "https://example.test/privacy");
+
+    s.ctx.terms_url.clear();
+    s.ctx.privacy_url.clear();
+    const ApiResult none = s.call("viewer");
+    ASSERT_TRUE(none.ok) << none.error.message;
+    EXPECT_EQ(none.value["legal"], (json{{"terms_url", ""}, {"privacy_url", ""}}));
+}
+
+TEST(WebApp, LegalUrlSettingsKeepTheDefaultTurnOffOrRefuse) {
+    using lake::api::legal_url_setting;
+    const std::string_view fallback = lake::api::default_terms_url;
+    EXPECT_EQ(fallback, "https://www.orama.com/legal/terms");
+    EXPECT_EQ(lake::api::default_privacy_url, "https://www.orama.com/legal/privacy");
+    EXPECT_EQ(legal_url_setting("LAKE_TERMS_URL", nullptr, fallback).value(), fallback);
+    EXPECT_EQ(legal_url_setting("LAKE_TERMS_URL", "", fallback).value(), fallback);
+    EXPECT_EQ(legal_url_setting("LAKE_TERMS_URL", "off", fallback).value(), "");
+    EXPECT_EQ(legal_url_setting("LAKE_TERMS_URL", "https://acme.example/legal/terms?v=2#top", fallback).value(),
+              "https://acme.example/legal/terms?v=2#top");
+    EXPECT_EQ(legal_url_setting("LAKE_PRIVACY_URL", "http://localhost:3000/privacy", fallback).value(),
+              "http://localhost:3000/privacy");
+    for (const char* bad : {"javascript:alert(1)", "/legal/terms", "www.orama.com/legal/terms", "https://",
+                            "https://a.example/x y", "https://a.example/\"x", "https://a.example/<b>",
+                            "ftp://a.example/terms"}) {
+        const auto refused = legal_url_setting("LAKE_TERMS_URL", bad, fallback);
+        ASSERT_FALSE(refused.has_value()) << bad;
+        EXPECT_TRUE(refused.error().starts_with("LAKE_TERMS_URL ")) << refused.error();
+    }
+    const std::string long_url = "https://a.example/" + std::string(2048, 'a');
+    EXPECT_FALSE(legal_url_setting("LAKE_PRIVACY_URL", long_url.c_str(), fallback).has_value());
 }
 
 TEST(WebApp, ViewerNamesClerkAndAnOrganizationNamesItsSpace) {

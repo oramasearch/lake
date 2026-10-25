@@ -672,7 +672,7 @@ function ChangePipeline({ project, graph, go }: { project: string; graph: Graph;
     </a>
   );
   return (
-    <Panel title="Change the Pipeline">
+    <Panel title="Change the Pipeline" testId="change-pipeline">
       <div className="pipeline-edit">
         <Form onSubmit={() => add.edit({ op: "add_step", kind, ...(name ? { name } : {}) }, (answer) => text(answer, "step") || null)}>
           <FormError error={add.error} />

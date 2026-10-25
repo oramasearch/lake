@@ -33,6 +33,7 @@ TokenSummary summarize_token(std::string_view token);
 // Shared by Clerk and OIDC. Call on the blocking pool: Fetch may perform network I/O.
 // In-flight refreshes fail closed for other callers; failures also consume the cooldown.
 // `reason`, when given, receives why a token was refused, in words safe to log.
+// `audience_absent`: the token must carry no `aud` (Clerk's default session token, lake#1163).
 class OidcJwks {
 public:
     using Clock = std::chrono::steady_clock;
@@ -48,7 +49,8 @@ public:
                                                                bool public_only,
                                                                const Fetch& fetch,
                                                                bool require_issued_at = false,
-                                                               std::string* reason = nullptr);
+                                                               std::string* reason = nullptr,
+                                                               bool audience_absent = false);
 
 private:
     struct Entry {

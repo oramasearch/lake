@@ -1,9 +1,12 @@
 /** Customers (`/customers`): the tenants, each an individual's or an organization's
- * (web_ui_customers, serve_customers_page). */
+ * (web_ui_customers, serve_customers_page). The operator gives a credit from Orama here by account
+ * ID or a person's email (Give credit, lake#1134), where billing is on. */
 import { useState } from "react";
-import { Building2, User, Users } from "lucide-react";
+import { Building2, Gift, User, Users } from "lucide-react";
 import { useList, type Row } from "@/lib/api";
-import { Chip, DataTable, FilterChips, Mono, Page, SearchInput, Stat, StatRow, Toolbar } from "@/lib/ui";
+import { useSession } from "@/lib/session";
+import { GiveCredit } from "@/pages/billing/GiveCredit";
+import { Button, Chip, DataTable, FilterChips, Mono, Page, SearchInput, Stat, StatRow, Toolbar } from "@/lib/ui";
 import { NameCell, PanelEmpty, When, countBy, matches, useMetaTrail } from "@/pages/organizations/shared";
 
 export default function CustomersPage() {
@@ -14,8 +17,22 @@ export default function CustomersPage() {
   const all = customers.data;
   const rows = all?.filter((c) => matches(search, c.name, c.user_id, c.organization_id, c.id) && (!type || c.customer_type === type));
   const of = (t: string) => (all ?? []).filter((c) => c.customer_type === t).length;
+  const { viewer } = useSession();
+  const [giving, setGiving] = useState(false);
   return (
-    <Page eyebrow="Administration" title="Customers" sub="The tenants. Each is an individual or an organization and owns its repositories.">
+    <Page
+      eyebrow="Administration"
+      title="Customers"
+      sub="The tenants. Each is an individual or an organization and owns its repositories."
+      actions={
+        viewer.administrator && viewer.billing ? (
+          <Button onClick={() => setGiving(true)}>
+            <Gift size={14} aria-hidden /> Give credit
+          </Button>
+        ) : undefined
+      }
+    >
+      {giving && <GiveCredit onClose={() => setGiving(false)} />}
       {all && all.length > 0 && (
         <StatRow cols={3}>
           <Stat label="Customers" value={all.length} icon={Users} />

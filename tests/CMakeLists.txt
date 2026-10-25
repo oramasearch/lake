@@ -29,6 +29,8 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_web_app.cpp test_ma
   test_transcripts.cpp
   test_mcp_client.cpp
   test_solutions.cpp
+  test_quickstart.cpp
+  test_browser_keys.cpp
   test_methodologies.cpp
   test_drives.cpp
   test_store_providers.cpp
@@ -39,6 +41,8 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_web_app.cpp test_ma
   test_model_gateway.cpp
   test_billing.cpp
   test_balance.cpp
+  test_client_address.cpp
+  test_coupons.cpp
   test_stripe.cpp
   test_sealed_delivery.cpp
   test_workspace_deletion.cpp
@@ -76,6 +80,8 @@ target_sources(lake-tests PRIVATE test_network_capabilities.cpp test_network_tun
 target_sources(lake-tests PRIVATE test_tunnel_clients.cpp)
 # Regions and the apex region picker (lake#757).
 target_sources(lake-tests PRIVATE test_regions.cpp)
+# A white-labelled Lake: host aliases, the control host and SSO-only sign-in (lake#1136).
+target_sources(lake-tests PRIVATE test_white_label.cpp)
 # SAML sign-in through the Assertion Consumer Service (lake#836).
 target_sources(lake-tests PRIVATE test_saml.cpp)
 # OpenID Connect discovery for Lake OAuth and enterprise OIDC (lake#837).
@@ -86,6 +92,10 @@ target_sources(lake-tests PRIVATE test_orders.cpp)
 target_sources(lake-tests PRIVATE test_identity_proof.cpp)
 # The version and its release page (root CLAUDE.md, *Cutting a release*).
 target_sources(lake-tests PRIVATE test_release_version.cpp)
+# `lake manifest`: the schema, Stripe events and environment the operator reads (lake#1119).
+target_sources(lake-tests PRIVATE test_manifest.cpp)
+# A white-labelled Lake's brand on every page, email and agent surface (lake#1135, lake#1137).
+target_sources(lake-tests PRIVATE test_brand.cpp)
 target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx OpenSSL::Crypto
   Boost::beast2 Boost::http Boost::corosio GTest::gtest
   # zetta-api for a fake Zetta HTTP transport under ZettaWorkspaceCaller (test_workspaces.cpp).
@@ -103,10 +113,14 @@ add_dependencies(lake-tests lake)
 include(GoogleTest)
 gtest_discover_tests(lake-tests)
 
-add_executable(lake-postgres-tests test_main.cpp test_postgres.cpp test_operator_contract.cpp test_network.cpp)
+add_executable(lake-postgres-tests test_main.cpp test_postgres.cpp test_operator_contract.cpp test_network.cpp
+  # `lake migrate` against empty, current and concurrent databases (lake#1119).
+  test_migrate.cpp)
 target_link_libraries(lake-postgres-tests PRIVATE lake-control-postgres pqxx OpenSSL::Crypto GTest::gtest)
 target_compile_definitions(lake-postgres-tests PRIVATE
-  LAKE_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+  LAKE_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+  LAKE_TEST_SERVER_PATH="$<TARGET_FILE:lake>")
+add_dependencies(lake-postgres-tests lake)
 gtest_discover_tests(lake-postgres-tests)
 
 add_executable(lake-debug-fixture debug_fixture.cpp)

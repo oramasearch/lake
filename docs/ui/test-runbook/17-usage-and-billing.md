@@ -602,6 +602,74 @@ Expect:
 - The figures stack; **Invoices** and **Billing Contact** drop below **This Month So Far**.
 - The lines table scrolls inside its box; the contact form's fields are one per row.
 
+#### BILL-050 · Give credit and revoke it from an account's Billing page · billing on · P0
+As: operator, then owner · Needs: billing on, an email inbox for `owner`
+
+1. As `operator`, open `/billing?customer_id=<owner's account id>` and press **Give credit**.
+2. Enter **Amount (USD)** `25`, **Reason** `qa-<MMDD> credit`, a **Last day it counts** next month,
+   and press **Give credit**.
+3. As `owner`, open **Organization → Billing**, then check `owner`'s inbox.
+4. As `operator`, press **Revoke** on the credit's row and confirm.
+
+Expect:
+- Step 1: the dialog "Give Credit" says the credit is spent before paid money, is not cash and does
+  not unlock the overdraft. **Give credit** stays disabled until the amount and reason are valid.
+- Step 2: a toast with the new balance and "the account was emailed"; the history has **Credit from
+  Orama** +$25.00 with "qa-<MMDD> credit · expires <date> · $25.00 left".
+- Step 3: `owner` sees the same row, no **Revoke**, and **Added** reads "Top-ups and credits from
+  Orama". One email "Orama added $25.00 of credit to your Lake account", with no reason in it.
+- Step 4: toast "Credit revoked: $25.00 unused stopped counting" (less what was used since); a row
+  **Credit from Orama revoked** (−) appears and the credit's row has no **Revoke**.
+- *API* `audit` shows `billing.balance.credit_granted` and `billing.balance.credit_revoked` on
+  `customer/<id>/billing`.
+
+#### BILL-051 · A credit alone does not unlock the overdraft · billing on · P1
+As: operator, then a new account · Needs: billing on
+
+1. Sign up a new test account `qa-<MMDD>-credit`. As `operator`, give it $1 from **Customers → Give
+   credit** by its email.
+2. As the new account, start a workspace, and use it until the balance reaches $0.
+
+Expect:
+- Before the credit: **Add Funds to Start**. After it: no banner; paid work starts.
+- At $0: the banner **Your Credit Is Used Up**, and starting paid work answers "…credit from Orama
+  is used up. Add $20.00 to go on". The **Limit** reads $0.00, never -$50.00.
+
+#### BILL-052 · A coupon link carried through sign-up · billing on · P0
+As: a new person, then a second account · Needs: billing on, ADM-048's code, a fresh test inbox
+
+1. In a private window, open `https://lake.live/?code=qa<MMDD>50` (or this Lake's host with
+   `?code=`), choose a region on the picker if it shows, and sign up with Clerk as
+   `qa-<MMDD>-coupon`.
+2. After the first signed-in page loads, open **Organization → Billing**.
+3. Reload the page.
+4. Sign up a second account with the same inbox plus a `+tag` (Gmail: also with a dot moved) and
+   redeem `qa<MMDD>50` in **Billing → Redeem a Code**.
+5. As an account that existed before ADM-048, redeem `qa<MMDD>50` in **Redeem a Code**.
+
+Expect:
+- Step 1: the picker says "Your code **QA<MMDD>50** goes with you"; the region's address has the
+  `?code=`, which is gone from the address once the app opens.
+- After sign-up, a banner **Welcome to Lake**: "You have $50.00 of credit from Orama." One email
+  "Orama added $50.00 of credit to your Lake account".
+- Step 2: the balance is $50.00; the history lists **Credit from Orama** with "Coupon code
+  QA<MMDD>50" and an expiry 90 days out.
+- Step 3: no second banner, no second credit.
+- Step 4: "You have already redeemed this code with another account."
+- Step 5: "This code is for new accounts only, and this account was created before it."
+- *API* `audit` shows `billing.coupon.redeemed` (with the code and campaign) and
+  `billing.coupon.refused` entries carrying only a `code_digest`.
+
+#### BILL-053 · Wrong codes are limited · billing on · P2
+As: owner · Needs: billing on
+
+1. In **Billing → Redeem a Code**, redeem `WRONG1` … `WRONG10`.
+2. Redeem a real code.
+
+Expect:
+- Step 1: "That code does not work on this Lake." each time.
+- Step 2: "Too many codes that did not work. Try again in an hour."; nothing is credited.
+
 ## Billing off
 
 #### BILL-048 · No Billing where the Lake does not bill · billing off · P0

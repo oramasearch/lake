@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <format>
 #include <initializer_list>
 
+#include "lake/api/brand.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/mcp.hpp"
 
@@ -32,6 +34,23 @@ struct GroupRule {
 // none of them claims falls to `ungrouped`, which Docs.EveryCapabilityHasADeliberateGroup keeps
 // empty (lake#642).
 constexpr std::array group_rules{
+    // The quickstart process (lake#1128, docs/api/quickstart.md): first, so an agent finds it
+    // before anything else.
+    GroupRule{"Quickstart",
+              "Start here. The quickstart process takes a dataset to search and model answers on "
+              "your own website in four calls: start_quickstart (makes the workspace when there "
+              "is none, adds the dataset, builds and publishes its search index), "
+              "quickstart_status (each step's state and what to call next), train_quickstart "
+              "(trains a model on the same data, then publishes it) and quickstart_snippets (the "
+              "plain web page, React and curl code with the hosts and ids filled in; with "
+              "`origins` it also makes the browser key the code needs). A step that fails says why "
+              "and is resumed by the "
+              "next call; paid steps answer 402 payment_required with the top-up link while the "
+              "balance is blocked.",
+              [](std::string_view n) {
+                  return n == "start_quickstart" || n == "quickstart_status" ||
+                         n == "train_quickstart" || n == "quickstart_snippets";
+              }},
     GroupRule{
         "Experiments",
         "Read training experiments (each trial is one run of its settings), run metrics, "
@@ -92,6 +111,19 @@ constexpr std::array group_rules{
               "of them (search_workspace_index), and publish or withdraw one's endpoint. "
               "search_index searches a published index.",
               [](std::string_view n) { return engine_capability_group(n) == "Search indexes"; }},
+    // Browser keys (lake#1152, docs/api/browser-keys.md): before Identity, whose rule takes
+    // anything named like a token.
+    GroupRule{"Browser keys",
+              "The key a website's own page holds: bound to one search index (and optionally one "
+              "model) of one workspace, callable only for search_index and predict on them, only "
+              "from the website origins it lists, so many times a minute, and lasting until it is "
+              "revoked, not until its maker signs out. create_browser_key answers its secret once; "
+              "list_browser_keys and revoke_browser_key manage them. An API token, an agent or an "
+              "MCP client with write on the account may make one.",
+              [](std::string_view n) {
+                  return n == "create_browser_key" || n == "list_browser_keys" ||
+                         n == "revoke_browser_key";
+              }},
     GroupRule{"Datasets",
               "Load data into a workspace (upload_dataset, create_dataset_from_query from a saved "
               "connection), read what a dataset holds and how to featurize it (analyze_dataset, "
@@ -186,8 +218,9 @@ constexpr std::array group_rules{
               "paid through Stripe. lake.live is prepaid: account_balance is the balance "
               "(top-ups minus usage charges), start_top_up adds funds through Stripe Checkout, "
               "set_auto_top_up tops up from a saved card, and past the overdraft every call that "
-              "starts paid work answers 402 payment_required. An enterprise install has no "
-              "billing, and these answer not_found.",
+              "starts paid work answers 402 payment_required. redeem_coupon redeems a coupon "
+              "code for credit from Orama; the operator makes codes with create_coupon. An "
+              "enterprise install has no billing, and these answer not_found.",
               [](std::string_view n) {
                   return contains_any(n,
                                       {"usage",
@@ -196,7 +229,8 @@ constexpr std::array group_rules{
                                        "bill",
                                        "metering",
                                        "balance",
-                                       "top_up"}) ||
+                                       "top_up",
+                                       "coupon"}) ||
                          n == "set_storage_quota";
               }},
     GroupRule{"Streams",
@@ -306,7 +340,8 @@ constexpr std::array group_rules{
               "Sign-in, passkeys, multi-factor authentication, sessions, tokens, devices, "
               "recovery, and deleting your account (delete_account, `dry_run: true` first).",
               [](std::string_view n) {
-                  return n == "delete_account" || contains_any(n,
+                  return n == "delete_account" || n == "sign_out_everywhere" ||
+                         contains_any(n,
                                       {"sign_in",
                                        "sign_up",
                                        "passkey",
@@ -377,12 +412,14 @@ constexpr std::array group_rules{
 };
 
 // The order groups are shown in.
-constexpr std::array<std::string_view, 30> group_order{"Workspace: Design, Train and Ship",
+constexpr std::array<std::string_view, 32> group_order{"Quickstart",
+                                                       "Workspace: Design, Train and Ship",
                                                        "Projects and pipelines",
                                                        "Training and runs",
                                                        "Experiments",
                                                        "Models",
                                                        "Search indexes",
+                                                       "Browser keys",
                                                        "Datasets",
                                                        "Connections",
                                                        "Decisions",
@@ -422,16 +459,55 @@ std::string mcp_endpoint(std::string_view origin) {
     return std::string(origin) + "/mcp";
 }
 
+// The variable a person keeps their key in, after the brand's short name: LAKE_KEY for Lake.
+std::string key_variable(std::string_view short_name) {
+    std::string out;
+    for (const char c : short_name) {
+        out += c == '-' ? '_' : static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    return out + "_KEY";
+}
+
+// A document written in Lake's words, in the instance brand's (lake#1137): every line but the
+// JSON input schemas, which llms_full_txt brands field by field so no enum value or key changes.
+// Unchanged for Lake's own brand.
+std::string in_brand(std::string_view markdown) {
+    const Brand& brand = instance_brand();
+    if (!brand.custom) {
+        return std::string(markdown);
+    }
+    static constexpr std::string_view open = "```json\n";
+    static constexpr std::string_view close = "\n```";
+    std::string out;
+    std::size_t at = 0;
+    while (at < markdown.size()) {
+        const std::size_t fence = markdown.find(open, at);
+        if (fence == std::string_view::npos) {
+            break;
+        }
+        const std::size_t end = markdown.find(close, fence + open.size());
+        if (end == std::string_view::npos) {
+            break;
+        }
+        out += brand.apply(markdown.substr(at, fence - at));
+        out += markdown.substr(fence, end - fence);
+        at = end;
+    }
+    out += brand.apply(markdown.substr(at));
+    return out;
+}
+
 std::string how_to_connect(std::string_view origin) {
+    const std::string& short_name = instance_brand().short_name;
     return std::format(
         "Lake's MCP server is `{0}` (Streamable HTTP, JSON-RPC 2.0, protocol {1}: `initialize`, "
         "`ping`, `tools/list`, `tools/call`). Authenticate with `Authorization: Bearer <key>`: a "
-        "Lake API token. Create one on {2}/developer/mcp (or {2}/tokens). A token lasts as long as "
-        "the sign-in that made it (at most 30 days) unless it is a standing key that never "
-        "expires, which the account or organization must allow and which names its tools and a "
-        "reason.\n\n"
-        "- Claude Code: `claude mcp add --transport http lake {0} --header \"Authorization: "
-        "Bearer $LAKE_KEY\"`\n"
+        "Lake API token. Create one on {2}/developer/mcp (or {2}/tokens). A token lasts at most "
+        "as long as the sign-in that made it had left (at most 30 days), and signing out does not "
+        "end it, unless it is a standing key that never expires, which the account or "
+        "organization must allow and which names its tools and a reason.\n\n"
+        "- Claude Code: `claude mcp add --transport http {3} {0} --header \"Authorization: "
+        "Bearer ${4}\"`\n"
         "- REST: every tool is also `{2}/v1/<tool>` (a read is GET with a query string, an "
         "action is POST with a JSON body); the schema is `{2}/v1/openapi.json`.\n"
         "- Answers are `{{\"ok\": true, \"value\": …}}` or `{{\"ok\": false, \"error\": "
@@ -442,7 +518,9 @@ std::string how_to_connect(std::string_view origin) {
         "or ignores the notice keeps the tools and schemas it first listed.\n",
         mcp_endpoint(origin),
         mcp_protocol_version,
-        origin);
+        origin,
+        short_name,
+        key_variable(short_name));
 }
 
 std::string flows_markdown(const Registry& registry) {
@@ -490,6 +568,15 @@ constexpr std::string_view rules =
     "`unauthenticated` (HTTP 401) "
     "carries `reason` (`missing`, `invalid` or `expired`) and `help`, the page that makes a new "
     "key.\n";
+
+// The first thing an agent connected to Lake should know (lake#1128): the quickstart process.
+constexpr std::string_view start_here =
+    "New to Lake, or helping someone who is? Run the **quickstart process**: `start_quickstart` "
+    "with a dataset file's text makes the workspace if there is none, loads the dataset, and "
+    "builds and publishes a search index; `quickstart_snippets` answers the code that puts a "
+    "search box on a website; `train_quickstart` trains a model on the same data and publishes "
+    "it, so the snippets show its answer beside each result. `quickstart_status` says where each "
+    "step stands and what to call next. The worked flow is the first one below.\n";
 
 constexpr std::string_view what_lake_does =
     "- **Data**: repositories (liquid version control with reviews, issues and releases), drives "
@@ -550,6 +637,32 @@ std::vector<std::string> read_tool_names(const Registry& registry) {
 
 const std::vector<Flow>& flows() {
     static const std::vector<Flow> all{
+        {"Quickstart: search and model answers on your website",
+         "Start here (lake#1128). A dataset becomes a search box on your website, then a model "
+         "trained on the same data answers beside each result. Every step is kept in the "
+         "workspace and resumed by calling again.",
+         {{"start_quickstart",
+           "`customer_id` (list_customers or viewer), the file's `content` with `format: "
+           "\"csv\"|\"jsonl\"` (or `dataset_id`); `workspace_id` optional: without it the "
+           "account's first workspace is used and made if absent. While it starts the answer is "
+           "`waiting_for_workspace`: call again with the same input and the `workspace_id` once "
+           "it is ready. Answers `quickstart_id` and each step's state"},
+          {"quickstart_status",
+           "`customer_id`, `workspace_id`: the steps (workspace, dataset, search_index, website, "
+           "model, model_answers), `next`, and with `include_costs` what the paid steps cost "
+           "against the balance"},
+          {"quickstart_snippets",
+           "`customer_id`, `workspace_id`, `origins` (your website's address, such as "
+           "[\"https://www.example.com\"]): plain web page, React and curl code with a browser "
+           "key made for that website already in it (`key.secret`, shown once). Without "
+           "`origins` it makes nothing, and `key.create` is the create_browser_key call"},
+          {"train_quickstart",
+           "`customer_id`, `workspace_id`, `target` (the column to predict), `entity_column` "
+           "(the column that names a row): starts training; read quickstart_status until the "
+           "model step is done, then call it again to publish the model"},
+          {"quickstart_snippets",
+           "again: the code now shows the model's answer beside each "
+           "search result"}}},
         {"Build and run a pipeline",
          "A pipeline is a Zetta execution graph of steps (connect, clean, model, index, serve, "
          "act) joined by edges.",
@@ -737,34 +850,20 @@ const std::vector<Flow>& flows() {
           {"expose_index", "`index_id` to publish it (`unexpose_index` to stop)"},
           {"search_index",
            "`index_id`, `query`; optional `field`, `top_k`, `fields` (which row fields each "
-           "hit carries)"}}},
+           "hit carries)"},
+          {"create_browser_key",
+           "`workspace_id`, `index_id`, `origins` (the website's address), optional `model_id`: "
+           "the key a web page holds, which searches only that index from only that website; "
+           "its `secret` is answered once"}}},
     };
     return all;
 }
 
-std::string llms_txt(const Registry& registry, std::string_view origin) {
-    std::string out = std::format(
-        "# Lake\n\n"
-        "> Lake is Orama's platform for designing, training and shipping AI on your own data. "
-        "Each account (yours or an organization's) has workspaces, and every data call names one "
-        "with `workspace_id`. Everything a person can do in the Lake Console is a capability in "
-        "one registry, served as REST, OpenAPI and MCP.\n\n"
-        "## What Lake Does\n\n{2}\n"
-        "## Connect\n\n{0}\n"
-        "## The Lake skill for Claude\n\n"
-        "Download [SKILL.md]({1}/skills/lake/SKILL.md) (public, no key needed) and install it:\n\n"
-        "```sh\nmkdir -p ~/.claude/skills/lake && curl -fsSL {1}/skills/lake/SKILL.md -o "
-        "~/.claude/skills/lake/SKILL.md\n```\n\n"
-        "It says how to connect, which tools to use for which task, the worked flows and the "
-        "rules.\n\n"
-        "## Learn more\n\n"
-        "- [Every tool with its input schema]({1}/llms-full.txt)\n"
-        "- [OpenAPI]({1}/v1/openapi.json)\n"
-        "- [MCP setup and keys]({1}/developer/mcp)\n\n"
-        "## Tools\n\n",
-        how_to_connect(origin),
-        origin,
-        what_lake_does);
+namespace {
+
+// llms.txt's tool list, worked flows and rules: the same on a region and on the apex.
+std::string tools_flows_and_rules(const Registry& registry) {
+    std::string out = "## Tools\n\n";
     for (const Group& group : tool_groups(registry)) {
         out += std::format("### {}\n\n{}\n\n", group.title, group.summary);
         for (const Tool& tool : group.tools) {
@@ -778,21 +877,23 @@ std::string llms_txt(const Registry& registry, std::string_view origin) {
     return out;
 }
 
-std::string llms_full_txt(const Registry& registry, std::string_view origin) {
-    std::string out = std::format("# Lake — every tool\n\n{}\nThe Lake skill for Claude: "
-                                  "{}/skills/lake/SKILL.md (public).\n\n",
-                                  how_to_connect(origin),
-                                  origin);
+// llms-full.txt's reference: every tool with its input schema, the worked flows and the rules.
+std::string tool_reference(const Registry& registry) {
+    const Brand& brand = instance_brand();
+    std::string out;
     for (const Group& group : tool_groups(registry)) {
         out += std::format("## {}\n\n{}\n\n", group.title, group.summary);
         for (const Tool& tool : group.tools) {
             const auto capability = registry.find(tool.name);
+            nlohmann::json schema =
+                capability ? capability->input_schema : nlohmann::json::object();
+            brand.apply_to_documentation(schema);
             out += std::format("### `{}` — {}\n\n{} {}\n\nInput schema:\n\n```json\n{}\n```\n\n",
                                tool.name,
                                tool.title,
                                tool.writes ? "**Write.**" : "**Read.**",
                                tool.description,
-                               capability ? capability->input_schema.dump(2) : "{}");
+                               schema.dump(2));
         }
     }
     out += "## Worked flows\n\n" + flows_markdown(registry);
@@ -800,27 +901,9 @@ std::string llms_full_txt(const Registry& registry, std::string_view origin) {
     return out;
 }
 
-std::string skill_md(const Registry& registry, std::string_view origin) {
-    std::string out = std::format(
-        "---\n"
-        "name: lake\n"
-        "description: Work in Lake ({0}) through its MCP server — Design, Train and Ship in a "
-        "workspace (projects, pipelines, data, runs, experiments, models, search indexes), "
-        "drives, transcripts, agents, apps, managed services (Postgres, Kafka, ClickHouse, …), "
-        "repositories, usage and billing. Use when asked to build or run a pipeline, load data, "
-        "keep files in a drive, search, stand up or connect a database service, check usage or "
-        "the bill, or do anything on Lake.\n"
-        "---\n\n"
-        "# Lake\n\n"
-        "## What Lake Does\n\n{2}\n"
-        "## Connect\n\n{1}\n"
-        "Check the connection with `server_info`, then `tools/list`. Full reference: "
-        "{0}/llms.txt and {0}/llms-full.txt (every tool's input schema). The latest copy of this "
-        "skill is always at {0}/skills/lake/SKILL.md.\n\n"
-        "## Which tools for which task\n\n",
-        origin,
-        how_to_connect(origin),
-        what_lake_does);
+// The skill's task map, flows and rules.
+std::string skill_tools_flows_and_rules(const Registry& registry) {
+    std::string out = "## Which tools for which task\n\n";
     for (const Group& group : tool_groups(registry)) {
         if (group.title == "Server") {
             continue;
@@ -840,6 +923,207 @@ std::string skill_md(const Registry& registry, std::string_view origin) {
     out += "\n## Flows\n\n" + flows_markdown(registry);
     out += "## Rules\n\n" + std::string(rules);
     return out;
+}
+
+std::string region_origin(const Region& region) {
+    return "https://" + region.host;
+}
+
+// The apex's region list (lake#1110): every region's Lake and the agent URLs it serves.
+std::string regions_markdown(const Regions& regions) {
+    std::string out;
+    for (const Region& region : regions.list) {
+        const std::string origin = region_origin(region);
+        out += std::format("### {0} (`{1}`): {2}\n\n"
+                           "- MCP server: `{2}/mcp`\n"
+                           "- Agent guide: {2}/llms.txt\n"
+                           "- Every tool with its input schema: {2}/llms-full.txt\n"
+                           "- Claude skill: {2}/skills/lake/SKILL.md\n"
+                           "- Sign up or sign in: {2}/\n"
+                           "- API tokens for MCP: {2}/developer/mcp\n"
+                           "- OpenAPI: {2}/v1/openapi.json\n"
+                           "- Claude Code: `claude mcp add --transport http lake-{3} {2}/mcp "
+                           "--header \"Authorization: Bearer $LAKE_KEY\"`\n\n",
+                           region.label,
+                           region.name,
+                           origin,
+                           region.host.substr(0, region.host.find('.')));
+    }
+    return out;
+}
+
+// What the apex says about regions before anything else: it is not a Lake, which region to use,
+// and that nothing crosses between regions.
+std::string apex_regions_section(const Regions& regions, std::string_view apex_origin) {
+    // "A (a.host), B (b.host) and C (c.host)", and one MCP server name per region: lake-<the
+    // first label of its host>.
+    const auto joined = [&regions](auto item) {
+        std::string out;
+        for (std::size_t i = 0; i < regions.list.size(); ++i) {
+            out += (i == 0 ? "" : (i + 1 == regions.list.size() ? " and " : ", ")) +
+                   item(regions.list[i]);
+        }
+        return out;
+    };
+    const std::string names = joined(
+        [](const Region& region) { return std::format("{} ({})", region.label, region.host); });
+    const std::string server_names = joined([](const Region& region) {
+        return "`lake-" + region.host.substr(0, region.host.find('.')) + "`";
+    });
+    return std::format(
+        "## Choose a region first\n\n"
+        "{0} is not a Lake: it lists Lake's regions, {1}. Each region is a separate Lake, with "
+        "its own accounts, sign-up, API tokens and MCP server. A workspace lives in the region it "
+        "was created in and is reached only through that region; a token from one region does "
+        "not work in another.\n\n"
+        "Use the region where the person's account and workspaces are. For a new account, ask "
+        "the person which region to use (where their data must stay, else the closest). Then "
+        "use that region's URLs below for everything: the MCP server, the REST API, the guides "
+        "and the skill. People choose a region, and see the plans and prices, at {0}/.\n\n"
+        "## Regions\n\n{2}"
+        "Every region's MCP server is Streamable HTTP, JSON-RPC 2.0, protocol {3} (`initialize`, "
+        "`ping`, `tools/list`, `tools/call`), authenticated with `Authorization: Bearer <key>`: "
+        "a Lake API token made in that region. Every tool is also `<region>/v1/<tool>` over REST "
+        "(a read is GET with a query string, an action is POST with a JSON body). Answers are "
+        "`{{\"ok\": true, \"value\": …}}` or `{{\"ok\": false, \"error\": {{\"code\", "
+        "\"message\"}}}}`. To work in more than one region, add one MCP server per region under "
+        "different names ({4}).\n\n",
+        apex_origin,
+        names,
+        regions_markdown(regions),
+        mcp_protocol_version,
+        server_names);
+}
+
+} // namespace
+
+std::string llms_txt(const Registry& registry, std::string_view origin) {
+    std::string out = std::format(
+        "# Lake\n\n"
+        "> Lake is Orama's platform for designing, training and shipping AI on your own data. "
+        "Each account (yours or an organization's) has workspaces, and every data call names one "
+        "with `workspace_id`. Everything a person can do in the Lake Console is a capability in "
+        "one registry, served as REST, OpenAPI and MCP.\n\n"
+        "## Start Here\n\n{3}\n"
+        "## What Lake Does\n\n{2}\n"
+        "## Connect\n\n{0}\n"
+        "## The Lake skill for Claude\n\n"
+        "Download [SKILL.md]({1}/skills/{4}/SKILL.md) (public, no key needed) and install it:\n\n"
+        "```sh\nmkdir -p ~/.claude/skills/{4} && curl -fsSL {1}/skills/{4}/SKILL.md -o "
+        "~/.claude/skills/{4}/SKILL.md\n```\n\n"
+        "It says how to connect, which tools to use for which task, the worked flows and the "
+        "rules.\n\n"
+        "## Learn more\n\n"
+        "- [Every tool with its input schema]({1}/llms-full.txt)\n"
+        "- [OpenAPI]({1}/v1/openapi.json)\n"
+        "- [MCP setup and keys]({1}/developer/mcp)\n\n",
+        how_to_connect(origin),
+        origin,
+        what_lake_does,
+        start_here,
+        instance_brand().short_name);
+    return in_brand(out + tools_flows_and_rules(registry));
+}
+
+std::string llms_full_txt(const Registry& registry, std::string_view origin) {
+    std::string out = std::format("# Lake — every tool\n\n## Start Here\n\n{}\n{}\nThe Lake "
+                                  "skill for Claude: {}/skills/{}/SKILL.md (public).\n\n",
+                                  start_here,
+                                  how_to_connect(origin),
+                                  origin,
+                                  instance_brand().short_name);
+    return in_brand(out + tool_reference(registry));
+}
+
+std::string skill_md(const Registry& registry, std::string_view origin) {
+    std::string out = std::format(
+        "---\n"
+        "name: {4}\n"
+        "description: Work in Lake ({0}) through its MCP server — Design, Train and Ship in a "
+        "workspace (the quickstart process first: a dataset to search and model answers on a "
+        "website; then projects, pipelines, data, runs, experiments, models, search indexes), "
+        "drives, transcripts, agents, apps, managed services (Postgres, Kafka, ClickHouse, …), "
+        "repositories, usage and billing. Use when asked to build or run a pipeline, load data, "
+        "keep files in a drive, search, stand up or connect a database service, check usage or "
+        "the bill, or do anything on Lake.\n"
+        "---\n\n"
+        "# Lake\n\n"
+        "## Start Here\n\n{3}\n"
+        "## What Lake Does\n\n{2}\n"
+        "## Connect\n\n{1}\n"
+        "Check the connection with `server_info`, then `tools/list`. Full reference: "
+        "{0}/llms.txt and {0}/llms-full.txt (every tool's input schema). The latest copy of this "
+        "skill is always at {0}/skills/{4}/SKILL.md.\n\n",
+        origin,
+        how_to_connect(origin),
+        what_lake_does,
+        start_here,
+        instance_brand().short_name);
+    return in_brand(out + skill_tools_flows_and_rules(registry));
+}
+
+std::string
+apex_llms_txt(const Registry& registry, const Regions& regions, std::string_view apex_origin) {
+    std::string out = std::format(
+        "# Lake\n\n"
+        "> Lake is Orama's platform for designing, training and shipping AI on your own data. "
+        "It runs as one Lake per region; {0} only lists them. Each account (yours or an "
+        "organization's) has workspaces in one region, and every data call names one with "
+        "`workspace_id`. Everything a person can do in the Lake Console is a capability in one "
+        "registry, served as REST, OpenAPI and MCP by each region.\n\n"
+        "{1}"
+        "## The Lake skill for Claude\n\n"
+        "Download [SKILL.md]({0}/skills/lake/SKILL.md) (public, no key needed; it names every "
+        "region) and install it:\n\n"
+        "```sh\nmkdir -p ~/.claude/skills/lake && curl -fsSL {0}/skills/lake/SKILL.md -o "
+        "~/.claude/skills/lake/SKILL.md\n```\n\n"
+        "A region's own copy (above) names only that region.\n\n"
+        "## Learn more\n\n"
+        "- [Every tool with its input schema]({0}/llms-full.txt)\n\n"
+        "## Start Here\n\n{3}\n"
+        "## What Lake Does\n\n{2}\n",
+        apex_origin,
+        apex_regions_section(regions, apex_origin),
+        what_lake_does,
+        start_here);
+    return in_brand(out + tools_flows_and_rules(registry));
+}
+
+std::string
+apex_llms_full_txt(const Registry& registry, const Regions& regions, std::string_view apex_origin) {
+    std::string out = std::format("# Lake — every tool\n\n{}## Start Here\n\n{}\nThe Lake "
+                                  "skill for Claude: {}/skills/lake/SKILL.md (public, names every "
+                                  "region).\n\n",
+                                  apex_regions_section(regions, apex_origin),
+                                  start_here,
+                                  apex_origin);
+    return in_brand(out + tool_reference(registry));
+}
+
+std::string
+apex_skill_md(const Registry& registry, const Regions& regions, std::string_view apex_origin) {
+    std::string out = std::format(
+        "---\n"
+        "name: lake\n"
+        "description: Work in Lake ({0}, one Lake per region) through its MCP server — Design, "
+        "Train and Ship in a workspace (the quickstart process first: a dataset to search and "
+        "model answers on a website; then projects, pipelines, data, runs, experiments, models, "
+        "search indexes), drives, transcripts, agents, apps, managed services (Postgres, Kafka, "
+        "ClickHouse, …), repositories, usage and billing. Use when asked to build or run a "
+        "pipeline, load data, keep files in a drive, search, stand up or connect a database "
+        "service, check usage or the bill, or do anything on Lake.\n"
+        "---\n\n"
+        "# Lake\n\n"
+        "{1}"
+        "Check the connection with `server_info` (it names the region), then `tools/list`. The "
+        "latest copy of this skill is always at {0}/skills/lake/SKILL.md.\n\n"
+        "## Start Here\n\n{3}\n"
+        "## What Lake Does\n\n{2}\n",
+        apex_origin,
+        apex_regions_section(regions, apex_origin),
+        what_lake_does,
+        start_here);
+    return in_brand(out + skill_tools_flows_and_rules(registry));
 }
 
 } // namespace lake::api::agent_docs

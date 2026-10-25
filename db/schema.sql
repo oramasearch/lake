@@ -4968,3 +4968,148 @@ CREATE TABLE IF NOT EXISTS account_balance_charges (
 );
 CREATE TABLE IF NOT EXISTS account_balances_guard (applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0099_account_balances') ON CONFLICT DO NOTHING;
+-- 0100_balance_grants (lake#1134, docs/api/billing.md#credits-from-orama): credits Orama gives an
+-- account (a design partner, a prize, a make-good), recorded as credits of kind `grant` beside the
+-- paid top-ups, so the balance stays the credits minus the charges. A grant is not a payment: it
+-- never sets first_top_up_at, so it never unlocks the overdraft. It records why, who gave it, when
+-- it stops counting and the account's charges when it was given (it pays only for later usage).
+-- When it expires or is revoked, the unused part (`forfeited_micros`) stops counting; what it paid
+-- for stays paid. Additive: new columns with defaults, the kind check widened, a guard.
+ALTER TABLE account_balance_credits ADD COLUMN IF NOT EXISTS reason text NOT NULL DEFAULT ''
+    CHECK (length(reason) <= 1000);
+ALTER TABLE account_balance_credits ADD COLUMN IF NOT EXISTS granted_by text NOT NULL DEFAULT ''
+    CHECK (length(granted_by) <= 255);
+ALTER TABLE account_balance_credits ADD COLUMN IF NOT EXISTS expires_at timestamptz;
+ALTER TABLE account_balance_credits ADD COLUMN IF NOT EXISTS charges_at_grant_micros bigint NOT NULL
+    DEFAULT 0 CHECK (charges_at_grant_micros >= 0);
+ALTER TABLE account_balance_credits ADD COLUMN IF NOT EXISTS ended_at timestamptz;
+ALTER TABLE account_balance_credits ADD COLUMN IF NOT EXISTS end_reason text NOT NULL DEFAULT ''
+    CHECK (end_reason IN ('', 'expired', 'revoked'));
+ALTER TABLE account_balance_credits ADD COLUMN IF NOT EXISTS charges_at_end_micros bigint NOT NULL
+    DEFAULT 0 CHECK (charges_at_end_micros >= 0);
+ALTER TABLE account_balance_credits ADD COLUMN IF NOT EXISTS forfeited_micros bigint NOT NULL
+    DEFAULT 0 CHECK (forfeited_micros >= 0);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'account_balance_credits_grant_check'
+                     AND conrelid = 'account_balance_credits'::regclass) THEN
+        -- Widened once: 0099 named it from its column.
+        ALTER TABLE account_balance_credits DROP CONSTRAINT IF EXISTS account_balance_credits_kind_check;
+        ALTER TABLE account_balance_credits ADD CONSTRAINT account_balance_credits_kind_check
+            CHECK (kind IN ('top_up', 'auto_top_up', 'grant'));
+        ALTER TABLE account_balance_credits ADD CONSTRAINT account_balance_credits_grant_check CHECK (
+            (kind = 'grant' AND provider = 'orama' AND length(reason) >= 1
+             AND amount_micros <= 10000000000 AND forfeited_micros <= amount_micros
+             AND ((ended_at IS NULL AND end_reason = '' AND forfeited_micros = 0)
+                  OR (ended_at IS NOT NULL AND end_reason <> '')))
+            OR (kind <> 'grant' AND reason = '' AND granted_by = '' AND expires_at IS NULL
+                AND charges_at_grant_micros = 0 AND ended_at IS NULL AND end_reason = ''
+                AND charges_at_end_micros = 0 AND forfeited_micros = 0));
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS account_balance_credits_counting_grants
+    ON account_balance_credits (customer_id) WHERE kind = 'grant' AND ended_at IS NULL;
+CREATE TABLE IF NOT EXISTS balance_grants_guard (applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0100_balance_grants') ON CONFLICT DO NOTHING;
+-- 0101_coupons (lake#1156, docs/api/billing.md#coupon-codes): codes the operator puts in ads, each
+-- worth an amount of cloud credit. A redemption is an ordinary grant from Orama (0100), with the
+-- reference `coupon:<coupon id>:<customer id>`, so the spending order, expiry and no-overdraft rules
+-- are the grant's. Billing, so in the control plane (decision 56). Codes are stored normalized
+-- (upper case letters and digits). One redemption per account and per verified email (kept as a
+-- SHA-256 digest of the normalized address, never the address); `redemptions` is the count the
+-- total cap is checked against, under the coupon's row lock. Failed attempts are counted per client
+-- and per person in `billing_coupon_attempts` (SHA-256 digests of the keys, never a code). Additive:
+-- three new tables and a guard.
+CREATE TABLE IF NOT EXISTS billing_coupons (
+    id                uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    code              text        NOT NULL UNIQUE CHECK (code ~ '^[A-Z0-9]{4,32}$'),
+    amount_micros     bigint      NOT NULL CHECK (amount_micros BETWEEN 10000 AND 10000000000
+                                                  AND amount_micros % 10000 = 0),
+    credit_days       integer     NOT NULL CHECK (credit_days BETWEEN 1 AND 3650),
+    expires_at        timestamptz,
+    max_redemptions   integer     CHECK (max_redemptions IS NULL OR max_redemptions BETWEEN 1 AND 10000000),
+    new_accounts_only boolean     NOT NULL DEFAULT true,
+    campaign          text        NOT NULL DEFAULT ''
+                                  CHECK (campaign = '' OR campaign ~ '^[a-z0-9][a-z0-9._-]{0,63}$'),
+    redemptions       integer     NOT NULL DEFAULT 0
+                                  CHECK (redemptions >= 0 AND (max_redemptions IS NULL
+                                                               OR redemptions <= max_redemptions)),
+    created_by        text        NOT NULL CHECK (length(created_by) BETWEEN 1 AND 255),
+    created_at        timestamptz NOT NULL DEFAULT now(),
+    disabled_at       timestamptz,
+    disabled_by       text        NOT NULL DEFAULT '' CHECK (length(disabled_by) <= 255)
+);
+CREATE INDEX IF NOT EXISTS billing_coupons_by_campaign ON billing_coupons (campaign, created_at DESC);
+CREATE TABLE IF NOT EXISTS billing_coupon_redemptions (
+    id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    coupon_id    uuid        NOT NULL REFERENCES billing_coupons(id) ON DELETE CASCADE,
+    customer_id  uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    email_sha256 text        NOT NULL CHECK (email_sha256 ~ '^[0-9a-f]{64}$'),
+    redeemed_by  text        NOT NULL CHECK (length(redeemed_by) BETWEEN 1 AND 255),
+    credit_id    uuid        REFERENCES account_balance_credits(id) ON DELETE SET NULL,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (coupon_id, customer_id),
+    UNIQUE (coupon_id, email_sha256)
+);
+CREATE INDEX IF NOT EXISTS billing_coupon_redemptions_by_customer
+    ON billing_coupon_redemptions (customer_id);
+CREATE TABLE IF NOT EXISTS billing_coupon_attempts (
+    key_sha256   text        PRIMARY KEY CHECK (key_sha256 ~ '^[0-9a-f]{64}$'),
+    failures     integer     NOT NULL CHECK (failures >= 0),
+    window_start timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS billing_coupon_attempts_by_window ON billing_coupon_attempts (window_start);
+CREATE TABLE IF NOT EXISTS coupons_guard (applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0101_coupons') ON CONFLICT DO NOTHING;
+
+-- 0102_browser_keys (lake#1152, docs/api/browser-keys.md): the key a website's own page holds.
+-- A credential, so in the control plane beside sessions and the keystore (multitenancy, decision
+-- 53): its SHA-256 (never the secret), its binding (one workspace, one search index, optionally
+-- one model), the website origins it may be called from, its calls a minute and the current
+-- minute's count (one row every replica counts in), who made it, its optional expiry and its
+-- revocation. It names no session, so signing out leaves it working. Additive: one table and a
+-- guard. 0100 and 0101 are taken by open pull requests (lake#1155, lake#1156).
+CREATE TABLE IF NOT EXISTS browser_keys (
+    id                    uuid        PRIMARY KEY,
+    customer_id           uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    workspace_id          uuid        NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    index_id              text        NOT NULL CHECK (length(index_id) BETWEEN 1 AND 256),
+    model_id              text        NOT NULL DEFAULT '' CHECK (length(model_id) <= 256),
+    name                  text        NOT NULL DEFAULT '' CHECK (length(name) <= 200),
+    origins               text[]      NOT NULL CHECK (cardinality(origins) BETWEEN 1 AND 20),
+    rate_limit_per_minute integer     NOT NULL DEFAULT 600
+                                      CHECK (rate_limit_per_minute BETWEEN 1 AND 6000),
+    secret_sha256         text        NOT NULL UNIQUE CHECK (secret_sha256 ~ '^[0-9a-f]{64}$'),
+    created_by_user_id    uuid        REFERENCES users(id) ON DELETE SET NULL,
+    created_by_taap_id    text        NOT NULL DEFAULT '',
+    created_at            timestamptz NOT NULL DEFAULT now(),
+    expires_at            timestamptz,
+    revoked_at            timestamptz,
+    revoked_by_taap_id    text        NOT NULL DEFAULT '',
+    last_used_at          timestamptz,
+    window_started_at     timestamptz,
+    window_calls          integer     NOT NULL DEFAULT 0 CHECK (window_calls >= 0)
+);
+CREATE INDEX IF NOT EXISTS browser_keys_customer_idx
+    ON browser_keys (customer_id, workspace_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS browser_keys_guard (applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0102_browser_keys') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0103_clerk_session_binding (lake#1163, docs/api/clerk.md#webhooks): each Lake browser session
+-- made by a Clerk exchange records the Clerk session it came from (`sid`, from Clerk's signed
+-- default session token). A Clerk session event then ends only the Lake browser sessions bound to
+-- that Clerk session, never API keys, static tokens or devices. NULL: unbound (exchanged before
+-- this migration, or not a Clerk sign-in); a session event still ends those browser sessions.
+-- Additive. Numbered after the open 0100 (lake#1155), 0101 (lake#1156) and 0102 (lake#1152).
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS clerk_session_id text
+    CHECK (clerk_session_id IS NULL OR length(clerk_session_id) BETWEEN 1 AND 256);
+CREATE INDEX IF NOT EXISTS sessions_clerk_session_id_idx
+    ON sessions (user_id, clerk_session_id) WHERE clerk_session_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS clerk_session_binding_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0103_clerk_session_binding')
+    ON CONFLICT DO NOTHING;

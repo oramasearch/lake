@@ -11,6 +11,7 @@
 #include "lake/api/agent_docs.hpp"
 #include "lake/api/balance.hpp"
 #include "lake/api/billing.hpp"
+#include "lake/api/brand.hpp"
 #include "lake/api/clerk.hpp"
 #include "lake/api/markdown.hpp"
 #include "lake/api/web_ui.hpp"
@@ -127,6 +128,15 @@ json viewer_schema() {
                          {"frontend_api", string_schema()}},
                         json::array({"enabled", "publishable_key", "frontend_api"}))},
          {"password_sign_up", {{"type", "boolean"}}},
+         {"legal",
+          object_schema({{"terms_url", string_schema()}, {"privacy_url", string_schema()}},
+                        json::array({"terms_url", "privacy_url"}))},
+         {"sign_in_sso",
+          {{"type", json::array({"object", "null"})},
+           {"properties",
+            {{"provider_id", string_schema()},
+             {"protocol", string_schema()},
+             {"name", string_schema()}}}}},
          {"external_origin", string_schema()},
          {"public_host", string_schema()},
          {"config",
@@ -135,19 +145,46 @@ json viewer_schema() {
          {"billing_payment", {{"type", json::array({"object", "null"})}}},
          {"balance", {{"type", json::array({"object", "null"})}}},
          {"version", string_schema()},
-         {"revision", string_schema()}},
+         {"revision", string_schema()},
+         // The instance brand (lake#1135, docs/serving/brand.md): what the console names itself.
+         {"brand",
+          {{"type", "object"},
+           {"description",
+            "This Lake's brand: `name`, `short_name`, `company`, `assistant_name`, "
+            "`console_title`, `eyebrow`, `by_orama`, `custom` (false for Lake's own), and `logo`, "
+            "`logo_dark`, `favicon` (data: URIs), `accent`, `accent_dark`, `support_email`, "
+            "`legal_name`, `terms_url` and `privacy_url`, each null when not configured."},
+           {"properties",
+            {{"custom", {{"type", "boolean"}}},
+             {"name", string_schema()},
+             {"short_name", string_schema()},
+             {"company", string_schema()},
+             {"assistant_name", string_schema()},
+             {"console_title", string_schema()},
+             {"eyebrow", string_schema()},
+             {"by_orama", {{"type", "boolean"}}}}},
+           {"required",
+            json::array({"custom",
+                         "name",
+                         "short_name",
+                         "company",
+                         "assistant_name",
+                         "console_title",
+                         "eyebrow"})}}}},
         json::array({"signed_in",
                      "administrator",
                      "mfa_enrolled",
                      "spaces",
                      "clerk",
                      "password_sign_up",
+                     "legal",
                      "external_origin",
                      "public_host",
                      "config",
                      "billing",
                      "version",
-                     "revision"}));
+                     "revision",
+                     "brand"}));
 }
 
 // A space's live workspaces as the selector lists them (desired != "deleted").
@@ -169,6 +206,23 @@ json live_workspaces(control::Store& store, const std::string& customer_id) {
     return out;
 }
 
+// The SSO provider that is this Lake's only way in, as the sign-in page needs it: its id, protocol
+// (saml or oidc, which decides how sign-in starts) and display name. Null when none is configured.
+// A provider that cannot be read keeps its id, so the page still shows the one way in.
+json sign_in_sso_json(ApiContext& context) {
+    if (context.sign_in_sso_provider.empty()) {
+        return nullptr;
+    }
+    json out{{"provider_id", context.sign_in_sso_provider}, {"protocol", ""}, {"name", ""}};
+    if (context.store != nullptr) {
+        if (const auto provider = context.store->get_sso_provider(context.sign_in_sso_provider)) {
+            out["protocol"] = provider->protocol;
+            out["name"] = provider->name;
+        }
+    }
+    return out;
+}
+
 ApiResult viewer(const json& input, ApiContext& context, const std::string& version) {
     const auto clerk = clerk_config(context.clerk_publishable_key);
     json out{
@@ -180,8 +234,25 @@ ApiResult viewer(const json& input, ApiContext& context, const std::string& vers
          {{"enabled", clerk.has_value()},
           {"publishable_key", clerk ? clerk->publishable_key : std::string()},
           {"frontend_api", clerk ? clerk->frontend_api : std::string()}}},
-        // Under Clerk, sign-up is Clerk's and restricted to invitations (docs/api/clerk.md).
-        {"password_sign_up", !clerk.has_value()},
+        // Under Clerk, sign-up is Clerk's (docs/api/clerk.md), and under SSO-only sign-in (lake#1136)
+        // people arrive through their organization's provider; the password entries refuse by the
+        // Clerk rule (lake#1098) and by the SSO-only gate.
+        {"password_sign_up",
+         lake_pool_password_sign_in(context.clerk_publishable_key) &&
+             context.sign_in_sso_provider.empty()},
+        // The terms and privacy policy sign-up and sign-in link to (LAKE_TERMS_URL,
+        // LAKE_PRIVACY_URL; liquid-bridge#15); empty when the instance shows no link. A custom
+        // brand's own links (LAKE_BRAND_TERMS_URL, LAKE_BRAND_PRIVACY_URL; lake#1135) win, so a
+        // white-labelled sign-up links its customer's terms.
+        {"legal",
+         {{"terms_url",
+           instance_brand().terms_url.empty() ? context.terms_url : instance_brand().terms_url},
+          {"privacy_url",
+           instance_brand().privacy_url.empty() ? context.privacy_url
+                                                : instance_brand().privacy_url}}},
+        // The provider that is the only way in (LAKE_SIGN_IN_SSO_PROVIDER), or null: the sign-in
+        // page then offers it alone (docs/api/sso.md).
+        {"sign_in_sso", sign_in_sso_json(context)},
         {"external_origin", public_origin(context)},
         {"public_host", context.public_host},
         {"config", {{"frontier_model", ""}}},
@@ -191,7 +262,8 @@ ApiResult viewer(const json& input, ApiContext& context, const std::string& vers
         // does not bill.
         {"billing_payment", payment_status_json(context)},
         {"version", version},
-        {"revision", std::string(build_revision_string())}};
+        {"revision", std::string(build_revision_string())},
+        {"brand", instance_brand().to_json()}};
     if (!context.authorized || context.store == nullptr) {
         return ApiResult::success(std::move(out));
     }
@@ -768,8 +840,8 @@ void register_console_capabilities(Registry& registry, std::string_view version)
             "they can see with each account's live workspaces, the current account and workspace "
             "(`workspace_id` when it is live in one of those accounts, else the account's only "
             "workspace), Clerk's publishable key and Frontend API host when Clerk signs people "
-            "in, the browser origin, the agent model settings, and this Lake's version. Needs no "
-            "credential: a visitor gets `signed_in: false` and no accounts.",
+            "in, the browser origin, the agent model settings, this Lake's version and its brand. "
+            "Needs no credential: a visitor gets `signed_in: false` and no accounts.",
         .input_schema =
             object_schema({{"workspace_id", string_schema()}, {"customer_id", string_schema()}}),
         .output_schema = viewer_schema(),

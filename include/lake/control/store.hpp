@@ -258,6 +258,43 @@ struct IssuedSession {
     // True when this call created the user (a sign-up, or a first OAuth sign-in in a pool).
     bool created_user = false;
 };
+// A browser key (lake#1152, docs/api/browser-keys.md): the key a website's own page holds. It is
+// bound to one published index (and optionally one published model) of one workspace, may call
+// only `search_index` and `predict` on them, only from its listed origins, and only so many times
+// a minute. It belongs to the workspace, not to the sign-in that made it: it lives until it is
+// revoked or reaches its optional expiry. Its secret is `lbk.<id>.<secret>`; the control plane
+// keeps its SHA-256 and binding beside the other credentials (`browser_keys`, migration
+// 0102_browser_keys, multitenancy: decision 53) and never the secret.
+inline constexpr std::string_view browser_key_credential_prefix = "lbk.";
+// The most origins one key lists, and its default and largest calls a minute.
+inline constexpr std::size_t browser_key_max_origins = 20;
+inline constexpr int browser_key_default_rate_limit = 600;
+inline constexpr int browser_key_max_rate_limit = 6000;
+struct BrowserKey {
+    std::string id, customer_id, workspace_id, index_id, model_id, name;
+    std::vector<std::string> origins;
+    int rate_limit_per_minute = browser_key_default_rate_limit;
+    std::string created_by_user_id, created_by_taap_id, created_at, expires_at, revoked_at,
+        revoked_by_taap_id, last_used_at;
+};
+struct NewBrowserKey {
+    std::string customer_id, workspace_id, index_id, model_id, name;
+    std::vector<std::string> origins;
+    int rate_limit_per_minute = browser_key_default_rate_limit;
+    // 0: the key lives until it is revoked.
+    std::int64_t expires_in_seconds = 0;
+    std::string created_by_user_id, created_by_taap_id;
+};
+struct IssuedBrowserKey {
+    BrowserKey key;
+    std::string secret; // shown once, never stored
+};
+// One call counted against a key's calls a minute: whether it may proceed, and when the key's
+// minute starts again when it may not.
+struct BrowserKeyAdmission {
+    bool allowed = true;
+    int retry_after_seconds = 0;
+};
 struct Principal {
     std::string user_id, taap_id, session_id, device_id, pool_id, kind;
     std::vector<std::string> scopes;
@@ -267,7 +304,15 @@ struct Principal {
     std::string workload_repository_id;
     std::string workload_revision;
     std::string workload_token_hash;
+    // Set for a browser key (kind `browser_key`): its binding, which the registry checks.
+    std::optional<BrowserKey> browser_key;
 };
+// Whether `origin` is a website origin a browser key may list: `https://host[:port]`, or
+// `http://localhost[:port]` / `http://127.0.0.1[:port]` for development, lowercase, with no path,
+// query or fragment. Answers the normalized origin, or why not.
+std::expected<std::string, std::string> browser_key_origin(std::string_view origin);
+// The principal a browser key's credential resolves to: no person, its own identity.
+Principal browser_key_principal(const BrowserKey& key, std::string digest);
 // A proof that the person holds the key of the identity document they enroll with (lake#931,
 // docs/api/identity.md#proving-you-hold-the-key): the nonce and expiry begin_identity_proof issued,
 // and what `liquid sign artifact <challenge>` printed.
@@ -332,6 +377,10 @@ struct ClerkIdentity {
     std::string subject, email, display_name, device_name;
     std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
     std::int64_t issued_at = 0; // verified Clerk JWT iat; required only for exchange
+    // The Clerk session the browser signed in with: `sid` from Clerk's signed default session
+    // token, verified at exchange (lake#1163). The Lake browser session is bound to it, so a
+    // session event ends only that browser. Empty: unbound (a page from before lake#1163).
+    std::string session_id;
 };
 // Upstream account state, ordered by Clerk's user updated_at (milliseconds).
 struct ClerkUserState {
@@ -454,16 +503,23 @@ struct BillingContact {
     std::string updated_at;
 };
 // A prepaid account balance (migration 0099, lake#1114, liquid-bridge decision 67,
-// docs/api/billing.md#balance): billing, so in the control plane. Credits are paid top-ups; charges
+// docs/api/billing.md#balance): billing, so in the control plane. Credits are paid top-ups and
+// grants from Orama (lake#1134); charges
 // are the account's usage priced at the list in force, one row a month (usage stays in each
 // workspace Zetta: only the priced amount is kept). The balance is credits minus charges. Amounts
 // are millionths of a US dollar. Timestamps are RFC 3339 UTC text, empty when unset.
 struct AccountBalance {
     std::string customer_id;
-    std::int64_t credits_micros = 0; // every credit, summed
+    // Every credit, summed; a grant counts what has not stopped counting (its amount less its
+    // forfeited part, lake#1134).
+    std::int64_t credits_micros = 0;
     std::int64_t charges_micros = 0; // every month's charge, summed
     std::int64_t credit_count = 0;
     std::string first_top_up_at; // empty: the account has never topped up
+    // The first grant from Orama (empty: none), and what the grants still counting have left
+    // unused (grants_unused, lake#1134). A grant never sets first_top_up_at.
+    std::string first_grant_at;
+    std::int64_t grants_unused_micros = 0;
     // The operator's overdraft for this account, replacing the instance's; nullopt: the instance's.
     std::optional<std::int64_t> overdraft_limit_micros;
     // The last refresh of the charges that read every workspace, and the last one that could not
@@ -494,15 +550,55 @@ struct AccountBalance {
     std::int64_t balance_micros() const {
         return credits_micros - charges_micros;
     }
+    // From when the charges are read: the first top-up's or the first grant's, whichever came
+    // first; empty while the account has neither.
+    std::string charges_since() const {
+        if (first_top_up_at.empty() ||
+            (!first_grant_at.empty() && first_grant_at < first_top_up_at)) {
+            return first_grant_at;
+        }
+        return first_top_up_at;
+    }
 };
 // One credit: a paid top-up, recorded once per (provider, reference), the Checkout Session or the
-// PaymentIntent that paid it.
+// PaymentIntent that paid it; or a grant from Orama (lake#1134), provider `orama`, reference the
+// grant's idempotency key.
 struct BalanceCredit {
     std::string id, customer_id;
-    std::string kind = "top_up"; // top_up | auto_top_up
+    std::string kind = "top_up"; // top_up | auto_top_up | grant
     std::int64_t amount_micros = 0;
     std::string provider, reference, event_id, created_at;
+    // A grant's own (empty or 0 for a top-up): why it was given, who gave it, when it stops
+    // counting (RFC 3339 UTC, YYYY-MM-DDTHH:MM:SSZ; empty: never), and the account's charges when
+    // it was given (it pays only for usage charged after; the store records them).
+    std::string reason, granted_by, expires_at;
+    std::int64_t charges_at_grant_micros = 0;
+    // When it stopped counting (empty: it counts), why (expired | revoked), the account's charges
+    // then, and the unused part that stopped counting. What it paid for stays paid.
+    std::string ended_at, end_reason;
+    std::int64_t charges_at_end_micros = 0;
+    std::int64_t forfeited_micros = 0;
 };
+// The most one grant from Orama gives: $10,000, the largest top-up (account_balance_credits checks
+// it too).
+inline constexpr std::int64_t balance_grant_most_micros = 10'000'000'000;
+// How an account's charges fall on its grants (lake#1134, docs/api/billing.md#credits-from-orama):
+// usage is paid by grants before paid money. A grant pays only for usage charged after it was
+// given and, once ended, before it ended; of the grants paying at once, the one that expires first
+// pays first (then the oldest). Answers what each of `grants` (in the order given) has paid for at
+// `charges_micros`. Both stores and the API use it.
+std::vector<std::int64_t> grant_allocation(const std::vector<BalanceCredit>& grants,
+                                           std::int64_t charges_micros);
+// The grants that stop counting at `at` (RFC 3339 UTC): every one still counting whose expiry is
+// at or before `at`, and `revoke_id` when it still counts. Each is answered with ended_at (`at`),
+// end_reason, charges_at_end_micros (`charges_micros`) and forfeited_micros: its amount less what
+// grant_allocation says it has paid for.
+std::vector<BalanceCredit> grants_ending(const std::vector<BalanceCredit>& grants,
+                                         std::int64_t charges_micros,
+                                         std::string_view at,
+                                         std::string_view revoke_id);
+// What the grants still counting have left unused at `charges_micros`.
+std::int64_t grants_unused(const std::vector<BalanceCredit>& grants, std::int64_t charges_micros);
 struct BalanceCreditResult {
     bool duplicate = false; // the event or the reference was recorded before; nothing changed
     BalanceCredit credit;
@@ -515,6 +611,54 @@ struct BalanceCharge {
     std::int64_t amount_micros = 0;
     std::string price_list_id, invoice_id, refreshed_at;
 };
+// A coupon code for ads (migration 0101, lake#1156, docs/api/billing.md#coupon-codes): redeeming
+// it gives the account a grant from Orama of `amount_micros` that stops counting `credit_days`
+// after the redemption. `code` is normalized (coupon_code_normalized). Timestamps are RFC 3339 UTC,
+// empty when unset.
+struct Coupon {
+    std::string id, code;
+    std::int64_t amount_micros = 0;
+    int credit_days = 90;
+    std::string expires_at;             // when the code stops working; empty: never
+    std::optional<int> max_redemptions; // the most redemptions in total; nullopt: no cap
+    bool new_accounts_only = true;      // refuse accounts older than the code or already used
+    std::string campaign;               // attribution label, lowercase; empty: none
+    int redemptions = 0;                // redemptions claimed so far (the cap counts these)
+    std::string created_by, created_at;
+    std::string disabled_at, disabled_by; // empty: the code works
+};
+// What one redemption claimed: the account, a SHA-256 digest of the person's normalized verified
+// email (coupon_email_digest), who redeemed it and the grant it became (empty until it is given).
+struct CouponRedemption {
+    std::string id, coupon_id, customer_id, email_sha256, redeemed_by, credit_id, created_at;
+};
+// A coupon with its ads report, counts only (no workspace data): redemptions that became a grant,
+// the redeeming accounts whose first paid top-up came after their redemption, what those accounts
+// were charged for usage after their grant was given, and what they paid in top-ups after
+// redeeming.
+struct CouponReport {
+    Coupon coupon;
+    int redeemed = 0;
+    int topped_up = 0;
+    std::int64_t spend_micros = 0;
+    std::int64_t paid_micros = 0;
+};
+// A claimed redemption: `resumed` when the account had already claimed this coupon and its grant
+// was not given yet (a redemption interrupted before its grant), so the caller gives it now.
+struct CouponClaim {
+    bool resumed = false;
+    CouponRedemption redemption;
+    Coupon coupon;
+};
+// The normalized form of a code a person typed: letters upper-cased, blanks and hyphens dropped;
+// nullopt when what is left is not 4 to 32 letters and digits.
+std::optional<std::string> coupon_code_normalized(std::string_view typed);
+// The SHA-256 (hex) of an email address normalized so one inbox is one address: lower-cased,
+// a `+tag` dropped from the local part, and the dots of a Gmail local part dropped
+// (gmail.com and googlemail.com are one domain). Empty for an empty address.
+std::string coupon_email_digest(std::string_view email);
+// What billing_coupons' checks refuse in a coupon, or nullopt when they keep it.
+std::optional<std::string> coupon_problem(const Coupon& coupon);
 // A field billing_contacts refuses, and what it must be.
 struct FieldProblem {
     std::string field, message;
@@ -2276,6 +2420,48 @@ public:
                                                                int limit) = 0;
     virtual Result<std::vector<BalanceCharge>> balance_charges(const std::string& customer_id) = 0;
     virtual Result<std::vector<std::string>> balance_customers() = 0;
+    // Grants from Orama (migration 0100, lake#1134). apply_balance_credit records a grant like any
+    // credit (once per reference, the marks cleared) but never sets first_top_up_at, and records
+    // the account's charges at that moment. balance_credit answers one credit by id (not_found).
+    // end_balance_grants ends, in one transaction, the account's grants grants_ending names at `at`
+    // against its charges now (`revoke_id`: one grant to revoke, else empty), and answers them;
+    // conflict when `revoke_id` names no grant of the account that still counts.
+    // personal_account_by_email answers the individual account of the person with that email
+    // (case-insensitive), not_found when there is none.
+    virtual Result<BalanceCredit> balance_credit(const std::string& credit_id) = 0;
+    virtual Result<std::vector<BalanceCredit>> end_balance_grants(const std::string& customer_id,
+                                                                  const std::string& at,
+                                                                  const std::string& revoke_id) = 0;
+    virtual Result<Customer> personal_account_by_email(const std::string& email) = 0;
+    // Coupon codes (migration 0101, lake#1156). create_coupon records a coupon (conflict when its
+    // code is taken); coupon_by_code and get_coupon answer one (not_found); coupon_reports answers
+    // every coupon, newest first, with its counts (`campaign` non-empty: that campaign's only);
+    // disable_coupon stops a code (a disabled one is answered as it is).
+    virtual Result<Coupon> create_coupon(const Coupon& coupon) = 0;
+    virtual Result<Coupon> coupon_by_code(const std::string& code) = 0;
+    virtual Result<Coupon> get_coupon(const std::string& coupon_id) = 0;
+    virtual Result<std::vector<CouponReport>> coupon_reports(const std::string& campaign) = 0;
+    virtual Result<Coupon> disable_coupon(const std::string& coupon_id, const std::string& by) = 0;
+    // The account's redemption of the coupon, not_found when it has none.
+    virtual Result<CouponRedemption> coupon_redemption(const std::string& coupon_id,
+                                                       const std::string& customer_id) = 0;
+    // Claims one redemption in one transaction under the coupon's row lock: an unfinished claim by
+    // the same account and email is answered `resumed`; otherwise conflict with the message
+    // `disabled`, `expired`, `used_up` (the cap is reached), `already_redeemed` (by this account)
+    // or `email_redeemed` (by this person on another account); else it records the redemption
+    // and counts it against the cap.
+    virtual Result<CouponClaim> claim_coupon(const CouponRedemption& redemption) = 0;
+    // Records the grant a claimed redemption became.
+    virtual Result<void> finish_coupon_redemption(const std::string& redemption_id,
+                                                  const std::string& credit_id) = 0;
+    // Failed redemption attempts, per key (a SHA-256 hex digest of a client or a person): whether
+    // any key has `limit` failures or more in its current window of `window_seconds`, and
+    // counting one failure against every key (a window past its length starts again).
+    virtual Result<bool> coupon_attempts_exhausted(const std::vector<std::string>& keys,
+                                                   int limit,
+                                                   int window_seconds) = 0;
+    virtual Result<void> coupon_attempt_failed(const std::vector<std::string>& keys,
+                                               int window_seconds) = 0;
     // Cloud orders (lake#831, migration 0089, docs/api/orders.md).
     // Records a new order and its first event (actor lake).
     virtual Result<CloudOrder> create_cloud_order(const NewCloudOrder& order) = 0;
@@ -2459,9 +2645,15 @@ public:
     // deletion is permanent. Suspension revokes all sessions and devices atomically. A current
     // identical state returns true so retries can finish profile/provisioning work; false is stale.
     virtual Result<bool> apply_clerk_user_state(const ClerkUserState&) = 0;
-    // Retain a millisecond revocation watermark before exchange too; revoke all account
-    // credentials.
+    // A Clerk session event (session.revoked/removed/ended) for Clerk session `session_id`
+    // (lake#1163, docs/api/clerk.md#webhooks). Advances the account's millisecond revocation
+    // watermark, retained before exchange too, so a template minted at or before it cannot be
+    // exchanged. Revokes only Lake browser sessions: those bound to `session_id` always, and
+    // unbound browser sessions of the account unless the event is older than the watermark.
+    // API keys, static tokens, TAAP sessions and devices are never touched, and keys made from a
+    // revoked browser session keep working: a key's lineage stops at its sign-in ancestor.
     virtual Result<void> revoke_clerk_sessions(const std::string& subject,
+                                               const std::string& session_id,
                                                std::int64_t revoked_at) = 0;
     // user.updated: the email (when non-empty) and display name of the account linked to the
     // subject; not_found when none is linked, conflict when another account has the email.
@@ -2501,6 +2693,20 @@ public:
                                             const std::string& state,
                                             const std::string& browser_binding) = 0;
     virtual Result<IssuedSession> create_token(const NewToken&) = 0;
+    // Browser keys (lake#1152, docs/api/browser-keys.md). The caller has checked the binding
+    // (the workspace is the account's, the index and model exist) and normalized the origins;
+    // the store refuses a workspace of another account or one being deleted. Lists newest first,
+    // revoked ones too; `workspace_id` empty lists every workspace of the account.
+    virtual Result<IssuedBrowserKey> create_browser_key(const NewBrowserKey&) = 0;
+    virtual Result<std::vector<BrowserKey>> list_browser_keys(const std::string& customer_id,
+                                                              const std::string& workspace_id) = 0;
+    // not_found for a key of another account; revoking a revoked key answers it unchanged.
+    virtual Result<BrowserKey> revoke_browser_key(const std::string& customer_id,
+                                                  const std::string& id,
+                                                  const std::string& revoked_by_taap_id) = 0;
+    // Counts one call in the key's current minute (shared by every replica, since it is a row):
+    // refused once the minute holds `rate_limit_per_minute` calls.
+    virtual Result<BrowserKeyAdmission> admit_browser_key_call(const std::string& id) = 0;
     virtual Result<std::vector<Session>> list_sessions(const std::string& user_id,
                                                        const std::string& pool_id) = 0;
     virtual Result<void> revoke_session(const std::string& user_id,

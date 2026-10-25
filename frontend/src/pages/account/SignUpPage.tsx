@@ -9,6 +9,8 @@ import { Button, Field, fieldError, Form, Notice, Page } from "@/lib/ui";
 import { useSession } from "@/lib/session";
 import { AuthFrame, useSignedInRedirect } from "./AuthFrame";
 import { ClerkSignIn } from "./ClerkSignIn";
+import { LegalNotice } from "./LegalNotice";
+import { SsoSignIn } from "./SsoSignIn";
 import { AccountRegionNote } from "@/components/Region";
 import { landingAfterSignIn, leaveFor, messageOf, NO_WORKSPACE, returnQuery, returnTarget } from "./signIn";
 
@@ -17,6 +19,7 @@ export default function SignUpPage() {
   const signedIn = useSignedInRedirect((administrator) => landingAfterSignIn(administrator));
   if (signedIn) return null;
   if (viewer.clerk.enabled) return <ClerkSignIn mode="sign-up" />;
+  if (viewer.sign_in_sso) return <SsoSignIn provider={viewer.sign_in_sso} mode="sign-up" />;
   return <NativeSignUp />;
 }
 
@@ -77,6 +80,7 @@ function NativeSignUp() {
             </Button>
           </div>
         </Form>
+        <LegalNotice mode="sign-up" />
         <p className="muted">
           Already registered? <Link to={`/sign-in${returnQuery(location.search)}`}>Sign in</Link>.
         </p>

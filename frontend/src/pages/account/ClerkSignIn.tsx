@@ -2,18 +2,22 @@
  * (web_ui_clerk_sign_in). clerk-js is loaded from the instance's own Frontend API host with the
  * publishable key; once Clerk has a session, its `lake` template token is posted once, as an
  * ordinary top-level form, to `POST /identity/clerk-session`, which verifies it, sets
- * `lake_session` and redirects. Lake reads no other Clerk state. */
+ * `lake_session` and redirects. Clerk's default session token goes with it: its signed `sid` binds
+ * the Lake browser session to this Clerk session, so signing out ends only this browser and never
+ * the account's API keys or devices (lake#1163). Lake reads no other Clerk state. */
 import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Actions, Button, Notice, Page } from "@/lib/ui";
 import { useSession } from "@/lib/session";
+import { brandText, instanceBrand } from "@/lib/brand";
 import { clerkPageSub, exchangeAutomatically, signUpModeOf, type ClerkEnvironmentHolder, type SignUpMode } from "@/lib/clerkSignIn";
 import { AuthFrame } from "./AuthFrame";
+import { LegalNotice } from "./LegalNotice";
 import { AccountRegionNote } from "@/components/Region";
 import { returnQuery, returnTarget } from "./signIn";
 
 /** The part of clerk-js this page uses. */
-type ClerkSession = { getToken(options: { template: string }): Promise<string | null> };
+type ClerkSession = { getToken(options?: { template?: string }): Promise<string | null> };
 type ClerkJs = ClerkEnvironmentHolder & {
   load(): Promise<void>;
   signOut(): Promise<void>;
@@ -80,14 +84,16 @@ export function useClerkSignUpMode(publishableKey: string | undefined, frontendA
   return mode;
 }
 
-/** Post the Clerk token as a real form: a top-level navigation, so the server's Set-Cookie and
- * redirect (or its `?error=`) apply to the page. `next` carries the pending return. */
-function postToLake(token: string, next: string) {
+/** Post the Clerk tokens as a real form: a top-level navigation, so the server's Set-Cookie and
+ * redirect (or its `?error=`) apply to the page. `token` is the `lake` template (who); the
+ * session token names which Clerk session (lake#1163). `next` carries the pending return. */
+function postToLake(token: string, sessionToken: string, next: string) {
   const form = document.createElement("form");
   form.method = "post";
   form.action = "/identity/clerk-session";
   const fields: [string, string][] = [
     ["token", token],
+    ["session_token", sessionToken],
     ["device_name", "browser"],
   ];
   if (next) fields.push(["next", next]);
@@ -102,9 +108,10 @@ function postToLake(token: string, next: string) {
   form.submit();
 }
 
-/** Clerk's form inside lake's card: lake's blue, IBM Plex and radius, and no card of its own. */
+/** Clerk's form inside lake's card: lake's blue (a white-labelled Lake's accent, lake#1135), IBM
+ * Plex and radius, and no card of its own. */
 const CLERK_APPEARANCE = {
-  variables: { colorPrimary: "#0f62fe", fontFamily: "'IBM Plex Sans', 'Helvetica Neue', Arial, sans-serif", borderRadius: "6px" },
+  variables: { colorPrimary: instanceBrand().accent ?? "#0f62fe", fontFamily: "'IBM Plex Sans', 'Helvetica Neue', Arial, sans-serif", borderRadius: "6px" },
   elements: {
     rootBox: { width: "100%" },
     cardBox: { width: "100%", boxShadow: "none", border: "0" },
@@ -137,7 +144,7 @@ export function ClerkSignIn({ mode }: { mode: "sign-in" | "sign-up" }) {
     const key = viewer.clerk.publishable_key;
     const host = viewer.clerk.frontend_api;
     if (!node || !key || !host) {
-      setStatus("Sign-in could not load: Clerk is not configured on this Lake.");
+      setStatus(brandText(instanceBrand(), "Sign-in could not load: Clerk is not configured on this Lake."));
       return;
     }
     let cancelled = false;
@@ -151,8 +158,9 @@ export function ClerkSignIn({ mode }: { mode: "sign-in" | "sign-up" }) {
       setStatus("Signing you in.");
       try {
         const token = await clerk.session.getToken({ template: TOKEN_TEMPLATE });
-        if (!token) throw new Error("Clerk gave no token.");
-        postToLake(token, next);
+        const sessionToken = await clerk.session.getToken();
+        if (!token || !sessionToken) throw new Error("Clerk gave no token.");
+        postToLake(token, sessionToken, next);
       } catch (e) {
         busy = false;
         setStatus(`Sign-in could not load: ${(e as Error).message}`);
@@ -209,9 +217,9 @@ export function ClerkSignIn({ mode }: { mode: "sign-in" | "sign-up" }) {
   return (
     <AuthFrame title={signUp ? "create account" : "sign in"}>
       <Page
-        eyebrow="Lake by Orama"
+        eyebrow={instanceBrand().eyebrow}
         title={signUp ? "Create Your Account" : "Sign In"}
-        sub={clerkPageSub(signUp, signUpMode)}
+        sub={brandText(instanceBrand(), clerkPageSub(signUp, signUpMode))}
       >
         <AccountRegionNote mode={signUp ? "sign-up" : "sign-in"} />
         {error && <Notice tone="danger">{error}</Notice>}
@@ -233,6 +241,7 @@ export function ClerkSignIn({ mode }: { mode: "sign-in" | "sign-up" }) {
           </Actions>
         )}
         <div ref={mount} className="clerk-mount" />
+        <LegalNotice mode={signUp ? "sign-up" : "sign-in"} />
         <p className="muted" role="status" aria-live="polite">
           {status}
         </p>

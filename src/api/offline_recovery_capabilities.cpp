@@ -331,6 +331,10 @@ void register_recovery_entry_points(Registry& registry) {
             if (!context.store) {
                 co_return no_store();
             }
+            if (auto refused =
+                    lake_pool_password_refusal(context, input.value("pool_id", "lake"))) {
+                co_return std::move(*refused);
+            }
             co_return answer(co_await issued_result(
                 co_await authentication_work([store = context.store, input] {
                     return store->recover_with_code(input.value("pool_id", "lake"),

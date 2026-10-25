@@ -5,7 +5,7 @@
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Globe, KeyRound, Search, SearchX, Trash2 } from "lucide-react";
-import { act, type Row } from "@/lib/api";
+import { act, useRead, type Row } from "@/lib/api";
 import { relative } from "@/lib/format";
 import { ConfirmButton } from "@/lib/overlay";
 import { indexLines } from "@/lib/deletion";
@@ -15,6 +15,7 @@ import { Banner, Button, Card, Chip, CopyBlock, Empty, ErrorBlock, KeyValue, Met
 import { WorkspaceFrame, cellText, qs, text, useAsync, useWorkspace, useWq, useWsPath, wa } from "../train/workspace";
 import { CopyMono, useOrigin } from "./parts";
 import { hitFields } from "./search";
+import { siteOrigin, type BrowserKey } from "../quickstart/quickstart";
 
 const SUB = "Search it here, publish it, and call it from your own code with a key that can only search.";
 
@@ -143,6 +144,7 @@ function IndexContent({ id, index }: { id: string; index: Row }) {
               </Button>
             )}
           </Card>
+          <WebsiteKeys id={id} table={text(index, "table")} published={published} />
           <SearchKey table={text(index, "table")} published={published} />
         </>
       }
@@ -265,6 +267,95 @@ function HitFields({ hit, fields }: { hit: Row; fields: string[] }) {
   );
 }
 
+/** Website keys (lake#1152, docs/ui/browser-keys.md): browser keys bound to this index and to the
+ * websites that may call with them, which outlive the sign-in that made them. Make one for a
+ * website's address (its secret shown once), see each key's websites and last use, and revoke it. */
+function WebsiteKeys({ id, table, published }: { id: string; table: string; published: boolean }) {
+  const { customerId, workspaceId } = useWorkspace();
+  const keys = useRead<{ keys: BrowserKey[] }>("list_browser_keys", { customer_id: customerId, workspace_id: workspaceId, index_id: id }, { enabled: !!customerId && !!workspaceId });
+  const create = useAsync();
+  const revoke = useAsync();
+  const [sites, setSites] = useState("");
+  const [secret, setSecret] = useState<string | null>(null);
+  const typed = sites
+    .split(/[\s,]+/)
+    .filter(Boolean)
+    .map(siteOrigin);
+  const problem = typed.find((t): t is { error: string } => "error" in t);
+  const origins = typed.flatMap((t) => ("origin" in t ? [t.origin] : []));
+  const rows = keys.data?.keys ?? [];
+  return (
+    <Card label="Outside calls" title="Website Keys">
+      <p className="mt-0 text-[13px] text-ink-2">
+        A key for a web page: it searches only this index, only from the websites you list, and keeps working until you revoke it{published ? "" : " (publish the index for it to answer)"}.
+      </p>
+      {create.error ? <ErrorBlock error={create.error} /> : null}
+      {secret ? (
+        <CopyBlock value={secret} label="Your website key, shown once" />
+      ) : (
+        <form
+          className="grid gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (problem || !origins.length) return;
+            void create.run(async () => {
+              const made = await act<{ secret?: string }>("create_browser_key", { customer_id: customerId, workspace_id: workspaceId, index_id: id, origins, name: `website ${table || id}` });
+              setSecret(made.secret ?? "");
+              setSites("");
+              void keys.refetch();
+            });
+          }}
+        >
+          <label className="grid gap-1 text-[12px] text-ink-2">
+            Websites (one or more addresses)
+            <input type="text" value={sites} onChange={(e) => setSites(e.target.value)} placeholder="https://www.example.com" data-testid="website-key-sites" />
+          </label>
+          {problem ? <p className="m-0 text-[12px] text-bad">{problem.error}</p> : null}
+          <Button type="submit" loading={create.busy} disabled={!!problem || !origins.length} data-testid="website-key-create">
+            <KeyRound size={14} aria-hidden /> Make a website key
+          </Button>
+        </form>
+      )}
+      {revoke.error ? <ErrorBlock error={revoke.error} /> : null}
+      {keys.isError ? <ErrorBlock error={keys.error} retry={() => void keys.refetch()} what="the website keys" /> : null}
+      {rows.length ? (
+        <ul className="mb-0 mt-3 grid list-none gap-2 p-0" data-testid="website-keys">
+          {rows.map((key) => (
+            <li key={key.id} className="grid gap-1 border-t border-line pt-2 text-[12px]" data-testid="website-key">
+              <span className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-mono text-ink">{key.origins.join(", ")}</span>
+                <Status value={key.state} tone={key.state === "active" ? "success" : "neutral"} />
+              </span>
+              <span className="text-ink-3">
+                {key.model_id ? "Searches and asks the model" : "Searches"} · {key.rate_limit_per_minute} calls a minute · {key.last_used_at ? `last used ${relative(key.last_used_at, Date.now(), key.last_used_at)}` : "never used"}
+                {key.expires_at ? ` · expires ${relative(key.expires_at, Date.now(), key.expires_at)}` : ""}
+              </span>
+              {key.state === "active" ? (
+                <span>
+                  <ConfirmButton
+                    title="Revoke this website key?"
+                    confirm={`Searches from ${key.origins.join(", ")} stop at once. Make a new key and update the page to search again.`}
+                    confirmLabel="Revoke"
+                    disabled={revoke.busy}
+                    onConfirm={() =>
+                      revoke.run(async () => {
+                        await act("revoke_browser_key", { customer_id: customerId, id: key.id });
+                        void keys.refetch();
+                      })
+                    }
+                  >
+                    Revoke
+                  </ConfirmButton>
+                </span>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </Card>
+  );
+}
+
 /** Calling it from outside, the key: a key that can only search published indexes. */
 function SearchKey({ table, published }: { table: string; published: boolean }) {
   const create = useAsync();
@@ -293,8 +384,8 @@ function SearchKey({ table, published }: { table: string; published: boolean }) 
             </Button>
           )}
           <p className="mb-0 text-[12px] text-ink-3">
-            The key keeps working for other published indexes until you revoke it on <Link to="/tokens">Tokens</Link>. A key lasts as long as the session that made
-            it, at most 30 days.
+            The key keeps working for other published indexes until you revoke it on <Link to="/tokens">Tokens</Link>. A key expires no later than the session that made
+            it would have, at most 30 days; signing out does not end it.
           </p>
         </>
       )}

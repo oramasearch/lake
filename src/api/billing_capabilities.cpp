@@ -1795,7 +1795,8 @@ void register_billing_capabilities(Registry& registry,
             if (!balance) {
                 co_return from_store(balance.error());
             }
-            if (!balance->first_top_up_at.empty()) {
+            // An account on a grant from Orama alone paid from its balance too (lake#1134).
+            if (!balance->charges_since().empty()) {
                 invoice.provider = "balance";
                 invoice.instructions = "Paid from your Lake account balance as you used it. "
                                        "Nothing more is due for this month.";
@@ -2143,6 +2144,8 @@ void register_billing_capabilities(Registry& registry,
 
     // The prepaid balance (lake#1114): billing's, so registered only where billing is on.
     register_balance_capabilities(registry, providers);
+    // Coupon codes for ads (lake#1156): each redemption a grant from Orama.
+    register_coupon_capabilities(registry);
 }
 
 } // namespace lake::api

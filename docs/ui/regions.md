@@ -27,6 +27,18 @@ once with `useRead("server_info", undefined, {workspace: null})` and kept for th
 Why links to the host's front page and not the same path: the other region has other accounts and
 other workspaces, so the current path (a workspace id, a repository) means nothing there.
 
+## Coupon codes
+
+lake#1156 ([billing.md](../api/billing.md#coupon-codes)). An ad links to
+`https://lake.live/?code=LAKE50`. The picker (`web_ui_region_picker`) and the order sheet's region
+card (`web_ui_order_sheet`) post back to the request's own path and query, and continuing goes to
+the same path and query on the chosen region's host (`region_continue_url`), so the code goes along
+with no change to the apex routing. Both pages say "Your code **LAKE50** goes with you: it is
+applied when you sign up in the region you choose." (`coupon_note` in `src/api/web_ui.cpp`; shown
+only for a code of letters, digits and hyphens). On the region's host the web app keeps the code
+through sign-up ([Balance pages](balance.md#coupon-codes)). A code works only in the regions it was
+created in, so a code for such an ad is created in each region.
+
 ## The order sheet
 
 lake#831. The apex host is the order sheet, server-rendered by `web_ui_order_sheet`
@@ -44,7 +56,9 @@ lake#831. The apex host is the order sheet, server-rendered by `web_ui_order_she
   - **Private Warehouse**, **Dedicated Cluster**, **On-Prem**: the monthly price in USD ("Starting
     from" for on-prem), the included usage credit and that usage beyond it is billed at the price
     list, the summary, the providers and regions (dedicated cluster), the features (each with
-    backups included), and **Order** (or **Send an order form** for on-prem) to the offer's form.
+    backups included, and each with "Your own domain, white-labelled (available on request)",
+    which the shared card does not carry: lake#1129,
+    [orders.md](../api/orders.md#what-exists)), and **Order** (or **Send an order form** for on-prem) to the offer's form.
 - **Contact us** under the cards opens the dedicated cluster's form with "Another provider, hardware
   or region" chosen.
 - **The order form** (`/order/<offer>`, `web_ui_order_form`): where it runs (a select of the shared
@@ -67,6 +81,8 @@ the layout is fluid below that.
   without regions, the host links, the sign-in, sign-up and workspace wording, and the order sheet
   links (`orderSheetLinks`: only an https URL, always the sheet's origin).
 - `ctest --test-dir build -R OrdersApex` renders the order sheet and its forms over HTTP.
+- `ctest --test-dir build -R 'RegionsApex.ACouponCodeGoesToTheChosenRegion|OrdersApex.TheOrderSheetCarriesACouponCodeToTheRegion'`:
+  `?code=` is carried to the region's host and both pages say so.
 - In a browser, start a local Lake with the variables in
   [`../api/regions.md`](../api/regions.md#how-to-verify) and open `http://127.0.0.1:4900/sign-in`:
   the region sentence is under the title; signed in, the top bar shows **Europe** and its menu

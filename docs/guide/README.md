@@ -16,6 +16,7 @@ may wrap across source lines.
 | Section | Slug | Title |
 |---|---|---|
 | Get Started | `index` | Getting Started (the first page, `/docs`) |
+| | `quickstart` | Quickstart (lake#1128) |
 | | `concepts` | Concepts and Glossary |
 | | `workspaces` | Workspaces |
 | | `account` | Your Account and Sign-In |

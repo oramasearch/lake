@@ -12,6 +12,7 @@
 #include <thread>
 
 #include "lake/api/audit_routing.hpp"
+#include "lake/api/white_label.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/store.hpp"
 #include "lake/transparency/log.hpp"
@@ -736,6 +737,74 @@ ApiResult authorize_methodology_deployment_token(const Capability& entry,
     return ApiResult::success(nullptr);
 }
 
+// A browser key (lake#1152, docs/api/browser-keys.md) acts as no person, so policy is not
+// consulted: what it may do is its binding. It may call search_index on its index, and predict on
+// its model when it has one, in its workspace of its account, from one of its origins, within its
+// calls a minute; anything else is refused before the handler runs.
+ApiResult
+authorize_browser_key(const Capability& entry, const nlohmann::json& input, ApiContext& context) {
+    const control::BrowserKey& key = *context.browser_key;
+    const auto refused = [](std::string message, std::string path = {}) {
+        return ApiResult::failure("unauthorized", std::move(message), std::move(path));
+    };
+    context.audit_customer_id = key.customer_id;
+    if (entry.name != "search_index" && entry.name != "predict") {
+        return refused("a browser key may call only search_index and predict; " + entry.name +
+                       " needs an API key");
+    }
+    if (entry.name == "predict" && key.model_id.empty()) {
+        return refused("this browser key searches only; make one with model_id to ask a model");
+    }
+    // The website it is used from: browsers send Origin with every cross-site request and with
+    // every POST, and a page cannot change it.
+    if (context.caller_origin.empty()) {
+        return refused("a browser key works only from the websites it lists, and this call names "
+                       "no Origin");
+    }
+    const auto origin = control::browser_key_origin(context.caller_origin);
+    if (!origin || std::ranges::find(key.origins, *origin) == key.origins.end()) {
+        return refused("this browser key does not work from " + context.caller_origin +
+                       "; it works from " + [&] {
+                           std::string listed;
+                           for (const auto& allowed : key.origins) {
+                               listed += (listed.empty() ? "" : ", ") + allowed;
+                           }
+                           return listed;
+                       }());
+    }
+    if (!input.is_object() || input.value("customer_id", std::string()) != key.customer_id) {
+        return refused("this browser key belongs to account " + key.customer_id, "/customer_id");
+    }
+    if (input.value("workspace_id", std::string()) != key.workspace_id) {
+        return refused("this browser key is bound to workspace " + key.workspace_id,
+                       "/workspace_id");
+    }
+    if (entry.name == "search_index" && input.value("index_id", std::string()) != key.index_id) {
+        return refused("this browser key searches index " + key.index_id + " only", "/index_id");
+    }
+    if (entry.name == "predict" && input.value("model_id", std::string()) != key.model_id) {
+        return refused("this browser key asks model " + key.model_id + " only", "/model_id");
+    }
+    if (context.store == nullptr) {
+        return ApiResult::failure("store_unavailable", "no control-plane store is configured");
+    }
+    const auto admitted = context.store->admit_browser_key_call(key.id);
+    if (!admitted) {
+        return ApiResult::failure(admitted.error().code == "not_found" ? "unauthorized"
+                                                                       : "store_unavailable",
+                                  admitted.error().message);
+    }
+    if (!admitted->allowed) {
+        ApiResult limited = ApiResult::failure(
+            "rate_limited",
+            "this browser key has made its " + std::to_string(key.rate_limit_per_minute) +
+                " calls this minute; retry in " + std::to_string(admitted->retry_after_seconds) +
+                " s");
+        return limited;
+    }
+    return ApiResult::success(nullptr);
+}
+
 const nlohmann::json& agent_task_input(const Capability& capability,
                                      const nlohmann::json& input,
                                      ApiContext& context,
@@ -931,6 +1000,9 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         state.result = ApiResult::failure(
             "invalid_input", "workspace_id must match the workspace URL", "/workspace_id");
         state.proceed = false;
+    } else if (context.browser_key) {
+        state.result = authorize_browser_key(entry, input, context);
+        state.proceed = state.result.ok;
     } else if (context.credential_kind.starts_with("build_")) {
         state.result = authorize_build_token(entry, input, context);
         state.proceed = state.result.ok;
@@ -1388,6 +1460,29 @@ void gate_paid_work(CallState& state,
     }
 }
 
+// SSO-only sign-in (lake#1136, docs/api/sso.md#the-customers-provider-as-the-only-way-in): with
+// LAKE_SIGN_IN_SSO_PROVIDER set, Lake's own sign-in methods in its own pool are refused before their
+// handlers, audited like any refusal. One place, so no handler has to remember it.
+void gate_instance_sign_in(CallState& state,
+                           const Capability& capability,
+                           const nlohmann::json& input,
+                           ApiContext& context) {
+    if (!state.proceed || context.sign_in_sso_provider.empty()) {
+        return;
+    }
+    std::string provider_pool;
+    if (names_sso_provider(capability.name) && context.store != nullptr && input.is_object() &&
+        input.contains("provider_id") && input.at("provider_id").is_string()) {
+        const auto provider = context.store->get_sso_provider(input.at("provider_id").get<std::string>());
+        // A provider that cannot be read is treated as Lake's own: refused unless it is the one.
+        provider_pool = provider ? provider->pool_id : std::string("lake");
+    }
+    if (auto refused = sso_only_refusal(context.sign_in_sso_provider, capability.name, input, provider_pool)) {
+        state.result = ApiResult::failure("unauthorized", std::move(*refused));
+        state.proceed = false;
+    }
+}
+
 // The balance warning on the outermost answer while the account is low, negative or blocked.
 void warn_about_balance(CallState& state, const nlohmann::json& input, ApiContext& context) {
     if (!context.balance || context.registry_depth != 1 ||
@@ -1429,6 +1524,7 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
     const DepthGuard registry_depth(context);
     CallState state = prepare_call(capability, call_input, context);
     gate_paid_work(state, *capability, call_input, context);
+    gate_instance_sign_in(state, *capability, call_input, context);
     if (state.proceed) {
         const auto start = std::chrono::steady_clock::now();
         try {
@@ -1517,6 +1613,7 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
     const DepthGuard registry_depth(context);
     CallState state = prepare_call(capability, call_input, context);
     gate_paid_work(state, *capability, call_input, context);
+    gate_instance_sign_in(state, *capability, call_input, context);
     if (state.proceed) {
         // A long poll (`wait_ms`) parks on the bus: it gives its HTTP worker back so parked
         // callers never fill the short-request workers (lake#534). Only a capability declared a

@@ -11,6 +11,7 @@
 #include "lake/api/audit_recorder.hpp"
 #include "lake/api/billing.hpp"
 #include "lake/api/clerk_webhooks.hpp"
+#include "lake/api/client_address.hpp"
 #include "lake/api/mcp_client.hpp"
 #include "lake/api/mcp_connections.hpp"
 #include "lake/api/metering_recorder.hpp"
@@ -111,6 +112,7 @@
 #include "lake/api/transcription.hpp"
 #include "lake/api/tunnel_clients.hpp"
 #include "lake/api/web_app.hpp"
+#include "lake/api/white_label.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/api/workspace_deletion.hpp"
 #include "lake/audit/audit.hpp"
@@ -7954,6 +7956,7 @@ struct ApiServer::Impl {
     lake::Thread io_thread;
     std::atomic<bool> is_running{false};
     unsigned short bound_port = 0;
+    unsigned short bound_proxy_port = 0;
     std::string failure_reason;
     std::vector<std::string> get_routes;
     // Exclusive ownership of options.store_root while the server runs (lake#467). The owner
@@ -8031,12 +8034,16 @@ struct ApiServer::Impl {
                     }
                     const auto next = std::ranges::min_element(
                         search_jobs, {}, [](const auto& queued) { return std::get<1>(queued); });
-                    if (std::get<1>(*next) <= std::chrono::steady_clock::now()) {
+                    const auto deadline = std::get<1>(*next);
+                    if (deadline <= std::chrono::steady_clock::now()) {
                         job = std::move(std::get<2>(*next));
                         search_jobs.erase(next);
                         break;
                     }
-                    search_jobs_cv.wait_until(lock, std::get<1>(*next));
+                    // A copy of the deadline: wait_until reads it after it took the lock back,
+                    // when another thread may have grown or shrunk search_jobs and moved the
+                    // element `next` pointed at (lake#1176). `next` is not used after the wait.
+                    search_jobs_cv.wait_until(lock, deadline);
                 }
             }
             job();
@@ -8733,6 +8740,8 @@ struct ApiServer::Impl {
     explicit Impl(ServerOptions opts)
         : options(std::move(opts)), sync_store(options.store_root, options.store_owner_wait),
           artifacts(options.store_root, options.node_name) {
+        // The brand first: the OpenAPI document and the MCP tool list below are rendered with it.
+        set_instance_brand(options.brand);
         sync_store.configure_replication(options.replication_allow_private_addresses,
                                          options.replication_timeout);
         configure_workspace_stores();
@@ -9360,6 +9369,10 @@ struct ApiServer::Impl {
             if (path == pattern)
                 return pattern;
         }
+        // A white-labelled Lake's skill (lake#1137): /skills/<short name>/SKILL.md.
+        if (path == "/skills/" + instance_brand().short_name + "/SKILL.md") {
+            return path;
+        }
         if (path.starts_with("/v1/oauth/") && path.ends_with("/callback")) {
             return "/v1/oauth/:provider/callback";
         }
@@ -9470,6 +9483,9 @@ struct ApiServer::Impl {
         ctx.public_host = options.public_host;
         ctx.external_origin = options.external_origin;
         ctx.clerk_publishable_key = options.clerk_publishable_key;
+        ctx.terms_url = options.terms_url;
+        ctx.privacy_url = options.privacy_url;
+        ctx.sign_in_sso_provider = options.sign_in_sso_provider;
         ctx.sealing_public_key = options.sealing_public_key;
         ctx.transcriber = transcriber;
         ctx.mcp_http = mcp_http;
@@ -9561,6 +9577,12 @@ struct ApiServer::Impl {
                 ctx.credential_expires_at_unix = principal->expires_at_unix;
                 ctx.pool_id = principal->pool_id;
                 ctx.scopes = principal->scopes;
+                // A browser key acts as no person and is no session (lake#1152): the registry
+                // admits it only to what it is bound to.
+                if (principal->browser_key) {
+                    ctx.session_credential = false;
+                    ctx.browser_key = principal->browser_key;
+                }
             } else {
                 // Said apart so a caller knows to renew rather than fix its key (lake#450).
                 ctx.credential_rejection =
@@ -10591,8 +10613,8 @@ struct ApiServer::Impl {
     }
 
     // IO-thread-only, bounded address state. Never evict an active bucket to admit a new client.
-    // Keyed on the address the trusted ingress hop reports (order_client_address): the socket peer
-    // is the ingress pod, which every user shares. Direct clients share the "direct" bucket.
+    // Keyed on order_client_address: the address a trusted proxy reports (the socket peer is the
+    // ingress pod, which every user shares), else the peer's own address (lake#1083).
     bool allow_clerk_exchange(const boost::http::route_params& route) {
         const auto now = std::chrono::steady_clock::now();
         std::erase_if(clerk_attempts, [&](const auto& item) {
@@ -10834,6 +10856,52 @@ struct ApiServer::Impl {
                                                         .device = device_name});
             return back(message);
         };
+        // Which Clerk session this browser is (lake#1163): a JWT template carries no session id,
+        // so the page also posts Clerk's default session token, whose signed `sid` names it. It
+        // is verified with the same JWKS and issuer, must carry no `aud` (so the template cannot
+        // stand in for it) and must name the same user. The Lake browser session is bound to that
+        // sid, and a Clerk session event then ends only this browser. Absent (a page from before
+        // lake#1163): the session is unbound, and any session event of the account ends it.
+        std::string clerk_session_id;
+        if (const std::string session_token = form_field(body, "session_token");
+            !session_token.empty()) {
+            auto ran = co_await run_blocking(
+                [cache = oidc_jwks, fetch = jwks_fetch(), session_token, config = *clerk] {
+                    std::string reason;
+                    auto verified = cache->verify(session_token,
+                                                  config.jwks_url,
+                                                  config.issuer,
+                                                  "",
+                                                  "",
+                                                  false,
+                                                  fetch,
+                                                  false,
+                                                  &reason,
+                                                  true);
+                    return std::pair{std::move(verified), std::move(reason)};
+                });
+            std::string why = ran ? std::move(ran->second)
+                                  : "verification did not run: " + ran.error().message;
+            if (ran && ran->first) {
+                if (ran->first->subject != claims->subject) {
+                    why = "the session token names another user";
+                } else if (ran->first->session_id.empty() ||
+                           ran->first->session_id.size() > 256) {
+                    why = "the session token carries no sid";
+                } else {
+                    clerk_session_id = ran->first->session_id;
+                }
+            }
+            if (clerk_session_id.empty()) {
+                std::cerr << nlohmann::json{{"event", "clerk_sign_in_refused"},
+                                            {"reason", "session token: " + why},
+                                            {"expected_issuer", clerk->issuer},
+                                            {"jwks_url", clerk->jwks_url}}
+                                 .dump()
+                          << '\n';
+                co_return co_await denied("Your sign-in could not be verified. Please try again.");
+            }
+        }
         const ClerkGet get =
             options.clerk_http
                 ? options.clerk_http
@@ -10878,7 +10946,8 @@ struct ApiServer::Impl {
                                           minted->taap_id,
                                           minted->public_key,
                                           minted->wrapped_seed,
-                                          claims->issued_at});
+                                          claims->issued_at,
+                                          clerk_session_id});
         if (!issued) {
             co_return co_await denied(issued.error().message);
         }
@@ -11216,6 +11285,17 @@ struct ApiServer::Impl {
         if (!options.store) {
             co_return co_await saml_error(
                 route, provider_id, ApiError{.code = "store_unavailable", .message = "no store"});
+        }
+        // SSO-only sign-in (lake#1136): the same refusal the registry gives start_sso_saml.
+        if (!options.sign_in_sso_provider.empty()) {
+            const auto provider = options.store->get_sso_provider(provider_id);
+            if (auto refused = sso_only_refusal(options.sign_in_sso_provider,
+                                                "start_sso_saml",
+                                                nlohmann::json{{"provider_id", provider_id}},
+                                                provider ? provider->pool_id : std::string("lake"))) {
+                co_return co_await saml_error(
+                    route, provider_id, ApiError{.code = "unauthorized", .message = *refused});
+            }
         }
         const auto started = start_saml_sign_in(*options.store,
                                                 options.public_host,
@@ -13497,7 +13577,8 @@ struct ApiServer::Impl {
     }
 
     // Whether the request is for the apex host (LAKE_APEX_HOST, lake#757): every path there is the
-    // region picker, apart from the stylesheet and fonts the picker links and the probes.
+    // region picker, apart from the stylesheet and fonts the picker links and the probes. The
+    // agent documents are answered by the same middleware (apex_agent_document, lake#1110).
     bool region_picker_serves(const boost::http::route_params& route) const {
         if (options.regions.apex_host.empty()) {
             return false;
@@ -13521,6 +13602,44 @@ struct ApiServer::Impl {
     // the region chosen before (the `lake_region` cookie), else the closest to Cloudflare's
     // CF-IPCountry, else the first. POST with `region`: remember it and continue to the same path
     // and query on that region's host.
+    // The agent documents a region serves at the same paths (lake#1110, docs/api/regions.md): on
+    // the apex they name every region instead of the picker's HTML. The route pattern recorded
+    // for the request, or empty when the request is not for one of them.
+    static std::string_view apex_agent_document(const boost::http::route_params& route) {
+        if (route.req.method() != boost::http::method::get) {
+            return {};
+        }
+        const std::string_view path = route.url.encoded_path();
+        for (const std::string_view document :
+             {"/llms.txt", "/llms-full.txt", "/skills/lake/SKILL.md", "/developer/mcp/skill"}) {
+            if (path == document) {
+                return document;
+            }
+        }
+        return {};
+    }
+
+    boost::http::route_task serve_apex_agent_document(boost::http::route_params& route,
+                                                      std::string_view document) {
+        const Regions& regions = options.regions;
+        const std::string origin = "https://" + regions.apex_host;
+        if (document == "/llms.txt" || document == "/llms-full.txt") {
+            co_return co_await send_text(
+                route,
+                boost::http::status::ok,
+                document == "/llms.txt" ? agent_docs::apex_llms_txt(registry, regions, origin)
+                                        : agent_docs::apex_llms_full_txt(registry, regions, origin),
+                "text/plain; charset=utf-8",
+                "public, max-age=300");
+        }
+        route.res.set("content-disposition", "attachment; filename=SKILL.md");
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     agent_docs::apex_skill_md(registry, regions, origin),
+                                     "text/markdown; charset=utf-8",
+                                     "public, max-age=300");
+    }
+
     boost::http::route_task serve_region_picker(boost::http::route_params& route) {
         namespace http = boost::http;
         const Regions& regions = options.regions;
@@ -13585,24 +13704,26 @@ struct ApiServer::Impl {
     }
 
     // The address an anonymous order and an authentication attempt are counted against (lake#838,
-    // LSR-103): X-Real-IP, which the ingress (ingress-nginx) always sets itself, overwriting any
-    // the sender sent; else the last X-Forwarded-For hop, the one the nearest proxy appended; else
-    // one bucket for every direct client. Never CF-Connecting-IP or the first X-Forwarded-For hop: a sender that reaches the
-    // ingress without passing Cloudflare can write either, and would land in a fresh bucket with
-    // each request. The ingress decides which client address to trust (Cloudflare's ranges), and
-    // lake counts what it decided.
-    static std::string order_client_address(const boost::http::route_params& route) {
-        if (route.req.count("x-real-ip") != 0) {
-            return std::string(route.req.at("x-real-ip")).substr(0, 64);
-        }
-        if (route.req.count("x-forwarded-for") != 0) {
-            std::string forwarded(route.req.at("x-forwarded-for"));
-            const auto comma = forwarded.rfind(',');
-            forwarded = comma == std::string::npos ? forwarded : forwarded.substr(comma + 1);
-            const auto first = forwarded.find_first_not_of(' ');
-            return first == std::string::npos ? "direct" : forwarded.substr(first, 64);
-        }
-        return "direct";
+    // LSR-103, lake#1083, lake#1132). From the proxy listener (LAKE_PROXY_PORT), whatever the peer,
+    // or from a trusted proxy on the main listener (LAKE_TRUSTED_PROXY_CIDRS): X-Real-IP, which the
+    // ingress (ingress-nginx) always sets itself, overwriting any the sender sent; else the last
+    // X-Forwarded-For hop, the one the nearest proxy appended; else the proxy's own address. From
+    // any other peer: the peer's address, whatever headers it sent, so a caller that reaches the
+    // Service without passing the ingress cannot rotate X-Real-IP past the limits. Never
+    // CF-Connecting-IP or the first X-Forwarded-For hop: a sender that reaches the ingress without
+    // passing Cloudflare can write either. The ingress decides which client address to trust
+    // (Cloudflare's ranges), and lake counts what it decided.
+    std::string order_client_address(const boost::http::route_params& route) const {
+        const auto header = [&](const char* name) -> std::optional<std::string_view> {
+            if (route.req.count(name) == 0) {
+                return std::nullopt;
+            }
+            return route.req.at(name);
+        };
+        const std::string peer = server ? server->peer(route) : std::string{};
+        const bool believed =
+            (server && server->proxied(route)) || is_trusted_proxy(options.trusted_proxies, peer);
+        return client_address(believed, peer, header("x-real-ip"), header("x-forwarded-for"));
     }
 
     // Where order links point: https://<apex host>, else the order sheet's configured URL.
@@ -14016,6 +14137,19 @@ struct ApiServer::Impl {
                 "<script id=\"lake-viewer\" type=\"application/json\">" + escaped + "</script>";
             if (const std::size_t head = html.find("</head>"); head != std::string::npos) {
                 html.insert(head, tag);
+            }
+        }
+        // A white-labelled Lake's title, favicon and colours are in the first paint (lake#1135):
+        // no build per brand, and no flash of Lake's own. Unchanged for Lake's brand.
+        if (const Brand& brand = instance_brand(); brand.custom) {
+            static constexpr std::string_view lake_title = "<title>Lake Console</title>";
+            if (const std::size_t title = html.find(lake_title); title != std::string::npos) {
+                html.replace(title,
+                             lake_title.size(),
+                             "<title>" + web_ui_escape(brand.console_title) + "</title>");
+            }
+            if (const std::size_t head = html.find("</head>"); head != std::string::npos) {
+                html.insert(head, brand.head_markup());
             }
         }
         return send_text(route,
@@ -14654,7 +14788,9 @@ struct ApiServer::Impl {
     }
 
     boost::http::route_task serve_metrics(boost::http::route_params& route) {
-        if (!context_for(route).authorized) {
+        // A browser key sits in a public page and reaches nothing but its binding (lake#1152).
+        if (const ApiContext context = context_for(route);
+            !context.authorized || context.browser_key) {
             return send_text(route,
                              boost::http::status::forbidden,
                              error_body("unauthorized", "a valid admin bearer token is required"),
@@ -15242,6 +15378,26 @@ struct ApiServer::Impl {
                         context.authorized ? maximum_sync_body_size : std::size_t{1024 * 1024});
     }
 
+    // Lake's CORS answers any origin (`Access-Control-Allow-Origin: *`); a call made with a browser
+    // key (lake#1152, docs/api/browser-keys.md) is answered to the key's own origins only: the
+    // calling origin when the key lists it, and no Access-Control-Allow-Origin otherwise, so a page
+    // of any other site cannot read the answer even if the call reached Lake. A preflight carries
+    // no credential, so it is answered as every other preflight is.
+    static void restrict_cors_to_browser_key(boost::http::route_params& route,
+                                             const ApiContext& ctx) {
+        if (!ctx.browser_key) {
+            return;
+        }
+        namespace http = boost::http;
+        route.res.erase(http::field::access_control_allow_origin);
+        route.res.set(http::field::vary, "Origin");
+        const auto origin = control::browser_key_origin(ctx.caller_origin);
+        if (origin && std::ranges::find(ctx.browser_key->origins, *origin) !=
+                          ctx.browser_key->origins.end()) {
+            route.res.set(http::field::access_control_allow_origin, ctx.caller_origin);
+        }
+    }
+
     boost::http::route_task serve_capability(boost::http::route_params& route,
                                              std::shared_ptr<const Capability> capability) {
         namespace http = boost::http;
@@ -15341,6 +15497,8 @@ struct ApiServer::Impl {
             status == http::status::too_many_requests) {
             route.res.set(http::field::retry_after, "1");
         }
+        // A browser key's answer is readable only by the websites it lists (lake#1152).
+        restrict_cors_to_browser_key(route, ctx);
         // A repository write names its workspace store requests as a page does (lake#527).
         route.res.set("Server-Timing", server_timing_of(route));
         stamp_response_headers(route, body);
@@ -15480,6 +15638,7 @@ struct ApiServer::Impl {
         if (!session_id.empty()) {
             route.res.set("Mcp-Session-Id", session_id);
         }
+        restrict_cors_to_browser_key(route, ctx);
         route.res.set("Server-Timing", server_timing_of(route));
         stamp_response_headers(route, body);
         auto [send_error] = co_await route.send(body);
@@ -15725,7 +15884,8 @@ bool ApiServer::start() {
         co_return result;
     });
     // The apex host's region picker (lake#757, docs/ui/regions.md): before everything else that
-    // could answer, so no path on the apex reaches the app or the API.
+    // could answer, so no path on the apex reaches the app or the API. The agent documents
+    // (/llms.txt, /llms-full.txt, the skill) answer there with every region (lake#1110).
     router.use(guarded("region_picker", [&impl](http::route_params& route) -> http::route_task {
         if (!impl.region_picker_serves(route)) {
             co_return http::route_next;
@@ -15733,9 +15893,45 @@ bool ApiServer::start() {
         const auto timing = request_timing(route);
         const auto start = timing ? timing->started : std::chrono::steady_clock::now();
         const RequestTimingScope timing_scope(route, start);
+        // An agent document (lake#1110) is recorded under its own route pattern.
+        if (const std::string_view document = impl.apex_agent_document(route); !document.empty()) {
+            auto result = co_await impl.serve_apex_agent_document(route, document);
+            impl.record_request(route, document, start);
+            co_return result;
+        }
         auto result = co_await impl.serve_region_picker(route);
         impl.record_request(route, "region_picker", start);
         co_return result;
+    }));
+    // A host alias (LAKE_HOST_ALIASES, lake#1136): the Orama host of a white-labelled Lake. A
+    // browser page opened there is sent to the public host (the customer's), so people sign in and
+    // stay on the customer's domain; the redirect is temporary, so removing the custom domain never
+    // leaves browsers pointed at it. Every other request (the API, MCP, git, the registry, OAuth and
+    // SAML callbacks, webhooks) is served exactly as on the public host: its Host is rewritten, so
+    // nothing below treats the alias as an application's custom domain.
+    router.use(guarded("host_alias", [&impl](http::route_params& route) -> http::route_task {
+        if (impl.options.host_aliases.empty() || impl.options.public_host.empty() ||
+            route.req.count(http::field::host) == 0 ||
+            !is_host_alias(impl.options.host_aliases, route.req.at(http::field::host))) {
+            co_return http::route_next;
+        }
+        const std::string path(route.url.path());
+        const std::string accept(route.req.value_or(http::field::accept, ""));
+        if (web_app_serves(route.req.method_text(), path, accept, false)) {
+            std::string target(route.url.encoded_path());
+            if (route.url.has_query()) {
+                target += "?" + std::string(route.url.encoded_query());
+            }
+            const auto timing = request_timing(route);
+            const auto start = timing ? timing->started : std::chrono::steady_clock::now();
+            const RequestTimingScope timing_scope(route, start);
+            auto result = co_await impl.redirect(
+                route, alias_redirect_location(impl.options.public_host, target));
+            impl.record_request(route, "host_alias", start);
+            co_return result;
+        }
+        route.req.set(http::field::host, impl.options.public_host);
+        co_return http::route_next;
     }));
     // A cookie-authenticated unsafe request from another origin is refused before any route.
     router.use(guarded("cross_site", [&impl](http::route_params& route) -> http::route_task {
@@ -15956,6 +16152,16 @@ bool ApiServer::start() {
                   return impl.observe_request(
                       route, "/skills/lake/SKILL.md", impl.serve_mcp_skill(route));
               });
+    // A white-labelled Lake also serves the skill under its brand's short name (lake#1137); the
+    // Lake path stays, so a link written before the brand still works.
+    if (const std::string branded = "/skills/" + instance_brand().short_name + "/SKILL.md";
+        branded != "/skills/lake/SKILL.md") {
+        add_route(http::method::get,
+                  branded,
+                  [&impl, branded](http::route_params& route) -> http::route_task {
+                      return impl.observe_request(route, branded, impl.serve_mcp_skill(route));
+                  });
+    }
     add_route(
         http::method::get, "/llms.txt", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/llms.txt", impl.serve_llms(route, false));
@@ -16515,6 +16721,22 @@ bool ApiServer::start() {
         return false;
     }
     impl.bound_port = impl.server->port();
+    if (impl.options.proxy_port) {
+        if (*impl.options.proxy_port != 0 && *impl.options.proxy_port == impl.bound_port) {
+            impl.failure_reason = "the proxy port (LAKE_PROXY_PORT) is the listen port " +
+                                  std::to_string(impl.bound_port) + "; give it a port of its own";
+            impl.server.reset();
+            return false;
+        }
+        const std::string proxy_error =
+            impl.server->bind_proxy(corosio::endpoint(address, *impl.options.proxy_port));
+        if (!proxy_error.empty()) {
+            impl.failure_reason = "proxy listener (LAKE_PROXY_PORT): " + proxy_error;
+            impl.server.reset();
+            return false;
+        }
+        impl.bound_proxy_port = impl.server->proxy_port();
+    }
     if (impl.options.store && impl.options.workspaces && !impl.options.instance_kek.empty()) {
         impl.metering_recorder =
             std::make_unique<MeteringRecorder>(impl.options.store.get(),
@@ -16682,6 +16904,9 @@ bool ApiServer::running() const {
 }
 unsigned short ApiServer::port() const {
     return impl_->bound_port;
+}
+unsigned short ApiServer::proxy_port() const {
+    return impl_->bound_proxy_port;
 }
 const std::string& ApiServer::reason() const {
     return impl_->failure_reason;

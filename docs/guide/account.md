@@ -24,7 +24,8 @@ each, on the site and through the API.
 Clerk's steps. Some lakes create accounts only by invitation; on `lake.oramadev.net`, an
 administrator adds people.
 
-**With Lake's own sign-up** (`/sign-up`):
+**With Lake's own sign-up** (`/sign-up`, on a Lake without Clerk; under Clerk the password
+entries below answer `403 forbidden`):
 
 1. Fill in **Email**, **Display name** (optional), **Password** and **Device name**.
 2. Press **Create account**. You land on **Data → Repositories**, signed in.
@@ -49,7 +50,7 @@ Identity](#your-identity)).
 ## Sign In
 
 **With Clerk**, press **Sign in** and follow Clerk's steps; you return to the page that sent you,
-or to **Ask Orama**, Lake's home.
+or to **Quickstart**, Lake's home.
 
 **With Lake's own sign-in** (`/sign-in`):
 
@@ -58,7 +59,7 @@ or to **Ask Orama**, Lake's home.
    sign in**.
 3. Or choose **Use a passkey**, or a configured social **Provider** and **Continue to provider**.
 
-You return to the page that sent you to sign in, or to **Ask Orama**, Lake's home, by default.
+You return to the page that sent you to sign in, or to **Quickstart**, Lake's home, by default.
 
 Through the REST API, send `POST /v1/sign_in_password` with this body:
 
@@ -90,6 +91,9 @@ United States (`us.lake.live`). Each region is a separate Lake with its own acco
 - **The front door picks for you.** Opening `lake.live` shows a page that preselects the region
   closest to you, or the one you chose there before. Press **Continue** to go to that region at the
   same address; Lake remembers the choice in a cookie that holds only the region's name.
+- **An agent reads every region from the front door.** `lake.live/llms.txt`, `lake.live/llms-full.txt`
+  and `lake.live/skills/lake/SKILL.md` name each region with its MCP server, guides and skill, so an
+  agent pointed at `lake.live` knows to work in the region where your account is.
 - Where Lake has no regions (an installation on your own servers, or a development Lake), none of
   this is shown.
 
@@ -171,7 +175,11 @@ it, choose **Use a passkey** on the sign-in page.
 Open **Sessions** from the account menu.
 
 - **This session** is the browser you are using. **Revoke and sign out** ends it after a
-  confirmation.
+  confirmation. Signing out ends only this browser: your API keys, MCP keys, other browsers and
+  devices keep working (lake#1163), including keys you made in this browser.
+- **Sign out everywhere** ends every session, API key, MCP key, static token and device of your
+  account, this browser included, after a confirmation. Use it when a key or a device may be lost
+  or exposed; agents and scripts using your keys stop until you make new ones.
 - **Sessions** lists your other sessions and tokens, with their scopes, expiry and status; filter by
   **Active** or **Revoked**. **Revoke** ends one on its next request.
 - **Devices** lists the devices you signed in from, including passkeys. Revoking a device ends its
@@ -202,8 +210,8 @@ organization or deactivating you through SCIM revokes your sessions there
 ## Limits
 
 - A session from Clerk sign-in lasts 30 days.
-- A token lasts as long as the session that made it, at most 30 days, unless your account allows
-  never-expiring tokens.
+- A token expires no later than the session that made it would have, at most 30 days, unless your
+  account allows never-expiring tokens. Signing out does not end it (lake#1163).
 - Passkeys and Lake's own multi-factor authentication are not offered when your Lake uses Clerk;
   Clerk handles sign-in there.
 

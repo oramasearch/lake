@@ -1,5 +1,9 @@
 # Public API types
 
+`brand.hpp` declares `Brand`, the instance brand of a white-labelled Lake (`LAKE_BRAND_FILE`,
+`LAKE_BRAND_*`, lake#1135), `brand_from_sources` (validation at start) and `instance_brand()`. See
+[brand](../../../docs/serving/brand.md).
+
 `pipeline.hpp` defines shared limits of 50,000 steps, 100,000 edges and 256 edits per batch,
 including a JSON shape/count guard used before graph copies and engine saves (lake#967).
 
@@ -215,6 +219,9 @@ and `checked_application_session` check a session issued in an application's poo
 user's record in the application's workspace before returning it, and `sign_up_password_session`
 claims a pool user's email there before the account exists (lake#353). See
 [apps.md](../../../docs/api/apps.md#where-users-and-organizations-live-lake353-lake354).
+`apps.hpp` also declares `lake_pool_password_refusal`, the `forbidden` answer the Lake pool's
+password entries give under Clerk; its rule is `lake_pool_password_sign_in` in `clerk.hpp`, the
+same one `viewer` reports as `password_sign_up` (lake#1098).
 `apps.hpp` declares `configured_application`, which reads an application's settings record from
 its workspace onto the routing row the store returns (lake#351), and `configured`, which unwraps
 its completed answer; the identity capabilities and hosted pages use them.
@@ -265,8 +272,13 @@ preserve raw counts and bill each direction separately. `test_model_gateway.cpp`
 `test_billing.cpp` cover provider-call refusal and invoice amounts, including a missing price.
 `authentication_work.hpp` limits authentication to two queued/running blocking jobs; its permit
 outlives the callable, so disconnects cannot release capacity early (lake#969).
-`ApiContext::client_address` is the address the trusted ingress hop decided (the HTTP server's
-`order_client_address`, `direct` without one), and the registry shares
+`client_address.hpp` (lake#1083, lake#1132) decides which address per-client limits count: what
+the proxy reported in `X-Real-IP` or the last `X-Forwarded-For` hop when the request arrived on the
+proxy listener (`ServerOptions::proxy_port`, `LAKE_PROXY_PORT`, `ApiServer::proxy_port()`) or from
+a trusted proxy (`ServerOptions::trusted_proxies`, `LAKE_TRUSTED_PROXY_CIDRS`, default loopback and
+the private ranges, `none` with a proxy listener), else the peer's own address. See [client addresses](../../../docs/deployment/client-addresses.md).
+`ApiContext::client_address` is that address (the HTTP server's `order_client_address`, `direct`
+when the peer is unknown), and the registry shares
 its client attempt table across transports. See [the contract](../../../docs/api/identity.md#authentication-attempt-limits).
 `ApiContext::recovery_client_address` carries ingress-derived transport metadata for anonymous
 recovery limits. It is never capability input; empty addresses share a bucket. See
@@ -276,3 +288,7 @@ recovery limits. It is never capability input; empty addresses share a bucket. S
 to the shared Store-backed registry reservations across REST, MCP and hosted forms. Non-HTTP
 calls share an in-process client bucket. See [the contract](../../../docs/api/identity.md#authentication-attempt-limits)
 (lake#966).
+`white_label.hpp` declares a white-labelled Lake's hosts (`InstanceHosts`: public host, aliases, control
+host) and SSO-only sign-in (`sso_only_refusal`). `ServerOptions` carries `host_aliases` and
+`sign_in_sso_provider`; `ApiContext` carries `sign_in_sso_provider`. See
+[white-label sign-in](../../../docs/deployment/white-label-sign-in.md) (lake#1136).

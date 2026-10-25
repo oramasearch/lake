@@ -361,7 +361,7 @@ function Services({ customerId, creating, setCreating }: { customerId: string; c
                     const stall = stallNote(service, phase);
                     const hint = deleting ? "" : startHint(service, phase, kinds);
                     return (
-                      <div className="max-w-[26rem] space-y-1">
+                      <div className="max-w-[26rem] space-y-1" data-testid="service-status">
                         <Status value={phase} tone={phaseTone(phase)} />
                         {showMessage && <div className="text-[12px] text-ink-2">{message}</div>}
                         {stall && <div className="rounded-[4px] bg-warn-soft px-2 py-1 text-[12px] text-warn">{stall}</div>}

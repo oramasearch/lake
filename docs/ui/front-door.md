@@ -6,8 +6,9 @@ server-rendered homepage checked on 2026-10-01 against lake `36679e1` on the dev
 The homepage (`/`, `frontend/src/pages/home/HomePage.tsx`) says what Lake is for: designing,
 training and shipping AI on the customer's own data, in a workspace of their own. It reads only
 `viewer`. Repositories are one link under Ship. Visitors and the operator see it. A signed-in
-person lands on Ask Orama instead, full page, and finds the platform at a glance under Home →
-Dashboard (`/dashboard`; lake#600, [README.md](README.md#the-shell)).
+person lands on Quickstart instead ([quickstart.md](quickstart.md), lake#1128), has Ask Orama at
+`/ask`, and finds the platform at a glance under Home → Dashboard (`/dashboard`; lake#600,
+[README.md](README.md#the-shell)).
 
 **Sign-in.** When `LAKE_CLERK_PUBLISHABLE_KEY` is set (`viewer.clerk.enabled`), Sign in opens
 Clerk's form and lake's own password, TOTP and passkey pages leave the navigation; see
@@ -19,6 +20,13 @@ the homepage and `/sign-up` say the same sentence about invitations; where it is
 invitation sentence. Until clerk-js has answered, the page offers Sign in and the docs only.
 Without Clerk, which is what an on-prem install uses, password sign-up is open and the visitor is
 offered **Create account** too.
+
+**Terms and privacy.** Every sign-up and sign-in form, Clerk's and lake's own, ends with *By
+creating an account, you agree to the Terms of Service and acknowledge the Privacy Policy.* (*By
+signing in, …* on sign-in), both linked from `viewer.legal` and opening in a new tab
+(`LegalNotice`, liquid-bridge#15). The instance sets the URLs (`LAKE_TERMS_URL`, `LAKE_PRIVACY_URL`,
+default Orama's published pages) or turns either off; see
+[`../deployment/sign-in.md`](../deployment/sign-in.md#terms-and-privacy).
 
 ## Landing copy
 

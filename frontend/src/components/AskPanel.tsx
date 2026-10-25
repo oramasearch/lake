@@ -14,6 +14,7 @@ import { type CSSProperties, useCallback, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ExternalLink, FileText, Maximize2, Minimize2, Plus, Sparkles, X } from "lucide-react";
 import { useSession } from "@/lib/session";
+import { brandText, instanceBrand } from "@/lib/brand";
 import { ASK_DEFAULT_WIDTH, setResizingAsk } from "@/lib/askWidth";
 import type { AskRequest } from "@/lib/ask";
 import { useIsPhone, usePhoneSheet } from "@/lib/phoneSheet";
@@ -50,7 +51,7 @@ function ResizeHandle({ width, onResize }: { width: number; onResize: (width: nu
     <div
       role="separator"
       aria-orientation="vertical"
-      aria-label="Resize Ask Orama"
+      aria-label={`Resize ${instanceBrand().assistant_name}`}
       aria-valuenow={width}
       tabIndex={0}
       title="Drag to resize · double-click to reset"
@@ -93,19 +94,21 @@ export function AskPanel({
   onRequestDone?: () => void;
 }) {
   const { workspaceId, space } = useSession();
+  // The assistant's name on a white-labelled Lake (lake#1135).
+  const brand = instanceBrand();
   const phone = useIsPhone();
   const keyboard = usePhoneSheet(phone);
   // The home indicator's strip matters only while the keyboard is down.
   const style = { width, ...(phone ? { "--sheet-safe-bottom": keyboard ? "0px" : "env(safe-area-inset-bottom)" } : {}) } as CSSProperties;
   return (
-    <aside className="ask-panel" data-overlay={overlay || undefined} data-expanded={expanded || undefined} data-sheet={phone || undefined} style={style} aria-label="Ask Orama">
+    <aside className="ask-panel" data-overlay={overlay || undefined} data-expanded={expanded || undefined} data-sheet={phone || undefined} style={style} aria-label={brand.assistant_name}>
       {!expanded && <ResizeHandle width={width} onResize={onResize} />}
       <div className="ask-head flex h-12 shrink-0 items-center gap-2 border-b border-[var(--lake-border-subtle)] px-4">
         <Sparkles size={15} aria-hidden />
         <div className="min-w-0 flex-1">
-          <h2 className="m-0 text-base">Ask Orama</h2>
+          <h2 className="m-0 text-base">{brand.assistant_name}</h2>
           <p className="muted m-0 truncate text-xs" title={from}>
-            {from ? `About the page ${from.split("?")[0]}` : "Ask about anything in your Lake. Changes are proposed for you to confirm."}
+            {from ? `About the page ${from.split("?")[0]}` : brandText(brand, "Ask about anything in your Lake. Changes are proposed for you to confirm.")}
           </p>
         </div>
         {workspaceId && space ? <PanelActions workspaceId={workspaceId} from={from} /> : null}
@@ -114,7 +117,7 @@ export function AskPanel({
             {expanded ? <Minimize2 size={15} aria-hidden /> : <Maximize2 size={15} aria-hidden />}
           </button>
         )}
-        <button type="button" className="icon-button" onClick={onClose} aria-label="Close Ask Orama">
+        <button type="button" className="icon-button" onClick={onClose} aria-label={`Close ${brand.assistant_name}`}>
           <X size={16} aria-hidden />
         </button>
       </div>
@@ -122,7 +125,7 @@ export function AskPanel({
         <PanelConversation key={workspaceId} workspaceId={workspaceId} from={from} request={request ?? null} onRequestDone={onRequestDone} />
       ) : (
         <div className="p-4">
-          <p>Ask Orama works in a workspace, and you have none selected.</p>
+          <p>{brand.assistant_name} works in a workspace, and you have none selected.</p>
           <p>
             <Link to="/workspaces">Choose or start one on Workspaces</Link>.
           </p>

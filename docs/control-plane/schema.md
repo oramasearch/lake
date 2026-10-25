@@ -1,14 +1,43 @@
 # Control-plane schema
 
-**Source of truth: `db/schema.sql` in this repository.** The operator carries a byte-identical
-vendored copy at `internal/controller/assets/lake-schema.sql` and applies it to every Lake's
-Postgres. Change the schema here, then copy it into the operator in the same change; the
-operator's test checks the copy carries the source-of-truth header.
+**Source of truth: `db/schema.sql` in this repository.** It is compiled into the lake binary, and
+`lake migrate` applies it (below). Until orama-operator#936 runs that command, the operator carries
+a byte-identical vendored copy at `internal/controller/assets/lake-schema.sql` and applies it to
+every Lake's Postgres; change the schema here, then copy it into the operator in the same change.
+
+## Applying the schema: `lake migrate`
+
+`lake migrate` (lake#1119) applies the `db/schema.sql` built into the binary to
+`LAKE_CONTROL_DB_URI` (or `--control-db`) exactly as the operator's `PostgresSchema` Job does:
+one transaction, skipped when the newest migration's guard table exists and every migration the
+file records is in `schema_migrations`, otherwise the whole idempotent file. It holds
+`pg_advisory_xact_lock(0x6c616b656d6967)` for the transaction, so concurrent runs apply one at a
+time, and prints the migration rows and guard tables it added as JSON. Exit 0 applied or current,
+1 a statement failed (rolled back), 2 usage, 3 the database unreachable within `--wait-seconds`.
+The server process never migrates. `lake manifest` publishes the schema's SHA-256, latest
+migration, guard table and every guard table, so the operator needs no copy of the file. The full
+contract is [`../deployment/operator-interface.md`](../deployment/operator-interface.md).
+
+A new migration still follows the rules below: idempotent SQL, its row in `schema_migrations`, and a
+new `*_guard` table created by the newest migration (`LakeManifest.TheGuardTableIsTheNewestMigrations`
+fails otherwise).
+
+`0103_clerk_session_binding` (lake#1163) adds nullable `sessions.clerk_session_id` (1 to 256
+characters): the Clerk session id (`sid`) a Clerk browser exchange came from, taken from Clerk's
+signed default session token. Index `sessions_clerk_session_id_idx` on `(user_id,
+clerk_session_id)` where set. A Clerk `session.revoked`/`removed`/`ended` revokes the account's
+`browser` sessions bound to that id, and unbound `browser` sessions unless the event is older than
+the account's revocation watermark; API keys, static tokens, TAAP sessions and devices are never
+revoked by a session event. Rows issued before the migration stay NULL (unbound). Additive; guard
+`clerk_session_binding_guard`; the operator must vendor this schema and select the guard before the
+binary rolls. See [Clerk](../api/clerk.md#webhooks).
 
 `0094_clerk_revocation` (lake#948, LSR-085) adds `clerk_user_states`: upstream user id, the
 last applied timestamp for that Clerk subject, an independent revocation watermark, suspension
 and terminal deletion. Both timestamps are Clerk milliseconds. Rows remain when an event precedes provisioning;
-revocation prevents re-exchange of old template JWTs and revokes all existing account credentials.
+revocation prevents re-exchange of old template JWTs. A ban, lock, deprovisioning or deletion
+revokes all existing account credentials; a session event revokes browser sessions only (lake#1163,
+`0103_clerk_session_binding`).
 `users.clerk_suspended` blocks every resolved user principal and every PostgreSQL session issuance
 path, while a newer unban/unlock can clear it without clearing `users.disabled_at` or reviving
 revoked credentials. The first application revokes all existing Clerk-linked sessions, tokens and
@@ -1420,3 +1449,80 @@ prepaid balance's billing records (decision 56), every row cascading with its cu
 A credit and its `billing_payment_events` row are written in one transaction. Lake alone writes the
 tables. Additive and idempotent; guard `account_balances_guard`. The operator vendors the schema and
 selects that guard before a lake with this change is rolled.
+
+## Credits from Orama (migration `0100_balance_grants`)
+
+`0100_balance_grants` (lake#1134, [`../api/billing.md#credits-from-orama`](../api/billing.md#credits-from-orama))
+lets `account_balance_credits` hold credits Orama gives, beside the paid top-ups:
+
+- `kind` may be `grant` (the 0099 check `account_balance_credits_kind_check` is replaced once, by a
+  `DO` block keyed on the new `account_balance_credits_grant_check`);
+- new columns, all with defaults, so existing rows are unchanged: `reason` (≤ 1000), `granted_by`
+  (≤ 255), `expires_at`, `charges_at_grant_micros` (the account's charges when it was given),
+  `ended_at`, `end_reason` (`''`, `expired` or `revoked`), `charges_at_end_micros` and
+  `forfeited_micros` (the unused part that stopped counting);
+- `account_balance_credits_grant_check`: a grant has provider `orama`, a reason, at most
+  $10,000, a forfeited part no larger than its amount, and is either still counting (no end, nothing
+  forfeited) or ended with a reason; a top-up has none of the grant columns set;
+- the partial index `account_balance_credits_counting_grants` (an account's grants that still count).
+
+The balance sums `amount_micros - forfeited_micros`. Additive and idempotent (reapplied, it changes
+nothing); guard `balance_grants_guard`. The orama-operator vendors lake's schema today, so an
+operator release carrying it, with that guard selected, rolls before a lake image that writes grants
+(unless lake#1119's `lake migrate` has taken the schema over by then).
+
+## Coupon codes (migration `0101_coupons`)
+
+`0101_coupons` (lake#1156, [`../api/billing.md#coupon-codes`](../api/billing.md#coupon-codes))
+adds three tables, billing records in the control plane (decision 56):
+
+- `billing_coupons`: one row per code. `code` is unique and stored normalized
+  (`^[A-Z0-9]{4,32}$`); `amount_micros` whole cents from $0.01 to $10,000; `credit_days` 1 to
+  3,650 (how long the grant lasts after redemption); `expires_at` (when the code stops working,
+  null: never); `max_redemptions` (null: no cap, else 1 to 10,000,000); `new_accounts_only`
+  (default true); `campaign` (`''` or lower-case, up to 64); `redemptions`, the claimed count the
+  cap is checked against (never above `max_redemptions`); `created_by`, `created_at`, and
+  `disabled_at`/`disabled_by`. Index `billing_coupons_by_campaign`.
+- `billing_coupon_redemptions`: one row per claim. `coupon_id`, `customer_id`, `email_sha256` (a
+  SHA-256 of the person's normalized email, never the address), `redeemed_by`, `credit_id` (the
+  grant it became, null until it is given) and `created_at`. Unique `(coupon_id, customer_id)` and
+  `(coupon_id, email_sha256)`: one redemption per account and per inbox. Index
+  `billing_coupon_redemptions_by_customer`.
+- `billing_coupon_attempts`: failed redemptions per key (`key_sha256`, a SHA-256 of a person's id or
+  a client address, never a code), `failures` and `window_start`. Rows a day past their window are
+  deleted as failures are counted.
+
+A claim locks the coupon's row (`SELECT … FOR UPDATE`), so the cap, the expiry, disabling and the
+two uniqueness rules are decided in the transaction that records the claim. The grant itself is a
+row of `account_balance_credits` of kind `grant` (0100), reference `coupon:<coupon id>:<customer
+id>`, written by the grant path; the redemption then records its id.
+
+Additive and idempotent (reapplied, it changes nothing); guard `coupons_guard`. The orama-operator
+vendors lake's schema today (`internal/controller/assets/lake-schema.sql`, until
+orama-operator#936), so an operator release carrying it through `0101_coupons`, with `coupons_guard`
+selected, rolls before a lake image that serves coupons, after the one for `0100_balance_grants`
+(unless lake#1147's `lake migrate` has taken the schema over by then).
+
+## Browser keys (migration `0102_browser_keys`)
+
+`0102_browser_keys` (lake#1152, [`../api/browser-keys.md`](../api/browser-keys.md)) adds
+`browser_keys`, one row per browser key: a credential, so in the control plane beside `sessions` and
+the keystore (multitenancy, decision 53), never in a workspace Zetta.
+
+- `id` (the key's id, also in its secret `lbk.<id>.<random>`), `customer_id` and `workspace_id`
+  (both cascade), `index_id` (1 to 256 characters), `model_id` (empty: the key asks no model),
+  `name` (at most 200);
+- `origins`, 1 to 20 lowercase origins without a trailing slash (lake checks the form; the table
+  checks the count);
+- `rate_limit_per_minute` (1 to 6000, default 600) with `window_started_at` and `window_calls`, the
+  current minute and its count, which `admit_browser_key_call` moves in one `UPDATE` so every replica
+  counts in the same row;
+- `secret_sha256`, unique, 64 lowercase hex digits: the secret itself is never stored;
+- `created_by_user_id` (set null if the user row goes) and `created_by_taap_id`, `created_at`,
+  `expires_at` (null: until revoked), `revoked_at` and `revoked_by_taap_id`, `last_used_at`.
+
+The row names no session, so revoking sessions (signing out, `revoke_user_sessions`, Clerk's
+account-wide session events) leaves it working; `revoke_browser_key` ends it, and a workspace whose
+`desired` is `deleted` ends its keys. Additive: the table, its index and `browser_keys_guard`.
+Apply before the new binary: the schema through `0102` reaches the control database first (lake's
+`lake migrate`, or the operator's vendored copy).

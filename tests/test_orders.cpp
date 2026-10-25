@@ -280,6 +280,20 @@ TEST(OrdersConfig, TheDefaultIsTheIssuesOffers) {
             return f.find("Backups included") != std::string::npos;
         })) << offer.id;
     }
+    // Private Warehouse and every offer above it carry their own domain, white-labelled, on
+    // request until it is delivered (lake#1129); the shared option does not.
+    const auto white_label = [](const std::vector<std::string>& features) {
+        return std::ranges::count(
+            features, std::string("Your own domain, white-labelled (available on request)"));
+    };
+    ASSERT_EQ(sheet.offers.size(), 3U);
+    for (const OrderOffer& offer : sheet.offers) {
+        EXPECT_EQ(white_label(offer.features), 1) << offer.id;
+    }
+    for (const std::string& feature : sheet.shared_features) {
+        EXPECT_EQ(feature.find("white-label"), std::string::npos) << feature;
+        EXPECT_EQ(feature.find("domain"), std::string::npos) << feature;
+    }
 }
 
 TEST(OrdersConfig, OverridesMergeOverTheDefault) {
@@ -1371,6 +1385,19 @@ TEST(OrdersApex, TheSheetShowsEveryOptionAndKeepsTheRegionChoice) {
         ++backups;
     }
     EXPECT_EQ(backups, 4U);
+    // Their own domain, white-labelled, on the three paid cards and not on the shared one, which
+    // comes first (lake#1129).
+    constexpr std::string_view white_label_line =
+        "Your own domain, white-labelled (available on request)";
+    const std::size_t paid_cards = page.body.find("id=\"private-warehouse\"");
+    ASSERT_NE(paid_cards, std::string::npos);
+    std::size_t white_label = 0;
+    for (std::size_t at = page.body.find(white_label_line); at != std::string::npos;
+         at = page.body.find(white_label_line, at + 1)) {
+        EXPECT_GT(at, paid_cards) << "the shared card must not offer a white-labelled domain";
+        ++white_label;
+    }
+    EXPECT_EQ(white_label, 3U);
     // The lead line is off by default.
     EXPECT_EQ(page.body.find("Train and serve a model"), std::string::npos);
     // The shared choice is exactly the picker's: preselected by country, posting back to the path.
@@ -2198,4 +2225,17 @@ TEST(OrdersEntitlement, CancellationWinsEvenWhenALaterInvoiceArrivedFirst) {
                                                                130,
                                                                500}));
     EXPECT_EQ(entitlement.access_until, 110);
+}
+
+TEST(OrdersApex, TheOrderSheetCarriesACouponCodeToTheRegion) {
+    // With the order sheet on, the region choice is its first card, and it carries `?code=` the
+    // same way (lake#1156).
+    const Regions regions = production();
+    const OrderSheet sheet = default_sheet();
+    const std::string html =
+        web_ui_order_sheet(sheet, regions, regions.list[0], "/?code=LAKE50", "");
+    EXPECT_NE(html.find("action=\"/?code=LAKE50\""), std::string::npos);
+    EXPECT_NE(html.find("Your code <strong>LAKE50</strong> goes with you"), std::string::npos);
+    EXPECT_EQ(web_ui_order_sheet(sheet, regions, regions.list[0], "/", "").find("Your code"),
+              std::string::npos);
 }

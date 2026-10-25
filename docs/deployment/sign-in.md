@@ -18,10 +18,19 @@ provider's console and in a Kubernetes Secret. This page names where it lives, n
 |---|---|---|
 | **Hosted** (`lake-dev`, `lake-testing`, `lake-staging`, `lake.live`) | **Clerk**: email code, and social connections (Google, GitHub, Microsoft, Apple) | The Clerk instance is created once by hand and the operator keeps it configured ([§1](#1-a-clerk-instance)); social connections by hand ([§2](#2-social-connections-on-a-clerk-instance)) |
 | **Without Clerk** (on-prem, air-gapped, [private-install.md](private-install.md)) | Lake's own: password + TOTP, passkeys, TAAP identity, and **Lake OAuth** (Google, GitHub, and an OIDC issuer that serves Lake's fixed paths) | Lake's administrator ([§3](#3-lake-oauth-without-clerk)) |
+| **A white-labelled Lake** (the customer's own domain) | A Clerk instance for that domain, or the customer's IdP as the only way in | [`white-label-sign-in.md`](white-label-sign-in.md) (lake#1136) |
 | **A customer organization's own IdP** | **Enterprise SSO**: SAML 2.0 or OIDC, plus SCIM provisioning. **Not ready to offer** ([§4](#4-enterprise-sso-and-scim)) | The organization's administrator ([§4](#4-enterprise-sso-and-scim)) |
 
-Under Clerk, Lake turns its own password sign-up off (`viewer` answers `password_sign_up: false`), so
-on a hosted Lake **every person signs in through Clerk**. Clerk sits in front of Lake's own sessions:
+Under Clerk, Lake turns its own password entries off in the `lake` pool, so on a hosted Lake **every
+person signs up and signs in through Clerk**, and Clerk's sign-up mode (restricted, or public on
+`lake.live`) is the only sign-up control. `viewer` answers `password_sign_up: false`, and the API
+refuses by the same rule (`lake_pool_password_sign_in` in `src/api/clerk.cpp`, lake#1098):
+`sign_up_password`, `sign_in_password`, `verify_mfa` and `recover_with_code` in the `lake` pool
+answer **403 `forbidden`** and issue no session. Before lake#1098 only `viewer` said so, and
+`POST /v1/sign_up_password` still created an account, a personal customer and a session for any
+email. Application pools keep their own password sign-in. Operator access (the admin token at
+`/login`), TAAP and passkey sign-in, and email and administrator recovery are not password entries
+and are unchanged. Clerk sits in front of Lake's own sessions:
 Lake verifies a `lake` JWT-template token and issues an ordinary `lake_session`
 ([`../api/clerk.md`](../api/clerk.md)).
 
@@ -53,6 +62,10 @@ from the instance's secret key, every hour and on any change:
   account restriction check at exchange, the `0094_clerk_revocation` schema with `clerk_revocation_guard`, and
   subscriptions to `session.revoked`, `session.removed` and `session.ended`; operator adoption is
   a rollout prerequisite, and exchange fails closed until the server key is injected;
+- lake#1163 additionally requires the `0103_clerk_session_binding` schema with
+  `clerk_session_binding_guard` (session events then end only the browser bound to the ended Clerk
+  session, never keys or devices). No Clerk setting changes: the binding uses Clerk's default
+  session token, which every instance issues;
 - on a production instance, the DNS records Clerk asks for, as `CloudflareDNSRecord`s in the Lake's
   zone.
 
@@ -261,6 +274,11 @@ is the host of the request's own origin**; `LAKE_PUBLIC_HOST` is used only when 
 origin (`webauthn_relying_party` in `src/api/capabilities.cpp`). A passkey registered on one host
 therefore does not work on another, for example `eu.lake.live` and `us.lake.live`.
 
+A wrong password answers with the same 401 (`invalid credentials`) and in the same time whether or
+not the email has a Lake password account: an unknown email is checked against a dummy Argon2id
+hash with the real parameters (lake#1101). Failed attempts are limited per account and per client
+address ([identity API](../api/identity.md#authentication-attempt-limits)).
+
 ## 4. Enterprise SSO and SCIM
 
 A customer organization brings its own IdP. Its administrator registers it with
@@ -306,6 +324,39 @@ Then:
    - SAML: a test user opens `https://<host>/v1/saml/<provider id>/start`, signs in at the IdP and
      lands on Lake signed in. The audit log has an `authentication` event on `saml/<provider id>`
      with outcome `success`; a refused response has outcome `denied` and the reason.
+
+## Terms and privacy
+
+Every sign-up and sign-in form links to the instance's terms of service and privacy policy, so a
+person sees both before an account is created
+([liquid-bridge#15](https://github.com/oramasearch/liquid-bridge/issues/15)). Under the form, Clerk's
+and lake's own alike, the page says *By creating an account, you agree to the Terms of Service and
+acknowledge the Privacy Policy.* (*By signing in, …* on sign-in). Both links open in a new tab, so a
+half-filled form is kept.
+
+| Variable | Default | What |
+|---|---|---|
+| `LAKE_TERMS_URL` | `https://www.orama.com/legal/terms` | the terms of service |
+| `LAKE_PRIVACY_URL` | `https://www.orama.com/legal/privacy` | the privacy policy |
+
+- **Unset** keeps the default: Orama's pages, published by orama-website-v2 (`/legal/terms`,
+  `/legal/privacy`). lake.live needs nothing set.
+- **`off`** removes that link. With both off, the sentence is gone. An enterprise or on-prem install
+  sets its own pages, or `off`.
+- **Anything else** must be an absolute `https://` (or `http://`) URL. Lake refuses to start on a
+  malformed one, and says which variable is wrong. The web app links only `http:` and `https:` URLs.
+- `viewer.legal` reports both (`{terms_url, privacy_url}`, empty for no link;
+  [web-app.md](../api/web-app.md)). They are instance configuration, not secrets: set them in the
+  Lake CR's `spec.env`.
+- **Clerk's own consent.** Clerk can also ask for consent in its form (its dashboard's legal
+  compliance setting). Lake does not rely on it: the sentence is Lake's, so it is the same with or
+  without Clerk. Turning Clerk's on is a change to the Clerk instance, so it is the operator's.
+- **What the documents say is not Lake's.** The text lives on the website and is approved by Steve
+  and counsel. Lake only links to it.
+
+Proof: `WebApp.ViewerReportsTheTermsAndPrivacyLinks`, `WebApp.LegalUrlSettingsKeepTheDefaultTurnOffOrRefuse`
+(`tests/test_api.cpp`), `HttpServer.ViewerCarriesTheTermsAndPrivacyLinks` (`tests/test_http_server.cpp`),
+and `frontend/tests/legal-links.test.ts`.
 
 ## Troubleshooting
 

@@ -70,7 +70,7 @@ function OramaAgentPage({ agentKey }: { agentKey: string }) {
         agent ? (
           <>
             {state?.talkable && (
-              <Button to={`/?${qs({ agent: agentKey })}`}>
+              <Button to={`/ask?${qs({ agent: agentKey })}`}>
                 <MessageSquare size={14} aria-hidden /> Talk in Ask Orama
               </Button>
             )}
@@ -290,7 +290,7 @@ function AgentDesign({ agent, own }: { agent: Row; own: boolean }) {
               ) : (
                 <p className="muted m-0 text-[12.5px]">Nothing to train: it runs on a frontier model and calls no pipeline.</p>
               )}
-              <Button to={`/?${qs({ agent: id })}`}>
+              <Button to={`/ask?${qs({ agent: id })}`}>
                 <MessageSquare size={14} aria-hidden /> Talk in Ask Orama
               </Button>
             </div>

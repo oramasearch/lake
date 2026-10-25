@@ -117,6 +117,16 @@
   }
 }
 
+/* The terms and privacy sentence under every sign-up and sign-in form (liquid-bridge#15). */
+.auth-legal {
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.auth-legal a {
+  text-decoration: underline;
+}
+
 /* The Clerk component sits where the server page mounted it. */
 .clerk-mount {
   margin: 8px 0;
@@ -139,4 +149,15 @@
 
 .recovery-codes code {
   overflow-wrap: break-word;
+}
+
+/* A white-labelled Lake's legal footer under the sign-in (lake#1135, AuthFrame's BrandFooter). */
+.auth-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--lake-space-4);
+  padding: 0 var(--lake-page-gutter) var(--lake-space-8);
+  color: var(--lake-text-secondary);
+  font-size: var(--lake-text-12);
 }

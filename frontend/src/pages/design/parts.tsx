@@ -21,6 +21,7 @@ export function Panel({
   id,
   className,
   role,
+  testId,
 }: {
   title?: ReactNode;
   label?: ReactNode;
@@ -31,9 +32,11 @@ export function Panel({
   id?: string;
   className?: string;
   role?: string;
+  /** `data-testid` for the browser scripts (tools/e2e). */
+  testId?: string;
 }) {
   return (
-    <section id={id} role={role} className={cx("min-w-0 scroll-mt-4", className)}>
+    <section id={id} role={role} data-testid={testId} className={cx("min-w-0 scroll-mt-4", className)}>
       <Card title={title} label={label} actions={actions} footer={footer} tone={tone}>
         {children}
       </Card>

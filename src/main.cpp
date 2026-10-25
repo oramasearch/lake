@@ -12,14 +12,18 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 
 #include <nlohmann/json.hpp>
 
 #include "lake/api/billing.hpp"
 #include "lake/api/capabilities.hpp"
+#include "lake/api/manifest.hpp"
+#include "lake/api/clerk.hpp"
 #include "lake/api/model_gateway.hpp"
 #include "lake/api/server.hpp"
 #include "lake/api/tunnel_clients.hpp"
+#include "lake/api/white_label.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_library.hpp"
 #include "lake/control/agent_runs.hpp"
@@ -27,6 +31,7 @@
 #include "lake/control/methodologies.hpp"
 #include "lake/control/platform.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "lake/control/schema.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/search/index.hpp"
 #include "lake/thread.hpp"
@@ -63,9 +68,18 @@ int usage() {
                  "[--instance-kek VALUE] [--tsa-url URL] [--tunnel-clients-dir PATH] "
                  "[--memory-store]");
     std::println("  lake version");
+    std::println("  lake migrate [--control-db URI] [--wait-seconds N]");
+    std::println("  lake manifest");
     std::println("");
     std::println("  --control-db   Postgres URI of the control plane (default "
                  "$LAKE_CONTROL_DB_URI)");
+    std::println("  migrate        applies the schema built into this binary to the control "
+                 "database, idempotently, in one transaction under an advisory lock, and prints "
+                 "what it applied as JSON; exit 0 applied or current, 1 failed and rolled back, "
+                 "2 usage, 3 unreachable. The server never migrates");
+    std::println("  --wait-seconds how long migrate keeps trying to connect (default 0)");
+    std::println("  manifest       prints, as JSON, what this image needs from the operator: "
+                 "version, schema, Stripe webhook events and environment variables");
     std::println("  --store-root   customer and instance data root (default $LAKE_STORE_ROOT)");
     std::println("  --external-origin HTTP(S) origin for repository commands "
                  "(default $LAKE_EXTERNAL_ORIGIN, then https://$LAKE_PUBLIC_HOST)");
@@ -168,6 +182,12 @@ int usage() {
                  "a worker, after 10 s (default 1024; 0 turns it off)");
     std::println("  LAKE_HTTP_MAX_LONG_REQUESTS long polls and pulls at once (default 512); "
                  "LAKE_HTTP_MAX_LONG_REQUESTS_PER_CALLER per caller (default 64)");
+    std::println("  LAKE_PROXY_PORT a second listener for the reverse proxy, on the --listen host, "
+                 "where X-Real-IP / X-Forwarded-For are believed from any peer (default none)");
+    std::println(
+        "  LAKE_TRUSTED_PROXY_CIDRS peers whose X-Real-IP / X-Forwarded-For per-client limits "
+        "believe on the main listener, comma-separated CIDRs or 'none' (default loopback "
+        "and private ranges; 'none' when LAKE_PROXY_PORT is set)");
     std::println("  LAKE_WORKSPACE_STORE_PREOPEN=false opens workspace stores on first use only "
                  "(default true: opened in the background from start)");
     std::println("  --tunnel-clients-dir the tunnel client downloads (default "
@@ -176,18 +196,88 @@ int usage() {
         "  LAKE_REGION, LAKE_REGION_LABEL this Lake's region; LAKE_REGIONS the deployment's "
         "regions as JSON [{{name,label,host,latitude,longitude}}]");
     std::println("  LAKE_APEX_HOST the host whose every request gets the region picker");
+    std::println("  LAKE_HOST_ALIASES other hosts that are this Lake (comma-separated): pages there "
+                 "go to LAKE_PUBLIC_HOST, the API is served; LAKE_CONTROL_HOST this Lake's name on "
+                 "the operator's control rows (default LAKE_PUBLIC_HOST)");
+    std::println("  LAKE_SIGN_IN_SSO_PROVIDER the SSO provider id that is the only way in for "
+                 "people (not with Clerk)");
     std::println("  LAKE_ORDER_SHEET JSON merged over the apex order sheet's default offers, "
                  "prices and limits (docs/api/orders.md)");
     std::println("  LAKE_RESEND_API_KEY Orama's Resend key for order email; LAKE_RESEND_FROM the "
                  "sender (default Lake <orders@lake.live>); LAKE_SUPPORT_EMAIL where orders go "
                  "(default support@orama.com)");
+    std::println("  LAKE_BRAND_FILE a JSON brand; LAKE_BRAND_NAME, _SHORT_NAME, _COMPANY, "
+                 "_ASSISTANT_NAME, _CONSOLE_TITLE, _BY_ORAMA, _LOGO, _LOGO_DARK, _FAVICON, "
+                 "_ACCENT, _ACCENT_DARK, _SUPPORT_EMAIL, _EMAIL_FROM, _LEGAL_NAME, _TERMS_URL, "
+                 "_PRIVACY_URL over it: a white-labelled Lake (docs/serving/brand.md)");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
     return 2;
+}
+
+// `lake migrate` (lake#1119, docs/control-plane/schema.md#applying-the-schema-lake-migrate):
+// the operator runs it from the image a Lake names before that image serves. It reads only its
+// own arguments and LAKE_CONTROL_DB_URI, never the server's settings.
+int migrate(int argc, char** argv) {
+    lake::control::MigrationOptions options;
+    options.connection_uri = env_or("LAKE_CONTROL_DB_URI", "");
+    const auto facts = lake::control::schema_facts(lake::control::embedded_schema_sql());
+    const auto usage_error = [&](std::string message) {
+        std::println(stderr, "lake migrate: {}", message);
+        std::println(
+            "{}", lake::control::migration_error_json(facts, {"usage", std::move(message)}).dump());
+        return lake::control::migrate_exit_usage;
+    };
+    for (int i = 2; i < argc; ++i) {
+        const std::string_view arg = argv[i];
+        if ((arg == "--control-db" || arg == "--wait-seconds") && i + 1 >= argc) {
+            return usage_error(std::string(arg) + " needs a value");
+        }
+        if (arg == "--control-db") {
+            options.connection_uri = argv[++i];
+        } else if (arg == "--wait-seconds") {
+            const std::string_view value = argv[++i];
+            std::uint64_t seconds = 0;
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), seconds);
+            if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() ||
+                seconds > 86400) {
+                return usage_error("--wait-seconds must be a whole number of seconds up to 86400");
+            }
+            options.wait = std::chrono::seconds{seconds};
+        } else {
+            return usage_error("unknown argument " + std::string(arg));
+        }
+    }
+    if (options.connection_uri.empty()) {
+        return usage_error("no control database: set LAKE_CONTROL_DB_URI or pass --control-db");
+    }
+    const auto result =
+        lake::control::apply_control_schema(options, lake::control::embedded_schema_sql());
+    if (!result) {
+        std::println(stderr, "lake migrate: {}: {}", result.error().code, result.error().message);
+        std::println("{}", lake::control::migration_error_json(facts, result.error()).dump());
+        return result.error().code == "connect" ? lake::control::migrate_exit_unreachable
+                                                : lake::control::migrate_exit_apply_failed;
+    }
+    std::println("{}", lake::control::migration_report_json(facts, *result).dump());
+    return lake::control::migrate_exit_ok;
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
+    // Subcommands that never start the server, dispatched before the server's settings are read
+    // so a setting the server would refuse cannot stop them (lake#1119).
+    if (argc >= 2 && std::string_view(argv[1]) == "migrate") {
+        return migrate(argc, argv);
+    }
+    if (argc >= 2 && std::string_view(argv[1]) == "manifest") {
+        if (argc > 2) {
+            std::println(stderr, "lake manifest: takes no arguments");
+            return 2;
+        }
+        std::println("{}", lake::api::operator_manifest().dump(2));
+        return 0;
+    }
     lake::api::ServerOptions opts;
     std::string control_db = env_or("LAKE_CONTROL_DB_URI", "");
     opts.admin_token = env_or("LAKE_ADMIN_TOKEN", "");
@@ -217,6 +307,36 @@ int main(int argc, char** argv) {
     opts.clerk_publishable_key = env_or("LAKE_CLERK_PUBLISHABLE_KEY", "");
     opts.clerk_webhook_secret = env_or("LAKE_CLERK_WEBHOOK_SECRET", "");
     opts.clerk_secret_key = env_or("LAKE_CLERK_SECRET_KEY", "");
+    // The terms and privacy policy sign-up and sign-in link to (liquid-bridge#15): unset keeps
+    // Orama's published pages, `off` shows no link, and a malformed URL stops lake.
+    for (const auto& [name, value, target, fallback] :
+         {std::tuple{"LAKE_TERMS_URL",
+                     std::getenv("LAKE_TERMS_URL"),
+                     &opts.terms_url,
+                     lake::api::default_terms_url},
+          std::tuple{"LAKE_PRIVACY_URL",
+                     std::getenv("LAKE_PRIVACY_URL"),
+                     &opts.privacy_url,
+                     lake::api::default_privacy_url}}) {
+        const auto url = lake::api::legal_url_setting(name, value, fallback);
+        if (!url) {
+            std::println(stderr, "lake: {}", url.error());
+            return 2;
+        }
+        *target = *url;
+    }
+    // The customer's identity provider as the only way in (lake#1136, docs/api/sso.md). Never
+    // together with Clerk.
+    {
+        auto provider = lake::api::sso_sign_in_from_environment(
+            env_or("LAKE_SIGN_IN_SSO_PROVIDER", ""),
+            lake::api::clerk_config(opts.clerk_publishable_key).has_value());
+        if (!provider) {
+            std::println(stderr, "lake: {}", provider.error());
+            return 2;
+        }
+        opts.sign_in_sso_provider = std::move(*provider);
+    }
     // The Zettas lake may reach (lake#1097): rendered by the operator. A malformed list stops lake
     // rather than widen or narrow it; an empty one leaves only Zettas on loopback reachable.
     if (const std::string allow = env_or("ZETTA_EGRESS_ALLOW", "");
@@ -294,6 +414,43 @@ int main(int argc, char** argv) {
         env_u64("LAKE_HTTP_MAX_LONG_REQUESTS_PER_CALLER", opts.max_long_requests_per_caller));
     opts.header_timeout = std::chrono::seconds{env_u64("LAKE_HTTP_HEADER_TIMEOUT_SECONDS", 10)};
     opts.worker_wait = std::chrono::seconds{env_u64("LAKE_HTTP_WORKER_WAIT_SECONDS", 10)};
+    // lake#1132: the reverse proxy's own listener, where X-Real-IP / X-Forwarded-For are
+    // believed. Unset: none, and everything arrives on the main listener as before.
+    {
+        auto proxy_port = lake::api::parse_proxy_port(env_or("LAKE_PROXY_PORT", ""));
+        if (!proxy_port) {
+            std::println(stderr, "lake: {}", proxy_port.error());
+            return 2;
+        }
+        opts.proxy_port = *proxy_port;
+    }
+    // lake#1083: whose X-Real-IP / X-Forwarded-For the per-client limits believe on the main
+    // listener. Unset without a proxy listener: loopback and the private ranges, so an image
+    // rolled before the operator sets it counts as before. Unset with one: nobody.
+    {
+        std::string setting = env_or("LAKE_TRUSTED_PROXY_CIDRS", "");
+        if (setting.find_first_not_of(" \t") == std::string::npos) {
+            setting =
+                std::string(lake::api::default_trusted_proxy_setting(opts.proxy_port.has_value()));
+        }
+        auto trusted = lake::api::parse_trusted_proxies(setting);
+        if (!trusted) {
+            std::println(stderr, "lake: {}", trusted.error());
+            return 2;
+        }
+        opts.trusted_proxies = std::move(*trusted);
+        if (opts.proxy_port) {
+            std::println(stderr,
+                         "lake: per-client limits believe X-Real-IP on the proxy port {} from any "
+                         "peer, and on the main port from {}",
+                         *opts.proxy_port,
+                         opts.trusted_proxies.description);
+        } else {
+            std::println(stderr,
+                         "lake: per-client limits believe X-Real-IP from {}",
+                         opts.trusted_proxies.description);
+        }
+    }
     // Every connection is a descriptor: raise the soft limit to the hard one and keep the
     // connection cap inside it, with room for PostgreSQL, stores and outbound calls.
     const std::size_t wanted_connections = opts.max_connections;
@@ -310,6 +467,20 @@ int main(int argc, char** argv) {
     opts.search_memory_bytes = static_cast<std::size_t>(
         std::max<std::uint64_t>(1024ULL * 1024ULL, env_u64("LAKE_SEARCH_MEMORY_BYTES", 256ULL * 1024ULL * 1024ULL)));
     opts.public_host = env_or("LAKE_PUBLIC_HOST", "");
+    // A white-labelled Lake (lake#1136, docs/deployment/white-label-sign-in.md): the operator moves
+    // LAKE_PUBLIC_HOST to the customer's host, keeps the Orama host as an alias, and keeps the
+    // control rows named by the Orama host. Invalid values stop startup.
+    std::string control_host;
+    {
+        auto hosts = lake::api::instance_hosts_from_environment(
+            opts.public_host, env_or("LAKE_HOST_ALIASES", ""), env_or("LAKE_CONTROL_HOST", ""));
+        if (!hosts) {
+            std::println(stderr, "lake: {}", hosts.error());
+            return 2;
+        }
+        opts.host_aliases = std::move(hosts->aliases);
+        control_host = std::move(hosts->control_host);
+    }
     opts.external_origin = env_or("LAKE_EXTERNAL_ORIGIN", "");
     opts.apps_wildcard = env_or("LAKE_APPS_WILDCARD", "");
     opts.apps_runtime_image = env_or("LAKE_APPS_RUNTIME_IMAGE", "");
@@ -360,6 +531,35 @@ int main(int argc, char** argv) {
             return 2;
         }
         opts.resend = std::move(*resend);
+        // The instance brand (lake#1135, docs/serving/brand.md): LAKE_BRAND_FILE with the
+        // LAKE_BRAND_* variables over it, rendered by the operator. Lake's own brand when none is
+        // set; an invalid brand stops startup. A custom brand's sender becomes Resend's From.
+        auto brand = lake::api::brand_from_sources(
+            {.file = env_or("LAKE_BRAND_FILE", ""),
+             .name = env_or("LAKE_BRAND_NAME", ""),
+             .short_name = env_or("LAKE_BRAND_SHORT_NAME", ""),
+             .company = env_or("LAKE_BRAND_COMPANY", ""),
+             .assistant_name = env_or("LAKE_BRAND_ASSISTANT_NAME", ""),
+             .console_title = env_or("LAKE_BRAND_CONSOLE_TITLE", ""),
+             .by_orama = env_or("LAKE_BRAND_BY_ORAMA", ""),
+             .logo = env_or("LAKE_BRAND_LOGO", ""),
+             .logo_dark = env_or("LAKE_BRAND_LOGO_DARK", ""),
+             .favicon = env_or("LAKE_BRAND_FAVICON", ""),
+             .accent = env_or("LAKE_BRAND_ACCENT", ""),
+             .accent_dark = env_or("LAKE_BRAND_ACCENT_DARK", ""),
+             .support_email = env_or("LAKE_BRAND_SUPPORT_EMAIL", ""),
+             .email_from = env_or("LAKE_BRAND_EMAIL_FROM", ""),
+             .legal_name = env_or("LAKE_BRAND_LEGAL_NAME", ""),
+             .terms_url = env_or("LAKE_BRAND_TERMS_URL", ""),
+             .privacy_url = env_or("LAKE_BRAND_PRIVACY_URL", "")},
+            opts.resend.from,
+            opts.resend.support_email);
+        if (!brand) {
+            std::println(stderr, "lake: {}", brand.error());
+            return 2;
+        }
+        opts.resend.from = brand->email_from;
+        opts.brand = std::move(*brand);
     }
     opts.apps_reserved_names = env_or("LAKE_APPS_RESERVED_NAMES", "");
     opts.apps_per_customer = env_u64("LAKE_APPS_PER_CUSTOMER");
@@ -482,7 +682,7 @@ int main(int argc, char** argv) {
                      "together");
         return 2;
     }
-    if (!operator_zetta_url.empty() && opts.public_host.empty()) {
+    if (!operator_zetta_url.empty() && control_host.empty()) {
         std::println(
             stderr, "lake: LAKE_PUBLIC_HOST is required when the operator Zetta client is enabled");
         return 2;
@@ -521,7 +721,7 @@ int main(int argc, char** argv) {
             opts.store,
             std::move(control),
             std::move(logs),
-            lake::control::PlatformConfig{opts.public_host,
+            lake::control::PlatformConfig{control_host,
                                           std::chrono::seconds{platform_sync_seconds},
                                           opts.identity_seed,
                                           opts.instance_kek});
@@ -610,6 +810,10 @@ int main(int argc, char** argv) {
             {"version", lake::version_string()},
             {"revision", lake::build_revision_string()},
             {"listen", "http://" + opts.listen_address + ":" + std::to_string(server.port())},
+            {"proxy_listen",
+             server.proxy_port() == 0
+                 ? std::string{}
+                 : "http://" + opts.listen_address + ":" + std::to_string(server.proxy_port())},
             {"node", opts.node_name},
             {"store", store_kind},
             {"store_root_configured", opts.store_root.empty() ? "no" : "yes"},
@@ -646,6 +850,7 @@ int main(int argc, char** argv) {
                                             : nlohmann::json(opts.regions.apex_host)},
             {"order_sheet", opts.order_sheet.enabled ? "on" : "off"},
             {"resend_api_key_set", opts.resend.api_key.empty() ? "no" : "yes"},
+            {"brand", opts.brand.custom ? opts.brand.name : "default"},
             {"agent_bus", opts.agent_bus ? (bus_url.empty() ? "memory" : "zetta") : "no"},
             {"api", "/v1/openapi.json"},
             {"mcp", "POST /mcp"}}
@@ -714,7 +919,10 @@ int main(int argc, char** argv) {
             exit_code = 1;
             break;
         }
-        if (std::chrono::steady_clock::now() >= next_app_cleanup) {
+        // Without a control store (neither --memory-store nor a control DB; `store` is `none`)
+        // there is nothing to sweep: lake serves what needs no store (lake#1168, where this
+        // dereferenced a null store and lake exited 139 a moment after start).
+        if (opts.store && std::chrono::steady_clock::now() >= next_app_cleanup) {
             if (app_bus_configured) {
                 const auto purged = opts.store->purge_deleted_web_apps();
                 if (!purged) {

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <charconv>
 #include <chrono>
@@ -19,6 +20,7 @@
 #include <set>
 #include <span>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <openssl/core_names.h>
@@ -42,6 +44,7 @@
 #include <pqxx/pqxx>
 
 #include "lake/control/policy.hpp"
+#include "lake/control/schema.hpp"
 #include "lake/control/workspace_records.hpp"
 
 namespace lake::control {
@@ -532,6 +535,26 @@ bool verify_secret(std::string_view encoded, std::string_view secret) {
     return result == 1 && CRYPTO_memcmp(derived.data(), expected.data(), derived.size()) == 0;
 }
 
+namespace {
+std::atomic<std::uint64_t> dummy_verifications{0};
+
+// Made by hash_secret itself, so a change to the stored parameters reaches the dummy too.
+const std::string& dummy_secret_hash() {
+    static const std::string hash = hash_secret(random_secret());
+    return hash;
+}
+} // namespace
+
+bool verify_secret_against_dummy(std::string_view secret) {
+    dummy_verifications.fetch_add(1, std::memory_order_relaxed);
+    static_cast<void>(verify_secret(dummy_secret_hash(), secret));
+    return false;
+}
+
+std::uint64_t dummy_secret_verifications() {
+    return dummy_verifications.load(std::memory_order_relaxed);
+}
+
 std::string new_totp_secret() {
     return random_secret();
 }
@@ -770,7 +793,8 @@ std::optional<OidcClaims> verify_oidc_id_token(std::string_view token,
                                                std::string_view issuer,
                                                std::string_view client_id,
                                                std::string_view nonce,
-                                               long now_unix) {
+                                               long now_unix,
+                                               bool audience_absent) {
     const std::size_t first = token.find('.');
     const std::size_t second = first == std::string_view::npos ? first : token.find('.', first + 1);
     if (first == std::string_view::npos || second == std::string_view::npos ||
@@ -831,7 +855,7 @@ std::optional<OidcClaims> verify_oidc_id_token(std::string_view token,
         return claims.contains(name) && claims[name].is_number_integer() ? claims[name].get<long>()
                                                                          : 0L;
     };
-    for (const auto* name : {"iss", "sub", "nonce", "azp", "email", "name"}) {
+    for (const auto* name : {"iss", "sub", "nonce", "azp", "email", "name", "sid"}) {
         if (claims.contains(name) && !claims[name].is_null() && !claims[name].is_string()) {
             return std::nullopt;
         }
@@ -847,13 +871,16 @@ std::optional<OidcClaims> verify_oidc_id_token(std::string_view token,
     const std::string subject = text("sub");
     const nlohmann::json audience = claims.value("aud", nlohmann::json());
     const bool authorized_party_valid =
-        !audience.is_array() || audience.size() <= 1 || text("azp") == client_id;
-    if (text("iss") != issuer || !audience_contains(audience, client_id) ||
-        !authorized_party_valid || expires_at <= now_unix || not_before > now_unix + 60 ||
-        issued_at > now_unix + 60 || subject.empty() || text("nonce") != nonce) {
+        audience_absent || !audience.is_array() || audience.size() <= 1 ||
+        text("azp") == client_id;
+    const bool audience_valid =
+        audience_absent ? audience.is_null() : audience_contains(audience, client_id);
+    if (text("iss") != issuer || !audience_valid || !authorized_party_valid ||
+        expires_at <= now_unix || not_before > now_unix + 60 || issued_at > now_unix + 60 ||
+        subject.empty() || text("nonce") != nonce) {
         return std::nullopt;
     }
-    return OidcClaims{subject, text("email"), text("name"), issued_at};
+    return OidcClaims{subject, text("email"), text("name"), issued_at, text("sid")};
 }
 
 std::expected<VerifiedPasskeyRegistration, std::string>
@@ -1657,6 +1684,36 @@ Session session_of(const pqxx::row& r) {
                    r[12].as<std::string>()};
 }
 
+// A browser key's row (lake#1152, migration 0102_browser_keys); timestamps as RFC 3339 UTC seconds.
+constexpr const char* browser_key_columns =
+    "id::text, customer_id::text, workspace_id::text, index_id, model_id, name, "
+    "array_to_json(origins)::text, rate_limit_per_minute, coalesce(created_by_user_id::text, ''), "
+    "created_by_taap_id, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+    "coalesce(to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), "
+    "coalesce(to_char(revoked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), "
+    "revoked_by_taap_id, "
+    "coalesce(to_char(last_used_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '')";
+
+BrowserKey browser_key_of(const pqxx::row& r) {
+    BrowserKey key;
+    key.id = r[0].as<std::string>();
+    key.customer_id = r[1].as<std::string>();
+    key.workspace_id = r[2].as<std::string>();
+    key.index_id = r[3].as<std::string>();
+    key.model_id = r[4].as<std::string>();
+    key.name = r[5].as<std::string>();
+    key.origins = nlohmann::json::parse(r[6].as<std::string>()).get<std::vector<std::string>>();
+    key.rate_limit_per_minute = r[7].as<int>();
+    key.created_by_user_id = r[8].as<std::string>();
+    key.created_by_taap_id = r[9].as<std::string>();
+    key.created_at = r[10].as<std::string>();
+    key.expires_at = r[11].as<std::string>();
+    key.revoked_at = r[12].as<std::string>();
+    key.revoked_by_taap_id = r[13].as<std::string>();
+    key.last_used_at = r[14].as<std::string>();
+    return key;
+}
+
 // ls1.<public UUID>.<256-bit random secret>; reject malformed input before opening a transaction.
 std::optional<std::string> session_lookup_id(std::string_view bearer) {
     if (bearer.size() != 105 || !bearer.starts_with("ls1.") || bearer[40] != '.') {
@@ -1678,20 +1735,26 @@ std::optional<std::string> session_lookup_id(std::string_view bearer) {
     return std::string(bearer.substr(4, 36));
 }
 
+// The session itself and every ancestor up to the first sign-in session (browser or TAAP) must
+// be live. A sign-in ancestor ends the walk without being checked: signing out never ends a key
+// made from that sign-in (lake#1163, Steve: "don't revoke api keys on signout"); it still must
+// belong to the same user and pool. Revoking a key still ends that key's own descendants.
 bool active_session_lineage(pqxx::work& tx,
                             const std::string& session_id,
                             const std::string& user_id,
                             const std::string& pool_id) {
     const auto rows = tx.exec_params(
         "WITH RECURSIVE lineage AS ("
-        "SELECT id, parent_session_id, user_id, pool_id, device_id, expires_at, revoked_at "
-        "FROM sessions WHERE id = $1::uuid AND user_id = $2::uuid AND pool_id = $3 "
+        "SELECT id, parent_session_id, user_id, pool_id, device_id, expires_at, revoked_at, "
+        "false AS sign_in FROM sessions WHERE id = $1::uuid AND user_id = $2::uuid AND "
+        "pool_id = $3 "
         "UNION SELECT p.id, p.parent_session_id, p.user_id, p.pool_id, p.device_id, "
-        "p.expires_at, p.revoked_at FROM sessions p JOIN lineage c ON p.id = c.parent_session_id) "
-        "SELECT count(*) > 0 AND bool_or(parent_session_id IS NULL) AND "
-        "bool_and(lineage.user_id = $2::uuid AND lineage.pool_id = $3 AND "
+        "p.expires_at, p.revoked_at, p.kind IN ('browser', 'taap') FROM sessions p "
+        "JOIN lineage c ON p.id = c.parent_session_id WHERE NOT c.sign_in) "
+        "SELECT count(*) > 0 AND bool_or(parent_session_id IS NULL OR sign_in) AND "
+        "bool_and(lineage.user_id = $2::uuid AND lineage.pool_id = $3 AND (sign_in OR ("
         "lineage.revoked_at IS NULL AND (expires_at IS NULL OR expires_at > clock_timestamp()) "
-        "AND (devices.id IS NULL OR devices.revoked_at IS NULL)) "
+        "AND (devices.id IS NULL OR devices.revoked_at IS NULL)))) "
         "FROM lineage LEFT JOIN devices ON devices.id = lineage.device_id",
         session_id,
         user_id,
@@ -7741,6 +7804,51 @@ public:
                            column);
     }
 
+    // A credit's columns, in the order credit_of reads them (grants' own columns: lake#1134).
+    static std::string credit_columns() {
+        return "id::text, kind, amount_micros, provider, reference, event_id, " +
+               balance_time("created_at") +
+               ", reason, granted_by, coalesce(to_char(expires_at AT TIME ZONE 'UTC', "
+               "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), charges_at_grant_micros, " +
+               balance_time("ended_at") + ", end_reason, charges_at_end_micros, forfeited_micros";
+    }
+
+    static BalanceCredit credit_of(const pqxx::row& row, const std::string& customer_id) {
+        BalanceCredit credit;
+        credit.id = row[0].as<std::string>();
+        credit.customer_id = customer_id;
+        credit.kind = row[1].as<std::string>();
+        credit.amount_micros = row[2].as<std::int64_t>();
+        credit.provider = row[3].as<std::string>();
+        credit.reference = row[4].as<std::string>();
+        credit.event_id = row[5].as<std::string>();
+        credit.created_at = row[6].as<std::string>();
+        credit.reason = row[7].as<std::string>();
+        credit.granted_by = row[8].as<std::string>();
+        credit.expires_at = row[9].as<std::string>();
+        credit.charges_at_grant_micros = row[10].as<std::int64_t>();
+        credit.ended_at = row[11].as<std::string>();
+        credit.end_reason = row[12].as<std::string>();
+        credit.charges_at_end_micros = row[13].as<std::int64_t>();
+        credit.forfeited_micros = row[14].as<std::int64_t>();
+        return credit;
+    }
+
+    // The account's grants in `tx`, oldest first; locked for the transaction with `lock`.
+    static std::vector<BalanceCredit>
+    grants_in(pqxx::work& tx, const std::string& customer_id, bool lock) {
+        std::vector<BalanceCredit> out;
+        for (const pqxx::row row : tx.exec_params(
+                 "SELECT " + credit_columns() +
+                     " FROM account_balance_credits WHERE customer_id = $1::uuid AND kind = "
+                     "'grant' ORDER BY created_at, id" +
+                     (lock ? " FOR UPDATE" : ""),
+                 customer_id)) {
+            out.push_back(credit_of(row, customer_id));
+        }
+        return out;
+    }
+
     // The account's balance in `tx`: its row's fields, the sums of its credits and charges, and
     // whether its organization has a paid order whose subscription is current.
     static Result<AccountBalance> balance_in(pqxx::work& tx, const std::string& customer_id) {
@@ -7795,15 +7903,22 @@ public:
             balance.version = row[19].as<std::int64_t>();
             balance.updated_at = row[20].as<std::string>();
         }
+        // A grant counts what has not stopped counting (lake#1134).
         const pqxx::result sums = tx.exec_params(
-            "SELECT (SELECT coalesce(sum(amount_micros), 0)::bigint FROM account_balance_credits "
-            "WHERE customer_id = $1::uuid), (SELECT count(*) FROM account_balance_credits WHERE "
-            "customer_id = $1::uuid), (SELECT coalesce(sum(amount_micros), 0)::bigint FROM "
-            "account_balance_charges WHERE customer_id = $1::uuid)",
+            "SELECT (SELECT coalesce(sum(amount_micros - forfeited_micros), 0)::bigint FROM "
+            "account_balance_credits WHERE customer_id = $1::uuid), (SELECT count(*) FROM "
+            "account_balance_credits WHERE customer_id = $1::uuid), (SELECT "
+            "coalesce(sum(amount_micros), 0)::bigint FROM account_balance_charges WHERE "
+            "customer_id = $1::uuid)",
             customer_id);
         balance.credits_micros = sums[0][0].as<std::int64_t>();
         balance.credit_count = sums[0][1].as<std::int64_t>();
         balance.charges_micros = sums[0][2].as<std::int64_t>();
+        const std::vector<BalanceCredit> grants = grants_in(tx, customer_id, false);
+        if (!grants.empty()) {
+            balance.first_grant_at = grants.front().created_at;
+            balance.grants_unused_micros = grants_unused(grants, balance.charges_micros);
+        }
         const std::string organization = customer[0][0].as<std::string>();
         if (!organization.empty()) {
             balance.paid_order =
@@ -7912,27 +8027,38 @@ public:
                 result.duplicate = true;
             }
             if (!result.duplicate) {
+                // A grant records the account's charges now: it pays only for later usage
+                // (lake#1134).
                 const pqxx::result inserted = tx.exec_params(
                     "INSERT INTO account_balance_credits (customer_id, kind, amount_micros, "
-                    "provider, reference, event_id) VALUES ($1::uuid, $2, $3, $4, $5, $6) ON "
-                    "CONFLICT (provider, reference) DO NOTHING RETURNING id::text, " +
-                        balance_time("created_at"),
+                    "provider, reference, event_id, reason, granted_by, expires_at, "
+                    "charges_at_grant_micros) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, "
+                    "$9::timestamptz, CASE WHEN $2 = 'grant' THEN (SELECT "
+                    "coalesce(sum(amount_micros), 0)::bigint FROM account_balance_charges WHERE "
+                    "customer_id = $1::uuid) ELSE 0 END) ON CONFLICT (provider, reference) DO "
+                    "NOTHING RETURNING " +
+                        credit_columns(),
                     credit.customer_id,
                     credit.kind,
                     credit.amount_micros,
                     credit.provider,
                     credit.reference,
-                    credit.event_id);
+                    credit.event_id,
+                    credit.reason,
+                    credit.granted_by,
+                    credit.expires_at.empty() ? std::nullopt
+                                              : std::optional<std::string>(credit.expires_at));
                 if (inserted.empty()) {
                     result.duplicate = true;
                 } else {
-                    result.credit = credit;
-                    result.credit.id = inserted[0][0].as<std::string>();
-                    result.credit.created_at = inserted[0][1].as<std::string>();
+                    result.credit = credit_of(inserted[0], credit.customer_id);
+                    // A grant is not a payment: the overdraft waits for the first paid top-up.
                     tx.exec_params(
                         "INSERT INTO account_balances (customer_id, first_top_up_at) VALUES "
-                        "($1::uuid, now()) ON CONFLICT (customer_id) DO UPDATE SET "
-                        "first_top_up_at = coalesce(account_balances.first_top_up_at, now()), "
+                        "($1::uuid, CASE WHEN $2 = 'grant' THEN NULL ELSE now() END) ON CONFLICT "
+                        "(customer_id) DO UPDATE SET first_top_up_at = "
+                        "coalesce(account_balances.first_top_up_at, CASE WHEN $2 = 'grant' THEN "
+                        "NULL ELSE now() END), "
                         "limit_warning_notified_at = NULL, negative_notified_at = NULL, "
                         "blocked_notified_at = NULL, auto_top_up_pending = CASE WHEN $2 = "
                         "'auto_top_up' THEN '' ELSE account_balances.auto_top_up_pending END, "
@@ -7988,22 +8114,14 @@ public:
         return with_tx<std::vector<BalanceCredit>>(
             [&](pqxx::work& tx) -> Result<std::vector<BalanceCredit>> {
                 const pqxx::result rows = tx.exec_params(
-                    "SELECT id::text, kind, amount_micros, provider, reference, event_id, " +
-                        balance_time("created_at") +
+                    "SELECT " + credit_columns() +
                         " FROM account_balance_credits WHERE customer_id = $1::uuid ORDER BY "
                         "created_at DESC, id LIMIT $2",
                     customer_id,
                     limit <= 0 ? 1000 : limit);
                 std::vector<BalanceCredit> out;
                 for (const pqxx::row row : rows) {
-                    out.push_back({row[0].as<std::string>(),
-                                   customer_id,
-                                   row[1].as<std::string>(),
-                                   row[2].as<std::int64_t>(),
-                                   row[3].as<std::string>(),
-                                   row[4].as<std::string>(),
-                                   row[5].as<std::string>(),
-                                   row[6].as<std::string>()});
+                    out.push_back(credit_of(row, customer_id));
                 }
                 return out;
             });
@@ -8031,6 +8149,87 @@ public:
         });
     }
 
+    Result<BalanceCredit> balance_credit(const std::string& credit_id) override {
+        return with_tx<BalanceCredit>([&](pqxx::work& tx) -> Result<BalanceCredit> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT " + credit_columns() +
+                    ", customer_id::text FROM account_balance_credits WHERE id::text = $1",
+                credit_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no credit " + credit_id});
+            }
+            return credit_of(rows[0], rows[0][15].as<std::string>());
+        });
+    }
+
+    Result<std::vector<BalanceCredit>> end_balance_grants(const std::string& customer_id,
+                                                          const std::string& at,
+                                                          const std::string& revoke_id) override {
+        return with_tx<std::vector<BalanceCredit>>(
+            [&](pqxx::work& tx) -> Result<std::vector<BalanceCredit>> {
+                if (tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", customer_id)
+                        .empty()) {
+                    return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+                }
+                // Locked, so two refreshes, or a refresh and a revocation, end each grant once.
+                const std::vector<BalanceCredit> grants = grants_in(tx, customer_id, true);
+                const std::int64_t charges =
+                    tx.exec_params("SELECT coalesce(sum(amount_micros), 0)::bigint FROM "
+                                   "account_balance_charges WHERE customer_id = $1::uuid",
+                                   customer_id)[0][0]
+                        .as<std::int64_t>();
+                const std::vector<BalanceCredit> ending =
+                    grants_ending(grants, charges, at, revoke_id);
+                if (!revoke_id.empty() && std::ranges::none_of(ending, [&](const BalanceCredit& g) {
+                        return g.id == revoke_id;
+                    })) {
+                    return std::unexpected(StoreError{
+                        "conflict", "no grant " + revoke_id + " of this account still counts"});
+                }
+                for (const BalanceCredit& ended : ending) {
+                    tx.exec_params("UPDATE account_balance_credits SET ended_at = "
+                                   "$2::timestamptz, end_reason = $3, charges_at_end_micros = $4, "
+                                   "forfeited_micros = $5 WHERE id = $1::uuid AND ended_at IS NULL",
+                                   ended.id,
+                                   ended.ended_at,
+                                   ended.end_reason,
+                                   ended.charges_at_end_micros,
+                                   ended.forfeited_micros);
+                }
+                if (!ending.empty()) {
+                    tx.exec_params("UPDATE account_balances SET version = version + 1, "
+                                   "updated_at = now() WHERE customer_id = $1::uuid",
+                                   customer_id);
+                }
+                // As stored (ended_at in the store's own format).
+                std::vector<BalanceCredit> out;
+                for (const BalanceCredit& ended : ending) {
+                    for (const BalanceCredit& kept : grants_in(tx, customer_id, false)) {
+                        if (kept.id == ended.id) {
+                            out.push_back(kept);
+                        }
+                    }
+                }
+                return out;
+            });
+    }
+
+    Result<Customer> personal_account_by_email(const std::string& email) override {
+        return with_tx<Customer>([&](pqxx::work& tx) -> Result<Customer> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + customer_columns +
+                    " FROM customers WHERE customer_type = 'individual' AND deleted_at IS NULL "
+                    "AND user_id = (SELECT id FROM users WHERE pool_id = 'lake' AND lower(email) "
+                    "= lower($1) AND email IS NOT NULL)",
+                email);
+            if (email.empty() || rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no personal account has that email"});
+            }
+            return customer_of(rows[0]);
+        });
+    }
+
     Result<std::vector<std::string>> balance_customers() override {
         return with_tx<std::vector<std::string>>(
             [&](pqxx::work& tx) -> Result<std::vector<std::string>> {
@@ -8041,6 +8240,319 @@ public:
                 }
                 return out;
             });
+    }
+
+    // Coupon codes (migration 0101, lake#1156, docs/api/billing.md#coupon-codes).
+    static std::string coupon_columns(std::string_view table = "") {
+        const std::string t = table.empty() ? std::string() : std::string(table) + ".";
+        return t + "id::text, " + t + "code, " + t + "amount_micros, " + t + "credit_days, " +
+               "coalesce(to_char(" + t +
+               "expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), " + t +
+               "max_redemptions, " + t + "new_accounts_only, " + t + "campaign, " + t +
+               "redemptions, " + t + "created_by, " + balance_time(t + "created_at") + ", " +
+               balance_time(t + "disabled_at") + ", " + t + "disabled_by";
+    }
+
+    static Coupon coupon_of(const pqxx::row& row) {
+        Coupon coupon;
+        coupon.id = row[0].as<std::string>();
+        coupon.code = row[1].as<std::string>();
+        coupon.amount_micros = row[2].as<std::int64_t>();
+        coupon.credit_days = row[3].as<int>();
+        coupon.expires_at = row[4].as<std::string>();
+        if (!row[5].is_null()) {
+            coupon.max_redemptions = row[5].as<int>();
+        }
+        coupon.new_accounts_only = row[6].as<bool>();
+        coupon.campaign = row[7].as<std::string>();
+        coupon.redemptions = row[8].as<int>();
+        coupon.created_by = row[9].as<std::string>();
+        coupon.created_at = row[10].as<std::string>();
+        coupon.disabled_at = row[11].as<std::string>();
+        coupon.disabled_by = row[12].as<std::string>();
+        return coupon;
+    }
+
+    static std::string redemption_columns() {
+        return "id::text, coupon_id::text, customer_id::text, email_sha256, redeemed_by, "
+               "coalesce(credit_id::text, ''), " +
+               balance_time("created_at");
+    }
+
+    static CouponRedemption redemption_of(const pqxx::row& row) {
+        return {row[0].as<std::string>(),
+                row[1].as<std::string>(),
+                row[2].as<std::string>(),
+                row[3].as<std::string>(),
+                row[4].as<std::string>(),
+                row[5].as<std::string>(),
+                row[6].as<std::string>()};
+    }
+
+    Result<Coupon> create_coupon(const Coupon& coupon) override {
+        if (const auto problem = coupon_problem(coupon)) {
+            return std::unexpected(StoreError{"invalid_input", *problem});
+        }
+        return with_tx<Coupon>([&](pqxx::work& tx) -> Result<Coupon> {
+            const pqxx::result inserted = tx.exec_params(
+                "INSERT INTO billing_coupons (code, amount_micros, credit_days, expires_at, "
+                "max_redemptions, new_accounts_only, campaign, created_by) VALUES ($1, $2, $3, "
+                "$4::timestamptz, $5, $6, $7, $8) ON CONFLICT (code) DO NOTHING RETURNING " +
+                    coupon_columns(),
+                coupon.code,
+                coupon.amount_micros,
+                coupon.credit_days,
+                coupon.expires_at.empty() ? std::nullopt
+                                          : std::optional<std::string>(coupon.expires_at),
+                coupon.max_redemptions,
+                coupon.new_accounts_only,
+                coupon.campaign,
+                coupon.created_by);
+            if (inserted.empty()) {
+                return std::unexpected(
+                    StoreError{"conflict", "the code " + coupon.code + " is taken"});
+            }
+            return coupon_of(inserted[0]);
+        });
+    }
+
+    Result<Coupon> coupon_by_code(const std::string& code) override {
+        return with_tx<Coupon>([&](pqxx::work& tx) -> Result<Coupon> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT " + coupon_columns() + " FROM billing_coupons WHERE code = $1", code);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no such code"});
+            }
+            return coupon_of(rows[0]);
+        });
+    }
+
+    Result<Coupon> get_coupon(const std::string& coupon_id) override {
+        return with_tx<Coupon>([&](pqxx::work& tx) -> Result<Coupon> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT " + coupon_columns() + " FROM billing_coupons WHERE id::text = $1",
+                coupon_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no coupon " + coupon_id});
+            }
+            return coupon_of(rows[0]);
+        });
+    }
+
+    Result<std::vector<CouponReport>> coupon_reports(const std::string& campaign) override {
+        return with_tx<std::vector<CouponReport>>(
+            [&](pqxx::work& tx) -> Result<std::vector<CouponReport>> {
+                // Per redemption: whether its grant was given, whether the account's first paid
+                // top-up came after it, what the account was charged after its grant was given,
+                // and what it paid in top-ups after redeeming. Then summed per coupon.
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT " + coupon_columns("c") +
+                        ", count(r.id) FILTER (WHERE r.credit_id IS NOT NULL), count(r.id) FILTER "
+                        "(WHERE b.first_top_up_at >= r.created_at), coalesce(sum(greatest(ch.total "
+                        "- coalesce(cr.charges_at_grant_micros, 0), 0)), 0)::bigint, "
+                        "coalesce(sum(p.paid), 0)::bigint FROM billing_coupons c LEFT JOIN "
+                        "billing_coupon_redemptions r ON r.coupon_id = c.id LEFT JOIN "
+                        "account_balances b ON b.customer_id = r.customer_id LEFT JOIN "
+                        "account_balance_credits cr ON cr.id = r.credit_id LEFT JOIN LATERAL "
+                        "(SELECT coalesce(sum(amount_micros), 0)::bigint AS total FROM "
+                        "account_balance_charges WHERE customer_id = r.customer_id) ch ON true "
+                        "LEFT JOIN LATERAL (SELECT coalesce(sum(amount_micros), 0)::bigint AS paid "
+                        "FROM account_balance_credits WHERE customer_id = r.customer_id AND kind "
+                        "<> 'grant' AND created_at > r.created_at) p ON true WHERE $1 = '' OR "
+                        "c.campaign = $1 GROUP BY c.id ORDER BY c.created_at DESC, c.id",
+                    campaign);
+                std::vector<CouponReport> out;
+                for (const pqxx::row row : rows) {
+                    CouponReport report{.coupon = coupon_of(row)};
+                    report.redeemed = row[13].as<int>();
+                    report.topped_up = row[14].as<int>();
+                    report.spend_micros = row[15].as<std::int64_t>();
+                    report.paid_micros = row[16].as<std::int64_t>();
+                    out.push_back(std::move(report));
+                }
+                return out;
+            });
+    }
+
+    Result<Coupon> disable_coupon(const std::string& coupon_id, const std::string& by) override {
+        return with_tx<Coupon>([&](pqxx::work& tx) -> Result<Coupon> {
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE billing_coupons SET disabled_at = coalesce(disabled_at, now()), "
+                "disabled_by = CASE WHEN disabled_at IS NULL THEN $2 ELSE disabled_by END WHERE "
+                "id::text = $1 RETURNING " +
+                    coupon_columns(),
+                coupon_id,
+                utf8_prefix(by, 255));
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no coupon " + coupon_id});
+            }
+            return coupon_of(rows[0]);
+        });
+    }
+
+    Result<CouponRedemption> coupon_redemption(const std::string& coupon_id,
+                                               const std::string& customer_id) override {
+        return with_tx<CouponRedemption>([&](pqxx::work& tx) -> Result<CouponRedemption> {
+            const pqxx::result rows =
+                tx.exec_params("SELECT " + redemption_columns() +
+                                   " FROM billing_coupon_redemptions WHERE coupon_id::text = $1 "
+                                   "AND customer_id::text = $2",
+                               coupon_id,
+                               customer_id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "the account has not redeemed this code"});
+            }
+            return redemption_of(rows[0]);
+        });
+    }
+
+    Result<CouponClaim> claim_coupon(const CouponRedemption& redemption) override {
+        if (redemption.email_sha256.size() != 64 || redemption.redeemed_by.empty()) {
+            return std::unexpected(
+                StoreError{"invalid_input", "a redemption names the person and their email"});
+        }
+        return with_tx<CouponClaim>([&](pqxx::work& tx) -> Result<CouponClaim> {
+            // The coupon's row lock orders every claim of one code: the cap and the uniqueness
+            // checks below see every earlier claim.
+            const pqxx::result coupons = tx.exec_params(
+                "SELECT " + coupon_columns() +
+                    ", (expires_at IS NOT NULL AND expires_at <= now()) FROM billing_coupons "
+                    "WHERE id::text = $1 FOR UPDATE",
+                redemption.coupon_id);
+            if (coupons.empty()) {
+                return std::unexpected(StoreError{"not_found", "no such code"});
+            }
+            Coupon coupon = coupon_of(coupons[0]);
+            const bool expired = coupons[0][13].as<bool>();
+            const pqxx::result customer = tx.exec_params(
+                "SELECT (created_at < (SELECT created_at FROM billing_coupons WHERE id::text = "
+                "$2)) FROM customers WHERE id::text = $1",
+                redemption.customer_id,
+                redemption.coupon_id);
+            if (customer.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no customer " + redemption.customer_id});
+            }
+            const auto conflict = [](std::string reason) {
+                return std::unexpected(StoreError{"conflict", std::move(reason)});
+            };
+            for (const pqxx::row row :
+                 tx.exec_params("SELECT " + redemption_columns() +
+                                    " FROM billing_coupon_redemptions WHERE coupon_id = $1::uuid "
+                                    "AND (customer_id::text = $2 OR email_sha256 = $3)",
+                                coupon.id,
+                                redemption.customer_id,
+                                redemption.email_sha256)) {
+                const CouponRedemption kept = redemption_of(row);
+                if (kept.customer_id == redemption.customer_id) {
+                    if (kept.credit_id.empty() && kept.email_sha256 == redemption.email_sha256) {
+                        return CouponClaim{.resumed = true, .redemption = kept, .coupon = coupon};
+                    }
+                    return conflict("already_redeemed");
+                }
+            }
+            if (!tx.exec_params("SELECT 1 FROM billing_coupon_redemptions WHERE coupon_id = "
+                                "$1::uuid AND email_sha256 = $2",
+                                coupon.id,
+                                redemption.email_sha256)
+                     .empty()) {
+                return conflict("email_redeemed");
+            }
+            if (!coupon.disabled_at.empty()) {
+                return conflict("disabled");
+            }
+            if (expired) {
+                return conflict("expired");
+            }
+            if (coupon.max_redemptions && coupon.redemptions >= *coupon.max_redemptions) {
+                return conflict("used_up");
+            }
+            if (coupon.new_accounts_only) {
+                if (customer[0][0].as<bool>()) {
+                    return conflict("not_new_account");
+                }
+                if (!tx.exec_params(
+                           "SELECT 1 FROM account_balance_credits WHERE customer_id::text = $1 "
+                           "UNION ALL SELECT 1 FROM account_balance_charges WHERE "
+                           "customer_id::text = $1 AND amount_micros > 0 UNION ALL SELECT 1 FROM "
+                           "billing_invoices WHERE customer_id::text = $1 AND total_micros > 0 AND "
+                           "state <> 'void' LIMIT 1",
+                           redemption.customer_id)
+                         .empty()) {
+                    return conflict("account_used");
+                }
+            }
+            const pqxx::result inserted = tx.exec_params(
+                "INSERT INTO billing_coupon_redemptions (coupon_id, customer_id, email_sha256, "
+                "redeemed_by) VALUES ($1::uuid, $2::uuid, $3, $4) RETURNING " +
+                    redemption_columns(),
+                coupon.id,
+                redemption.customer_id,
+                redemption.email_sha256,
+                utf8_prefix(redemption.redeemed_by, 255));
+            tx.exec_params(
+                "UPDATE billing_coupons SET redemptions = redemptions + 1 WHERE id = $1::uuid",
+                coupon.id);
+            ++coupon.redemptions;
+            return CouponClaim{
+                .resumed = false, .redemption = redemption_of(inserted[0]), .coupon = coupon};
+        });
+    }
+
+    Result<void> finish_coupon_redemption(const std::string& redemption_id,
+                                          const std::string& credit_id) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            if (tx.exec_params("UPDATE billing_coupon_redemptions SET credit_id = $2::uuid WHERE "
+                               "id::text = $1 RETURNING 1",
+                               redemption_id,
+                               credit_id)
+                    .empty()) {
+                return std::unexpected(StoreError{"not_found", "no redemption " + redemption_id});
+            }
+            return {};
+        });
+    }
+
+    Result<bool> coupon_attempts_exhausted(const std::vector<std::string>& keys,
+                                           int limit,
+                                           int window_seconds) override {
+        return with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            for (const std::string& key : keys) {
+                if (!tx.exec_params("SELECT 1 FROM billing_coupon_attempts WHERE key_sha256 = $1 "
+                                    "AND failures >= $2 AND window_start > now() - make_interval("
+                                    "secs => $3)",
+                                    key,
+                                    limit,
+                                    window_seconds)
+                         .empty()) {
+                    return true;
+                }
+            }
+            return false;
+        });
+    }
+
+    Result<void> coupon_attempt_failed(const std::vector<std::string>& keys,
+                                       int window_seconds) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            // Windows long past are forgotten, so the table holds only recent clients.
+            tx.exec_params("DELETE FROM billing_coupon_attempts WHERE window_start < now() - "
+                           "make_interval(secs => $1) * 24",
+                           window_seconds);
+            for (const std::string& key : keys) {
+                tx.exec_params(
+                    "INSERT INTO billing_coupon_attempts (key_sha256, failures) VALUES ($1, 1) ON "
+                    "CONFLICT (key_sha256) DO UPDATE SET failures = CASE WHEN "
+                    "billing_coupon_attempts.window_start <= now() - make_interval(secs => $2) "
+                    "THEN 1 ELSE billing_coupon_attempts.failures + 1 END, window_start = CASE "
+                    "WHEN billing_coupon_attempts.window_start <= now() - make_interval(secs => "
+                    "$2) THEN now() ELSE billing_coupon_attempts.window_start END",
+                    key,
+                    window_seconds);
+            }
+            return {};
+        });
     }
 
     // Cloud orders (lake#831, migration 0089, docs/api/orders.md).
@@ -8711,12 +9223,15 @@ public:
                 return with_authentication_tx<IssuedSession>([&](pqxx::work& tx)
                                                                  -> Result<IssuedSession> {
                     const pqxx::result rows = password_credential_tx(tx, in.pool_id, in.email);
-                    if (rows.empty())
+                    // An unknown email, or an account with no password, still runs one
+                    // Argon2id check, so it answers as slowly as a wrong password (lake#1101).
+                    if (rows.empty()) {
+                        identity_crypto::verify_secret_against_dummy(in.password);
                         return std::unexpected(
                             StoreError{"not_found", "invalid email or password"});
-
-                    if (rows.empty() || !identity_crypto::verify_secret(
-                                            rows[0][1].as<std::string>(), in.password)) {
+                    }
+                    if (!identity_crypto::verify_secret(rows[0][1].as<std::string>(),
+                                                        in.password)) {
                         return std::unexpected(
                             StoreError{"not_found", "invalid email or password"});
                     }
@@ -8845,8 +9360,13 @@ public:
                                        "AND kind = 'password' AND revoked_at IS NULL FOR UPDATE",
                                        user_id,
                                        pool);
-                    if (password.empty() || !identity_crypto::verify_secret(
-                                                password[0][0].as<std::string>(), proof.password)) {
+                    // An account with no password still runs one Argon2id check (lake#1101).
+                    const bool password_matches =
+                        password.empty()
+                            ? identity_crypto::verify_secret_against_dummy(proof.password)
+                            : identity_crypto::verify_secret(password[0][0].as<std::string>(),
+                                                             proof.password);
+                    if (!password_matches) {
                         return std::unexpected(StoreError{
                             "unauthorized", "MFA enrollment requires the current password"});
                     }
@@ -8925,12 +9445,12 @@ public:
                                                                  -> Result<IssuedSession> {
                     const pqxx::result password_rows =
                         password_credential_tx(tx, in.pool_id, in.email);
-                    if (password_rows.empty())
+                    if (password_rows.empty()) {
+                        identity_crypto::verify_secret_against_dummy(in.password); // lake#1101
                         return std::unexpected(
                             StoreError{"not_found", "invalid email or password"});
-
-                    if (password_rows.empty() ||
-                        !identity_crypto::verify_secret(password_rows[0][1].as<std::string>(),
+                    }
+                    if (!identity_crypto::verify_secret(password_rows[0][1].as<std::string>(),
                                                         in.password)) {
                         return std::unexpected(
                             StoreError{"not_found", "invalid email or password"});
@@ -9226,7 +9746,8 @@ public:
         return result;
     }
     Result<IssuedSession> sign_in_clerk(const ClerkIdentity& in) override {
-        if (in.issued_at <= 0 || in.subject.empty() || in.subject.size() > 256) {
+        if (in.issued_at <= 0 || in.subject.empty() || in.subject.size() > 256 ||
+            in.session_id.size() > 256) {
             return std::unexpected(
                 StoreError{"invalid_input", "a Clerk subject and token issue time are required"});
         }
@@ -9244,22 +9765,33 @@ public:
                 return std::unexpected(
                     StoreError{"unauthorized", "the Clerk token predates revocation"});
             }
-            return issue_session(tx,
-                                 found->user_id,
-                                 "lake",
-                                 in.device_name,
-                                 "browser",
-                                 "",
-                                 {"*"},
-                                 "",
-                                 60 * 60 * 24 * 30);
+            auto issued = issue_session(tx,
+                                        found->user_id,
+                                        "lake",
+                                        in.device_name,
+                                        "browser",
+                                        "",
+                                        {"*"},
+                                        "",
+                                        60 * 60 * 24 * 30);
+            if (issued && !in.session_id.empty()) {
+                // Bound to the Clerk session it came from, so that session's end ends only this
+                // browser (lake#1163, migration 0103_clerk_session_binding).
+                tx.exec_params("UPDATE sessions SET clerk_session_id = $2 WHERE id = $1::uuid",
+                               issued->session.id,
+                               in.session_id);
+            }
+            return issued;
         });
     }
     Result<void> revoke_clerk_sessions(const std::string& subject,
+                                       const std::string& session_id,
                                        std::int64_t revoked_at) override {
-        if (subject.empty() || subject.size() > 256 || revoked_at < 0) {
-            return std::unexpected(StoreError{
-                "invalid_input", "a Clerk subject and revocation timestamp are required"});
+        if (subject.empty() || subject.size() > 256 || session_id.empty() ||
+            session_id.size() > 256 || revoked_at < 0) {
+            return std::unexpected(
+                StoreError{"invalid_input",
+                           "a Clerk subject, session id and revocation timestamp are required"});
         }
         return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
             tx.exec_params(
@@ -9268,21 +9800,26 @@ public:
             const auto state = tx.exec_params(
                 "SELECT revoked_before FROM clerk_user_states WHERE subject = $1 FOR UPDATE",
                 subject);
-            if (revoked_at < state[0][0].as<std::int64_t>())
-                return {};
-            tx.exec_params("UPDATE clerk_user_states SET revoked_before = $2 WHERE subject = $1",
+            // An event older than the watermark still ends the browser bound to its own Clerk
+            // session; only the unbound browsers' account-wide revocation follows the order.
+            const bool current = revoked_at >= state[0][0].as<std::int64_t>();
+            tx.exec_params("UPDATE clerk_user_states SET revoked_before = "
+                           "GREATEST(revoked_before, $2) WHERE subject = $1",
                            subject,
                            revoked_at);
             const auto user_id = clerk_user_id(tx, subject);
             if (user_id) {
                 // The user lock also serializes every other issuance path with this revocation.
                 tx.exec_params("SELECT id FROM users WHERE id = $1::uuid FOR UPDATE", *user_id);
-                tx.exec_params("UPDATE sessions SET revoked_at = coalesce(revoked_at, now()) WHERE "
-                               "user_id = $1::uuid",
-                               *user_id);
-                tx.exec_params("UPDATE devices SET revoked_at = coalesce(revoked_at, now()) WHERE "
-                               "user_id = $1::uuid",
-                               *user_id);
+                // Browser sessions only (lake#1163): API keys, static tokens, TAAP sessions and
+                // devices stay, and keys made from a revoked browser session keep working.
+                tx.exec_params("UPDATE sessions SET revoked_at = coalesce(revoked_at, now()) "
+                               "WHERE user_id = $1::uuid AND pool_id = 'lake' AND kind = "
+                               "'browser' AND revoked_at IS NULL AND (clerk_session_id = $2 OR "
+                               "($3 AND clerk_session_id IS NULL))",
+                               *user_id,
+                               session_id,
+                               current);
             }
             return {};
         });
@@ -9774,6 +10311,128 @@ public:
                                  in.parent_session_id);
         });
     }
+    Result<IssuedBrowserKey> create_browser_key(const NewBrowserKey& in) override {
+        if (in.customer_id.empty() || in.workspace_id.empty() || in.index_id.empty() ||
+            in.origins.empty() || in.origins.size() > browser_key_max_origins ||
+            in.rate_limit_per_minute < 1 || in.rate_limit_per_minute > browser_key_max_rate_limit ||
+            in.expires_in_seconds < 0) {
+            return std::unexpected(StoreError{
+                "invalid_input",
+                "a browser key names its account, workspace and index, lists 1 to 20 origins and "
+                "makes 1 to 6000 calls a minute"});
+        }
+        const std::string random = identity_crypto::random_secret();
+        if (random.size() < 32) {
+            return std::unexpected(StoreError{"store_error", "could not generate a browser key"});
+        }
+        const std::string id = new_uuid_v4();
+        const std::string secret = std::string(browser_key_credential_prefix) + id + "." + random;
+        const std::string digest = identity_crypto::sha256_hex(secret);
+        return with_tx<IssuedBrowserKey>([&](pqxx::work& tx) -> Result<IssuedBrowserKey> {
+            const pqxx::result live = tx.exec_params(
+                "SELECT 1 FROM workspaces WHERE id = $1::uuid AND customer_id = $2::uuid "
+                "AND desired <> 'deleted'",
+                in.workspace_id,
+                in.customer_id);
+            if (live.empty()) {
+                return std::unexpected(StoreError{
+                    "invalid_input", "workspace_id must name a workspace Zetta in this account"});
+            }
+            const pqxx::result rows = tx.exec_params(
+                std::string(
+                    "INSERT INTO browser_keys (id, customer_id, workspace_id, index_id, "
+                    "model_id, name, origins, rate_limit_per_minute, secret_sha256, "
+                    "created_by_user_id, created_by_taap_id, expires_at) VALUES "
+                    "($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, "
+                    "ARRAY(SELECT json_array_elements_text($7::json)), $8, $9, "
+                    "NULLIF($10, '')::uuid, $11, "
+                    "CASE WHEN $12::bigint > 0 THEN now() + make_interval(secs => $12::bigint) "
+                    "END) RETURNING ") +
+                    browser_key_columns,
+                id,
+                in.customer_id,
+                in.workspace_id,
+                in.index_id,
+                in.model_id,
+                in.name,
+                nlohmann::json(in.origins).dump(),
+                in.rate_limit_per_minute,
+                digest,
+                in.created_by_user_id,
+                in.created_by_taap_id,
+                in.expires_in_seconds);
+            return IssuedBrowserKey{browser_key_of(rows[0]), secret};
+        });
+    }
+    Result<std::vector<BrowserKey>> list_browser_keys(const std::string& customer_id,
+                                                      const std::string& workspace_id) override {
+        return with_tx<std::vector<BrowserKey>>(
+            [&](pqxx::work& tx) -> Result<std::vector<BrowserKey>> {
+                const pqxx::result rows =
+                    tx.exec_params(std::string("SELECT ") + browser_key_columns +
+                                       " FROM browser_keys WHERE customer_id = $1::uuid AND "
+                                       "($2 = '' OR workspace_id = NULLIF($2, '')::uuid) "
+                                       "ORDER BY created_at DESC, id",
+                                   customer_id,
+                                   workspace_id);
+                std::vector<BrowserKey> keys;
+                for (const pqxx::row& row : rows) {
+                    keys.push_back(browser_key_of(row));
+                }
+                return keys;
+            });
+    }
+    Result<BrowserKey> revoke_browser_key(const std::string& customer_id,
+                                          const std::string& id,
+                                          const std::string& revoked_by_taap_id) override {
+        if (!uuid_text(id)) {
+            return std::unexpected(
+                StoreError{"not_found", "no browser key " + id + " in this account"});
+        }
+        return with_tx<BrowserKey>([&](pqxx::work& tx) -> Result<BrowserKey> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("UPDATE browser_keys SET revoked_at = coalesce(revoked_at, now()), "
+                            "revoked_by_taap_id = CASE WHEN revoked_at IS NULL THEN $3 ELSE "
+                            "revoked_by_taap_id END WHERE id = $1::uuid AND customer_id = "
+                            "$2::uuid RETURNING ") +
+                    browser_key_columns,
+                id,
+                customer_id,
+                revoked_by_taap_id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no browser key " + id + " in this account"});
+            }
+            return browser_key_of(rows[0]);
+        });
+    }
+    Result<BrowserKeyAdmission> admit_browser_key_call(const std::string& id) override {
+        // One statement: the minute starts again a minute after it began, and every replica
+        // counts in the same row.
+        return with_tx<BrowserKeyAdmission>([&](pqxx::work& tx) -> Result<BrowserKeyAdmission> {
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE browser_keys SET "
+                "window_calls = CASE WHEN window_started_at IS NULL OR "
+                "window_started_at <= now() - interval '1 minute' THEN 1 "
+                "ELSE window_calls + 1 END, "
+                "window_started_at = CASE WHEN window_started_at IS NULL OR "
+                "window_started_at <= now() - interval '1 minute' THEN now() "
+                "ELSE window_started_at END "
+                "WHERE id = $1::uuid RETURNING window_calls, rate_limit_per_minute, "
+                "greatest(1, ceil(extract(epoch FROM window_started_at + interval '1 minute' - "
+                "now())))::int",
+                id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "session is not active"});
+            }
+            const int calls = rows[0][0].as<int>();
+            const int limit = rows[0][1].as<int>();
+            if (calls > limit) {
+                return BrowserKeyAdmission{false, rows[0][2].as<int>()};
+            }
+            return BrowserKeyAdmission{true, 0};
+        });
+    }
     Result<std::vector<Session>> list_sessions(const std::string& user_id,
                                                const std::string& pool_id) override {
         return with_tx<std::vector<Session>>([&](pqxx::work& tx) -> Result<std::vector<Session>> {
@@ -9926,6 +10585,33 @@ public:
         return principal;
     }
 
+    // A browser key (lake#1152): live until revoked or expired, while its workspace is.
+    Result<Principal> browser_key_credential(const std::string& secret) {
+        const auto parsed = parse_agent_credential(secret, browser_key_credential_prefix);
+        if (!parsed || !uuid_text(parsed->first)) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        const std::string digest = identity_crypto::sha256_hex(secret);
+        return with_tx<Principal>([&](pqxx::work& tx) -> Result<Principal> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + browser_key_columns +
+                    ", secret_sha256, (expires_at IS NOT NULL AND expires_at <= now()) "
+                    "FROM browser_keys WHERE id = $1::uuid AND revoked_at IS NULL AND EXISTS "
+                    "(SELECT 1 FROM workspaces WHERE workspaces.id = browser_keys.workspace_id "
+                    "AND workspaces.desired <> 'deleted')",
+                parsed->first);
+            if (rows.empty() || !constant_time_hex_equal(digest, rows[0][15].as<std::string>())) {
+                return std::unexpected(StoreError{"not_found", "session is not active"});
+            }
+            if (rows[0][16].as<bool>()) {
+                return std::unexpected(StoreError{"expired", "the browser key has expired"});
+            }
+            tx.exec_params("UPDATE browser_keys SET last_used_at = now() WHERE id = $1::uuid",
+                           parsed->first);
+            return browser_key_principal(browser_key_of(rows[0]), digest);
+        });
+    }
+
     Result<Principal> resolve_principal(const std::string& secret) {
         if (auto principal = build_principal(secret)) {
             return principal;
@@ -9938,6 +10624,9 @@ public:
         }
         if (secret.starts_with(methodology_run_credential_prefix)) {
             return methodology_run_credential(secret);
+        }
+        if (secret.starts_with(browser_key_credential_prefix)) {
+            return browser_key_credential(secret);
         }
         if (secret.starts_with(agent_launch_credential_prefix)) {
             return launch_principal(secret);
@@ -12132,7 +12821,10 @@ public:
                 return with_authentication_tx<IssuedSession>([&](pqxx::work& tx)
                                                                  -> Result<IssuedSession> {
                     const pqxx::result user_rows = password_credential_tx(tx, pool_id, email);
+                    // Every refusal runs one Argon2id check, so neither an unknown email nor a
+                    // code that matches no selector answers faster than a wrong code (lake#1101).
                     if (user_rows.empty()) {
+                        identity_crypto::verify_secret_against_dummy(code);
                         return std::unexpected(
                             StoreError{"unauthorized", "invalid email or recovery code"});
                     }
@@ -12146,8 +12838,12 @@ public:
                         user_id,
                         pool_id,
                         identity_crypto::recovery_selector(code));
-                    if (recovery_rows.empty() || !identity_crypto::verify_secret(
-                                                     recovery_rows[0][1].as<std::string>(), code))
+                    const bool code_matches =
+                        recovery_rows.empty()
+                            ? identity_crypto::verify_secret_against_dummy(code)
+                            : identity_crypto::verify_secret(recovery_rows[0][1].as<std::string>(),
+                                                             code);
+                    if (!code_matches)
                         return std::unexpected(
                             StoreError{"unauthorized", "invalid email or recovery code"});
                     tx.exec_params("UPDATE credentials SET revoked_at = now() WHERE id = $1::uuid",
@@ -12422,20 +13118,24 @@ public:
             [&](AuthenticationOutcome&) -> Result<IssuedSession> {
                 return with_authentication_tx<IssuedSession>([&](pqxx::work& tx)
                                                                  -> Result<IssuedSession> {
-                    if (!attempt || !lock_authentication_account_tx(tx, attempt->user_id))
+                    // An unknown recovery, or one with no token yet, still runs one Argon2id
+                    // check, so it answers as slowly as a wrong token (lake#1101).
+                    if (!attempt || !lock_authentication_account_tx(tx, attempt->user_id)) {
+                        identity_crypto::verify_secret_against_dummy(token);
                         return std::unexpected(invalid_authentication());
+                    }
                     const pqxx::result attempts = tx.exec_params(
                         "SELECT user_id::text, method, status, token_hash, ready_at <= now(), "
                         "expires_at > now() FROM offline_recovery_attempts WHERE id = $1::uuid AND "
                         "user_id = $2::uuid FOR UPDATE",
                         recovery_id,
                         attempt->user_id);
-                    if (attempts.empty())
-                        return std::unexpected(
-                            StoreError{"unauthorized", "invalid recovery token"});
-
-                    if (attempts.empty() || attempts[0][3].is_null() ||
-                        !identity_crypto::verify_secret(attempts[0][3].as<std::string>(), token)) {
+                    const bool token_matches =
+                        attempts.empty() || attempts[0][3].is_null()
+                            ? identity_crypto::verify_secret_against_dummy(token)
+                            : identity_crypto::verify_secret(attempts[0][3].as<std::string>(),
+                                                             token);
+                    if (!token_matches) {
                         return std::unexpected(
                             StoreError{"unauthorized", "invalid recovery token"});
                     }
@@ -13352,6 +14052,102 @@ private:
 
 std::unique_ptr<Store> make_postgres_store(std::string connection_uri, std::string instance_kek) {
     return std::make_unique<PostgresStore>(std::move(connection_uri), std::move(instance_kek));
+}
+
+// `lake migrate` (lake#1119): the operator's PostgresSchema Job, done by the binary that carries
+// the schema. Same checks in the same order: skip when the newest guard table exists and every
+// migration the file records is in schema_migrations (or the file records none, or the database has
+// no schema_migrations table), else run the whole file in one transaction. The advisory lock makes
+// a second concurrent run wait, then find the database current.
+std::expected<MigrationReport, MigrationError> apply_control_schema(const MigrationOptions& options,
+                                                                    std::string_view sql) {
+    using clock = std::chrono::steady_clock;
+    const auto started = clock::now();
+    const SchemaFacts facts = schema_facts(sql);
+    if (options.connection_uri.empty()) {
+        return std::unexpected(MigrationError{"connect", "no control database URI"});
+    }
+    std::unique_ptr<pqxx::connection> connection;
+    const auto deadline = started + options.wait;
+    for (;;) {
+        try {
+            connection = std::make_unique<pqxx::connection>(options.connection_uri);
+            break;
+        } catch (const std::exception& error) {
+            const auto now = clock::now();
+            if (now >= deadline) {
+                return std::unexpected(MigrationError{"connect", error.what()});
+            }
+            std::this_thread::sleep_for(
+                std::min<clock::duration>(std::chrono::seconds(2), deadline - now));
+        }
+    }
+    MigrationReport report;
+    try {
+        pqxx::work tx(*connection);
+        tx.exec("SET LOCAL client_min_messages TO warning");
+        tx.exec("SELECT pg_advisory_xact_lock(" + std::to_string(schema_migration_lock_key) + ")");
+        const auto has_migrations_table = [&tx] {
+            return tx.exec("SELECT to_regclass('public.schema_migrations') IS NOT NULL")[0][0]
+                .as<bool>();
+        };
+        const auto recorded = [&tx, &has_migrations_table] {
+            std::set<std::string> versions;
+            if (has_migrations_table()) {
+                for (const auto& row : tx.exec("SELECT version FROM public.schema_migrations")) {
+                    versions.insert(row[0].as<std::string>());
+                }
+            }
+            return versions;
+        };
+        const auto guards = [&tx] {
+            std::set<std::string> tables;
+            for (const auto& row :
+                 tx.exec("SELECT tablename::text FROM pg_tables WHERE schemaname = "
+                         "'public' AND tablename LIKE '%\\_guard'")) {
+                tables.insert(row[0].as<std::string>());
+            }
+            return tables;
+        };
+        const bool migrations_table = has_migrations_table();
+        const auto migrations_before = recorded();
+        const auto guards_before = guards();
+        for (const auto& version : facts.migrations) {
+            if (!migrations_before.contains(version)) {
+                report.migrations_missing.push_back(version);
+            }
+        }
+        const bool current =
+            !facts.guard_table.empty() && guards_before.contains(facts.guard_table) &&
+            (facts.migrations.empty() || !migrations_table || report.migrations_missing.empty());
+        if (current) {
+            report.migrations_missing.clear();
+        } else {
+            tx.exec(std::string(sql));
+            report.applied = true;
+        }
+        const auto migrations_after = recorded();
+        const auto guards_after = guards();
+        for (const auto& version : facts.migrations) {
+            if (migrations_after.contains(version) && !migrations_before.contains(version)) {
+                report.migrations_applied.push_back(version);
+            }
+        }
+        for (const auto& table : facts.guard_tables) {
+            if (guards_after.contains(table) && !guards_before.contains(table)) {
+                report.guard_tables_created.push_back(table);
+            }
+        }
+        report.migrations_recorded = migrations_after.size();
+        tx.commit();
+    } catch (const pqxx::broken_connection& error) {
+        return std::unexpected(MigrationError{"connect", error.what()});
+    } catch (const std::exception& error) {
+        return std::unexpected(MigrationError{"apply", error.what()});
+    }
+    report.elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - started).count();
+    return report;
 }
 
 } // namespace lake::control

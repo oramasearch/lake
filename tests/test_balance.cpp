@@ -15,6 +15,7 @@
 #include <regex>
 #include <set>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -1069,6 +1070,466 @@ TEST(StripeBalance, CheckoutsChargesAndEventsAreLakesOwn) {
 // The gate is one list on the registry (lake#1114): every capability whose name says it creates,
 // starts, runs, deploys, trains, launches, builds or stores something is either on the list or
 // classified here as starting nothing that costs money, and every name on the list is registered.
+// Credits from Orama (lake#1134, docs/api/billing.md#credits-from-orama).
+
+namespace {
+
+std::string utc_in(std::chrono::seconds offset) {
+    return std::format(
+        "{:%FT%T}Z",
+        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now() + offset));
+}
+
+lake::control::BalanceCredit store_grant(const std::string& customer,
+                                         std::int64_t micros,
+                                         const std::string& reference,
+                                         const std::string& expires_at = {}) {
+    lake::control::BalanceCredit grant;
+    grant.customer_id = customer;
+    grant.kind = "grant";
+    grant.amount_micros = micros;
+    grant.provider = "orama";
+    grant.reference = reference;
+    grant.reason = "design partner";
+    grant.granted_by = "operator";
+    grant.expires_at = expires_at;
+    return grant;
+}
+
+} // namespace
+
+TEST(BalanceGrant, OnlyTheOperatorOrTheInstanceAdministratorGivesOrRevokesACredit) {
+    BalanceRig rig;
+    const json give{{"customer_id", rig.customer},
+                    {"amount_micros", 25 * dollar},
+                    {"reason", "design partner"}};
+    // The account's own owner (an admin of it) may not give itself credit.
+    auto refused = rig.owner("grant_balance_credit", give);
+    EXPECT_EQ(refused.error.code, "unauthorized") << refused.error.message;
+    // Nor may another person.
+    const auto other =
+        rig.store->create_user({"taap:1:ed25519:balance-other", "other@example.test", "Other"});
+    ASSERT_TRUE(other);
+    auto stranger = rig.owner_context();
+    stranger.acting_identity = "taap:1:ed25519:balance-other";
+    stranger.acting_user_id = other->id;
+    refused = rig.call("grant_balance_credit", give, stranger);
+    EXPECT_EQ(refused.error.code, "unauthorized") << refused.error.message;
+    EXPECT_EQ(rig.balance().credits_micros, 0);
+    // The instance administrator without the operator credential may.
+    auto admin = rig.operator_context();
+    admin.operator_credential = false;
+    const auto given = rig.call("grant_balance_credit", give, admin);
+    ASSERT_TRUE(given.ok) << given.error.message;
+    EXPECT_EQ(rig.balance().credits_micros, 25 * dollar);
+    // Revoking is theirs alone too.
+    refused = rig.owner("revoke_balance_credit",
+                        {{"credit_id", given.value["credit"]["id"].get<std::string>()}});
+    EXPECT_EQ(refused.error.code, "unauthorized") << refused.error.message;
+    // Refused calls are audited, as denied.
+    const auto events = lake::test::audit_events(*rig.store);
+    ASSERT_TRUE(events);
+    EXPECT_TRUE(std::ranges::any_of(*events, [](const lake::audit::Event& event) {
+        return event.draft.action == "grant_balance_credit" && event.draft.outcome == "denied";
+    }));
+}
+
+TEST(BalanceGrant, TheAmountTheReasonTheExpiryAndTheAccountAreChecked) {
+    BalanceRig rig;
+    auto op = rig.operator_context();
+    const auto give = [&](json input) { return rig.call("grant_balance_credit", input, op); };
+    const json ok{{"customer_id", rig.customer},
+                  {"amount_micros", 25 * dollar},
+                  {"reason", "design partner"}};
+    auto input = ok;
+    input["amount_micros"] = 0;
+    EXPECT_EQ(give(input).error.code, "invalid_input");
+    input["amount_micros"] = 9'999;
+    EXPECT_EQ(give(input).error.code, "invalid_input") << "at least a cent";
+    input["amount_micros"] = 10'000 * dollar + 10'000;
+    EXPECT_EQ(give(input).error.code, "invalid_input") << "at most $10,000";
+    input["amount_micros"] = 25 * dollar + 1;
+    EXPECT_EQ(give(input).error.code, "invalid_input") << "whole cents";
+    input = ok;
+    input.erase("reason");
+    EXPECT_EQ(give(input).error.code, "invalid_input") << "the reason is required";
+    input["reason"] = "   ";
+    EXPECT_EQ(give(input).error.code, "invalid_input");
+    input["reason"] = std::string(1001, 'x');
+    EXPECT_EQ(give(input).error.code, "invalid_input");
+    input = ok;
+    input["expires_at"] = "2026-13-01T00:00:00Z";
+    EXPECT_EQ(give(input).error.code, "invalid_input");
+    input["expires_at"] = "tomorrow";
+    EXPECT_EQ(give(input).error.code, "invalid_input");
+    input["expires_at"] = utc_in(-std::chrono::hours{1});
+    EXPECT_EQ(give(input).error.code, "invalid_input") << "in the future";
+    input["expires_at"] = utc_in(std::chrono::days{3700});
+    EXPECT_EQ(give(input).error.code, "invalid_input") << "within 10 years";
+    input = ok;
+    input["email"] = "owner@example.test";
+    EXPECT_EQ(give(input).error.code, "invalid_input") << "customer_id or email, not both";
+    input.erase("customer_id");
+    input.erase("email");
+    EXPECT_EQ(give(input).error.code, "invalid_input") << "one of them";
+    input = ok;
+    input["customer_id"] = lake::control::new_uuid_v4();
+    EXPECT_EQ(give(input).error.code, "not_found");
+    input = ok;
+    input.erase("customer_id");
+    input["email"] = "nobody@example.test";
+    const auto unknown = give(input);
+    EXPECT_EQ(unknown.error.code, "not_found");
+    EXPECT_EQ(unknown.error.path, "/email");
+    input = ok;
+    input["reference"] = "bad reference!";
+    EXPECT_EQ(give(input).error.code, "invalid_input");
+    EXPECT_EQ(rig.balance().credits_micros, 0) << "nothing was given";
+    EXPECT_TRUE(rig.sent.empty());
+}
+
+TEST(BalanceGrant, AGrantByIdOrByEmailIsCreditedShownAuditedAndEmailedOnce) {
+    BalanceRig rig;
+    auto op = rig.operator_context();
+    const std::string expires = utc_in(std::chrono::days{30});
+    const auto given = rig.call("grant_balance_credit",
+                                {{"customer_id", rig.customer},
+                                 {"amount_micros", 25 * dollar},
+                                 {"reason", "design partner"},
+                                 {"expires_at", expires},
+                                 {"reference", "partner-2026-10"}},
+                                op);
+    ASSERT_TRUE(given.ok) << given.error.message;
+    EXPECT_EQ(given.value["duplicate"], false);
+    EXPECT_EQ(given.value["emailed"], true) << given.value.dump();
+    EXPECT_EQ(given.value["credit"]["kind"], "grant");
+    EXPECT_EQ(given.value["credit"]["label"], "Credit from Orama");
+    EXPECT_EQ(given.value["balance"]["balance_micros"], 25 * dollar);
+    EXPECT_EQ(given.value["balance"]["state"], "ok") << "blocked before, ok after";
+    EXPECT_EQ(given.value["balance"]["first_top_up_at"], "") << "a grant is not a payment";
+    const std::string credit_id = given.value["credit"]["id"];
+
+    // One email, to the owner, keyed by the grant, with nothing a person typed in it.
+    ASSERT_EQ(rig.sent.size(), 1U);
+    EXPECT_EQ(rig.sent[0].email.to, std::vector<std::string>{"owner@example.test"});
+    EXPECT_EQ(rig.sent[0].email.subject, "Orama added $25.00 of credit to your Lake account");
+    EXPECT_EQ(rig.sent[0].key, "lake-balance-grant-" + credit_id);
+    EXPECT_NE(rig.sent[0].email.text.find("not cash"), std::string::npos);
+    EXPECT_NE(rig.sent[0].email.text.find(expires.substr(0, 10)), std::string::npos);
+    EXPECT_NE(rig.sent[0].email.text.find("first top-up of $20.00"), std::string::npos);
+    EXPECT_NE(rig.sent[0].email.text.find("https://lake.test/billing?customer_id=" + rig.customer),
+              std::string::npos);
+    EXPECT_EQ(rig.sent[0].email.text.find("design partner"), std::string::npos);
+
+    // A retry with the same reference grants nothing more and emails nothing more.
+    const auto again = rig.call("grant_balance_credit",
+                                {{"customer_id", rig.customer},
+                                 {"amount_micros", 25 * dollar},
+                                 {"reason", "design partner"},
+                                 {"reference", "partner-2026-10"}},
+                                op);
+    ASSERT_TRUE(again.ok) << again.error.message;
+    EXPECT_EQ(again.value["duplicate"], true);
+    EXPECT_EQ(rig.balance().credits_micros, 25 * dollar);
+    EXPECT_EQ(rig.sent.size(), 1U);
+
+    // By a person's email, in any case: their personal account.
+    const auto by_email = rig.call("grant_balance_credit",
+                                   {{"email", "OWNER@example.test"},
+                                    {"amount_micros", 5 * dollar},
+                                    {"reason", "support make-good"}},
+                                   op);
+    ASSERT_TRUE(by_email.ok) << by_email.error.message;
+    EXPECT_EQ(by_email.value["customer_id"], rig.customer);
+    EXPECT_EQ(rig.balance().credits_micros, 30 * dollar);
+    EXPECT_EQ(rig.sent.size(), 2U);
+
+    // The account sees both, as credits from Orama with their reasons and expiry.
+    const auto read = rig.owner("account_balance", {{"customer_id", rig.customer}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    ASSERT_EQ(read.value["credits"].size(), 2U);
+    const json& first = read.value["credits"][1];
+    EXPECT_EQ(first["label"], "Credit from Orama");
+    EXPECT_EQ(first["reason"], "design partner");
+    EXPECT_EQ(first["expires_at"], expires);
+    EXPECT_EQ(first["unused_micros"], 25 * dollar);
+    EXPECT_EQ(read.value["grants_unused_micros"], 30 * dollar);
+    EXPECT_EQ(read.value["balance_micros"], 30 * dollar);
+
+    // Audited centrally, with who, how much and why.
+    const auto granted = audit_of(*rig.store, "billing.balance.credit_granted");
+    ASSERT_EQ(granted.size(), 3U) << "two grants and the retry";
+    EXPECT_EQ(granted[0].draft.details["amount_micros"], 25 * dollar);
+    EXPECT_EQ(granted[0].draft.details["reason"], "design partner");
+    EXPECT_EQ(granted[0].draft.details["granted_by"], "operator");
+    EXPECT_EQ(granted[0].draft.principal, "admin");
+    EXPECT_EQ(granted[0].draft.object, "customer/" + rig.customer + "/billing");
+    EXPECT_EQ(granted[1].draft.details["duplicate"], true);
+    EXPECT_EQ(granted[2].draft.details["by_email"], true);
+
+    // Without email configured the grant still goes through, and says why no email went.
+    rig.runtime->mailer = nullptr;
+    rig.runtime->email_unavailable_reason = "LAKE_RESEND_API_KEY is not set";
+    const auto quiet =
+        rig.call("grant_balance_credit",
+                 {{"customer_id", rig.customer}, {"amount_micros", dollar}, {"reason", "prize"}},
+                 op);
+    ASSERT_TRUE(quiet.ok) << quiet.error.message;
+    EXPECT_EQ(quiet.value["emailed"], false);
+    EXPECT_EQ(quiet.value["email_error"], "LAKE_RESEND_API_KEY is not set");
+}
+
+TEST(BalanceGrant, AGrantClearsTheMarksButNeverUnlocksTheOverdraft) {
+    BalanceRig rig;
+    // A gated call that changes nothing here (no model provider): the gate answers first.
+    // The caller's personal account is the one charged.
+    const json create{{"endpoint", "chat/completions"}, {"request", {{"model", "gpt-5.5"}}}};
+    // Blocked before anything.
+    auto refused = rig.owner("model_completion", create);
+    ASSERT_EQ(refused.error.code, "payment_required");
+
+    auto op = rig.operator_context();
+    ASSERT_TRUE(rig.call("grant_balance_credit",
+                         {{"customer_id", rig.customer},
+                          {"amount_micros", 25 * dollar},
+                          {"reason", "design partner"}},
+                         op)
+                    .ok);
+    // Blocked -> ok: paid work runs on the credit.
+    auto allowed = rig.owner("model_completion", create);
+    EXPECT_NE(allowed.error.code, "payment_required") << allowed.error.message;
+    auto view = lake::api::balance_view(rig.balance(), rig.runtime->settings);
+    EXPECT_EQ(view.state, "ok");
+    EXPECT_EQ(view.overdraft_micros, 0) << "no overdraft before the first paid top-up";
+
+    // Usage is charged from the grant's month on, though there was never a top-up.
+    rig.use(18'000); // $18: $7 left, under the $10 warning
+    auto report = rig.refresh();
+    EXPECT_EQ(report.refreshed, 1);
+    EXPECT_EQ(rig.balance().balance_micros(), 7 * dollar);
+    view = lake::api::balance_view(rig.balance(), rig.runtime->settings);
+    EXPECT_EQ(view.state, "low");
+    ASSERT_EQ(rig.sent.size(), 2U) << "the grant's email and the warning near the $0 limit";
+    EXPECT_EQ(rig.sent[1].email.subject, "Your Lake balance is close to its limit");
+
+    // At $0 it stops: no overdraft from a grant alone.
+    rig.use(7'000);
+    rig.refresh();
+    EXPECT_EQ(rig.balance().balance_micros(), 0);
+    refused = rig.owner("model_completion", create);
+    ASSERT_EQ(refused.error.code, "payment_required") << refused.error.message;
+    EXPECT_EQ(refused.error.details["reason"], "first_top_up");
+    EXPECT_EQ(refused.error.details["overdraft_micros"], 0);
+    EXPECT_EQ(refused.error.details["add_micros"], 20 * dollar);
+    EXPECT_NE(refused.error.message.find("credit from Orama is used up"), std::string::npos)
+        << refused.error.message;
+    ASSERT_EQ(rig.sent.size(), 3U);
+    EXPECT_EQ(rig.sent[2].email.subject, "Lake has stopped starting paid work on your account");
+    EXPECT_FALSE(rig.balance().blocked_notified_at.empty());
+
+    // Another grant clears the marks (the next crossing is told again) and unblocks.
+    ASSERT_TRUE(rig.call("grant_balance_credit",
+                         {{"customer_id", rig.customer},
+                          {"amount_micros", 5 * dollar},
+                          {"reason", "make-good"}},
+                         op)
+                    .ok);
+    EXPECT_TRUE(rig.balance().blocked_notified_at.empty());
+    EXPECT_TRUE(rig.balance().limit_warning_notified_at.empty());
+    EXPECT_NE(rig.owner("model_completion", create).error.code, "payment_required");
+
+    // The first paid top-up unlocks the overdraft as always.
+    rig.credit(20 * dollar, "cs_first");
+    view = lake::api::balance_view(rig.balance(), rig.runtime->settings);
+    EXPECT_EQ(view.overdraft_micros, 50 * dollar);
+    EXPECT_EQ(view.balance_micros, 25 * dollar);
+}
+
+TEST(BalanceGrant, ExpiryStopsOnlyTheUnusedPartAndLeavesPaidMoneyAlone) {
+    BalanceRig rig;
+    rig.credit(20 * dollar, "cs_first"); // paid $20
+    // $25 from Orama, expiring in a moment.
+    ASSERT_TRUE(rig.store->apply_balance_credit(
+        store_grant(rig.customer, 25 * dollar, "grant-expiring", utc_in(std::chrono::seconds{3}))));
+    EXPECT_EQ(rig.balance().balance_micros(), 45 * dollar);
+    rig.use(10'000); // $10, spent from the grant first
+    auto report = rig.refresh();
+    EXPECT_EQ(report.grants_expired, 0) << "not expired yet";
+    auto balance = rig.balance();
+    EXPECT_EQ(balance.balance_micros(), 35 * dollar);
+    EXPECT_EQ(balance.grants_unused_micros, 15 * dollar) << "grants pay before paid money";
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{3500});
+    report = rig.refresh();
+    EXPECT_EQ(report.grants_expired, 1);
+    balance = rig.balance();
+    // $15 unused stopped counting; the $10 it paid for stays paid; the $20 paid is untouched.
+    EXPECT_EQ(balance.credits_micros, 30 * dollar);
+    EXPECT_EQ(balance.balance_micros(), 20 * dollar);
+    EXPECT_EQ(balance.grants_unused_micros, 0);
+    const auto credits = rig.store->balance_credits(rig.customer, 0);
+    ASSERT_TRUE(credits);
+    const auto grant = std::ranges::find(*credits, "grant", &lake::control::BalanceCredit::kind);
+    ASSERT_NE(grant, credits->end());
+    EXPECT_EQ(grant->end_reason, "expired");
+    EXPECT_EQ(grant->forfeited_micros, 15 * dollar);
+    const auto expired = audit_of(*rig.store, "billing.balance.credit_expired");
+    ASSERT_EQ(expired.size(), 1U);
+    EXPECT_EQ(expired[0].draft.details["forfeited_micros"], 15 * dollar);
+    EXPECT_EQ(expired[0].draft.details["used_micros"], 10 * dollar);
+    // Later usage is paid money's; an ended grant ends once.
+    rig.use(5'000);
+    report = rig.refresh();
+    EXPECT_EQ(report.grants_expired, 0);
+    EXPECT_EQ(rig.balance().balance_micros(), 15 * dollar);
+    const auto read = rig.owner("account_balance", {{"customer_id", rig.customer}});
+    ASSERT_TRUE(read.ok);
+    const auto shown = std::ranges::find_if(read.value["credits"],
+                                            [](const json& c) { return c["kind"] == "grant"; });
+    ASSERT_NE(shown, read.value["credits"].end());
+    EXPECT_EQ((*shown)["end_reason"], "expired");
+    EXPECT_EQ((*shown)["counting_micros"], 10 * dollar);
+}
+
+TEST(BalanceGrant, AnExpiredGrantCountsUntilARefreshReadsTheUsageInFull) {
+    BalanceRig rig;
+    ASSERT_TRUE(rig.store->apply_balance_credit(
+        store_grant(rig.customer, 25 * dollar, "grant-held", utc_in(std::chrono::seconds{1}))));
+    const std::string lab = rig.workspaces.create(rig.customer, "lab");
+    rig.use(4'000);
+    std::this_thread::sleep_for(std::chrono::milliseconds{1500});
+    rig.workspaces.records(lab).metric_unavailable_next = 10;
+    auto report = rig.refresh();
+    EXPECT_EQ(report.held, 1);
+    EXPECT_EQ(report.grants_expired, 0) << "never forfeited against charges not read";
+    EXPECT_EQ(rig.balance().credits_micros, 25 * dollar);
+    rig.workspaces.records(lab).metric_unavailable_next = 0;
+    report = rig.refresh();
+    EXPECT_EQ(report.grants_expired, 1);
+    EXPECT_EQ(rig.balance().credits_micros, 4 * dollar);
+    EXPECT_EQ(rig.balance().balance_micros(), 0);
+}
+
+TEST(BalanceGrant, AGrantPaysOnlyForUsageAfterItWasGiven) {
+    BalanceRig rig;
+    rig.credit(50 * dollar, "cs_first");
+    rig.use(30'000); // $30 before the grant
+    rig.refresh();
+    ASSERT_TRUE(rig.store->apply_balance_credit(
+        store_grant(rig.customer, 25 * dollar, "grant-late", utc_in(std::chrono::seconds{1}))));
+    EXPECT_EQ(rig.balance().grants_unused_micros, 25 * dollar);
+    std::this_thread::sleep_for(std::chrono::milliseconds{1500});
+    const auto report = rig.refresh();
+    EXPECT_EQ(report.grants_expired, 1);
+    EXPECT_EQ(rig.balance().balance_micros(), 20 * dollar)
+        << "the unused $25 stopped counting; it never paid for the $30 before it";
+}
+
+TEST(BalanceGrant, RevokingRemovesOnlyTheUnusedRemainder) {
+    BalanceRig rig;
+    auto op = rig.operator_context();
+    const auto given = rig.call("grant_balance_credit",
+                                {{"customer_id", rig.customer},
+                                 {"amount_micros", 25 * dollar},
+                                 {"reason", "design partner"}},
+                                op);
+    ASSERT_TRUE(given.ok) << given.error.message;
+    const std::string credit_id = given.value["credit"]["id"];
+    rig.use(10'000); // $10, not yet refreshed: the revocation reads it first
+    const auto revoked = rig.call(
+        "revoke_balance_credit", {{"credit_id", credit_id}, {"reason", "ended early"}}, op);
+    ASSERT_TRUE(revoked.ok) << revoked.error.message;
+    EXPECT_EQ(revoked.value["revoked_micros"], 15 * dollar);
+    EXPECT_EQ(revoked.value["credit"]["end_reason"], "revoked");
+    EXPECT_EQ(revoked.value["credit"]["counting_micros"], 10 * dollar);
+    EXPECT_EQ(revoked.value["balance"]["balance_micros"], 0) << "what was spent stays spent";
+    EXPECT_EQ(revoked.value["balance"]["state"], "blocked");
+    const auto audited = audit_of(*rig.store, "billing.balance.credit_revoked");
+    ASSERT_EQ(audited.size(), 1U);
+    EXPECT_EQ(audited[0].draft.details["revoked_micros"], 15 * dollar);
+    EXPECT_EQ(audited[0].draft.details["used_micros"], 10 * dollar);
+    EXPECT_EQ(audited[0].draft.details["reason"], "ended early");
+
+    // Once.
+    EXPECT_EQ(rig.call("revoke_balance_credit", {{"credit_id", credit_id}}, op).error.code,
+              "conflict");
+    // A paid top-up is not revoked here; an unknown id is not found.
+    rig.credit(20 * dollar, "cs_first");
+    const auto credits = rig.store->balance_credits(rig.customer, 0);
+    ASSERT_TRUE(credits);
+    const auto paid = std::ranges::find(*credits, "top_up", &lake::control::BalanceCredit::kind);
+    ASSERT_NE(paid, credits->end());
+    EXPECT_EQ(rig.call("revoke_balance_credit", {{"credit_id", paid->id}}, op).error.code,
+              "invalid_input");
+    EXPECT_EQ(rig.call("revoke_balance_credit", {{"credit_id", lake::control::new_uuid_v4()}}, op)
+                  .error.code,
+              "not_found");
+
+    // A grant fully spent revokes nothing.
+    const auto spent = rig.call(
+        "grant_balance_credit",
+        {{"customer_id", rig.customer}, {"amount_micros", 5 * dollar}, {"reason", "prize"}},
+        op);
+    ASSERT_TRUE(spent.ok);
+    rig.use(6'000);
+    const auto nothing =
+        rig.call("revoke_balance_credit", {{"credit_id", spent.value["credit"]["id"]}}, op);
+    ASSERT_TRUE(nothing.ok) << nothing.error.message;
+    EXPECT_EQ(nothing.value["revoked_micros"], 0);
+}
+
+TEST(BalanceGrant, TheAllocationSpendsTheSoonestExpiringGrantFirst) {
+    using lake::control::BalanceCredit;
+    std::vector<BalanceCredit> grants(3);
+    grants[0] = store_grant("a", 10 * dollar, "never");                         // no expiry
+    grants[1] = store_grant("a", 10 * dollar, "later", "2027-06-01T00:00:00Z"); // expires later
+    grants[2] = store_grant("a", 10 * dollar, "sooner", "2027-01-01T00:00:00Z");
+    for (std::size_t i = 0; i < grants.size(); ++i) {
+        grants[i].id = "g" + std::to_string(i);
+        grants[i].created_at = "2026-10-0" + std::to_string(i + 1) + "T00:00:00Z";
+    }
+    auto used = lake::control::grant_allocation(grants, 15 * dollar);
+    EXPECT_EQ(used, (std::vector<std::int64_t>{0, 5 * dollar, 10 * dollar}));
+    EXPECT_EQ(lake::control::grants_unused(grants, 15 * dollar), 15 * dollar);
+    // Past every grant: the rest is paid money's.
+    used = lake::control::grant_allocation(grants, 40 * dollar);
+    EXPECT_EQ(used, (std::vector<std::int64_t>{10 * dollar, 10 * dollar, 10 * dollar}));
+
+    // The sooner one expires at $15 charged: its $0 unused stops; the later one at $18 keeps what
+    // it paid ($5 + $3) and forfeits $2.
+    auto ending = lake::control::grants_ending(grants, 15 * dollar, "2027-01-01T00:00:00Z", "");
+    ASSERT_EQ(ending.size(), 1U);
+    EXPECT_EQ(ending[0].id, "g2");
+    EXPECT_EQ(ending[0].forfeited_micros, 0);
+    grants[2] = ending[0];
+    ending = lake::control::grants_ending(grants, 18 * dollar, "2027-06-01T00:00:00Z", "");
+    ASSERT_EQ(ending.size(), 1U);
+    EXPECT_EQ(ending[0].id, "g1");
+    EXPECT_EQ(ending[0].forfeited_micros, 2 * dollar);
+    grants[1] = ending[0];
+    // What is left counts on the one without expiry; revoking it forfeits its unused part.
+    EXPECT_EQ(lake::control::grants_unused(grants, 18 * dollar), 10 * dollar);
+    EXPECT_EQ(lake::control::grants_unused(grants, 21 * dollar), 7 * dollar);
+    ending = lake::control::grants_ending(grants, 21 * dollar, "2027-07-01T00:00:00Z", "g0");
+    ASSERT_EQ(ending.size(), 1U);
+    EXPECT_EQ(ending[0].end_reason, "revoked");
+    EXPECT_EQ(ending[0].forfeited_micros, 7 * dollar);
+}
+
+TEST(BalanceGrant, AnAccountOnAGrantAloneIsInvoicedAsPaidFromItsBalance) {
+    BalanceRig rig;
+    ASSERT_TRUE(
+        rig.store->apply_balance_credit(store_grant(rig.customer, 25 * dollar, "grant-inv")));
+    const std::string last =
+        month_name(std::chrono::sys_days{(this_month() - std::chrono::months{1}) / 1});
+    auto op = rig.operator_context();
+    const auto issued =
+        rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", last}}, op);
+    ASSERT_TRUE(issued.ok) << issued.error.message;
+    EXPECT_EQ(issued.value["provider"], "balance");
+    EXPECT_EQ(issued.value["state"], "paid");
+}
+
 TEST(PaidWorkContract, EveryCapabilityThatStartsPaidWorkIsMarked) {
     lake::api::Registry registry;
     lake::api::register_core_capabilities(registry, "test");
@@ -1100,6 +1561,7 @@ TEST(PaidWorkContract, EveryCapabilityThatStartsPaidWorkIsMarked) {
         {"create_invitation", "an identity"},
         {"create_grant", "a permission"},
         {"create_token", "a credential"},
+        {"create_browser_key", "a credential"},
         {"create_encryption_key", "a key record"},
         {"create_federation_issuer", "a configuration"},
         {"create_pki_authority", "a credential"},
@@ -1127,6 +1589,7 @@ TEST(PaidWorkContract, EveryCapabilityThatStartsPaidWorkIsMarked) {
         {"create_projects_from_opportunities", "records"},
         {"create_pipeline", "a definition; running it is gated"},
         {"create_solution", "a definition"},
+        {"create_coupon", "a code for ads; redeeming it gives credit (lake#1156)"},
         {"create_methodology", "a definition; validating and running it are gated"},
         {"create_agent", "a definition; launching it is gated"},
         {"create_agent_from_proposal", "a definition"},

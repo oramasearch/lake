@@ -7,7 +7,10 @@
 
 #include "lake/api/balance.hpp"
 #include "lake/api/billing.hpp"
+#include "lake/api/brand.hpp"
 #include "lake/api/clerk.hpp"
+#include "lake/api/client_address.hpp"
+#include "lake/api/legal_links.hpp"
 #include "lake/api/oidc_jwks.hpp"
 #include "lake/api/orders.hpp"
 #include "lake/api/regions.hpp"
@@ -80,6 +83,15 @@ struct ServerOptions {
     // request is answered 429 (LAKE_HTTP_MAX_LONG_REQUESTS, LAKE_HTTP_MAX_LONG_REQUESTS_PER_CALLER).
     std::size_t max_long_requests = 512;
     std::size_t max_long_requests_per_caller = 64;
+    // The peers whose X-Real-IP and X-Forwarded-For per-client limits believe; any other peer is
+    // counted on its own address (LAKE_TRUSTED_PROXY_CIDRS, lake#1083). Default: loopback and the
+    // private ranges (default_trusted_proxy_cidrs).
+    TrustedProxies trusted_proxies = *parse_trusted_proxies("");
+    // A second listener for the reverse proxy (LAKE_PROXY_PORT, lake#1132), on listen_address:
+    // the same routes, workers and limits, but a request that arrives on it has its X-Real-IP or
+    // last X-Forwarded-For hop believed whatever its peer. Only the proxy may reach it (the
+    // operator's NetworkPolicy). Unset: no second listener; 0: an ephemeral port (tests).
+    std::optional<unsigned short> proxy_port;
     // A request header must arrive whole within this of its first byte, or of the accept for a
     // connection's first request; otherwise the connection is closed
     // (LAKE_HTTP_HEADER_TIMEOUT_SECONDS).
@@ -99,6 +111,15 @@ struct ServerOptions {
     // Public hostname used in OAuth callbacks, as the WebAuthn RP ID, and as
     // the HTTPS repository-command origin when external_origin is unset.
     std::string public_host;
+    // Other hosts that are this Lake too (LAKE_HOST_ALIASES, lake#1136): on a white-labelled Lake
+    // the Orama host it was created on, while public_host is the customer's. Browser pages opened
+    // on one are redirected to public_host; every other request is served as on public_host.
+    // Lowercased, without ports.
+    std::vector<std::string> host_aliases;
+    // The enterprise SSO provider that is the only way in for people (LAKE_SIGN_IN_SSO_PROVIDER,
+    // lake#1136): Lake's own password, passkey, social and email-recovery sign-in are refused in its
+    // own pool, and the sign-in page offers that provider alone. Empty: Lake's usual sign-in.
+    std::string sign_in_sso_provider;
     // Configured browser-facing HTTP(S) origin, including any non-default port.
     // It takes precedence over public_host. When both are empty, repository
     // terminal instructions are suppressed; request headers never supply it.
@@ -156,6 +177,10 @@ struct ServerOptions {
     // platform credentials. Without the key, orders are still recorded and their email waits.
     // `resend_http` replaces the outbound client (tests); `resend_api_base` is Resend's origin.
     ResendSettings resend;
+    // The instance brand (LAKE_BRAND_FILE, LAKE_BRAND_*, lake#1135, docs/serving/brand.md): Lake's
+    // own unless configured. The server installs it as the process's instance_brand() when it is
+    // constructed, so every surface it renders reads it.
+    Brand brand;
     ResendHttp resend_http;
     std::string resend_api_base = std::string(lake::api::resend_api_base);
     // How often the order pass (the orders' email and audit) runs; tests shorten it.
@@ -190,6 +215,10 @@ struct ServerOptions {
     // and sign-up are Clerk's and lake's own identity pages leave the navigation; empty or `xxx`
     // keeps lake's own sign-in, as an on-prem install uses. See docs/api/clerk.md.
     std::string clerk_publishable_key;
+    // The terms of service and privacy policy sign-up and sign-in link to (LAKE_TERMS_URL,
+    // LAKE_PRIVACY_URL, liquid-bridge#15); `viewer` reports them as `legal`. Empty: no link.
+    std::string terms_url = std::string(default_terms_url);
+    std::string privacy_url = std::string(default_privacy_url);
     // LAKE_CLERK_SECRET_KEY: checks current ban/lock state at every template exchange.
     // Missing key or an unavailable Backend API refuses exchange. Never returned or logged.
     std::string clerk_secret_key;
@@ -375,6 +404,8 @@ public:
     [[nodiscard]] bool running() const;
     // The actual bound port (differs from options when port was 0).
     [[nodiscard]] unsigned short port() const;
+    // The proxy listener's bound port; 0 when ServerOptions::proxy_port is unset.
+    [[nodiscard]] unsigned short proxy_port() const;
     [[nodiscard]] const std::string& reason() const;
     // Non-empty once the server cannot continue: the store root stayed held past
     // store_owner_wait, or could not be opened. The owning loop exits non-zero with it.

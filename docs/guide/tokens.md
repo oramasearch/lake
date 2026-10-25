@@ -12,7 +12,7 @@ lasts. It is shown once; Lake keeps only its hash.
 | **Scope** | What the key may call: a capability name (such as `search_index`), `*` for every capability, or `registry_pull` to pull images with `docker login`. |
 | **Read-only key** | A key whose scopes are every read capability; every write is refused. |
 | **Lifetime** | How long the key works. By default as long as the sign-in that made it, at most 30 days. |
-| **Standing key** | A key that never expires and survives sign-out. It needs a reason, named scopes and your account's opt-in. |
+| **Standing key** | A key that never expires. It needs a reason, named scopes and your account's opt-in. Every key survives sign-out (lake#1163); a standing key also outlives the browser session's expiry. |
 | **Static key** | A key not tied to a sign-in session. It needs a reason and can only be made from a credential that is already static. |
 
 A key can **never do more than you**: its scopes limit which capabilities it may call, and your own
@@ -74,13 +74,15 @@ permissions. See [The liquid CLI](/docs/cli).
 A published search index can be called from outside Lake with a key that can do nothing else. On
 **Ship → Search Indexes**, open the index and use **Create a search key**; it makes a key scoped to
 `search_index` only ([Models and Search Indexes](/docs/ship)). It works for any published index
-you can read until you revoke it, and lasts as long as the session that made it, at most 30 days.
+you can read until you revoke it, and expires no later than the session that made it would have,
+at most 30 days. Signing out does not end it.
 
 - REST: `POST /v1/create_token` with `{"name": "Website search", "scopes": ["search_index"]}`.
 
 ## Standing Keys That Never Expire
 
-A standing key keeps working after you sign out, for a service that runs unattended. It needs:
+Every key keeps working after you sign out (lake#1163). A standing key also never expires, for a
+service that runs unattended. It needs:
 
 - a non-empty reason;
 - named scopes (never `*`; an *every tool* standing key made on the Developer pages names every

@@ -1324,6 +1324,158 @@ TEST_P(HttpResponseIsolation, ATokenIsIssuedAndRevokedWithTheBrowserSession) {
     EXPECT_FALSE(after.starts_with("HTTP/1.1 200")) << "a revoked token no longer authenticates";
 }
 
+// lake#1163 (Steve: "don't revoke api keys on signout"): a key made in a browser keeps working
+// after that browser signs out through /logout, and a key derived from it too. Revoking the key
+// itself still ends its descendant.
+TEST_P(HttpResponseIsolation, AKeyMadeInABrowserOutlivesThatBrowsersSignOut) {
+    auto connection = connect();
+    const std::string cookie = sign_in(*connection);
+    const auto [created_response, created] =
+        post_v1(*connection, cookie, "create_token", {{"name", "agent key"}, {"scopes", {"*"}}});
+    ASSERT_TRUE(created.value("ok", false)) << created_response.substr(0, 300);
+    const std::string key = created["value"]["secret"];
+    const std::string key_id = created["value"]["session"]["id"];
+    const auto [derived_response, derived] = post_v1(
+        *connection,
+        "lake_session=" + key,
+        "create_token",
+        {{"name", "derived"}, {"scopes", {"list_sessions"}}, {"expires_in_seconds", 300}});
+    ASSERT_TRUE(derived.value("ok", false)) << derived_response.substr(0, 300);
+    const std::string child = derived["value"]["secret"];
+
+    const std::string signed_out = connection->request("POST", "/logout", {}, cookie);
+    ASSERT_TRUE(signed_out.starts_with("HTTP/1.1 302"));
+    EXPECT_TRUE(connection->request("GET", "/v1/list_sessions", {}, cookie)
+                    .starts_with("HTTP/1.1 401"))
+        << "the browser is signed out";
+    EXPECT_TRUE(connection->request("GET", "/v1/list_sessions", {}, "lake_session=" + key)
+                    .starts_with("HTTP/1.1 200"))
+        << "the key made in that browser keeps working";
+    EXPECT_TRUE(connection->request("GET", "/v1/list_sessions", {}, "lake_session=" + child)
+                    .starts_with("HTTP/1.1 200"));
+
+    const auto [revoked_response, revoked] =
+        post_v1(*connection, "lake_session=" + key, "revoke_session", {{"id", key_id}});
+    ASSERT_TRUE(revoked.value("ok", false)) << revoked_response.substr(0, 300);
+    EXPECT_FALSE(connection->request("GET", "/v1/list_sessions", {}, "lake_session=" + child)
+                     .starts_with("HTTP/1.1 200"))
+        << "revoking the key ends its descendant";
+}
+
+// lake#1152 (docs/api/browser-keys.md): a browser key made in the console searches its one index
+// from its website's origin, answers CORS to that origin alone, keeps working after its maker
+// signs out, and stops at once when revoked.
+TEST_P(HttpResponseIsolation, ABrowserKeyAnswersOnlyItsWebsiteAndOutlivesSignOut) {
+    auto connection = connect();
+    std::string cookie = sign_in(*connection);
+    const nlohmann::json customers = get_v1(*connection, cookie, "list_customers");
+    const std::string customer_id = customers["value"]["items"][0]["id"];
+    select_workspace(*connection, customer_id);
+    const std::string workspace_id = connection->workspace_id;
+    workspace_caller_->answers["get_index"] = {{"index_id", "index-site"}, {"exposed", true}};
+    workspace_caller_->answers["search"] = {
+        {"hits",
+         nlohmann::json::array({{{"id", "1"}, {"score", 2.5}, {"fields", {{"title", "Alien"}}}}})}};
+    const std::string site = "https://shop.example.test";
+    const auto [created_response, created] =
+        post_v1(*connection,
+                cookie,
+                "create_browser_key",
+                {{"customer_id", customer_id},
+                 {"workspace_id", workspace_id},
+                 {"index_id", "index-site"},
+                 {"origins", nlohmann::json::array({site + "/"})}});
+    ASSERT_TRUE(created.value("ok", false)) << created_response.substr(0, 400);
+    const std::string key = created["value"]["secret"];
+    ASSERT_TRUE(key.starts_with("lbk.")) << key;
+    EXPECT_EQ(created["value"]["key"]["origins"], nlohmann::json::array({site}));
+    const std::string key_id = created["value"]["key"]["id"];
+
+    const std::string query = "/v1/search_index?customer_id=" + customer_id +
+                              "&workspace_id=" + workspace_id + "&index_id=index-site&query=alien";
+    const auto search_from = [&](const std::string& origin) {
+        std::vector<std::pair<std::string, std::string>> headers;
+        if (!origin.empty()) {
+            headers.emplace_back("Origin", origin);
+        }
+        return connection->request(
+            "GET", query, "", "", "HTTP/1.1", key, "application/json", headers);
+    };
+    const std::string found = search_from(site);
+    ASSERT_TRUE(found.starts_with("HTTP/1.1 200")) << found.substr(0, 400);
+    EXPECT_EQ(response_header(found, "access-control-allow-origin"), site);
+    EXPECT_NE(response_header(found, "vary").find("Origin"), std::string::npos);
+    EXPECT_EQ(nlohmann::json::parse(response_body(found))["value"]["hits"][0]["fields"]["title"],
+              "Alien");
+
+    // Another website: refused, and its page could not read the answer anyway.
+    const std::string elsewhere = search_from("https://evil.example.test");
+    EXPECT_TRUE(elsewhere.starts_with("HTTP/1.1 403")) << elsewhere.substr(0, 400);
+    EXPECT_TRUE(response_header(elsewhere, "access-control-allow-origin").empty()) << elsewhere;
+    EXPECT_TRUE(search_from("").starts_with("HTTP/1.1 403")) << "no Origin, no answer";
+    // Another index of the same workspace, and another capability.
+    const std::string other_index = connection->request(
+        "GET",
+        "/v1/search_index?customer_id=" + customer_id + "&workspace_id=" + workspace_id +
+            "&index_id=index-other&query=alien",
+        "",
+        "",
+        "HTTP/1.1",
+        key,
+        "application/json",
+        {{"Origin", site}});
+    EXPECT_TRUE(other_index.starts_with("HTTP/1.1 403")) << other_index.substr(0, 400);
+    const std::string listing = connection->request("GET",
+                                                    "/v1/list_customers",
+                                                    "",
+                                                    "",
+                                                    "HTTP/1.1",
+                                                    key,
+                                                    "application/json",
+                                                    {{"Origin", site}});
+    EXPECT_TRUE(listing.starts_with("HTTP/1.1 403")) << listing.substr(0, 400);
+    const std::string metrics = connection->request(
+        "GET", "/metrics", "", "", "HTTP/1.1", key, "application/json", {{"Origin", site}});
+    EXPECT_TRUE(metrics.starts_with("HTTP/1.1 403")) << metrics.substr(0, 200);
+
+    // A preflight carries no credential: it is answered as every other preflight is.
+    const std::string preflight =
+        connection->request("OPTIONS",
+                            "/v1/search_index",
+                            "",
+                            "",
+                            "HTTP/1.1",
+                            {},
+                            "application/json",
+                            {{"Origin", site},
+                             {"Access-Control-Request-Method", "GET"},
+                             {"Access-Control-Request-Headers", "authorization"}});
+    EXPECT_TRUE(preflight.starts_with("HTTP/1.1 204")) << preflight.substr(0, 300);
+
+    // Signing out ends the session, not the website's key.
+    const std::string signed_out = connection->request("POST", "/logout", {}, cookie);
+    ASSERT_TRUE(signed_out.starts_with("HTTP/1.1 302")) << signed_out.substr(0, 300);
+    EXPECT_TRUE(
+        connection->request("GET", "/v1/list_sessions", {}, cookie).starts_with("HTTP/1.1 401"));
+    const std::string after_sign_out = search_from(site);
+    EXPECT_TRUE(after_sign_out.starts_with("HTTP/1.1 200")) << after_sign_out.substr(0, 400);
+
+    // Revoked from a new sign-in: refused at once, as an unknown credential.
+    cookie = sign_in(*connection);
+    const auto [listed_response, listed] = post_v1(
+        *connection, cookie, "revoke_browser_key", {{"customer_id", customer_id}, {"id", key_id}});
+    ASSERT_TRUE(listed.value("ok", false)) << listed_response.substr(0, 400);
+    EXPECT_EQ(listed["value"]["key"]["state"], "revoked");
+    const std::string revoked = search_from(site);
+    EXPECT_TRUE(revoked.starts_with("HTTP/1.1 401")) << revoked.substr(0, 400);
+    const nlohmann::json keys =
+        get_v1(*connection, cookie, "list_browser_keys?customer_id=" + customer_id);
+    ASSERT_EQ(keys["value"]["keys"].size(), 1U) << keys.dump();
+    EXPECT_EQ(keys["value"]["keys"][0]["state"], "revoked");
+    EXPECT_EQ(keys["value"]["keys"][0].dump().find(key.substr(41)), std::string::npos)
+        << "a listed key never carries its secret";
+}
+
 // lake#18: every call to a capability route is audited, a body lake cannot read included. A
 // malformed body and a well-formed one each leave exactly one signed failure event under their
 // request id, with the error and the body's size but never its contents.
@@ -3755,6 +3907,123 @@ TEST(HttpServer, AuthenticationClientBudgetFollowsTheIngressAddressAcrossRestAnd
     EXPECT_NE(probe.request("GET", "/healthz").find("200 OK"), std::string::npos);
 }
 
+// lake#1083: X-Real-IP is believed only from a trusted proxy. A caller inside the cluster that
+// reaches the Service directly is counted on its own address however it rotates the header.
+TEST(HttpServer, AuthenticationClientBudgetIgnoresForwardedHeadersFromAnUntrustedPeer) {
+    for (const bool trusted : {false, true}) {
+        lake::api::ServerOptions options;
+        options.port = 0;
+        options.store = std::make_shared<lake::control::InMemoryStore>();
+        // The test's loopback peer: trusted as a proxy, or a caller that skipped the ingress.
+        options.trusted_proxies = *lake::api::parse_trusted_proxies(trusted ? "127.0.0.1/32" : "10.244.0.0/16");
+        lake::api::ApiServer server(options);
+        ASSERT_TRUE(server.start()) << server.reason();
+        int attempt = 0;
+        auto authenticate = [&](std::vector<std::pair<std::string, std::string>> headers) {
+            HttpConnection connection(server.port());
+            const nlohmann::json arguments{{"email", std::to_string(attempt++) + "@example.test"},
+                                           {"code", "wrong"}};
+            const auto response = connection.request("POST",
+                                                     "/v1/recover_with_code",
+                                                     arguments.dump(),
+                                                     "",
+                                                     "HTTP/1.1",
+                                                     "",
+                                                     "application/json",
+                                                     std::move(headers));
+            EXPECT_FALSE(response.empty());
+            return response.find("rate_limited") != std::string::npos;
+        };
+        // A fresh X-Real-IP and X-Forwarded-For on every attempt.
+        for (int i = 0; i < 100; ++i) {
+            const std::string address = "192.0.2." + std::to_string(i + 1);
+            EXPECT_FALSE(authenticate({{"X-Real-IP", address}, {"X-Forwarded-For", address}}))
+                << trusted << " " << i;
+        }
+        // Untrusted: all 100 were one client (the peer), now out of budget. Trusted: each address
+        // was its own client, and a new one still has its budget.
+        EXPECT_EQ(authenticate({{"X-Real-IP", "198.51.100.1"}}), !trusted);
+        EXPECT_EQ(authenticate({{"X-Forwarded-For", "198.51.100.2"}}), !trusted);
+    }
+}
+
+// lake#1132: X-Real-IP is believed on the proxy listener (LAKE_PROXY_PORT) whatever the peer,
+// and on the main listener only from LAKE_TRUSTED_PROXY_CIDRS (here `none`). Both serve the same
+// routes. An in-cluster caller that reaches the main port rotates the header in vain.
+TEST(HttpServer, ForwardedHeadersAreBelievedOnlyOnTheProxyListener) {
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.proxy_port = 0;
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    options.trusted_proxies = *lake::api::parse_trusted_proxies("none");
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    ASSERT_NE(server.proxy_port(), 0);
+    ASSERT_NE(server.proxy_port(), server.port());
+    int attempt = 0;
+    auto authenticate = [&](unsigned short port,
+                            std::vector<std::pair<std::string, std::string>> headers) {
+        HttpConnection connection(port);
+        const nlohmann::json arguments{{"email", std::to_string(attempt++) + "@example.test"},
+                                       {"code", "wrong"}};
+        const auto response = connection.request("POST",
+                                                 "/v1/recover_with_code",
+                                                 arguments.dump(),
+                                                 "",
+                                                 "HTTP/1.1",
+                                                 "",
+                                                 "application/json",
+                                                 std::move(headers));
+        EXPECT_FALSE(response.empty());
+        return response.find("rate_limited") != std::string::npos;
+    };
+    // The same routes on both listeners.
+    HttpConnection main_probe(server.port());
+    EXPECT_NE(main_probe.request("GET", "/healthz").find("200 OK"), std::string::npos);
+    HttpConnection proxy_probe(server.proxy_port());
+    EXPECT_NE(proxy_probe.request("GET", "/healthz").find("200 OK"), std::string::npos);
+    // Through the proxy port, each address is its own client.
+    for (int i = 0; i < 100; ++i) {
+        const std::string address = "192.0.2." + std::to_string(i + 1);
+        EXPECT_FALSE(authenticate(server.proxy_port(), {{"X-Real-IP", address}})) << i;
+    }
+    EXPECT_FALSE(authenticate(server.proxy_port(), {{"X-Forwarded-For", "198.51.100.2"}}));
+    // On the main port the headers are ignored: 100 rotated attempts are one client, the peer.
+    for (int i = 0; i < 100; ++i) {
+        const std::string address = "203.0.113." + std::to_string(i + 1);
+        EXPECT_FALSE(
+            authenticate(server.port(), {{"X-Real-IP", address}, {"X-Forwarded-For", address}}))
+            << i;
+    }
+    EXPECT_TRUE(authenticate(server.port(), {{"X-Real-IP", "198.51.100.1"}}));
+    // The proxy port still counts the address the proxy reported, not the shared peer.
+    EXPECT_FALSE(authenticate(server.proxy_port(), {{"X-Real-IP", "198.51.100.3"}}));
+    server.stop();
+}
+
+// lake#1132: unset, there is no second listener; the proxy port may not be the listen port.
+TEST(HttpServer, ProxyListenerIsOptionalAndNeedsItsOwnPort) {
+    {
+        lake::api::ServerOptions options;
+        options.port = 0;
+        lake::api::ApiServer server(options);
+        ASSERT_TRUE(server.start()) << server.reason();
+        EXPECT_EQ(server.proxy_port(), 0);
+        server.stop();
+    }
+    lake::api::ServerOptions first;
+    first.port = 0;
+    lake::api::ApiServer holder(first);
+    ASSERT_TRUE(holder.start()) << holder.reason();
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.proxy_port = holder.port(); // taken
+    lake::api::ApiServer server(options);
+    EXPECT_FALSE(server.start());
+    EXPECT_NE(server.reason().find("LAKE_PROXY_PORT"), std::string::npos) << server.reason();
+    holder.stop();
+}
+
 TEST(HttpServer, RecoveryWorkCannotBlockHealthOrTheSharedStoreConnection) {
     const auto uri = lake::test::postgres_uri();
     if (!uri)
@@ -4234,6 +4503,29 @@ TEST(HttpServer, WorkspaceMcpSessionsLearnThatExportedToolsChanged) {
     EXPECT_FALSE(told(post(call, fresh)));
 }
 
+// A server reports Orama's published terms and privacy policy by default, and the configured ones
+// when they are set (LAKE_TERMS_URL, LAKE_PRIVACY_URL; liquid-bridge#15).
+TEST(HttpServer, ViewerCarriesTheTermsAndPrivacyLinks) {
+    for (const bool configured : {false, true}) {
+        lake::api::ServerOptions options;
+        options.port = 0;
+        options.worker_coroutines = 1;
+        options.store = std::make_shared<lake::control::InMemoryStore>();
+        if (configured) {
+            options.terms_url = "https://acme.example/terms";
+            options.privacy_url = "";
+        }
+        lake::api::ApiServer server(options);
+        ASSERT_TRUE(server.start()) << server.reason();
+        HttpConnection connection(server.port());
+        const auto viewer =
+            nlohmann::json::parse(response_body(connection.request("GET", "/v1/viewer")))["value"];
+        EXPECT_EQ(viewer["legal"]["terms_url"],
+                  configured ? "https://acme.example/terms" : "https://www.orama.com/legal/terms");
+        EXPECT_EQ(viewer["legal"]["privacy_url"], configured ? "" : "https://www.orama.com/legal/privacy");
+    }
+}
+
 // With Clerk, the web app mounts Clerk's sign-in (docs/api/clerk.md); lake keeps the exchange and
 // sends sign-out through Clerk's page so its session ends too.
 TEST(HttpServer, ClerkExchangeRefusesAForgedTokenAndSignOutEndsClerkToo) {
@@ -4256,6 +4548,29 @@ TEST(HttpServer, ClerkExchangeRefusesAForgedTokenAndSignOutEndsClerkToo) {
     EXPECT_EQ(viewer["clerk"]["enabled"], true);
     EXPECT_EQ(viewer["clerk"]["publishable_key"], "pk_test_MTI3LjAuMC4xJA");
     EXPECT_EQ(viewer["password_sign_up"], false);
+    // lake#1098: and the API agrees. Password sign-up in the Lake pool is refused, with no
+    // session cookie, so an address Clerk would refuse gets no account.
+    const std::string sign_up =
+        connection.request("POST",
+                           "/v1/sign_up_password",
+                           R"({"email":"outsider@example.com","password":"correct horse battery"})",
+                           {},
+                           "HTTP/1.1",
+                           {},
+                           "application/json");
+    ASSERT_TRUE(sign_up.starts_with("HTTP/1.1 403")) << sign_up.substr(0, 400);
+    EXPECT_EQ(nlohmann::json::parse(response_body(sign_up))["error"]["code"], "forbidden");
+    EXPECT_TRUE(response_header(sign_up, "set-cookie").empty());
+    const std::string sign_in =
+        connection.request("POST",
+                           "/v1/sign_in_password",
+                           R"({"email":"outsider@example.com","password":"correct horse battery"})",
+                           {},
+                           "HTTP/1.1",
+                           {},
+                           "application/json");
+    ASSERT_TRUE(sign_in.starts_with("HTTP/1.1 403")) << sign_in.substr(0, 400);
+    EXPECT_TRUE(response_header(sign_in, "set-cookie").empty());
     // Clerk's sign-in shows its images from Clerk's image host, and from nowhere else (lake#943).
     const std::string page = connection.request(
         "GET", "/sign-in", {}, {}, "HTTP/1.1", {}, "text/plain", {{"Accept", "text/html"}});

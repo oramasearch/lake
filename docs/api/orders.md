@@ -24,6 +24,18 @@ The apex host (`LAKE_APEX_HOST`, `lake.live`) shows every way to get Lake, with 
 Every offer says backups are included. Usage beyond the credit is billed at the published price
 list; how a bill applies the credit is in [billing.md](billing.md#order-sheet-subscriptions).
 
+**Your own domain, white-labelled.** Private Warehouse and every offer above it (Dedicated
+Cluster, On-Prem) list *"Your own domain, white-labelled (available on request)"* as a feature;
+the shared option does not (lake#1129, Steve, 2026-10-24). A customer on one of those offers can
+have their Lake serve their own brand at their own address (for example `data.example.com`)
+instead of `lake.live`. It is a line of plan data in each offer's `features`, not page copy, and it
+says *on request* because it is arranged with support, not self-serve: Lake has custom domains for
+**applications** today (`create_domain`), not yet for a whole warehouse. What a white-labelled
+warehouse still needs (the customer's domain and TLS on a zone they own, branding with no Orama or
+Lake marks, sign-in on their domain, the agent surfaces on their domain) is filed and linked from
+https://github.com/oramasearch/lake/issues/1129. Drop *"(available on request)"* only when that is
+delivered.
+
 **Two paths, one table.** Every order is a row of `cloud_orders` in lake's control-plane
 PostgreSQL (orders are multitenancy and billing, decision 56; nothing from a workspace is in it):
 
@@ -87,9 +99,11 @@ The apex is anonymous, so the form cannot flood support:
   process. Checkout orders and order forms have separate in-all caps (lake#838), so order forms,
   which anyone can send, can never use up the cap a paying customer is counted against. Past a
   limit: `429`, nothing recorded.
-- **The address** is `X-Real-IP`, which the ingress (ingress-nginx) always sets itself, overwriting
-  any a sender wrote; else the last `X-Forwarded-For` hop (the one the nearest proxy appended); else
-  one bucket for every direct client. Lake never reads `CF-Connecting-IP` or the first
+- **The address** ([client addresses](../deployment/client-addresses.md), lake#1083), from a
+  trusted proxy (`LAKE_TRUSTED_PROXY_CIDRS`), is `X-Real-IP`, which the ingress (ingress-nginx)
+  always sets itself, overwriting any a sender wrote; else the last `X-Forwarded-For` hop (the one
+  the nearest proxy appended); else the proxy's own address. From any other peer it is the peer's
+  address, whatever headers it sent. Lake never reads `CF-Connecting-IP` or the first
   `X-Forwarded-For` hop: a sender that reaches the ingress without passing Cloudflare could write
   either and land in a fresh bucket with each request (lake#838). Which client address to trust is
   the ingress's decision: until it trusts Cloudflare's header from Cloudflare's ranges (https://github.com/oramasearch/orama-operator/issues/719),
@@ -232,6 +246,11 @@ hours with the first send, so a retry never sends twice) and a JSON body
 `{from, to, subject, text, reply_to}`. The key is Orama's platform secret, an environment variable
 of the hosting platform (`spec.env` with a `secretKeyRef`), never a workspace secret, never logged;
 a 401/403 is reported without any of it.
+
+On a white-labelled Lake every email, the balance's included, is written in the instance brand's
+words, sent from `LAKE_BRAND_EMAIL_FROM` with the brand's support address as Reply-To
+([`../serving/brand.md`](../serving/brand.md#where-it-is-read), lake#1135). Lake's own brand sends
+exactly the email below.
 
 | State | Support (`LAKE_SUPPORT_EMAIL`) | Customer (the contact email) |
 |---|---|---|

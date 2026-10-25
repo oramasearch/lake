@@ -52,13 +52,14 @@ Both stores enforce these limits before creating a token, delivery or notice:
 - Start nothing for a disabled, deleted or suspended account (lake#948, Clerk suspension): the
   request spends its budgets and gets the same accepted body, but no token, mail or notice.
 
-The HTTP adapter supplies the existing ingress-derived address (`order_client_address`) to
-REST and MCP; capability inputs cannot supply it. Deployments must keep ingress-nginx's
-sanitizing of `X-Real-IP`/the final forwarded hop and prevent direct access around that ingress,
-as for the order form. Lake does not check that the header came from the ingress: it takes
-`X-Real-IP` from whatever peer sent it. A caller that reaches lake's pods without passing the
-ingress (inside the cluster, for example) can name a new address with each request and so is held
-only by the global and per-account budgets. No address means a shared direct-client bucket. PostgreSQL retains only
+The HTTP adapter supplies the client address (`order_client_address`) to REST and MCP;
+capability inputs cannot supply it. Lake believes `X-Real-IP` and the final forwarded hop only
+from a peer inside `LAKE_TRUSTED_PROXY_CIDRS`, and counts any other peer on its own address
+([client addresses](../deployment/client-addresses.md), lake#1083). Deployments must keep
+ingress-nginx's sanitizing of those headers. The default trusts loopback and the private ranges,
+which inside a cluster includes every pod: a pod the Lake's NetworkPolicy admits (a workspace
+workload, a build or methodology pod) can still name a new address with each request and so is
+held only by the global and per-account budgets. PostgreSQL retains only
 the SHA-256 address digest and expires idle client buckets after an hour; the global cap bounds
 new rows even when a caller varies addresses, because no client row is created while it is spent. Budgets persist across store instances and replicas.
 

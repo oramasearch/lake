@@ -83,7 +83,7 @@ path behaves as below. `LAKE_ORDER_SHEET` with `{"enabled":false}` gives the pla
 A request whose `Host` (port ignored, any case) equals `LAKE_APEX_HOST` is answered by the picker
 before any other route, so no path on the apex reaches the web app or the API. The only exceptions
 are the `GET`s of the stylesheet and fonts the page links (`/style-<hash>.css`, `/style.css`,
-`/fonts/…`) and the probes (`/healthz`, `/readyz`).
+`/fonts/…`), the probes (`/healthz`, `/readyz`), and the agent documents below.
 
 - **`GET` (any method but `POST`)**: the page (`text/html`, `no-store`), server-rendered by
   `web_ui_order_sheet` (`web_ui_region_picker` when the sheet is off; `src/api/web_ui.cpp`), one
@@ -101,6 +101,56 @@ are the `GET`s of the stylesheet and fonts the page links (`/style-<hash>.css`, 
   behind TLS). The cookie is set on the apex only and holds the region name, never a session.
   A name that is not a region of this deployment answers `400` with the page again and sets nothing.
 
+## The apex's agent documents (lake#1110)
+
+An agent told "use lake.live" reads `https://lake.live/llms.txt` first. The apex is not a Lake, so
+it cannot answer a region's text, and the picker's HTML is no use to an agent. A `GET` of one of
+the paths a region serves its agent documents at answers, on the apex, the same document written
+for every region:
+
+| Path on the apex | Answer | Built by |
+|---|---|---|
+| `/llms.txt` | `text/plain; charset=utf-8`, `public, max-age=300` | `agent_docs::apex_llms_txt` |
+| `/llms-full.txt` | `text/plain; charset=utf-8`, `public, max-age=300` | `agent_docs::apex_llms_full_txt` |
+| `/skills/lake/SKILL.md`, `/developer/mcp/skill` | `text/markdown; charset=utf-8`, `public, max-age=300`, `Content-Disposition: attachment; filename=SKILL.md` | `agent_docs::apex_skill_md` |
+
+Each opens with **Choose a region first**: the apex is not a Lake; every region is a separate Lake
+with its own accounts, sign-up, API tokens and MCP server; a workspace stays in the region it was
+created in and a token from one region does not work in another; use the region where the account
+is, and for a new account ask the person which region. Then one section per region of
+`LAKE_REGIONS`, in its order, with its MCP server (`https://<host>/mcp`), `llms.txt`,
+`llms-full.txt`, skill, sign-in page, token page (`/developer/mcp`), OpenAPI and a `claude mcp add`
+command named `lake-<first label of the host>`. After that, the same tool list (llms.txt), tool
+reference with input schemas (llms-full.txt) or task map (the skill), worked flows and rules a
+region serves, from the same registry. The region list is `LAKE_REGIONS`, the same source the
+picker uses: no host is written in the code, and a new region appears with no change to Lake.
+
+Every other path, and a `POST` to these paths (the picker's form), is the picker as above. A
+region's own host serves its own documents, which name only that region. With no regions (nonprod)
+there is no apex and nothing changes.
+
+The apex serves no `/mcp`, no `/.well-known/` discovery and no `/skills/` index; no region serves
+those either today.
+
+```
+$ curl -s https://lake.live/llms.txt | head -40
+# Lake
+
+> Lake is Orama's platform for designing, training and shipping AI on your own data. It runs as one Lake per region; https://lake.live only lists them. …
+
+## Choose a region first
+
+https://lake.live is not a Lake: it lists Lake's regions, Europe (eu.lake.live) and United States (us.lake.live). …
+
+## Regions
+
+### Europe (`swedencentral`): https://eu.lake.live
+
+- MCP server: `https://eu.lake.live/mcp`
+- Agent guide: https://eu.lake.live/llms.txt
+…
+```
+
 The country centroids are a static table in `src/api/regions.cpp`, taken from Google's Dataset
 Publishing Language canonical countries table
 (https://developers.google.com/public-data/docs/canonical/countries_csv), kept to current ISO
@@ -112,8 +162,10 @@ library is involved.
 - `ctest --test-dir build -R Regions` runs `tests/test_regions.cpp`: the variables and every startup
   error, the centroid table, the great-circle distance, the closest region per country, the cookie
   preference, the continue URL keeping the path and query, `server_info` with and without regions,
-  the picker over HTTP (every path, the cookie, the `POST`, the refused region, the stylesheet), and
-  no picker when the variables are unset.
+  the picker over HTTP (every path, the cookie, the `POST`, the refused region, the stylesheet),
+  no picker when the variables are unset, and the apex's agent documents
+  (`RegionsApexAgentDocuments.*`: every region of the list with every link, the content types,
+  the picker still on every other path, a region's own text, nonprod unchanged).
 - By hand, with a local Lake:
 
   ```
@@ -122,6 +174,7 @@ library is involved.
   ./build/lake --memory-store --listen 127.0.0.1:4900
   curl -s -H 'Host: lake.live' -H 'CF-IPCountry: US' 'http://127.0.0.1:4900/w/x?y=1' | grep checked
   curl -si -X POST -H 'Host: lake.live' -d region=eastus 'http://127.0.0.1:4900/w/x?y=1' | grep -i -E 'location|set-cookie'
+  curl -s -H 'Host: lake.live' http://127.0.0.1:4900/llms.txt | head -30
   ```
 
 ## How to change it
@@ -129,6 +182,9 @@ library is involved.
 - A new region is a new `LakeSet` member with a region in the operator; Lake reads it from the
   variables and needs no change.
 - The order sheet around the picker is [orders.md](orders.md#how-to-change-it).
+- The apex's agent documents are `apex_llms_txt`, `apex_llms_full_txt` and `apex_skill_md` in
+  `src/api/agent_docs.cpp`; the paths they answer are `apex_agent_document` in
+  `src/api/http_server.cpp`.
 - The page's words and layout are `web_ui_region_picker`; its styles are `fieldset.region-choices`
   and `label.region-choice` in `src/api/web_ui_styles.inc`.
 - The web app's region display is [`../ui/regions.md`](../ui/regions.md).
