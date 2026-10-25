@@ -566,6 +566,54 @@ struct BalanceCharge {
     std::int64_t amount_micros = 0;
     std::string price_list_id, invoice_id, refreshed_at;
 };
+// A coupon code for ads (migration 0101, lake#1156, docs/api/billing.md#coupon-codes): redeeming
+// it gives the account a grant from Orama of `amount_micros` that stops counting `credit_days`
+// after the redemption. `code` is normalized (coupon_code_normalized). Timestamps are RFC 3339 UTC,
+// empty when unset.
+struct Coupon {
+    std::string id, code;
+    std::int64_t amount_micros = 0;
+    int credit_days = 90;
+    std::string expires_at;             // when the code stops working; empty: never
+    std::optional<int> max_redemptions; // the most redemptions in total; nullopt: no cap
+    bool new_accounts_only = true;      // refuse accounts older than the code or already used
+    std::string campaign;               // attribution label, lowercase; empty: none
+    int redemptions = 0;                // redemptions claimed so far (the cap counts these)
+    std::string created_by, created_at;
+    std::string disabled_at, disabled_by; // empty: the code works
+};
+// What one redemption claimed: the account, a SHA-256 digest of the person's normalized verified
+// email (coupon_email_digest), who redeemed it and the grant it became (empty until it is given).
+struct CouponRedemption {
+    std::string id, coupon_id, customer_id, email_sha256, redeemed_by, credit_id, created_at;
+};
+// A coupon with its ads report, counts only (no workspace data): redemptions that became a grant,
+// the redeeming accounts whose first paid top-up came after their redemption, what those accounts
+// were charged for usage after their grant was given, and what they paid in top-ups after
+// redeeming.
+struct CouponReport {
+    Coupon coupon;
+    int redeemed = 0;
+    int topped_up = 0;
+    std::int64_t spend_micros = 0;
+    std::int64_t paid_micros = 0;
+};
+// A claimed redemption: `resumed` when the account had already claimed this coupon and its grant
+// was not given yet (a redemption interrupted before its grant), so the caller gives it now.
+struct CouponClaim {
+    bool resumed = false;
+    CouponRedemption redemption;
+    Coupon coupon;
+};
+// The normalized form of a code a person typed: letters upper-cased, blanks and hyphens dropped;
+// nullopt when what is left is not 4 to 32 letters and digits.
+std::optional<std::string> coupon_code_normalized(std::string_view typed);
+// The SHA-256 (hex) of an email address normalized so one inbox is one address: lower-cased,
+// a `+tag` dropped from the local part, and the dots of a Gmail local part dropped
+// (gmail.com and googlemail.com are one domain). Empty for an empty address.
+std::string coupon_email_digest(std::string_view email);
+// What billing_coupons' checks refuse in a coupon, or nullopt when they keep it.
+std::optional<std::string> coupon_problem(const Coupon& coupon);
 // A field billing_contacts refuses, and what it must be.
 struct FieldProblem {
     std::string field, message;
@@ -2340,6 +2388,35 @@ public:
                                                                   const std::string& at,
                                                                   const std::string& revoke_id) = 0;
     virtual Result<Customer> personal_account_by_email(const std::string& email) = 0;
+    // Coupon codes (migration 0101, lake#1156). create_coupon records a coupon (conflict when its
+    // code is taken); coupon_by_code and get_coupon answer one (not_found); coupon_reports answers
+    // every coupon, newest first, with its counts (`campaign` non-empty: that campaign's only);
+    // disable_coupon stops a code (a disabled one is answered as it is).
+    virtual Result<Coupon> create_coupon(const Coupon& coupon) = 0;
+    virtual Result<Coupon> coupon_by_code(const std::string& code) = 0;
+    virtual Result<Coupon> get_coupon(const std::string& coupon_id) = 0;
+    virtual Result<std::vector<CouponReport>> coupon_reports(const std::string& campaign) = 0;
+    virtual Result<Coupon> disable_coupon(const std::string& coupon_id, const std::string& by) = 0;
+    // The account's redemption of the coupon, not_found when it has none.
+    virtual Result<CouponRedemption> coupon_redemption(const std::string& coupon_id,
+                                                       const std::string& customer_id) = 0;
+    // Claims one redemption in one transaction under the coupon's row lock: an unfinished claim by
+    // the same account and email is answered `resumed`; otherwise conflict with the message
+    // `disabled`, `expired`, `used_up` (the cap is reached), `already_redeemed` (by this account)
+    // or `email_redeemed` (by this person on another account); else it records the redemption
+    // and counts it against the cap.
+    virtual Result<CouponClaim> claim_coupon(const CouponRedemption& redemption) = 0;
+    // Records the grant a claimed redemption became.
+    virtual Result<void> finish_coupon_redemption(const std::string& redemption_id,
+                                                  const std::string& credit_id) = 0;
+    // Failed redemption attempts, per key (a SHA-256 hex digest of a client or a person): whether
+    // any key has `limit` failures or more in its current window of `window_seconds`, and
+    // counting one failure against every key (a window past its length starts again).
+    virtual Result<bool> coupon_attempts_exhausted(const std::vector<std::string>& keys,
+                                                   int limit,
+                                                   int window_seconds) = 0;
+    virtual Result<void> coupon_attempt_failed(const std::vector<std::string>& keys,
+                                               int window_seconds) = 0;
     // Cloud orders (lake#831, migration 0089, docs/api/orders.md).
     // Records a new order and its first event (actor lake).
     virtual Result<CloudOrder> create_cloud_order(const NewCloudOrder& order) = 0;

@@ -685,6 +685,110 @@ curl -s https://lake.live/v1/grant_balance_credit \
        "expires_at":"2027-01-31T23:59:59Z","reference":"partner-pat-2026-10"}'
 ```
 
+### Coupon codes
+
+[lake#1156](https://github.com/oramasearch/lake/issues/1156), Steve, 2026-10-24: *"create coupon
+codes that will grant someone a number of credits that I can use in my ads"*. The defaults below
+are lake#1156's; Steve may change any of them.
+
+**What a code is.** The operator or the instance administrator creates a code (`create_coupon`),
+such as `LAKE50`, worth an amount of credit. Whoever redeems it (`redeem_coupon`) gets an ordinary
+[credit from Orama](#credits-from-orama): the redemption calls the same grant path as
+`grant_balance_credit` (`give_balance_grant` in `src/api/balance.cpp`), so the spending order,
+expiry, no-overdraft rule, email and idempotency are the grant's, never a second mechanism.
+
+- **The grant.** Kind `grant`, provider `orama`, reason `Coupon code <CODE>` (shown to the account),
+  `granted_by` `coupon:<coupon id>`, `expires_at` the redemption plus the code's `credit_days`
+  (default 90), and the reference `coupon:<coupon id>:<customer id>`, so a retry, or a redemption
+  interrupted between its claim and its grant, grants once. The grant's email goes once
+  (`lake-balance-grant-<credit id>`).
+- **The code.** Typed (4 to 32 letters and digits; blanks and hyphens are dropped; case does not
+  matter) or, when left out, generated: 16 characters from `ABCDEFGHJKMNPQRSTVWXYZ23456789` (no
+  look-alikes), about 78 bits from OpenSSL's random source, so it cannot be guessed. Codes are
+  stored normalized (upper case), and `LAKE50`, `lake-50` and `Lake 50` are one code.
+- **Its settings.** The amount (whole cents, $0.01 to $10,000), `credit_days` (1 to 3,650), an
+  optional `expires_at` (when the code stops working, UTC, within 10 years), an optional
+  `max_redemptions` (the total cap), `new_accounts_only` (default **true**, the default for ads) and
+  an optional `campaign` label (lower-case letters, digits, `.`, `_`, `-`; up to 64) for
+  attribution.
+- **Stopping it.** `disable_coupon` (by `coupon_id` or `code`) refuses later redemptions at once;
+  credit already given stays. Calling it again changes nothing.
+
+**Who may redeem, and how often.**
+
+- **A person.** `redeem_coupon` takes `customer_id` and `code`; the caller needs `admin` on the
+  account (owners and admins), and must be a person signed in: the operator credential and an
+  agent's credential are refused (`unauthorized`).
+- **One redemption per account and per verified email.** The person's email (the one on their
+  account: Clerk's verified primary address on lake.live) is kept only as a SHA-256 digest of its
+  normalized form: lower-cased, a `+tag` dropped, and for Gmail (`gmail.com`, `googlemail.com`) the
+  dots of the local part dropped. So one inbox cannot redeem a code twice through two accounts. A
+  person without an email cannot redeem (`conflict`, reason `no_verified_email`).
+- **New accounts only** refuses an account created before the code (`not_new_account`) and one that
+  already has any credit (a top-up or a grant), any charged usage, or a non-void invoice with a
+  total (`account_used`). A new account cannot start paid work before its first credit, so it has no
+  charges to hide.
+- **The cap, the expiry and disabling** are checked under the coupon's row lock in the same
+  transaction that records the redemption (`used_up`, `expired`, `disabled`).
+- **Failed attempts are limited**: 10 refusals an hour per person and per client address (the
+  ingress-derived address that keys sign-in budgets), counted in `billing_coupon_attempts` by
+  SHA-256 digests of the keys. Past it, every attempt answers `rate_limited` (429), the right code
+  included, until the hour has passed. A refusal for a server error is not counted.
+
+A refusal answers `not_found` (an unknown code) or `conflict`, with `error.details.reason` one of
+`unknown`, `disabled`, `expired`, `used_up`, `already_redeemed`, `email_redeemed`,
+`not_new_account`, `account_used`, `no_verified_email`, and a sentence a person can read
+(`"This code has expired."`).
+
+**Audit and privacy.** Each redemption is audited centrally on `customer/<id>/billing`:
+`billing.coupon.redeemed` with who (the principal), the code, the campaign, the coupon, redemption
+and credit ids, the amount and the expiry. A refusal is `billing.coupon.refused` with its reason
+and a 12-hex-digit SHA-256 prefix of what was typed (`code_digest`), never the typed code: a guess
+is not written down anywhere, and request logs carry route patterns only. Creating, listing and
+disabling are audited on `billing/coupons` (`billing.coupon.created`, `billing.coupon.listed`,
+`billing.coupon.disabled`).
+
+**The ads report.** `list_coupons` answers every code, newest first (`campaign`: one campaign's
+only), with its `state` (active, disabled, expired, used_up), `redemptions` (claimed, what the cap
+counts) and, per code: `redeemed` (redemptions that became a credit), `topped_up` (redeeming
+accounts whose first paid top-up came after their redemption), `spend_micros` (what those accounts
+were charged for usage after their credit was given) and `paid_micros` (what they paid in top-ups
+since redeeming). `campaigns` sums the same per campaign. Counts and sums only: no workspace data,
+no names. An account that redeemed two codes of one campaign is counted under each.
+
+**Carried through sign-up.** An ad links to `https://lake.live/?code=LAKE50`. The apex region
+picker (and the order sheet, when it is on) posts back to the same path and query and continues to
+the chosen region's host with it (`region_continue_url`), and says "Your code LAKE50 goes with you".
+On the region's host the web app keeps the code in the browser for a day and redeems it on the first
+signed-in page for the person's own account ([Coupon codes in the console](../ui/balance.md#coupon-codes)).
+
+**Regions.** Each lake.live region is a separate Lake with its own control plane, and Lake has no
+way to call a sibling region today, so **a code works only in the region it was created in**. For an
+ad that reaches several regions, create the same code (the same string, amount and settings) in each
+region: in each region's console (**Administration → Coupons**), or with `create_coupon` and that
+region's admin token. `create_coupon` answers `region` and `other_regions` to remind you. Each
+region counts its own redemptions and cap. Creating it in every region from one form is a follow-up
+([lake#1159](https://github.com/oramasearch/lake/issues/1159)).
+
+**Where it lives.** Billing, so in the control plane (decision 56): `billing_coupons`,
+`billing_coupon_redemptions` and `billing_coupon_attempts`, migration `0101_coupons`
+([schema](../control-plane/schema.md#coupon-codes-migration-0101_coupons)).
+
+**On lake.live** (an ad for $50 lasting 90 days):
+
+```bash
+curl -s https://eu.lake.live/v1/create_coupon \
+  -H "Authorization: Bearer $LAKE_ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"code":"LAKE50","amount_micros":50000000,"credit_days":90,
+       "expires_at":"2026-12-31T23:59:59Z","campaign":"google-2026-11"}'
+# then the same on https://us.lake.live with that region's admin token
+curl -s "https://eu.lake.live/v1/list_coupons?campaign=google-2026-11" \
+  -H "Authorization: Bearer $LAKE_ADMIN_TOKEN"
+```
+
+`$LAKE_ADMIN_TOKEN` is the region's Secret `lake-<name>-admin`, key `token` (see
+[Giving a credit on lake.live](#credits-from-orama)); never paste it anywhere.
+
 ### Balance capabilities
 
 | Capability | Kind | Who | Input | What it does |
@@ -696,11 +800,16 @@ curl -s https://lake.live/v1/grant_balance_credit \
 | `refresh_account_balance` | action | operator, instance administrator | `customer_id` | Refreshes one account now as the owner loop does, and answers `{balance, refresh}`; `refresh.grants_expired` counts the credits from Orama it ended. |
 | `grant_balance_credit` | action | operator, instance administrator | `customer_id` or `email`, `amount_micros` (10,000 to 10,000,000,000, whole cents), `reason` (1 to 1,000 bytes), `expires_at?` (UTC `YYYY-MM-DDTHH:MM:SSZ`, future, within 10 years), `reference?` (1 to 200 of `A-Z a-z 0-9 - _ . :`) | Gives the account a [credit from Orama](#credits-from-orama): `{customer_id, duplicate, credit, emailed, email_error?, balance}`. |
 | `revoke_balance_credit` | action | operator, instance administrator | `credit_id`, `reason?` | Ends a grant after reading usage: `{customer_id, credit, revoked_micros, balance}`; only the unused part stops counting. `invalid_input` for a paid top-up, `conflict` once it ended. |
+| `create_coupon` | action | operator, instance administrator | `amount_micros` (10,000 to 10,000,000,000, whole cents), `code?` (4 to 32 letters and digits after normalizing; left out: generated), `credit_days?` (1 to 3,650, default 90), `expires_at?` (UTC, future, within 10 years), `max_redemptions?` (1 to 10,000,000), `new_accounts_only?` (default true), `campaign?` | Creates a [coupon code](#coupon-codes): `{coupon, link, region, other_regions}`; `link` is `https://<apex>/?code=<CODE>` (this Lake's origin without an apex). `conflict` when the code is taken. |
+| `list_coupons` | read | operator, instance administrator | `campaign?` | `{coupons, campaigns}`: each code with `state`, `redemptions`, `redeemed`, `topped_up`, `spend_micros`, `paid_micros`; the same summed per campaign. |
+| `disable_coupon` | action | operator, instance administrator | `coupon_id` or `code` | Stops the code at once: `{coupon}`. Idempotent. |
+| `redeem_coupon` | action | `admin` on the customer, a person (not the operator or an agent) | `customer_id`, `code` | Gives the account the code's credit from Orama: `{customer_id, code, amount_micros, expires_at, message, credit, emailed, email_error?, balance}`. Refusals: `not_found`/`conflict` with `details.reason`, `rate_limited` past 10 failures an hour per person or client. |
 
 All are audited centrally on `customer/<id>/billing` (`billing.balance.read`,
 `billing.balance.top_up_started`, `billing.balance.auto_top_up_set`,
 `billing.balance.overdraft_set`, `billing.balance.refresh`, `billing.balance.credit_granted` with
-who, how much, why and the expiry, `billing.balance.credit_revoked`).
+who, how much, why and the expiry, `billing.balance.credit_revoked`, `billing.coupon.redeemed`,
+`billing.coupon.refused`); the coupon administration on `billing/coupons`.
 
 `account_balance` also answers `first_grant_at` and `grants_unused_micros`, and each credit's
 `label`; a grant's row adds `reason`, `expires_at`, `ended_at`, `end_reason` (`expired` or
@@ -743,6 +852,25 @@ who, how much, why and the expiry, `billing.balance.credit_revoked`).
   forfeited, a person's account by email, and the table's checks.
 - `frontend/tests/balance.test.ts`: the banner, the Add funds link, the amounts, the history (credits
   from Orama and their expiry) and the return from Stripe, and the Give credit form's input.
+- `Coupon.*` (`tests/test_coupons.cpp`): codes normalized and emails digested per inbox; only the
+  operator or the instance administrator creates, lists or disables (the operator and a stranger
+  cannot redeem into an account); the create checks, generated codes (16 characters, no look-alikes,
+  all different) and the ad link with and without regions; a redemption as an ordinary grant (kind
+  `grant`, provider `orama`, reference `coupon:<coupon>:<customer>`, the balance, one email, audited
+  `billing.coupon.redeemed` with the code and campaign); a second redemption by the same account and
+  by the same inbox on another account refused; the cap, the code's expiry and disabling; new
+  accounts only (an older account, a topped-up one and one with charges refused); ten failed
+  attempts limiting the person and the client address, and refusals audited with a digest only; an
+  interrupted redemption finished once; the campaign report.
+- `CouponStore.MemoryFollowsTheContract` and `CouponStore.PostgresFollowsTheContract`: migration
+  `0101_coupons` and its guard, the code's uniqueness, every claim refusal, resuming an unfinished
+  claim, finishing, the attempts and the report, and the tables' checks.
+- `RegionsApex.ACouponCodeGoesToTheChosenRegion` and
+  `OrdersApex.TheOrderSheetCarriesACouponCodeToTheRegion`: the picker and the order sheet carry
+  `?code=` to the chosen region's host and say so.
+- `frontend/tests/coupons.test.ts`: `?code=` kept through sign-up (a day, out of the address, replaced
+  by a later link, forgotten once Lake answers, kept over a network failure), and the create form's
+  input.
 
 ## Order sheet subscriptions
 

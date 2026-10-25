@@ -420,6 +420,17 @@ Orama can give an account a credit (lake#1134, migration `0100_balance_grants`):
 a credit of kind `grant` spent before paid money, never unlocking the overdraft, its unused part
 stopping at expiry or revocation. See
 [`docs/api/billing.md#credits-from-orama`](docs/api/billing.md#credits-from-orama).
+Coupon codes for ads follow (lake#1156, migration `0101_coupons`): `create_coupon`, `list_coupons`
+(per code and per campaign: redemptions, first paid top-ups, spend) and `disable_coupon` for the
+operator or the instance administrator, and `redeem_coupon` for a person, whose redemption is an
+ordinary grant through the grant path (`give_balance_grant`, reference
+`coupon:<coupon id>:<customer id>`); one per account and per verified email (a digest), new accounts
+only by default, a total cap, the code's expiry, ten failed attempts an hour per person and per
+client. Console: Administration → Coupons, Billing → Redeem a Code, and `?code=` kept through Clerk
+sign-up in localStorage and redeemed on the first signed-in page; the apex picker carries `?code=`
+to the chosen region. A code works only in the region it is created in (lake#1159). Not deployed;
+the operator must vendor the schema and select `coupons_guard`. See
+[`docs/api/billing.md#coupon-codes`](docs/api/billing.md#coupon-codes).
 
 Billing follows, for Orama Cloud only (lake#564, decision 56, migration `0073_billing`): billing
 records live in PostgreSQL as multitenancy (`billing_plans`, `billing_plan_prices`,

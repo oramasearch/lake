@@ -186,8 +186,9 @@ constexpr std::array group_rules{
               "paid through Stripe. lake.live is prepaid: account_balance is the balance "
               "(top-ups minus usage charges), start_top_up adds funds through Stripe Checkout, "
               "set_auto_top_up tops up from a saved card, and past the overdraft every call that "
-              "starts paid work answers 402 payment_required. An enterprise install has no "
-              "billing, and these answer not_found.",
+              "starts paid work answers 402 payment_required. redeem_coupon redeems a coupon "
+              "code for credit from Orama; the operator makes codes with create_coupon. An "
+              "enterprise install has no billing, and these answer not_found.",
               [](std::string_view n) {
                   return contains_any(n,
                                       {"usage",
@@ -196,7 +197,8 @@ constexpr std::array group_rules{
                                        "bill",
                                        "metering",
                                        "balance",
-                                       "top_up"}) ||
+                                       "top_up",
+                                       "coupon"}) ||
                          n == "set_storage_quota";
               }},
     GroupRule{"Streams",

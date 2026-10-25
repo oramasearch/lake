@@ -957,6 +957,48 @@ public:
         return call("personal_account_by_email",
                     [&] { return store_->personal_account_by_email(email); });
     }
+    control::Result<control::Coupon> create_coupon(const control::Coupon& coupon) override {
+        return call("create_coupon", [&] { return store_->create_coupon(coupon); });
+    }
+    control::Result<control::Coupon> coupon_by_code(const std::string& code) override {
+        return call("coupon_by_code", [&] { return store_->coupon_by_code(code); });
+    }
+    control::Result<control::Coupon> get_coupon(const std::string& coupon_id) override {
+        return call("get_coupon", [&] { return store_->get_coupon(coupon_id); });
+    }
+    control::Result<std::vector<control::CouponReport>>
+    coupon_reports(const std::string& campaign) override {
+        return call("coupon_reports", [&] { return store_->coupon_reports(campaign); });
+    }
+    control::Result<control::Coupon> disable_coupon(const std::string& coupon_id,
+                                                    const std::string& by) override {
+        return call("disable_coupon", [&] { return store_->disable_coupon(coupon_id, by); });
+    }
+    control::Result<control::CouponRedemption>
+    coupon_redemption(const std::string& coupon_id, const std::string& customer_id) override {
+        return call("coupon_redemption",
+                    [&] { return store_->coupon_redemption(coupon_id, customer_id); });
+    }
+    control::Result<control::CouponClaim>
+    claim_coupon(const control::CouponRedemption& redemption) override {
+        return call("claim_coupon", [&] { return store_->claim_coupon(redemption); });
+    }
+    control::Result<void> finish_coupon_redemption(const std::string& redemption_id,
+                                                   const std::string& credit_id) override {
+        return call("finish_coupon_redemption",
+                    [&] { return store_->finish_coupon_redemption(redemption_id, credit_id); });
+    }
+    control::Result<bool> coupon_attempts_exhausted(const std::vector<std::string>& keys,
+                                                    int limit,
+                                                    int window_seconds) override {
+        return call("coupon_attempts_exhausted",
+                    [&] { return store_->coupon_attempts_exhausted(keys, limit, window_seconds); });
+    }
+    control::Result<void> coupon_attempt_failed(const std::vector<std::string>& keys,
+                                                int window_seconds) override {
+        return call("coupon_attempt_failed",
+                    [&] { return store_->coupon_attempt_failed(keys, window_seconds); });
+    }
     control::Result<control::CloudOrder>
     create_cloud_order(const control::NewCloudOrder& order) override {
         return call("create_cloud_order", [&] { return store_->create_cloud_order(order); });

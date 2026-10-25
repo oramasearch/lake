@@ -1470,3 +1470,35 @@ The balance sums `amount_micros - forfeited_micros`. Additive and idempotent (re
 nothing); guard `balance_grants_guard`. The orama-operator vendors lake's schema today, so an
 operator release carrying it, with that guard selected, rolls before a lake image that writes grants
 (unless lake#1119's `lake migrate` has taken the schema over by then).
+
+## Coupon codes (migration `0101_coupons`)
+
+`0101_coupons` (lake#1156, [`../api/billing.md#coupon-codes`](../api/billing.md#coupon-codes))
+adds three tables, billing records in the control plane (decision 56):
+
+- `billing_coupons`: one row per code. `code` is unique and stored normalized
+  (`^[A-Z0-9]{4,32}$`); `amount_micros` whole cents from $0.01 to $10,000; `credit_days` 1 to
+  3,650 (how long the grant lasts after redemption); `expires_at` (when the code stops working,
+  null: never); `max_redemptions` (null: no cap, else 1 to 10,000,000); `new_accounts_only`
+  (default true); `campaign` (`''` or lower-case, up to 64); `redemptions`, the claimed count the
+  cap is checked against (never above `max_redemptions`); `created_by`, `created_at`, and
+  `disabled_at`/`disabled_by`. Index `billing_coupons_by_campaign`.
+- `billing_coupon_redemptions`: one row per claim. `coupon_id`, `customer_id`, `email_sha256` (a
+  SHA-256 of the person's normalized email, never the address), `redeemed_by`, `credit_id` (the
+  grant it became, null until it is given) and `created_at`. Unique `(coupon_id, customer_id)` and
+  `(coupon_id, email_sha256)`: one redemption per account and per inbox. Index
+  `billing_coupon_redemptions_by_customer`.
+- `billing_coupon_attempts`: failed redemptions per key (`key_sha256`, a SHA-256 of a person's id or
+  a client address, never a code), `failures` and `window_start`. Rows a day past their window are
+  deleted as failures are counted.
+
+A claim locks the coupon's row (`SELECT … FOR UPDATE`), so the cap, the expiry, disabling and the
+two uniqueness rules are decided in the transaction that records the claim. The grant itself is a
+row of `account_balance_credits` of kind `grant` (0100), reference `coupon:<coupon id>:<customer
+id>`, written by the grant path; the redemption then records its id.
+
+Additive and idempotent (reapplied, it changes nothing); guard `coupons_guard`. The orama-operator
+vendors lake's schema today (`internal/controller/assets/lake-schema.sql`, until
+orama-operator#936), so an operator release carrying it through `0101_coupons`, with `coupons_guard`
+selected, rolls before a lake image that serves coupons, after the one for `0100_balance_grants`
+(unless lake#1147's `lake migrate` has taken the schema over by then).

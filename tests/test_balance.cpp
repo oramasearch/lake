@@ -1588,6 +1588,7 @@ TEST(PaidWorkContract, EveryCapabilityThatStartsPaidWorkIsMarked) {
         {"create_projects_from_opportunities", "records"},
         {"create_pipeline", "a definition; running it is gated"},
         {"create_solution", "a definition"},
+        {"create_coupon", "a code for ads; redeeming it gives credit (lake#1156)"},
         {"create_methodology", "a definition; validating and running it are gated"},
         {"create_agent", "a definition; launching it is gated"},
         {"create_agent_from_proposal", "a definition"},

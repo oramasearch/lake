@@ -250,7 +250,13 @@ and `balance_credit_problem` are the checks both stores apply. Credits from Oram
 `0100_balance_grants`, lake#1134) are `BalanceCredit`s of kind `grant` with their own fields;
 `balance_credit`, `end_balance_grants` (expired ones and one revoked, in one transaction) and
 `personal_account_by_email` are their store calls, and `grant_allocation`, `grants_ending` and
-`grants_unused` the one rule both stores and the API use for how charges fall on grants.
+`grants_unused` the one rule both stores and the API use for how charges fall on grants. Coupon
+codes (migration `0101_coupons`, lake#1156) are `Coupon`, `CouponRedemption`, `CouponReport` and
+`CouponClaim`: `create_coupon`, `coupon_by_code`, `get_coupon`, `coupon_reports`, `disable_coupon`,
+`coupon_redemption`, `claim_coupon` (every check of a redemption under the coupon's row lock, with
+`resumed` for a claim whose grant was not given yet), `finish_coupon_redemption`, and the failed
+attempts `coupon_attempts_exhausted` / `coupon_attempt_failed`; `coupon_code_normalized`,
+`coupon_email_digest` (one inbox, one digest) and `coupon_problem` are the shared rules.
 
 
 `oci_records.hpp` holds a tenant image's manifests and tags in its routed workspace (lake#383

@@ -10,4 +10,6 @@ export const screens: Screen[] = [
   { path: "/billing/add-funds", title: "Add Funds", section: "organization", billing: true, component: lazyPage(() => import("./AddFundsPage")) },
   { path: "/billing/invoices/:invoiceId", title: "Invoice", section: "organization", billing: true, component: lazyPage(() => import("./InvoicePage")) },
   { path: "/billing/plans", title: "Price List", section: "administration", audience: ["operator"], billing: true, component: lazyPage(() => import("./PriceListPage")) },
+  // Coupon codes for ads (lake#1156): the operator's, where the lake bills.
+  { path: "/coupons", title: "Coupons", section: "administration", audience: ["operator"], billing: true, component: lazyPage(() => import("../admin/CouponsPage")) },
 ];

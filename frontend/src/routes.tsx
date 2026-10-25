@@ -120,6 +120,7 @@ export const NAV: NavItem[] = [
   { section: "administration", path: "/usage/accounts", label: "Usage", icon: "metering", audience: ["operator"] },
   // The price list and each account's invoices (lake#564), where the lake bills.
   { section: "administration", path: "/billing/plans", label: "Billing", icon: "metering", audience: ["operator"], billing: true },
+  { section: "administration", path: "/coupons", label: "Coupons", icon: "metering", audience: ["operator"], billing: true },
   { section: "administration", path: "/secret-mounts", label: "Secrets", icon: "secrets", audience: ["operator"] },
   { section: "administration", path: "/audit", label: "Audit", icon: "audit", audience: ["operator"] },
   { section: "developer", path: "/developer/api", label: "API", icon: "api", audience: AO },

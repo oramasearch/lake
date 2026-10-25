@@ -164,6 +164,36 @@ std::string error_markup(std::string_view error) {
                          : std::format("<p class=\"error\">{}</p>", web_ui_escape(error));
 }
 
+// A coupon code an ad's link carries (`?code=`, lake#1156): the picker posts back to the same
+// query and continues to it on the chosen region's host, so the code goes along; the page says so.
+// Only letters, digits and hyphens are shown; anything else shows nothing.
+std::string coupon_note(std::string_view target) {
+    const auto query = target.find('?');
+    if (query == std::string_view::npos) {
+        return {};
+    }
+    std::string_view rest = target.substr(query + 1);
+    while (!rest.empty()) {
+        const auto amp = rest.find('&');
+        const std::string_view pair = rest.substr(0, amp);
+        rest = amp == std::string_view::npos ? std::string_view() : rest.substr(amp + 1);
+        if (!pair.starts_with("code=")) {
+            continue;
+        }
+        const std::string_view code = pair.substr(5);
+        if (code.empty() || code.size() > 64 || !std::ranges::all_of(code, [](char c) {
+                return std::isalnum(static_cast<unsigned char>(c)) || c == '-';
+            })) {
+            return {};
+        }
+        return std::format("<p class=\"notice\" data-coupon>Your code <strong>{}</strong> goes "
+                           "with you: it is applied when you sign up in the region you "
+                           "choose.</p>",
+                           web_ui_escape(code));
+    }
+    return {};
+}
+
 std::string theme_color(const control::Application& application,
                         std::string_view key,
                         std::string_view fallback) {
@@ -420,7 +450,7 @@ std::string web_ui_region_picker(const Regions& regions,
         "</body></html>",
         theme_preference_script,
         stylesheet_link(),
-        error_markup(error),
+        error_markup(error) + coupon_note(target),
         action,
         choices);
 }
@@ -588,7 +618,7 @@ std::string web_ui_order_sheet(const OrderSheet& sheet,
                            : std::string(),
         web_ui_escape(price_list),
         web_ui_escape(sheet.shared_summary),
-        bullet_list(sheet.shared_features),
+        bullet_list(sheet.shared_features) + coupon_note(target),
         action,
         region_choices(regions, selected));
     for (const OrderOffer& offer : sheet.offers) {

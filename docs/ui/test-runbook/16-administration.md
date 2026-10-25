@@ -90,6 +90,29 @@ Expect:
 - Step 3: the dialog stays open with "no person with that email has a personal account on this
   Lake"; nothing is given.
 
+#### ADM-048 · Create, report and disable a coupon code · billing on · P0
+As: operator · Needs: billing on
+
+1. Open **Administration → Coupons** and press **New code**.
+2. Enter **Code** `qa<MMDD>50`, **Credit (USD)** `50`, keep **Credit lasts (days)** `90` and **New
+   accounts only** checked, **Campaign** `qa-<mmdd>`, and press **Create code**.
+3. Press **New code** again with the same code in other letters (`QA<MMDD>50`) and press **Create
+   code**.
+4. Press **New code**, leave **Code** empty, **Credit (USD)** `5`, and press **Create code**.
+5. After BILL-052, reload the page.
+6. Press **Disable** on `QA<MMDD>50` and confirm.
+
+Expect:
+- Step 2: a banner **Code QA<MMDD>50 Is Ready** with **Link for the ad**
+  `https://<apex or this host>/?code=QA<MMDD>50` and a copy button; on lake.live it also says to
+  create the same code in the other region. The table lists it **Active**, $50.00, "New accounts".
+- Step 3: the dialog stays open with "the code QA<MMDD>50 is taken".
+- Step 4: a generated code of 16 characters with no 0, O, 1, I, L or U.
+- Step 5: the row shows **Redemptions** 1 and **Campaigns** lists `qa-<mmdd>` with 1 redeemed.
+- Step 6: the row reads **Disabled** and has no **Disable**; a redemption now answers "This code is
+  no longer offered."
+- *API* `audit` shows `billing.coupon.created` and `billing.coupon.disabled` on `billing/coupons`.
+
 ## Applications
 
 #### ADM-005 · Applications with none registered · P2

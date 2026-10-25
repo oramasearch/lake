@@ -228,6 +228,33 @@ void check_membership(HttpEvidence& http, const json& user) {
     http.call("remove_member", {{"id", membership.at("id")}});
 }
 
+// Coupon codes (lake#1156): the operator creates, lists and disables a code; a person who signed
+// up after it redeems it for their own account.
+void check_coupons(HttpEvidence& http, lake::control::Store& store) {
+    const auto created = http.call("create_coupon",
+                                   {{"code", "schema-50"},
+                                    {"amount_micros", 50'000'000},
+                                    {"credit_days", 90},
+                                    {"max_redemptions", 10},
+                                    {"campaign", "schema"}});
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto session =
+        checked(store.sign_up_password({"lake",
+                                        "schema-coupon-" + suffix + "@example.test",
+                                        "correct horse battery staple",
+                                        "Schema coupon",
+                                        "schema",
+                                        "{}"}));
+    const std::string personal = checked(store.list_customers(2, session.session.user_id)).at(0).id;
+    const std::string operator_bearer = http.bearer;
+    http.bearer = session.secret;
+    http.call("redeem_coupon", {{"customer_id", personal}, {"code", "SCHEMA50"}});
+    http.bearer = operator_bearer;
+    http.call("list_coupons");
+    http.read("list_coupons", "?campaign=schema");
+    http.call("disable_coupon", {{"coupon_id", created.at("coupon").at("id")}});
+}
+
 // create_organization_space and convert_personal_space serve a signed-in person and refuse the
 // operator credential, so they are called with a person's session.
 void check_person_organizations(HttpEvidence& http, lake::control::Store& store) {
@@ -938,6 +965,7 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
                                     {"expires_at", "2030-01-01T00:00:00Z"}});
     http.call("revoke_balance_credit",
               {{"credit_id", granted.at("credit").at("id")}, {"reason", "schema conformance"}});
+    check_coupons(http, *store);
     http.call("start_top_up", {{"customer_id", customer.id}, {"amount_micros", 25'000'000}});
     http.call("set_auto_top_up", {{"customer_id", customer.id}, {"enabled", true}});
     http.call("set_auto_top_up", {{"customer_id", customer.id}, {"enabled", false}});

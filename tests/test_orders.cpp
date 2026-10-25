@@ -2226,3 +2226,16 @@ TEST(OrdersEntitlement, CancellationWinsEvenWhenALaterInvoiceArrivedFirst) {
                                                                500}));
     EXPECT_EQ(entitlement.access_until, 110);
 }
+
+TEST(OrdersApex, TheOrderSheetCarriesACouponCodeToTheRegion) {
+    // With the order sheet on, the region choice is its first card, and it carries `?code=` the
+    // same way (lake#1156).
+    const Regions regions = production();
+    const OrderSheet sheet = default_sheet();
+    const std::string html =
+        web_ui_order_sheet(sheet, regions, regions.list[0], "/?code=LAKE50", "");
+    EXPECT_NE(html.find("action=\"/?code=LAKE50\""), std::string::npos);
+    EXPECT_NE(html.find("Your code <strong>LAKE50</strong> goes with you"), std::string::npos);
+    EXPECT_EQ(web_ui_order_sheet(sheet, regions, regions.list[0], "/", "").find("Your code"),
+              std::string::npos);
+}

@@ -600,3 +600,41 @@ TEST(RegionsApexAgentDocuments, NoRegionsMeansTheUsualText) {
     }
     server.stop();
 }
+
+TEST(RegionsApex, ACouponCodeGoesToTheChosenRegion) {
+    // An ad links to lake.live/?code=LAKE50 (lake#1156): the picker says the code goes along, its
+    // form posts back to the same query, and continuing keeps it on the region's host, where the
+    // web app keeps it through sign-up.
+    ApiServer server(options_with(production()));
+    ASSERT_TRUE(server.start()) << server.reason();
+    const unsigned short port = server.port();
+    Response page = send(port, "GET", "/?code=LAKE50", "lake.live", {{"CF-IPCountry", "US"}});
+    ASSERT_EQ(page.status, 200) << page.body;
+    EXPECT_NE(page.body.find("action=\"/?code=LAKE50\""), std::string::npos);
+    EXPECT_NE(page.body.find("Your code <strong>LAKE50</strong> goes with you"), std::string::npos);
+    Response chosen = send(port,
+                           "POST",
+                           "/?code=LAKE50",
+                           "lake.live",
+                           {{"Content-Type", "application/x-www-form-urlencoded"}},
+                           "region=eastus");
+    EXPECT_EQ(chosen.status, 302) << chosen.body;
+    EXPECT_EQ(chosen.headers["location"], "https://us.lake.live/?code=LAKE50");
+    // Among other parameters too.
+    Response mixed = send(port,
+                          "POST",
+                          "/?utm_source=google&code=LAKE50",
+                          "lake.live",
+                          {{"Content-Type", "application/x-www-form-urlencoded"}},
+                          "region=swedencentral");
+    EXPECT_EQ(mixed.headers["location"], "https://eu.lake.live/?utm_source=google&code=LAKE50");
+    server.stop();
+
+    // A code that is not letters, digits and hyphens is not shown (the query is still carried).
+    const Regions regions = production();
+    const std::string odd =
+        web_ui_region_picker(regions, regions.list[0], "/?code=%3Cscript%3E", "");
+    EXPECT_EQ(odd.find("Your code"), std::string::npos);
+    EXPECT_EQ(web_ui_region_picker(regions, regions.list[0], "/", "").find("Your code"),
+              std::string::npos);
+}

@@ -3197,6 +3197,88 @@ std::optional<std::string> balance_credit_problem(const BalanceCredit& credit) {
     return std::nullopt;
 }
 
+std::optional<std::string> coupon_code_normalized(std::string_view typed) {
+    std::string code;
+    for (const char c : typed) {
+        if (c == ' ' || c == '-' || c == '\t') {
+            continue;
+        }
+        const auto byte = static_cast<unsigned char>(c);
+        if (!std::isalnum(byte) || byte > 0x7f) {
+            return std::nullopt;
+        }
+        code.push_back(static_cast<char>(std::toupper(byte)));
+        if (code.size() > 32) {
+            return std::nullopt;
+        }
+    }
+    if (code.size() < 4) {
+        return std::nullopt;
+    }
+    return code;
+}
+
+std::string coupon_email_digest(std::string_view email) {
+    std::string address = lower(std::string(email));
+    const auto first = address.find_first_not_of(" \t");
+    const auto last = address.find_last_not_of(" \t");
+    if (first == std::string::npos) {
+        return {};
+    }
+    address = address.substr(first, last - first + 1);
+    const auto at = address.rfind('@');
+    if (at != std::string::npos && at > 0) {
+        std::string local = address.substr(0, at);
+        std::string domain = address.substr(at + 1);
+        if (const auto plus = local.find('+'); plus != std::string::npos && plus > 0) {
+            local.resize(plus);
+        }
+        if (domain == "googlemail.com") {
+            domain = "gmail.com";
+        }
+        if (domain == "gmail.com") {
+            std::erase(local, '.');
+        }
+        address = local + "@" + domain;
+    }
+    return identity_crypto::sha256_hex(address);
+}
+
+std::optional<std::string> coupon_problem(const Coupon& coupon) {
+    const auto code = coupon_code_normalized(coupon.code);
+    if (!code || *code != coupon.code) {
+        return "a code is 4 to 32 letters and digits, upper case";
+    }
+    if (coupon.amount_micros < 10'000 || coupon.amount_micros > balance_grant_most_micros ||
+        coupon.amount_micros % 10'000 != 0) {
+        return "a coupon gives whole cents, $0.01 to $10,000";
+    }
+    if (coupon.credit_days < 1 || coupon.credit_days > 3650) {
+        return "the credit lasts 1 to 3,650 days";
+    }
+    if (coupon.max_redemptions &&
+        (*coupon.max_redemptions < 1 || *coupon.max_redemptions > 10'000'000)) {
+        return "the most redemptions is 1 to 10,000,000";
+    }
+    if (!coupon.campaign.empty()) {
+        const bool first_ok = std::isalnum(static_cast<unsigned char>(coupon.campaign[0])) &&
+                              !std::isupper(static_cast<unsigned char>(coupon.campaign[0]));
+        const bool rest_ok = std::ranges::all_of(coupon.campaign, [](char c) {
+            const auto byte = static_cast<unsigned char>(c);
+            return byte < 0x80 && ((std::isalnum(byte) && !std::isupper(byte)) || c == '.' ||
+                                   c == '_' || c == '-');
+        });
+        if (!first_ok || !rest_ok || coupon.campaign.size() > 64) {
+            return "a campaign is 1 to 64 lower-case letters, digits, '.', '_' or '-', starting "
+                   "with a letter or digit";
+        }
+    }
+    if (coupon.created_by.empty() || coupon.created_by.size() > 255) {
+        return "a coupon names who created it";
+    }
+    return std::nullopt;
+}
+
 std::vector<std::int64_t> grant_allocation(const std::vector<BalanceCredit>& grants,
                                            std::int64_t charges_micros) {
     std::vector<std::int64_t> used(grants.size(), 0);
@@ -3555,6 +3637,219 @@ Result<std::vector<std::string>> InMemoryStore::balance_customers() {
         out.push_back(customer_id);
     }
     return out;
+}
+
+namespace {
+// Now, as a whole-second UTC time: the form of a coupon's expires_at.
+std::string coupon_now() {
+    return std::format("{:%FT%T}Z",
+                       std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+}
+} // namespace
+
+Result<Coupon> InMemoryStore::create_coupon(const Coupon& coupon) {
+    if (const auto problem = coupon_problem(coupon)) {
+        return std::unexpected(StoreError{"invalid_input", *problem});
+    }
+    std::lock_guard lock(mutex_);
+    if (std::ranges::any_of(coupons_,
+                            [&](const Coupon& kept) { return kept.code == coupon.code; })) {
+        return std::unexpected(StoreError{"conflict", "the code " + coupon.code + " is taken"});
+    }
+    Coupon stored = coupon;
+    stored.id = new_uuid_v4();
+    stored.created_at = now_iso8601();
+    stored.redemptions = 0;
+    stored.disabled_at.clear();
+    stored.disabled_by.clear();
+    coupons_.push_back(stored);
+    return stored;
+}
+
+Result<Coupon> InMemoryStore::coupon_by_code(const std::string& code) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(coupons_, code, &Coupon::code);
+    if (code.empty() || found == coupons_.end()) {
+        return std::unexpected(StoreError{"not_found", "no such code"});
+    }
+    return *found;
+}
+
+Result<Coupon> InMemoryStore::get_coupon(const std::string& coupon_id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(coupons_, coupon_id, &Coupon::id);
+    if (found == coupons_.end()) {
+        return std::unexpected(StoreError{"not_found", "no coupon " + coupon_id});
+    }
+    return *found;
+}
+
+Result<std::vector<CouponReport>> InMemoryStore::coupon_reports(const std::string& campaign) {
+    std::lock_guard lock(mutex_);
+    std::vector<CouponReport> out;
+    for (auto coupon = coupons_.rbegin(); coupon != coupons_.rend(); ++coupon) {
+        if (!campaign.empty() && coupon->campaign != campaign) {
+            continue;
+        }
+        CouponReport report{.coupon = *coupon};
+        for (const CouponRedemption& redemption : coupon_redemptions_) {
+            if (redemption.coupon_id != coupon->id) {
+                continue;
+            }
+            if (!redemption.credit_id.empty()) {
+                ++report.redeemed;
+            }
+            const AccountBalance balance = account_balance_locked(redemption.customer_id);
+            if (!balance.first_top_up_at.empty() &&
+                balance.first_top_up_at >= redemption.created_at) {
+                ++report.topped_up;
+            }
+            std::int64_t at_grant = 0;
+            for (const BalanceCredit& credit : balance_credits_) {
+                if (credit.id == redemption.credit_id) {
+                    at_grant = credit.charges_at_grant_micros;
+                }
+                if (credit.customer_id == redemption.customer_id && credit.kind != "grant" &&
+                    credit.created_at > redemption.created_at) {
+                    report.paid_micros += credit.amount_micros;
+                }
+            }
+            report.spend_micros += std::max<std::int64_t>(balance.charges_micros - at_grant, 0);
+        }
+        out.push_back(std::move(report));
+    }
+    return out;
+}
+
+Result<Coupon> InMemoryStore::disable_coupon(const std::string& coupon_id, const std::string& by) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(coupons_, coupon_id, &Coupon::id);
+    if (found == coupons_.end()) {
+        return std::unexpected(StoreError{"not_found", "no coupon " + coupon_id});
+    }
+    if (found->disabled_at.empty()) {
+        found->disabled_at = now_iso8601();
+        found->disabled_by = utf8_prefix(by, 255);
+    }
+    return *found;
+}
+
+Result<CouponRedemption> InMemoryStore::coupon_redemption(const std::string& coupon_id,
+                                                          const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find_if(coupon_redemptions_, [&](const CouponRedemption& r) {
+        return r.coupon_id == coupon_id && r.customer_id == customer_id;
+    });
+    if (found == coupon_redemptions_.end()) {
+        return std::unexpected(StoreError{"not_found", "the account has not redeemed this code"});
+    }
+    return *found;
+}
+
+Result<CouponClaim> InMemoryStore::claim_coupon(const CouponRedemption& redemption) {
+    if (redemption.email_sha256.size() != 64 || redemption.redeemed_by.empty()) {
+        return std::unexpected(
+            StoreError{"invalid_input", "a redemption names the person and their email"});
+    }
+    std::lock_guard lock(mutex_);
+    const auto coupon = std::ranges::find(coupons_, redemption.coupon_id, &Coupon::id);
+    if (coupon == coupons_.end()) {
+        return std::unexpected(StoreError{"not_found", "no such code"});
+    }
+    const auto customer = std::ranges::find(customers_, redemption.customer_id, &Customer::id);
+    if (customer == customers_.end()) {
+        return std::unexpected(StoreError{"not_found", "no customer " + redemption.customer_id});
+    }
+    const auto conflict = [](std::string reason) {
+        return std::unexpected(StoreError{"conflict", std::move(reason)});
+    };
+    for (const CouponRedemption& kept : coupon_redemptions_) {
+        if (kept.coupon_id != coupon->id) {
+            continue;
+        }
+        if (kept.customer_id == redemption.customer_id) {
+            if (kept.credit_id.empty() && kept.email_sha256 == redemption.email_sha256) {
+                return CouponClaim{.resumed = true, .redemption = kept, .coupon = *coupon};
+            }
+            return conflict("already_redeemed");
+        }
+        if (kept.email_sha256 == redemption.email_sha256) {
+            return conflict("email_redeemed");
+        }
+    }
+    if (!coupon->disabled_at.empty()) {
+        return conflict("disabled");
+    }
+    if (!coupon->expires_at.empty() && coupon->expires_at <= coupon_now()) {
+        return conflict("expired");
+    }
+    if (coupon->max_redemptions && coupon->redemptions >= *coupon->max_redemptions) {
+        return conflict("used_up");
+    }
+    if (coupon->new_accounts_only) {
+        if (customer->created_at < coupon->created_at) {
+            return conflict("not_new_account");
+        }
+        const AccountBalance balance = account_balance_locked(customer->id);
+        const bool invoiced = std::ranges::any_of(invoices_, [&](const Invoice& invoice) {
+            return invoice.customer_id == customer->id && invoice.total_micros > 0 &&
+                   invoice.state != "void";
+        });
+        if (balance.credit_count > 0 || balance.charges_micros > 0 || invoiced) {
+            return conflict("account_used");
+        }
+    }
+    CouponRedemption stored = redemption;
+    stored.id = new_uuid_v4();
+    stored.credit_id.clear();
+    stored.created_at = now_iso8601();
+    stored.redeemed_by = utf8_prefix(redemption.redeemed_by, 255);
+    coupon_redemptions_.push_back(stored);
+    ++coupon->redemptions;
+    return CouponClaim{.resumed = false, .redemption = stored, .coupon = *coupon};
+}
+
+Result<void> InMemoryStore::finish_coupon_redemption(const std::string& redemption_id,
+                                                     const std::string& credit_id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(coupon_redemptions_, redemption_id, &CouponRedemption::id);
+    if (found == coupon_redemptions_.end()) {
+        return std::unexpected(StoreError{"not_found", "no redemption " + redemption_id});
+    }
+    if (std::ranges::none_of(balance_credits_,
+                             [&](const BalanceCredit& credit) { return credit.id == credit_id; })) {
+        return std::unexpected(StoreError{"invalid_input", "no credit " + credit_id});
+    }
+    found->credit_id = credit_id;
+    return {};
+}
+
+Result<bool> InMemoryStore::coupon_attempts_exhausted(const std::vector<std::string>& keys,
+                                                      int limit,
+                                                      int window_seconds) {
+    std::lock_guard lock(mutex_);
+    const auto now = std::chrono::system_clock::now();
+    return std::ranges::any_of(keys, [&](const std::string& key) {
+        const auto found = coupon_attempts_.find(key);
+        return found != coupon_attempts_.end() &&
+               now - found->second.second < std::chrono::seconds{window_seconds} &&
+               found->second.first >= limit;
+    });
+}
+
+Result<void> InMemoryStore::coupon_attempt_failed(const std::vector<std::string>& keys,
+                                                  int window_seconds) {
+    std::lock_guard lock(mutex_);
+    const auto now = std::chrono::system_clock::now();
+    for (const std::string& key : keys) {
+        auto& [failures, started] = coupon_attempts_[key];
+        if (failures == 0 || now - started >= std::chrono::seconds{window_seconds}) {
+            failures = 0;
+            started = now;
+        }
+        ++failures;
+    }
+    return {};
 }
 
 void InMemoryStore::cloud_order_event_locked(const std::string& id,

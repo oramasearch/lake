@@ -5,7 +5,8 @@
  * and can issue an invoice for a month that has ended. Reads `billing_account`, `price_list`,
  * `bill_preview` and `list_invoices`; writes `set_billing_contact` (owners, admins and the
  * operator, lake#857), `issue_invoice` (the operator), and `grant_balance_credit` and
- * `revoke_balance_credit` (the operator's Give credit and Revoke, lake#1134). The page exists only
+ * `revoke_balance_credit` (the operator's Give credit and Revoke, lake#1134), and `redeem_coupon`
+ * (Redeem a Code, an owner or admin of the account, lake#1156). The page exists only
  * where the lake bills (`viewer.billing`). */
 import { type ChangeEvent, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
@@ -20,6 +21,7 @@ import { Banner, Button, Card, DataTable, Empty, ErrorBlock, Field, fieldError, 
 import { useSpacePermissions } from "@/pages/apps/shared";
 import { addFundsPath, balanceTone, dollarsToMicros, historyRows, microsToDollars, returnNotice, type BalanceAnswer } from "./balance";
 import { GiveCredit } from "./GiveCredit";
+import { RedeemCode } from "./RedeemCode";
 import { addressLines, asksForBillingEmail, billedNote, contactDraft, contactSavedMessage, countryOptions, invoiceTone, lineSentence, monthLabel, months, money, owed, paymentSummary, priceLabel, quantityLabel, type Account, type Bill, type ContactDraft, type ContactSaved, type Invoice, type Line, type PriceListAnswer } from "./billing";
 
 export default function BillingPage() {
@@ -109,6 +111,7 @@ export default function BillingPage() {
               <>
                 {asksForBillingEmail(account.data) && <Banner tone="info">Add a billing email so invoices are emailed to you.</Banner>}
                 {balance.data && <AutoTopUpCard balance={balance.data} customerId={customerId} canEdit={permissions.canAdmin} onSaved={() => void balance.refetch()} />}
+                {!operator && permissions.canAdmin && <RedeemCode customerId={customerId} onRedeemed={() => void balance.refetch()} />}
                 <InvoicesCard invoices={invoices} customerId={customerId} operator={operator} />
                 <ContactCard account={account.data} customerId={customerId} canEdit={permissions.canAdmin} checking={permissions.loading} />
                 {bill.data && bill.data.not_measured.length > 0 && (
