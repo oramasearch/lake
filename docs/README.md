@@ -11,7 +11,8 @@ copied into the image, `tunnel_client_downloads` and its signed short-lived link
 `GET /tunnel-clients/<platform>` (lake#745).
 [api/regions.md](api/regions.md) defines regions (lake#757, decision 64): `LAKE_REGION`,
 `LAKE_REGION_LABEL`, `LAKE_REGIONS` and `LAKE_APEX_HOST`, `server_info`'s `region` and `regions`, and
-the apex host's region picker with its closest-region choice and preference cookie;
+the apex host's region picker with its closest-region choice and preference cookie, and the
+apex's region-aware `llms.txt`, `llms-full.txt` and skill (lake#1110);
 [ui/regions.md](ui/regions.md) is where the web app shows the region.
 [api/orders.md](api/orders.md) defines the apex order sheet (lake#831): offers and prices from
 `LAKE_ORDER_SHEET`, Stripe Checkout and the order form, `cloud_orders` (migration `0089`, the

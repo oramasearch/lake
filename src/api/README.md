@@ -4,6 +4,12 @@ A condition-variable wait releases its lock, so nothing it is given may point in
 another thread changes meanwhile: `run_search_jobs` copies the next job's deadline before
 `wait_until` and does not touch the job after it wakes (lake#1176, a container-overflow under
 AddressSanitizer).
+`agent_docs.cpp` also writes the apex host's `llms.txt`, `llms-full.txt` and skill
+(`apex_llms_txt`, `apex_llms_full_txt`, `apex_skill_md`, lake#1110): every region of
+`LAKE_REGIONS` with its MCP server and agent documents, then the same tools, flows and rules a
+region serves. `http_server.cpp` answers them from the region picker's middleware
+(`apex_agent_document`) for a `GET` of those paths on the apex. See
+[regions](../../docs/api/regions.md#the-apexs-agent-documents-lake1110).
 
 `stream_person` in `agent_stream_triggers.cpp` is shared with `mcp_connection_streams.cpp` and
 requires a present, enabled account (lake#951). Disabled/missing principals trigger idempotent

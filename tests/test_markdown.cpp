@@ -457,8 +457,8 @@ TEST(Docs, WordingFaultsAreFoundOnlyInProse) {
 // Every word a person or an agent reads about Lake's tools says Lake and never "space"
 // (decision 59, lake#642, lake#647): all of llms.txt, llms-full.txt and the skill, every
 // description, summary and title in OpenAPI (both audiences) and in MCP's tools/list (both
-// audiences), the registry's descriptions and input schemas included. Account, workspace or
-// organization is said instead, whichever is true.
+// audiences), the registry's descriptions and input schemas included, and the apex's three
+// documents (lake#1110). Account, workspace or organization is said instead, whichever is true.
 TEST(Docs, AgentDocsSayLakeAndNeverSpace) {
     const lake::api::Registry registry = every_capability();
     const std::string origin = "https://lake.example";
@@ -466,11 +466,25 @@ TEST(Docs, AgentDocsSayLakeAndNeverSpace) {
     const std::string skill = lake::api::agent_docs::skill_md(registry, origin);
     const std::size_t body = skill.find("\n---\n", 4);
     ASSERT_NE(body, std::string::npos);
-    for (const auto& [name, text] :
-         std::vector<std::pair<std::string, std::string>>{
+    // The apex's documents (lake#1110), which name every region, are read the same way.
+    const auto regions = lake::api::regions_from_environment(
+        "",
+        "",
+        R"([{"name":"swedencentral","label":"Europe","host":"eu.lake.example","latitude":60,"longitude":17},)"
+        R"({"name":"eastus","label":"United States","host":"us.lake.example","latitude":37,"longitude":-79}])",
+        "lake.example");
+    ASSERT_TRUE(regions) << regions.error();
+    const std::string apex_skill = lake::api::agent_docs::apex_skill_md(registry, *regions, origin);
+    const std::size_t apex_body = apex_skill.find("\n---\n", 4);
+    ASSERT_NE(apex_body, std::string::npos);
+    for (const auto& [name, text] : std::vector<std::pair<std::string, std::string>>{
              {"llms.txt", lake::api::agent_docs::llms_txt(registry, origin)},
              {"llms-full.txt", lake::api::agent_docs::llms_full_txt(registry, origin)},
-             {"SKILL.md", skill.substr(body + 5)}}) {
+             {"SKILL.md", skill.substr(body + 5)},
+             {"apex llms.txt", lake::api::agent_docs::apex_llms_txt(registry, *regions, origin)},
+             {"apex llms-full.txt",
+              lake::api::agent_docs::apex_llms_full_txt(registry, *regions, origin)},
+             {"apex SKILL.md", apex_skill.substr(apex_body + 5)}}) {
         for (const std::string& fault : wording_faults(text)) {
             ADD_FAILURE() << name << " " << fault;
         }

@@ -4,6 +4,7 @@
 #include <string_view>
 #include <vector>
 
+#include "lake/api/regions.hpp"
 #include "lake/api/registry.hpp"
 
 // What an agent needs to learn Lake, generated from the one capability registry so it never
@@ -53,5 +54,16 @@ const std::vector<Flow>& flows();
 std::string llms_txt(const Registry& registry, std::string_view origin);
 std::string llms_full_txt(const Registry& registry, std::string_view origin);
 std::string skill_md(const Registry& registry, std::string_view origin);
+
+// The same three documents for the apex host (LAKE_APEX_HOST, lake#1110, docs/api/regions.md),
+// which is not a Lake: they say so, name every region of `regions.list` with its MCP server,
+// llms.txt, llms-full.txt, skill and token page, and then teach the tools as a region's do.
+// `apex_origin` is "https://<apex host>".
+std::string
+apex_llms_txt(const Registry& registry, const Regions& regions, std::string_view apex_origin);
+std::string
+apex_llms_full_txt(const Registry& registry, const Regions& regions, std::string_view apex_origin);
+std::string
+apex_skill_md(const Registry& registry, const Regions& regions, std::string_view apex_origin);
 
 } // namespace lake::api::agent_docs

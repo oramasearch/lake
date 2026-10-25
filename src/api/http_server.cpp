@@ -13502,7 +13502,8 @@ struct ApiServer::Impl {
     }
 
     // Whether the request is for the apex host (LAKE_APEX_HOST, lake#757): every path there is the
-    // region picker, apart from the stylesheet and fonts the picker links and the probes.
+    // region picker, apart from the stylesheet and fonts the picker links and the probes. The
+    // agent documents are answered by the same middleware (apex_agent_document, lake#1110).
     bool region_picker_serves(const boost::http::route_params& route) const {
         if (options.regions.apex_host.empty()) {
             return false;
@@ -13526,6 +13527,44 @@ struct ApiServer::Impl {
     // the region chosen before (the `lake_region` cookie), else the closest to Cloudflare's
     // CF-IPCountry, else the first. POST with `region`: remember it and continue to the same path
     // and query on that region's host.
+    // The agent documents a region serves at the same paths (lake#1110, docs/api/regions.md): on
+    // the apex they name every region instead of the picker's HTML. The route pattern recorded
+    // for the request, or empty when the request is not for one of them.
+    static std::string_view apex_agent_document(const boost::http::route_params& route) {
+        if (route.req.method() != boost::http::method::get) {
+            return {};
+        }
+        const std::string_view path = route.url.encoded_path();
+        for (const std::string_view document :
+             {"/llms.txt", "/llms-full.txt", "/skills/lake/SKILL.md", "/developer/mcp/skill"}) {
+            if (path == document) {
+                return document;
+            }
+        }
+        return {};
+    }
+
+    boost::http::route_task serve_apex_agent_document(boost::http::route_params& route,
+                                                      std::string_view document) {
+        const Regions& regions = options.regions;
+        const std::string origin = "https://" + regions.apex_host;
+        if (document == "/llms.txt" || document == "/llms-full.txt") {
+            co_return co_await send_text(
+                route,
+                boost::http::status::ok,
+                document == "/llms.txt" ? agent_docs::apex_llms_txt(registry, regions, origin)
+                                        : agent_docs::apex_llms_full_txt(registry, regions, origin),
+                "text/plain; charset=utf-8",
+                "public, max-age=300");
+        }
+        route.res.set("content-disposition", "attachment; filename=SKILL.md");
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     agent_docs::apex_skill_md(registry, regions, origin),
+                                     "text/markdown; charset=utf-8",
+                                     "public, max-age=300");
+    }
+
     boost::http::route_task serve_region_picker(boost::http::route_params& route) {
         namespace http = boost::http;
         const Regions& regions = options.regions;
@@ -15731,7 +15770,8 @@ bool ApiServer::start() {
         co_return result;
     });
     // The apex host's region picker (lake#757, docs/ui/regions.md): before everything else that
-    // could answer, so no path on the apex reaches the app or the API.
+    // could answer, so no path on the apex reaches the app or the API. The agent documents
+    // (/llms.txt, /llms-full.txt, the skill) answer there with every region (lake#1110).
     router.use(guarded("region_picker", [&impl](http::route_params& route) -> http::route_task {
         if (!impl.region_picker_serves(route)) {
             co_return http::route_next;
@@ -15739,6 +15779,12 @@ bool ApiServer::start() {
         const auto timing = request_timing(route);
         const auto start = timing ? timing->started : std::chrono::steady_clock::now();
         const RequestTimingScope timing_scope(route, start);
+        // An agent document (lake#1110) is recorded under its own route pattern.
+        if (const std::string_view document = impl.apex_agent_document(route); !document.empty()) {
+            auto result = co_await impl.serve_apex_agent_document(route, document);
+            impl.record_request(route, document, start);
+            co_return result;
+        }
         auto result = co_await impl.serve_region_picker(route);
         impl.record_request(route, "region_picker", start);
         co_return result;
