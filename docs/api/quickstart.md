@@ -32,11 +32,12 @@ are each one's own, unchanged:
 | Workspace (when none is named) | `start_workspace` |
 | Dataset | `upload_dataset` with `if_exists: "rename"` (so its CSV check and name rule apply), or an existing `dataset_id` checked with the engine's `get_dataset` |
 | Search index | `create_index`, then `expose_index` |
-| Model | `train_model` (methodology `M-1` and a 0.2 held-out share unless told otherwise), then `expose_model` once its run has succeeded |
+| Model | `train_model` (methodology `M-1` and a 0.2 held-out share unless told otherwise), on the dataset or, when it cannot train as it is, on a training copy made with `upload_dataset` ([columns](#columns)); then `expose_model` once its run has succeeded |
 | Website key | `create_browser_key` bound to the index (and the model once published) and the website's origins: nested in `quickstart_snippets` when it is sent `origins`, or called by the person or the agent ([browser-keys.md](browser-keys.md)) |
 
 The quickstart's own reads for its bookkeeping (the training run's `get_run`, the model the run made
-from `list_models`, the dataset's columns from `get_dataset`) go through `call_workspace`, the path
+from `list_models`, the dataset's columns from `get_dataset`, their kinds from `analyze_dataset`, the
+rows of a training copy through the engine's `sql`) go through `call_workspace`, the path
 every engine read takes, under the quickstart call's own authorization and audit, so a status poll
 records one audit event rather than one per read.
 
@@ -49,7 +50,7 @@ proposed `quickstart_train`; it is `train_quickstart`, an action, beside `train_
 |---|---|---|---|
 | `start_quickstart` | action, paid | `customer_id`; `workspace_id?`; `quickstart_id?` (resume); `content` with `format` (`csv`, `jsonl`) and `name?`, or `dataset_id` (`<database>/<name>`); `fields?` (the columns to search) | The workspace (the account's first, made when it has none, while `workspace_id` is left out), the dataset, its index, publishing it |
 | `quickstart_status` | read | `customer_id`, `workspace_id`, `quickstart_id?` (default: the newest), `include_costs?` | Every step's state, the ids, the training's progress read live, `next`, the workspace's quickstarts; with `include_costs`, `costs` |
-| `train_quickstart` | action, paid | `customer_id`, `workspace_id`, `quickstart_id?`, `target?`, `entity_column?`, `methodology?` (default `M-1`), `holdout_fraction?` (default 0.2), `name?` | Starts training; called again once trained, publishes the model; a failed run is trained again by the next call |
+| `train_quickstart` | action, paid | `customer_id`, `workspace_id`, `quickstart_id?`, `target?` (default: `suggested`), `target_value?` (the value of a category to look for), `entity_column?`, `as_of?` (the snapshot date), `methodology?` (default `M-1`), `holdout_fraction?` (default 0.2), `name?` | Prepares the columns ([columns](#columns)) and starts training; called again once trained, publishes the model; a failed run is trained again by the next call |
 | `quickstart_snippets` | action, authorized as a read (POST) | `customer_id`, `workspace_id`, `quickstart_id?`, `origins?` (the website's origins: makes the key now) | `snippets` (`html`, `react`, `curl`, each `{id, title, language, code}`), `key` (`kind: "browser_key"`, `placeholder`, `capabilities`, `create`: the `create_browser_key` call, `secret` and `browser_key` when it made one, `note`), `mcp`, `ready`, `includes_model` |
 
 `start_quickstart` takes up to 64 MiB of JSON, as `upload_dataset` does; the engine takes at most
@@ -86,9 +87,96 @@ proposed `quickstart_train`; it is `train_quickstart`, an action, beside `train_
 capability it called, word for word; `next` names the call that tries it again. The `model` step
 carries `progress` (`status` from `get_run`, `started_at`) while it trains.
 
-`dataset.columns` is the file's columns in its own order with their types (the index lists its
-fields sorted); the console's first guess for training is the last column as the outcome and the
-first text column as the row's name.
+`dataset.columns` is the file's columns in its own order (the index lists its fields sorted), each
+with its storage `type` and, from lake#1181, its detected `kind` ([columns](#columns)).
+`snapshot_date` and `suggested` (`{target, target_value, entity_column}`) are on every answer.
+
+## Columns
+
+lake#1181. Steve, 2026-10-24, after the Quickstart on lake-dev (v0.7.0) refused a dataset with a date
+column (`transform_required: add_snapshot_date`) and showed the raw code: *"it should be able to use
+any type of columns (auto-detect)"*.
+
+**Detection.** `start_quickstart` asks the engine's own column profile, `analyze_dataset`
+(`sample_rows` 10000, `as_of` the snapshot date), and keeps each column's kind on the record
+(`detect_columns` in `src/api/quickstart_columns.cpp`; Lake writes no profiler of its own). Each entry
+of `dataset.columns`:
+
+```json
+{"name": "Country", "type": "string", "kind": "categorical", "title": "category, 4 values",
+ "distinct_count": 4, "null_rate": 0, "values": ["Canada", "France", "Japan", "Brazil"],
+ "counts": [20, 15, 15, 10], "identifier": false,
+ "feature": {"use": true, "reason": "a category of 4 values"},
+ "predict": {"can": true, "choose_value": true, "values": ["Canada", "France", "Japan", "Brazil"]}}
+```
+
+| `kind` | From the engine's `semantic_type` | Learned from | Can be predicted |
+|---|---|---|---|
+| `numeric` | numeric | yes | no (many values) |
+| `categorical` | categorical | up to 32 values | 3 to 20 values, with `target_value` |
+| `boolean` | boolean, or any column with exactly two values (free/pro, 0/1) | yes | yes |
+| `datetime` | datetime | no: left out | no |
+| `free_text` | free_text | no: needs a text methodology | no |
+| `identifier` | identifier | no: names a row | no |
+| `empty` | no values | no | no |
+| `constant` | one value | no | no |
+| `unsupported` | json, unknown | no | no |
+
+The rules are the default methodology's, M-1: gradient-boosted trees answering a yes-or-no question
+from numbers and categories (zetta `docs/data/featurization.md`). Another `methodology` trains as it
+did before, without preparation. A quickstart made before lake#1181 is detected live by
+`quickstart_status` and kept by the next `train_quickstart`.
+
+**What is offered first** (`suggested`): a two-valued column whose name says it is an outcome
+(`churned`, `is_active`, `popular`…), else the last two-valued column, else the category with the
+fewest values and its most common value; the first identifier names a row. The console lists only
+columns with `predict.can`, each with its `title`.
+
+**Snapshot date.** `snapshot_date` is when the dataset was uploaded (or when the quickstart took an
+existing one), kept on the quickstart record in the workspace Zetta. `train_quickstart`'s `as_of`
+(`2026-10-24` or an ISO-8601 time) changes it; the console's date field sends it. It is declared to
+the engine as `analyze_dataset`'s `as_of`, with the column to predict as its `label`, so the engine's
+leakage checks run: a column it flags is left out ("it may give the answer away"). **Date and time
+columns are left out of the first model**: zetta v0.5.0's `train_model` takes no `as_of` (only the
+`run` capability's dataset contract does), and the website's model answers come from the rows search
+returns, so a feature the rows do not hold could not be answered. Once `train_model` takes one,
+dates can become features measured from the snapshot date
+([zetta#1494](https://github.com/oramasearch/zetta/issues/1494)).
+
+**The training copy.** When the dataset trains as it is (every input usable or left out by the
+engine itself, the column to predict already 0/1, a unique column naming the rows), `train_model`
+gets it unchanged (`preparation.copy: false`). Otherwise Lake reads the rows through the engine's
+`sql` as the person (`SELECT COUNT(*)`, then 5,000 rows a page, at most 1,000,000), writes the usable
+inputs, the column that names a row and the column to predict as 0/1 (1 where it equals the value to
+look for: `target_value`, else a yes-like value, else the rarer of two) as JSON Lines (CSV when that
+would pass upload_dataset's 16 MiB), loads it with a nested `upload_dataset` named
+`<dataset>_training` (`if_exists: "rename"`), and trains on it. Upload, train and their metering,
+balance gate and audit are each capability's own. The copy is a dataset in the workspace like any
+other; the website's rows still predict, because the model reads only columns they hold.
+
+A column that names a row must be unique: the engine keys rows by it, and a repeating name (a first
+name) merges rows and their answers (on v0.5.0 the run fails "training labels are a single class").
+So when the chosen column repeats, or none is chosen, Lake numbers the rows (`row_number`) and keeps
+the chosen column as an input; `preparation.note` says so.
+
+`training.preparation` records it: `{methodology, copy, dataset_id, format?, entity, used, dropped:
+[{name, reason}], label: {column, positive, rows_yes, rows_no}, rows, skipped, note, applied}`.
+
+**Refusals in plain words.** A choice that cannot train is refused before anything runs: one sent
+(`target`, `target_value`, `entity_column`) is `invalid_input` with its path and a plain message; one
+Lake chose is kept on the model step as `choose_columns`. A copy with no row to learn from (no value,
+the value appears in no row, or every row has it) is `cannot_prepare`. When `train_model` answers
+`transform_required: <name>: …`:
+
+| Refusal | What Lake does |
+|---|---|
+| `add_snapshot_date` | Leaves out every detected date column and any column whose values are ISO dates or times (95%, the engine's rule), and trains once more |
+| `add_entity_key`, `capture_label` | Numbers the rows and writes the target as 0/1, and trains once more |
+| anything else, or the same again | Keeps it on the model step as `training_refused` with a plain message saying what to choose, and `transform` naming it for an agent; `next` repeats it |
+
+A failed run's reason (`get_run`'s `error`, or its last error log line) is explained the same way
+(`run_failed`, with the engine's words in `detail`). The page never shows the raw code, and its
+button says *Train with these choices*.
 
 ### A workspace that is starting
 
@@ -173,6 +261,15 @@ decision 53), both of which multitenancy already holds. Audit goes to the worksp
   balance refused with the top-up link and nothing started, another account's workspace refused,
   a person with no workspace waiting for one, input refusals, and the OpenAPI, MCP, `llms.txt`,
   `llms-full.txt` and skill listings.
+- `QuickstartColumns.*` (`tests/test_quickstart_columns.cpp`) covers the column rules: every kind,
+  what is offered first, the choice checks, the training copy (numbered rows, the 0/1 answer, CSV),
+  dates found in values, and every refusal explained without its code.
+- `Quickstart.AnyColumnTypesTrainADatedDatasetIsPreparedNotRefused`,
+  `ATransformRequiredLakeCanSatisfyIsAppliedAndTriedOnce` and `WhatCannotBeTrainedIsSaidInPlainWords`
+  run Steve's shape (first name, country, a date, an id, free text, numbers, an empty and a constant
+  column) through the test double, including a `transform_required` retry.
+- `QuickstartZetta.ADatedDatasetWithAnyColumnTypesTrainsAndAnswersOnARealEngine` trains that shape
+  on a real Zetta (v0.5.0), publishes it and predicts on the search hits' rows, date included.
 - `QuickstartZetta.ADatasetBecomesSearchAndModelAnswersOnARealEngine` runs the same against a real
   Zetta with `LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` set (a local `zetta --headless`): a
   real search through `search_index`, training, publishing and `predict` on the hits.
@@ -183,6 +280,9 @@ decision 53), both of which multitenancy already holds. Audit goes to the worksp
 - In a browser: `tools/e2e/quickstart.mjs` ([../deployment/browser-testing.md](../deployment/browser-testing.md)).
 
 ## How to change it
+
+- What a kind is used for: `describe` in `src/api/quickstart_columns.cpp`; what is offered first:
+  `suggest`; a refusal Lake fixes: `fix_for`, and its words: `explain_refusal`.
 
 - A new step: a field on the record, a `step(...)` in `status_of`, its call in the capability that
   owns it (as a nested registry call), its cost in `costs_for`, and the console's card.

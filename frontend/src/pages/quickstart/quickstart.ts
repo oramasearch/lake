@@ -14,13 +14,48 @@ export type Status = {
   state: QuickstartState;
   next: string;
   steps: Step[];
-  dataset: { id: string; database: string; name: string; rows?: number | null; columns?: { name: string; type: string }[] } | null;
+  dataset: { id: string; database: string; name: string; rows?: number | null; columns?: Column[] } | null;
   index: { id: string; fields: string[]; published: boolean } | null;
-  training: { run_id?: string; target?: string | null; entity_column?: string | null; methodology?: string } | null;
+  training: {
+    run_id?: string;
+    target?: string | null;
+    target_value?: string | null;
+    entity_column?: string | null;
+    methodology?: string;
+    as_of?: string;
+    preparation?: Preparation | null;
+  } | null;
+  /** The date the dataset's dates are read as of (lake#1181). */
+  snapshot_date?: string | null;
+  /** The column to predict (and value) and the row's name offered first. */
+  suggested?: { target: string | null; target_value: string | null; entity_column: string | null } | null;
   model: { id: string; published: boolean } | null;
   workspace?: { ready?: boolean; phase?: string; message?: string };
   quickstarts?: { quickstart_id: string; dataset_id: string | null; created_at: string | null }[];
   costs?: Costs;
+};
+/** A dataset column with its detected kind (lake#1181, docs/api/quickstart.md#columns). `kind` is
+ * null when the engine could not profile it. */
+export type Column = {
+  name: string;
+  type: string;
+  kind?: string | null;
+  title?: string;
+  distinct_count?: number;
+  values?: string[];
+  feature?: { use: boolean; reason?: string };
+  predict?: { can: boolean; reason?: string; values?: string[]; choose_value?: boolean; positive?: string };
+};
+/** How a training was prepared: the copy it trained on, what was left out and why. */
+export type Preparation = {
+  copy: boolean;
+  dataset_id?: string | null;
+  entity?: string;
+  used?: string[];
+  dropped?: { name: string; reason: string }[];
+  label?: { column: string; positive: string } | null;
+  note?: string | null;
+  applied?: string[];
 };
 export type Rate = { unit_micros: number; per: number } | null;
 export type Costs = {
@@ -129,6 +164,77 @@ export function firstColumns(fields: string[], columns: { name: string; type: st
   if (names.length === 1) return { target, entity: "" };
   const text = columns.find((c) => c.name !== target && c.type === "string");
   return { target, entity: text ? text.name : names[0] };
+}
+
+/** Whether every column carries a detected kind, so the page offers the detected choices. */
+export function detected(columns: Column[] | undefined): boolean {
+  return !!columns && columns.length > 0 && columns.every((c) => typeof c.kind === "string");
+}
+
+/** The columns the model can predict, each with its detected type, as the choice lists them. */
+export function predictable(columns: Column[]): { name: string; label: string }[] {
+  return columns.filter((c) => c.predict?.can).map((c) => ({ name: c.name, label: c.title ? `${c.name} (${c.title})` : c.name }));
+}
+
+/** A column's detected type, as the column list shows it. */
+export function kindLabel(column: Column): string {
+  return column.title ?? column.type ?? "";
+}
+
+/** What the person has chosen for training. */
+export type Choice = { target: string; value: string; entity: string; asOf: string };
+
+/** The choices the page starts with: what the last training used, else what Lake suggests, else
+ * (an engine that could not profile the columns) the file's order. */
+export function startingChoice(status: Pick<Status, "dataset" | "index" | "training" | "suggested" | "snapshot_date">): Choice {
+  const columns = status.dataset?.columns ?? [];
+  const asOf = dateInput(status.training?.as_of ?? status.snapshot_date ?? "");
+  if (!detected(columns)) {
+    const guess = firstColumns(columns.length ? columns.map((c) => c.name) : status.index?.fields ?? [], columns);
+    return { target: status.training?.target ?? guess.target, value: "", entity: status.training?.entity_column ?? guess.entity, asOf };
+  }
+  const can = new Set(predictable(columns).map((c) => c.name));
+  const trained = status.training?.target && can.has(status.training.target) ? status.training : null;
+  const target = trained?.target ?? status.suggested?.target ?? "";
+  const value = trained ? trained.target_value ?? "" : status.suggested?.target === target ? status.suggested?.target_value ?? "" : "";
+  const entity = trained ? trained.entity_column ?? "" : status.suggested?.entity_column ?? "";
+  return { target, value: value || valuesOf(columns, target)[0] || "", entity, asOf };
+}
+
+/** The values offered for a category to predict; empty for a column with two values. */
+export function valuesOf(columns: Column[], target: string): string[] {
+  const column = columns.find((c) => c.name === target);
+  return column?.predict?.choose_value ? column.predict.values ?? [] : [];
+}
+
+/** What happens to each column with these choices, in the file's order. */
+export function columnUses(columns: Column[], choice: Pick<Choice, "target" | "entity">): { name: string; kind: string; use: string; reason: string; used: boolean }[] {
+  return columns.map((c) => {
+    const kind = kindLabel(c);
+    if (c.name === choice.target) return { name: c.name, kind, use: "Predicted", reason: "", used: true };
+    if (c.name === choice.entity) return { name: c.name, kind, use: "Names a row", reason: "", used: true };
+    if (c.feature?.use) return { name: c.name, kind, use: "Learned from", reason: c.feature.reason ?? "", used: true };
+    return { name: c.name, kind, use: "Left out", reason: c.feature?.reason ?? "", used: false };
+  });
+}
+
+/** A date or ISO time as a date field's value (YYYY-MM-DD); empty when it is not one. */
+export function dateInput(value: string): string {
+  return /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : "";
+}
+
+/** train_quickstart's input for these choices: as_of only when the date was changed. */
+export function trainInput(choice: Choice, columns: Column[], snapshot: string | null | undefined): Record<string, string> {
+  const input: Record<string, string> = { target: choice.target };
+  if (choice.value && valuesOf(columns, choice.target).length) input.target_value = choice.value;
+  if (choice.entity) input.entity_column = choice.entity;
+  if (choice.asOf && choice.asOf !== dateInput(snapshot ?? "")) input.as_of = choice.asOf;
+  return input;
+}
+
+/** The train button's words: a first training, or another with changed choices after a failure. */
+export function trainLabel(failed: boolean): string {
+  return failed ? "Train with these choices" : "Train a model";
 }
 
 /** How often the page reads the status: often while the workspace starts or the model trains,
