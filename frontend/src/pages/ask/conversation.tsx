@@ -15,7 +15,8 @@ import { ApiError, act, useRead, type Row } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { Badge, Button, ErrorBlock, Skeleton, cx } from "@/lib/ui";
 import { isWorkspacePath } from "@/routes";
-import { confirmOutcomes, proposalCall, shownValue, visibleText, type ProposalCall } from "./home";
+import { confirmOutcomes, proposalCall, type ProposalCall } from "./home";
+import { ProposalCallView } from "./proposalCard";
 import { talkToAgents, type TalkToAgent } from "@/lib/agents";
 import { Markdown, qs, secondsSince, spokenDuration, useWorkspace, useWq } from "@/pages/train/workspace";
 
@@ -308,37 +309,6 @@ export function AskMessages({
       })}
       {working && <AskWorking task={task} fallbackAgent={agent} name={name} />}
     </section>
-  );
-}
-
-/** The exact call Confirm runs (lake#942), as Lake states it: the capability, then every input
- * field with its schema description and value (shownValue and visibleText, so nothing can hide). The
- * person reviews these, not the model's explanation, which the proposal shows apart from them. */
-function ProposalCallView({ call }: { call: ProposalCall }) {
-  return (
-    <div className="stack gap-1">
-      <p className="m-0">
-        <strong>Confirm runs</strong> <code>{call.capability}</code>
-        {call.title ? ` (${call.title}${call.kind === "action" ? ", a change" : ""})` : ""} with exactly:
-      </p>
-      {call.fields.length ? (
-        <dl>
-          {call.fields.map((field) => (
-            <div key={field.name} className="contents">
-              <dt>
-                <code>{visibleText(field.name)}</code>
-                {field.description ? <span className="muted"> {field.description}</span> : null}
-              </dt>
-              <dd>
-                <code className="whitespace-pre-wrap">{shownValue(field.value)}</code>
-              </dd>
-            </div>
-          ))}
-        </dl>
-      ) : (
-        <p className="muted m-0">no input</p>
-      )}
-    </div>
   );
 }
 

@@ -35,7 +35,10 @@ shows it and keeps it honest.
   the `get_agent_task` call it already makes; it adds no workspace call. Replies and delegations
   name agents as people call them (*Experiments Agent*, not `agent-experiments`).
 - Each of Ask Orama's **proposals** (a change it wants to make) is shown with its capability and its
-  impact, and a **Confirm** button. A confirmed proposal that worked shows *Confirmed* and is never
+  impact, and a **Confirm** button. Each argument of the call is three rows, its name, its value,
+  then its description, so a value has the card's full width and wraps at any character; a value
+  longer than six lines (JSON, a long intent) shows its first lines and *Show all N lines*
+  (lake#1192, [below](#what-confirm-runs-lake942)). A confirmed proposal that worked shows *Confirmed* and is never
   offered again. One whose confirm did not work shows the stored *That did not work: …* reason
   under it and never shows *Confirmed* (lake#794). It keeps a **Try again** button only when the
   stored outcome says trying again could work (`retry: true`, a transient refusal); otherwise the
@@ -140,8 +143,32 @@ conversation) and is audited in that workspace's log.
   it again.* A proposal missing several required fields names **every** one in one sentence
   (*create_stream needs `zetta` and `topic`, …*), listed in `error.missing`, so one reply settles it;
   `validate_input` itself still stops at the first. Only the proposals that can run keep an index
-  for `confirm_ask_proposal`. Nothing is called to check. A check that needs the data (a topic
-  already taken, a system stream) still happens only when the person confirms.
+  for `confirm_ask_proposal`. Nothing is called for these checks. A check that needs the data (a
+  topic already taken, a system stream) still happens only when the person confirms, except the
+  project check below.
+- **A proposal for a project that does not exist is never offered** (lake#1193). After the schema
+  check, every proposal whose capability works on an existing project (`compile_intent`,
+  `capture_intent`, `compile_n8n`, `compile_python`, `import_n8n`, `save_pipeline`,
+  `check_pipeline`, `start_run`, `deploy_pipeline`, `approve_pipeline`, `compile_pipeline`,
+  `run_pipeline`, `edit_pipeline`, `create_pipeline`, or one of the engine's names sent through
+  `workspace_act`) has its `project` read once with the engine's `get_project`, as the person. A
+  project the engine answers `not_found` for withholds the proposal (`error {code: "not_found",
+  path: "/project"}`) with *I could not offer this change: there is no project named "…" in this
+  workspace, so compile_intent could not run. To build it in a new project, I can propose
+  compile_pipeline with `create_project`, which creates the project and its pipeline in one
+  confirmation.* A `compile_pipeline` with `create_project` for a project that already exists is
+  withheld the other way (`conflict` at `/create_project`). A read that settles nothing (the
+  workspace not reachable) leaves the proposal offered, and confirm still checks. Only reads are
+  made.
+- **Each turn hears what became of the conversation's proposals** (lake#1194). `send_ask_message`
+  reads the conversation and hands Ask Orama's turn `context.proposals`: the last ten proposals,
+  oldest first, each `{message_id, index?, capability, input, state}` with `state` `pending`
+  (offered, not confirmed), `confirmed`, `failed` (with the stored `error`, its `code` and
+  `retry`) or `withheld` (with the reason). `agent_turn` passes an Ask Orama turn's `context`
+  through. It is information, never authority: the turn's key still carries no action. So after a
+  failed confirm, "create it then" is answered with a new proposal that corrects the error, never
+  with *confirm the proposal in Lake* about the one that failed ([agent-ask-orama](https://github.com/oramasearch/agent-ask-orama)
+  reads it). A conversation that cannot be read sends no `context`, and the turn still runs.
 - **The answer is the agent's writing, read by type.** A proposal whose `capability` is absent,
   null or a number is withheld (*a proposed change does not say which capability it runs.*, at
   `/capability`); a `reply` or `trace_id` that is not text is stored as empty. Neither ever fails the
@@ -192,8 +219,13 @@ model's account of it.
   `invalid_input`; this is a breaking change for API and MCP callers, which read
   `get_ask_conversation` first.
 - **The web app shows the call and keeps the model's words apart.** Each proposal shows *Confirm
-  runs `<capability>` (<title>, a change) with exactly:* and every field with its description and
-  value, then the impact under *Ask Orama's explanation, not checked by Lake*. Values are written as
+  runs `<capability>` (<title>, a change) with exactly:* and every field as three rows, its name,
+  its value, then its description, then the impact under *Ask Orama's explanation, not checked by
+  Lake*. The rows replace a two-column grid whose value column collapsed to one character per line
+  beside a long description (lake#1192): a value has the card's full width and wraps at any
+  character, a value of several lines or over 80 characters is a wrapped block, and one longer than
+  six lines shows its first six with *Show all N lines*; the whole value is always in the page
+  (`ProposalCallView` in `frontend/src/pages/ask/proposalCard.ts`). Values are written as
   JSON, so a string keeps its quotes and a leading or trailing blank shows, and every control,
   format or bidirectional character and every whitespace character other than the plain blank
   (a right-to-left override `U+202E`, a zero-width `U+200B`) is written as `\u{…}`. A
@@ -206,6 +238,25 @@ For example, the web app's `send_ask_message` (`POST /w/<workspace_id>/v1/send_a
 ```json
 {"customer_id": "8f1c…", "workspace_id": "4b2e…", "message": "What do I have?", "page": {"path": "/design/project", "name": "churn"}}
 ```
+
+## A new project in one confirmation (lake#1193)
+
+`compile_intent` works only on a project that exists, so a plan for a new project used to need two
+proposals, or failed on confirm. A new project's pipeline is one proposal instead:
+`compile_pipeline` with `create_project: true` ([web-app.md](web-app.md#compile_pipeline)) creates
+the project, described by the intent, then captures the intent and compiles it (with
+`methodology`, that methodology's own pipeline, and with `dataset`, pointed at it). One
+confirmation runs both steps. A project that already has the name is refused as `conflict` before
+anything is written; a compile that fails after the project was created says the project was
+created. Ask Orama proposes this for a new project (its prompt v15), for example:
+
+```json
+{"capability": "compile_pipeline", "input": {"project": "Customer Segmentation EDA Dashboard", "intent": "Segment customers from datasets.ux_review_20261018_customers", "dataset": "datasets.ux_review_20261018_customers", "methodology": "M-3", "create_project": true}}
+```
+
+The other way, `create_project` then `compile_intent` as two proposals, was not chosen: the second
+would be withheld until the first was confirmed, and two confirmations for one plan is the failure
+this replaces.
 
 ## Deleting a conversation
 
@@ -279,6 +330,27 @@ without `input_sha256` (400) or with another digest (409) creates no invitation 
 outcome; the confirm with the shown digest creates the invitation with exactly the values shown.
 `frontend/tests/home.test.ts` checks that the page offers no Confirm without Lake's call and that a
 shown value cannot hide characters.
+
+`HttpServer/HttpResponseIsolation.AskOramaNeverOffersAProposalForAMissingProject` (lake#1193): an
+answer proposing `compile_intent` on a project the workspace does not have, `compile_pipeline` with
+`create_project` for one it has, and `compile_pipeline` with `create_project` for a new one is
+stored with only the last offered, the first two withheld at `/project` (`not_found`) and
+`/create_project` (`conflict`) with sentences that say what to do, and only `get_project` read to
+check; confirming the offered one creates the project, then compiles its pipeline, and stores
+*Done: compile_pipeline.*; `compile_pipeline` called directly with `create_project` on an existing
+project is 409 and creates nothing.
+
+`HttpServer/HttpResponseIsolation.AskOramaHearsWhatBecameOfItsEarlierProposals` (lake#1194): a first
+turn carries no `context`; a `compile_intent` proposal whose project is deleted before the confirm
+fails with `not_found`; the next turn ("create it then") carries `context.proposals` with that
+proposal `failed`, its code, `retry: false` and the error; the corrected `compile_pipeline` with
+`create_project` it answers is offered and confirms; the turn after hears the failed proposal and
+the confirmed correction.
+
+`frontend/tests/home.test.ts` *the confirm card gives every value its own full-width row*
+(lake#1192) renders the card with a UUID, a long sentence and a JSON object: no `dl`, three rows of
+name, value and description, the sentence a whole wrapped block, the JSON laid out with every line
+in the page and *Show all N lines*, and the stylesheet's wrapping rules.
 
 `HttpServer/HttpResponseIsolation.TheWebAppTalksToAskOramaThroughCapabilities` (lake#561): the same
 conversation over `/v1` with the browser session: `send_ask_message` with a page, `settle_ask_turn`

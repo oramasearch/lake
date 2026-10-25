@@ -6,6 +6,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { askLinkTarget, confirmOutcomes, greeting, homeLink, homeView, isAskHome, landingAfterSignIn, linkThread, proposalCall, shownValue, starterQuestions, visibleText } from "../src/pages/ask/home.ts";
 import { HOME_NAV, currentNavIn, localPath } from "../src/routes/nav.ts";
+import { readFileSync } from "node:fs";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { ProposalCallView, VALUE_PREVIEW_LINES, fieldValueLayout } from "../src/pages/ask/proposalCard.ts";
+
+const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 
 const person = { signed_in: true, administrator: false };
 const operator = { signed_in: true, administrator: true };
@@ -254,4 +260,53 @@ test("a shown value cannot hide characters (lake#942)", () => {
   assert.equal(shownValue({ public: true }), '{\n  "public": true\n}');
   assert.equal(shownValue(3), "3");
   assert.equal(visibleText("role\u2066"), "role\\u{2066}", "a field's name too");
+});
+
+test("the confirm card gives every value its own full-width row (lake#1192)", () => {
+  const customer = "b267e8df-afb0-41ee-bcb7-02713e7a9fbe";
+  const intent =
+    "Segment customers from datasets.ux_review_20261018_customers into behavioural clusters and show each cluster's size, its defining columns and how it changed over the last quarter";
+  const hints = { source: "datasets", table: "ux_review_20261018_customers", entity_column: "customer_id", columns: ["tenure", "spend", "plan", "region"] };
+  const call = {
+    capability: "compile_pipeline",
+    title: "Build a pipeline from a description",
+    kind: "action",
+    fields: [
+      { name: "customer_id", description: "the account whose workspace this is", value: customer },
+      { name: "intent", description: "reserved: say what you are trying to do; recorded on the call's trace, stripped before schema validation", value: intent },
+      { name: "hints", description: "known dataset, label, time column, and other shape hints", value: hints },
+    ],
+    input_sha256: "c".repeat(64),
+  };
+  const html = renderToStaticMarkup(createElement(ProposalCallView, { call }));
+  // No two-column grid: the dl whose description column took the width is gone.
+  assert.doesNotMatch(html, /<(dl|dt|dd)\b/);
+  const rows = html.match(/<li class="ask-proposal-field">[\s\S]*?<\/li>/g) ?? [];
+  assert.equal(rows.length, 3, html);
+  // Each row is the name, then the value, then the description.
+  const [uuidRow, intentRow, hintsRow] = rows;
+  assert.match(uuidRow, /^<li class="ask-proposal-field"><code class="ask-proposal-field-name">customer_id<\/code><code class="ask-proposal-value">&quot;b267e8df-afb0-41ee-bcb7-02713e7a9fbe&quot;<\/code><p class="ask-proposal-field-about">the account whose workspace this is<\/p><\/li>$/);
+  // A long sentence is a wrapped block, whole, and short enough to need no "Show all".
+  assert.ok(intentRow.indexOf("ask-proposal-field-name") < intentRow.indexOf(intent.slice(0, 40)));
+  assert.ok(intentRow.indexOf(intent.slice(-30)) < intentRow.indexOf("ask-proposal-field-about"));
+  assert.match(intentRow, /<pre class="ask-proposal-value"><code>&quot;Segment customers/);
+  assert.doesNotMatch(intentRow, /Show all/);
+  // A JSON object is laid out over lines, every line in the page, and folds past a few lines.
+  const layout = fieldValueLayout(hints);
+  assert.ok(layout.block && layout.collapsible && layout.lines > VALUE_PREVIEW_LINES, JSON.stringify(layout));
+  assert.match(hintsRow, /<pre class="ask-proposal-value ask-proposal-value-collapsed"><code>\{\n  &quot;source&quot;: &quot;datasets&quot;,/);
+  assert.ok(hintsRow.includes("&quot;region&quot;\n  ]\n}"), "the last line is in the page, not cut");
+  assert.match(hintsRow, new RegExp(`aria-expanded="false"[^>]*>Show all ${layout.lines} lines</button>`));
+  // A short value stays inline; a long one-line value becomes a block.
+  assert.equal(fieldValueLayout("owner").block, false);
+  assert.equal(fieldValueLayout("x".repeat(120)).block, true);
+  assert.equal(fieldValueLayout("x".repeat(120)).collapsible, false);
+  // The page uses this card, and its value wraps at any character in the card's full width.
+  assert.match(read("src/pages/ask/conversation.tsx"), /import \{ ProposalCallView \} from "\.\/proposalCard"/);
+  const css = read("src/styles/lake.css");
+  const rule = (selector: string) => css.match(new RegExp(`(^|\\n)${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\{([^}]*)\\}`))?.[2] ?? "";
+  assert.match(rule(".ask-proposal-fields"), /flex-direction: column/);
+  assert.match(rule(".ask-proposal-value"), /overflow-wrap: anywhere/);
+  assert.match(rule(".ask-proposal-value"), /white-space: pre-wrap/);
+  assert.match(rule(".ask-proposal-value-collapsed"), /overflow: hidden/);
 });
