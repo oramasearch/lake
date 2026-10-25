@@ -362,6 +362,13 @@ solutions are sealed `lake_solutions` records in the workspace Zetta, listed and
 catalogue, which it reads through the workspace's engine (`list_solutions`, `get_solution`);
 `update_solution` and `delete_solution` answer `forbidden` for Orama's. See `docs/api/solutions.md`.
 
+`feature_planning.cpp` runs around the engine's `plan_features` (lake#1153), on the path
+`workspace_capabilities.cpp` gives both `plan_features` and `workspace_query`: a missing
+`methodology` is chosen from `analyze_dataset`, a missing `as_of` is read from the dataset's
+snapshot column (`dataset_as_of`, the one place Lake reads a dataset's cutoff), and a
+`transform_required` gets `performed_by`, the Lake capabilities that do it. See
+`docs/api/feature-planning.md`.
+
 `methodology_capabilities.cpp` registers a workspace's own methodologies (lake#655): the code is
 committed to a workspace repository through the repository store, registered by the engine
 (`register_methodology`, `update_methodology`, `delete_methodology`), built by `build_image` and run

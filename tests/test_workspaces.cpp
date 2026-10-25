@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -19,6 +20,7 @@
 #include <zetta/connect/egress_policy.hpp>
 #include <zetta/connect/http_transport.hpp>
 
+#include "api/feature_planning.hpp"
 #include "experiment_fixture.hpp"
 #include "lake/api/agent_docs.hpp"
 #include "lake/api/audit_routing.hpp"
@@ -1987,6 +1989,197 @@ TEST(Workspaces, DatasetWritesAreCheckedAndIdsAgree) {
     ASSERT_TRUE(without->ok) << without->error.message;
     EXPECT_EQ(without->value["id"], "datasets/accounts");
     EXPECT_EQ(without->value["kind"], "data");
+}
+
+// plan_features takes a dataset alone (lake#1153): the methodology is chosen from the analysis, the
+// cutoff is read from the dataset's snapshot column, and a transform the engine still asks for
+// names the Lake capability that performs it. Each shape is one the issue's Auto-Suggest Agent scan
+// declined.
+TEST(Workspaces, PlanFeaturesTakesADatasetAloneAndReadsItsSnapshotCutoff) {
+    Workspaces w;
+    lake::control::InMemoryStore& store = *w.store;
+    const auto principal = store.context_for(w.secret);
+    auto requested = w.run(w.service->request(w.customer_id));
+    const auto workspace = store.get_service(requested->service_id);
+    ASSERT_TRUE(store.set_service_status(workspace->id, "Ready", "", "http://ws:4800"));
+    w.deliver(*workspace, {{"kind", "zetta"}, {"token", "t"}});
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const auto call = [&](const std::string& name, json input) {
+        lake::api::ApiContext context;
+        context.store = &store;
+        context.workspaces = w.service.get();
+        context.registry = &registry;
+        context.authorized = true;
+        context.acting_user_id = principal->user_id;
+        context.acting_identity = principal->taap_id;
+        context.credential_session_id = principal->session_id;
+        context.credential_kind = principal->kind;
+        context.scopes = principal->scopes;
+        context.request_id = lake::control::new_uuid_v4();
+        input["customer_id"] = w.customer_id;
+        input["workspace_id"] = w.workspace_id();
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(completed);
+        return std::move(*completed);
+    };
+    const auto sent = [&](const std::string& capability) {
+        for (auto it = w.caller->calls.rbegin(); it != w.caller->calls.rend(); ++it) {
+            if (it->first == capability) {
+                return it->second;
+            }
+        }
+        return json();
+    };
+    const auto column = [](const char* name) { return json{{"name", name}, {"type", "string"}}; };
+    const json labelled = {
+        {"columns",
+         json::array({{{"name", "account"}, {"role_candidates", json::array()}},
+                      {{"name", "churned"}, {"role_candidates", json::array({"label"})}}})}};
+    w.caller->answers["analyze_dataset"] = labelled;
+    w.caller->answers["plan_features"] = {
+        {"status", "ready"}, {"dataset", "datasets.ux_review_churn"}, {"methodology", "M-1"},
+        {"entries", json::array()}, {"excluded", json::array()}, {"transform_required", nullptr}};
+
+    // Shape 3: account, as_of, churn_window_days, ... churned. No methodology, no cutoff named.
+    w.caller->answers["get_dataset"] = {
+        {"name", "ux_review_churn"}, {"database", "datasets"},
+        {"columns", json::array({column("account"), column("as_of"), column("churn_window_days"),
+                                 column("churned")})}};
+    // Blanks and nulls may sort first; the latest date is taken.
+    w.caller->answers["sql"] = {
+        {"columns", json::array({"as_of"})},
+        {"rows", json::array({{{"as_of", nullptr}}, {{"as_of", ""}}, {{"as_of", "2026-09-27"}},
+                              {{"as_of", "2026-09-01"}}})}};
+    w.caller->calls.clear();
+    auto planned = call("plan_features", {{"dataset", "datasets.ux_review_churn"}});
+    ASSERT_TRUE(planned.ok) << planned.error.code << ": " << planned.error.message;
+    json engine = sent("plan_features");
+    EXPECT_EQ(engine["dataset"], "datasets.ux_review_churn");
+    EXPECT_EQ(engine["methodology"], "M-1");
+    EXPECT_EQ(engine["as_of"], "2026-09-27");
+    EXPECT_EQ(engine["time_column"], "as_of");
+    EXPECT_EQ(sent("sql")["statement"],
+              "SELECT as_of FROM datasets.ux_review_churn ORDER BY as_of DESC LIMIT 16");
+    EXPECT_EQ(sent("get_dataset"), (json{{"dataset", "ux_review_churn"}, {"database", "datasets"}}));
+    EXPECT_EQ(planned.value["inferred"]["methodology"]["id"], "M-1");
+    EXPECT_NE(planned.value["inferred"]["methodology"]["reason"].get<std::string>().find("churned"),
+              std::string::npos);
+    EXPECT_EQ(planned.value["inferred"]["as_of"]["column"], "as_of");
+    EXPECT_EQ(planned.value["inferred"]["as_of"]["value"], "2026-09-27");
+    EXPECT_FALSE(planned.value.contains("as_of_unavailable"));
+
+    // The same through workspace_query, with a bare name, as Auto-Suggest Agent asks.
+    w.caller->calls.clear();
+    planned = call("workspace_query",
+                   {{"capability", "plan_features"},
+                    {"input", {{"dataset", "ux_review_churn"}, {"methodology", "M-3"}}}});
+    ASSERT_TRUE(planned.ok) << planned.error.message;
+    engine = sent("plan_features");
+    EXPECT_EQ(engine["methodology"], "M-3") << "a named methodology is kept";
+    EXPECT_EQ(engine["as_of"], "2026-09-27");
+    EXPECT_EQ(sent("get_dataset"), (json{{"dataset", "ux_review_churn"}}));
+    EXPECT_TRUE(sent("analyze_dataset").is_null()) << "no analysis when the methodology is named";
+    EXPECT_FALSE(planned.value["inferred"].contains("methodology"));
+
+    // Shape 2: observed_at is the snapshot column; a time_column named by the caller wins.
+    w.caller->answers["get_dataset"] = {
+        {"name", "churn"}, {"database", "datasets"},
+        {"columns", json::array({column("account"), column("observed_at"), column("churned")})}};
+    w.caller->answers["sql"] = {{"rows", json::array({{{"observed_at", "2026-10-01"}}})}};
+    planned = call("plan_features", {{"dataset", "churn"}, {"methodology", "M-1"}});
+    ASSERT_TRUE(planned.ok);
+    EXPECT_EQ(sent("plan_features")["as_of"], "2026-10-01");
+    EXPECT_EQ(sent("plan_features")["time_column"], "observed_at");
+    planned = call("plan_features",
+                   {{"dataset", "churn"}, {"methodology", "M-1"}, {"time_column", "missing"}});
+    ASSERT_TRUE(planned.ok);
+    EXPECT_FALSE(sent("plan_features").contains("as_of"));
+
+    // A cutoff the caller names is used as named, and Lake reads nothing to find one.
+    w.caller->calls.clear();
+    planned = call("plan_features",
+                   {{"dataset", "churn"}, {"methodology", "M-1"}, {"as_of", "2026-06-30"}});
+    ASSERT_TRUE(planned.ok);
+    EXPECT_EQ(w.caller->calls.size(), 1U) << w.caller->calls.front().first;
+    EXPECT_EQ(sent("plan_features")["as_of"], "2026-06-30");
+    EXPECT_FALSE(planned.value.contains("inferred"));
+
+    // Shape 1: no date at all. Nothing is inferred and the engine plans it as it is.
+    w.caller->answers["get_dataset"] = {
+        {"name", "churn_plain"}, {"database", "datasets"},
+        {"columns", json::array({column("account"), column("tenure_months"), column("churned")})}};
+    planned = call("plan_features", {{"dataset", "churn_plain"}});
+    ASSERT_TRUE(planned.ok);
+    EXPECT_FALSE(sent("plan_features").contains("as_of"));
+    EXPECT_EQ(sent("plan_features")["methodology"], "M-1");
+    EXPECT_FALSE(planned.value["inferred"].contains("as_of"));
+
+    // A date that is not a snapshot (signup_date) still needs a cutoff: the transform names the
+    // capabilities that give it, and why Lake did not.
+    w.caller->answers["get_dataset"] = {
+        {"name", "accounts"}, {"database", "datasets"},
+        {"columns", json::array({column("account"), column("signup_date"), column("churned")})}};
+    w.caller->answers["plan_features"] = {
+        {"status", "transform_required"}, {"dataset", "datasets.accounts"}, {"methodology", "M-1"},
+        {"entries", json::array()}, {"excluded", json::array()},
+        {"transform_required",
+         {{"name", "add_snapshot_date"},
+          {"description", "Datetime features must be computed relative to a declared as_of"},
+          {"proposed_create_dataset_from_query_sql", ""},
+          {"clean_step", "Add a snapshot date for each prediction row and pass it as as_of."}}}};
+    planned = call("plan_features", {{"dataset", "accounts"}, {"methodology", "M-1"}});
+    ASSERT_TRUE(planned.ok);
+    const json transform = planned.value["transform_required"];
+    ASSERT_TRUE(transform["performed_by"].is_array());
+    EXPECT_EQ(transform["performed_by"][0]["capability"], "plan_features");
+    EXPECT_EQ(transform["performed_by"][0]["input"]["dataset"], "datasets.accounts");
+    EXPECT_EQ(transform["performed_by"][1]["capability"], "upload_dataset");
+    EXPECT_NE(transform["why_no_as_of"].get<std::string>().find("snapshot date"),
+              std::string::npos);
+    EXPECT_FALSE(planned.value.contains("inferred"));
+
+    // Event rows: the engine's proposed SELECT runs with workspace_sql, the result loads with
+    // upload_dataset.
+    w.caller->answers["plan_features"]["transform_required"] = {
+        {"name", "aggregate_events_to_entity"},
+        {"description", "one row per entity"},
+        {"proposed_create_dataset_from_query_sql",
+         "SELECT account, COUNT(*) AS event_count FROM datasets.events GROUP BY account"},
+        {"clean_step", ""}};
+    planned = call("plan_features", {{"dataset", "accounts"}, {"methodology", "M-1"}});
+    ASSERT_TRUE(planned.ok);
+    EXPECT_EQ(planned.value["transform_required"]["performed_by"][0]["capability"],
+              "workspace_sql");
+    EXPECT_EQ(planned.value["transform_required"]["performed_by"][0]["input"]["statement"],
+              "SELECT account, COUNT(*) AS event_count FROM datasets.events GROUP BY account");
+    EXPECT_EQ(planned.value["transform_required"]["performed_by"][1]["capability"],
+              "upload_dataset");
+
+    // With no methodology and a dataset the engine cannot analyze, the refusal says both.
+    w.caller->failure = lake::control::ZettaControlError{
+        "invalid_input", "dataset: no dataset named 'nothing'"};
+    w.caller->failure_for = "analyze_dataset";
+    auto refused = call("plan_features", {{"dataset", "nothing"}});
+    ASSERT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "invalid_input");
+    EXPECT_EQ(refused.error.path, "/dataset");
+    EXPECT_NE(refused.error.message.find("needs a methodology"), std::string::npos);
+    EXPECT_NE(refused.error.message.find("no dataset named 'nothing'"), std::string::npos);
+    w.caller->failure.reset();
+    w.caller->failure_for.clear();
+
+    // Without a label the plan is segmentation.
+    w.caller->answers["analyze_dataset"] = {
+        {"columns", json::array({{{"name", "account"}, {"role_candidates", json::array()}}})}};
+    planned = call("plan_features", {{"dataset", "churn_plain"}});
+    ASSERT_TRUE(planned.ok);
+    EXPECT_EQ(sent("plan_features")["methodology"], "M-3");
+    EXPECT_EQ(planned.value["inferred"]["methodology"]["id"], "M-3");
+
+    EXPECT_TRUE(lake::api::is_snapshot_column("As_Of"));
+    EXPECT_TRUE(lake::api::is_snapshot_column("snapshot_date"));
+    EXPECT_FALSE(lake::api::is_snapshot_column("signup_date"));
 }
 
 // Train > Agents (docs/api/train-agents.md, lake#229): the agents people build live in the
@@ -5689,4 +5882,145 @@ TEST(SafeMode, AWarningCarriesItsStatementsAndTheConfirmationRunsTheCall) {
     ASSERT_FALSE(other.ok);
     EXPECT_TRUE(other.error.details.is_null());
     EXPECT_FALSE(other.envelope()["error"].contains("details"));
+}
+
+// lake#1153 on a real Zetta (a local `zetta --headless`, LAKE_TEST_ZETTA_URL and
+// LAKE_TEST_ZETTA_TOKEN): each churn table the issue's Auto-Suggest Agent scan declined plans `ready`
+// through Lake, from the dataset alone, and a date that is not a snapshot names how to give one.
+TEST(FeaturePlanZetta, EachChurnShapeFromTheIssuePlansFromTheDatasetAlone) {
+    const char* url = std::getenv("LAKE_TEST_ZETTA_URL");
+    const char* token = std::getenv("LAKE_TEST_ZETTA_TOKEN");
+    if (url == nullptr || token == nullptr || *url == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_ZETTA_URL and LAKE_TEST_ZETTA_TOKEN are not set";
+    }
+    lake::control::install_zetta_control_transport();
+    struct Shutdown {
+        ~Shutdown() {
+            lake::control::shutdown_zetta_control_transport();
+        }
+    } shutdown;
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const std::filesystem::path dir =
+        lake::test::fixture_path("feature-plan-zetta-" + lake::control::new_uuid_v4());
+    std::filesystem::create_directories(dir);
+    auto service = std::make_shared<lake::control::WorkspaceService>(
+        lake::control::WorkspaceConfig{dir.string(), 0},
+        store,
+        std::make_shared<lake::control::ZettaWorkspaceCaller>());
+    const std::string identity = "taap:1:ed25519:feature-plan-zetta";
+    const auto user = store->create_user({identity, "plan@example.test", "Plan"});
+    ASSERT_TRUE(user);
+    const auto customer = store->create_customer({"individual", user->id, "", "fpzetta"});
+    ASSERT_TRUE(customer);
+    const auto object = store->find_policy_object("customer", customer->id);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(store->create_grant({identity, object->id, "admin", "a", "admin", "r"}));
+    const auto workspace = store->create_workspace({customer->id, "home", "dev", ""});
+    ASSERT_TRUE(workspace) << workspace.error().message;
+    const auto zetta_service = store->get_service(workspace->zetta_service_id);
+    ASSERT_TRUE(zetta_service);
+    ASSERT_TRUE(store->set_service_status(zetta_service->id, "Ready", "", url));
+    std::ofstream(dir / (zetta_service->slug + ".json"))
+        << json{{"kind", "zetta"}, {"token", token}}.dump();
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const auto call = [&](const std::string& name, json input) {
+        lake::api::ApiContext context;
+        context.store = store.get();
+        context.workspaces = service.get();
+        context.registry = &registry;
+        context.authorized = true;
+        context.acting_identity = identity;
+        context.acting_user_id = user->id;
+        context.session_credential = true;
+        context.scopes = {"*"};
+        context.request_id = lake::control::new_uuid_v4();
+        input["customer_id"] = customer->id;
+        input["workspace_id"] = workspace->id;
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(completed);
+        return completed ? std::move(*completed) : lake::api::ApiResult{};
+    };
+
+    // The issue's shapes: 200 accounts, one row each, a churned label.
+    const std::string run = lake::control::new_uuid_v4().substr(0, 8);
+    std::string plain = "account,tenure_months,monthly_spend,support_tickets,churn_risk,churned\n";
+    std::string observed = "account,tenure_months,monthly_spend,support_tickets,churn_risk,churned,"
+                           "observed_at,churn_window_days\n";
+    std::string as_of =
+        "account,as_of,churn_window_days,tenure_months,monthly_spend,support_tickets,churned\n";
+    std::string signup = "account,signup_date,tenure_months,churned\n";
+    for (int row = 0; row < 200; ++row) {
+        const std::string account = "acct-" + std::to_string(1000 + row);
+        const std::string tenure = std::to_string(1 + row % 60);
+        const std::string spend = row % 37 == 0 ? "999" : std::to_string(20 + row % 250) + ".5";
+        const std::string tickets = std::to_string(row % 9);
+        const std::string risk = "0." + std::to_string(100 + row % 900);
+        const std::string churned = (row % 9 > 5 || row % 60 < 5) ? "1" : "0";
+        const std::string day = "2026-0" + std::to_string(1 + row % 9) + "-" +
+                                (row % 28 < 9 ? "0" : "") + std::to_string(1 + row % 28);
+        plain += account + "," + tenure + "," + spend + "," + tickets + "," + risk + "," +
+                 churned + "\n";
+        observed += account + "," + tenure + "," + spend + "," + tickets + "," + risk + "," +
+                    churned + "," + day + ",90\n";
+        as_of += account + "," + day + ",90," + tenure + "," + spend + "," + tickets + "," +
+                 churned + "\n";
+        signup += account + "," + day + "," + tenure + "," + churned + "\n";
+    }
+    const auto upload = [&](const std::string& table, const std::string& csv) {
+        auto loaded = call("upload_dataset",
+                           {{"table_name", table}, {"format", "csv"}, {"content", csv}});
+        ASSERT_TRUE(loaded.ok) << table << ": " << loaded.error.message;
+    };
+    upload("plain_" + run, plain);
+    upload("observed_" + run, observed);
+    upload("asof_" + run, as_of);
+    upload("signup_" + run, signup);
+
+    // Before lake#1153 this answered `invalid_input: no subschema has succeeded`.
+    auto plan = call("plan_features", {{"dataset", "datasets.asof_" + run}});
+    ASSERT_TRUE(plan.ok) << plan.error.code << ": " << plan.error.message;
+    EXPECT_EQ(plan.value["status"], "ready") << plan.value["transform_required"].dump();
+    EXPECT_EQ(plan.value["methodology"], "M-1");
+    EXPECT_EQ(plan.value["inferred"]["methodology"]["id"], "M-1");
+    EXPECT_EQ(plan.value["inferred"]["as_of"]["column"], "as_of");
+    EXPECT_EQ(plan.value["inferred"]["as_of"]["value"], "2026-09-27");
+
+    // Every methodology S-1 composes at level 1, on every shape, as Auto-Suggest Agent asks for it.
+    for (const std::string table : {"plain_" + run, "observed_" + run, "asof_" + run}) {
+        for (const char* methodology : {"M-1", "M-2", "M-3"}) {
+            auto planned = call("workspace_query",
+                                {{"capability", "plan_features"},
+                                 {"input", {{"dataset", table}, {"methodology", methodology}}}});
+            ASSERT_TRUE(planned.ok) << table << " " << methodology << ": "
+                                    << planned.error.message;
+            EXPECT_EQ(planned.value["status"], "ready")
+                << table << " " << methodology << ": "
+                << planned.value["transform_required"].dump();
+        }
+    }
+    plan = call("plan_features", {{"dataset", "observed_" + run}, {"methodology", "M-1"}});
+    ASSERT_TRUE(plan.ok);
+    EXPECT_EQ(plan.value["inferred"]["as_of"]["column"], "observed_at");
+    plan = call("plan_features", {{"dataset", "plain_" + run}});
+    ASSERT_TRUE(plan.ok);
+    EXPECT_FALSE(plan.value["inferred"].contains("as_of"));
+
+    // A signup date is a feature, not the cutoff: the engine still asks for one, and Lake says
+    // which capabilities give it. Declaring it makes the plan ready.
+    plan = call("plan_features", {{"dataset", "signup_" + run}, {"methodology", "M-1"}});
+    ASSERT_TRUE(plan.ok) << plan.error.message;
+    ASSERT_EQ(plan.value["status"], "transform_required");
+    EXPECT_EQ(plan.value["transform_required"]["name"], "add_snapshot_date");
+    EXPECT_EQ(plan.value["transform_required"]["performed_by"][0]["capability"], "plan_features");
+    EXPECT_EQ(plan.value["transform_required"]["performed_by"][1]["capability"], "upload_dataset");
+    plan = call("plan_features",
+                {{"dataset", "signup_" + run}, {"methodology", "M-1"}, {"as_of", "2026-10-01"}});
+    ASSERT_TRUE(plan.ok);
+    EXPECT_EQ(plan.value["status"], "ready") << plan.value["transform_required"].dump();
+
+    for (const std::string table :
+         {"plain_" + run, "observed_" + run, "asof_" + run, "signup_" + run}) {
+        static_cast<void>(call("delete_dataset", {{"id", "datasets/" + table}}));
+    }
 }

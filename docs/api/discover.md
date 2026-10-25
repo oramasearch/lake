@@ -1,5 +1,13 @@
 # Design → Opportunities
 
+**Updated 2026-10-25 (lake#1153): a clean table gets its Opportunity.** Auto-Suggest Agent plans every
+dataset with `plan_features`, which now reads the cutoff a table's rows were observed at from its
+snapshot column (`as_of`, `observed_at`, ...) instead of declining every table with a date as
+*transform first*, and names the Lake capability that performs any preparation that remains
+([feature-planning.md](feature-planning.md)). Auto-Suggest Agent's side (prompt v5, a *transform first*
+that the feature plans contradict becomes an Opportunity with its preparation in `required_first`)
+is [agent-autosuggest](https://github.com/oramasearch/agent-autosuggest)'s.
+
 **Updated 2026-10-03 (lake#376): Opportunities live in the workspace Zetta of the workspace their
 scan ran in.** A finished scan is saved, once, as records of the `lake_opportunities` collection in
 that workspace's Zetta ([workspace records](../architecture/workspace-records.md)), sealed and found
