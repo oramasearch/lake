@@ -27,6 +27,10 @@ import {
   trainLabel,
   valuesOf,
   type Choice,
+  type WebsiteView,
+  DEFAULT_WEBSITE_VIEW,
+  WEBSITE_VIEWS,
+  agentPrompt,
   type Column,
   rateLabel,
   stepTone,
@@ -445,6 +449,7 @@ function Website({ status }: { status: QuickstartStatus }) {
   };
   // Without `origins` quickstart_snippets changes nothing: it is POSTed, as a read.
   const snippets = usePostRead<Snippets>("quickstart_snippets", where);
+  const [view, setView] = useState<WebsiteView>(DEFAULT_WEBSITE_VIEW);
   const [lang, setLang] = useState<Lang>("html");
   const [site, setSite] = useState("");
   const [made, setMade] = useState<Snippets | null>(null);
@@ -457,6 +462,7 @@ function Website({ status }: { status: QuickstartStatus }) {
   const shown = made && !stale ? made : value;
   const snippet = shown?.snippets.find((s) => s.id === lang);
   const secret = made && !stale ? made.key?.secret ?? null : null;
+  const prompt = agentPrompt(shown, secret);
   return (
     <Card label={status.model?.published ? "Steps 3 and 5" : "Step 3"} title={status.model?.published ? "Search and Model Answers on Your Website" : "Search on Your Website"}>
       {snippets.isLoading ? (
@@ -467,7 +473,7 @@ function Website({ status }: { status: QuickstartStatus }) {
         <div data-testid="quickstart-website">
           <ol className="mt-0 pl-4 text-[13px] text-ink-2">
             <li>Type your website's address and make its key. The key only searches this index{value.includes_model ? " and asks your model" : ""}, only from that address, and it is shown once.</li>
-            <li>Copy the code into your page: a plain web page or a React component.</li>
+            <li>Copy the agent prompt into your coding agent, or the code into your page yourself: a plain web page or a React component.</li>
             <li>Open the page and search. {value.includes_model ? "Each result shows the model's answer beside it." : "Train a model below to add its answers."}</li>
           </ol>
           {error ? <ErrorBlock error={error} /> : null}
@@ -497,23 +503,37 @@ function Website({ status }: { status: QuickstartStatus }) {
               {typed && "error" in typed ? <p className="m-0 basis-full text-[12px] text-bad">{typed.error}</p> : null}
             </form>
           )}
-          <div className="mt-3">
-            <StateTabs<Lang>
-              value={lang}
-              onChange={setLang}
-              label="Code"
-              tabs={[
-                { value: "html", label: "Plain web page" },
-                { value: "react", label: "React" },
-                { value: "curl", label: "curl" },
-              ]}
-            />
+          <div className="mt-3" data-testid="quickstart-website-views">
+            <StateTabs<WebsiteView> value={prompt ? view : "code"} onChange={setView} label="How to add it" tabs={prompt ? WEBSITE_VIEWS : WEBSITE_VIEWS.filter((v) => v.value === "code")} />
           </div>
-          {snippet ? (
-            <div data-testid={`quickstart-snippet-${snippet.id}`}>
-              <CopyBlock value={withKey(snippet.code, value.key?.placeholder ?? "YOUR_LAKE_SEARCH_KEY", secret)} multiline />
+          {prompt && view === "prompt" ? (
+            <div data-testid="quickstart-agent-prompt">
+              <p className="mb-1 mt-2 text-[12.5px] text-ink-2">
+                Paste this into your coding agent (Claude Code, Cursor and the like) in your website's project. It holds the code, {secret ? "your key, " : ""}what the key can do, what Lake answers and how to check it works.
+              </p>
+              <CopyBlock value={prompt} label="Agent prompt" multiline />
             </div>
-          ) : null}
+          ) : (
+            <>
+              <div className="mt-3">
+                <StateTabs<Lang>
+                  value={lang}
+                  onChange={setLang}
+                  label="Code"
+                  tabs={[
+                    { value: "html", label: "Plain web page" },
+                    { value: "react", label: "React" },
+                    { value: "curl", label: "curl" },
+                  ]}
+                />
+              </div>
+              {snippet ? (
+                <div data-testid={`quickstart-snippet-${snippet.id}`}>
+                  <CopyBlock value={withKey(snippet.code, value.key?.placeholder ?? "YOUR_LAKE_SEARCH_KEY", secret)} multiline />
+                </div>
+              ) : null}
+            </>
+          )}
           {shown?.key ? (
             <p className="mb-0 text-[12px] text-ink-3">
               {shown.key.note} <Link to={`/w/${encodeURIComponent(status.workspace_id)}/ship/index?${new URLSearchParams({ customer_id: status.customer_id, id: status.index?.id ?? "" })}`}>Website keys</Link>

@@ -418,6 +418,40 @@ TEST(Quickstart, ADroppedDatasetBecomesSearchThenModelAnswers) {
     EXPECT_NE(curl.find("-H \"Origin: https://www.example.com\""), std::string::npos) << curl;
     EXPECT_TRUE(q.store->list_browser_keys(me.customer_id, "")->empty());
 
+    // The agent prompt (lake#1185), search only and without a key: everything a coding agent
+    // needs, and how to make the key.
+    {
+        const std::string prompt = snippets.value["prompt"];
+        for (const std::string needed : {std::string("https://lake.test/v1/search_index"),
+                                         std::string("index-1"),
+                                         me.workspace_id,
+                                         me.customer_id,
+                                         std::string("YOUR_LAKE_SEARCH_KEY"),
+                                         std::string("create_browser_key"),
+                                         std::string("\"origins\""),
+                                         std::string("Website Keys"),
+                                         std::string("\"hits\""),
+                                         std::string("\"score\""),
+                                         std::string("\"fields\""),
+                                         std::string("429"),
+                                         std::string("no results"),
+                                         std::string("framework"),
+                                         std::string("Access-Control-Allow-Origin"),
+                                         std::string("https://lake.test/mcp"),
+                                         std::string("https://lake.test/llms.txt"),
+                                         std::string("```html"),
+                                         std::string("```jsx"),
+                                         std::string("export function LakeSearch"),
+                                         std::string("600 calls a minute"),
+                                         std::string("title, genre, rating, popular")}) {
+            EXPECT_NE(prompt.find(needed), std::string::npos) << needed << "\n" << prompt;
+        }
+        EXPECT_EQ(prompt.find("POST https://lake.test/v1/predict"), std::string::npos)
+            << "no model yet";
+        EXPECT_EQ(prompt.find("`predict` value"), std::string::npos);
+        EXPECT_EQ(prompt.find("lbk."), std::string::npos) << "no secret it was not given";
+    }
+
     // With the website's origin, the call makes the key and puts it in the code, shown once.
     json for_site = where;
     for_site["origins"] = json::array({"https://shop.example.test"});
@@ -435,6 +469,13 @@ TEST(Quickstart, ADroppedDatasetBecomesSearchThenModelAnswers) {
         std::string(keyed.value["snippets"][2]["code"]).find("Origin: https://shop.example.test"),
         std::string::npos);
     ASSERT_EQ(q.store->list_browser_keys(me.customer_id, me.workspace_id)->size(), 1U);
+    // The key this call made is in the prompt, with the origins it allows.
+    {
+        const std::string prompt = keyed.value["prompt"];
+        EXPECT_NE(prompt.find("Bearer " + secret), std::string::npos);
+        EXPECT_NE(prompt.find("  - https://shop.example.test"), std::string::npos) << prompt;
+        EXPECT_EQ(prompt.find("YOUR_LAKE_SEARCH_KEY"), std::string::npos);
+    }
     // The key it made searches the quickstart's index from that website, as no person.
     {
         auto website = q.operator_context();
@@ -520,6 +561,19 @@ TEST(Quickstart, ADroppedDatasetBecomesSearchThenModelAnswers) {
     const std::string react = snippets.value["snippets"][1]["code"];
     EXPECT_NE(react.find("export function LakeSearch"), std::string::npos);
     EXPECT_NE(react.find("/v1/predict"), std::string::npos);
+    // With the model published, the prompt asks for its answers too (lake#1185).
+    {
+        const std::string prompt = snippets.value["prompt"];
+        for (const std::string needed : {"https://lake.test/v1/predict",
+                                         "model-1",
+                                         "\"ranked\"",
+                                         "\"risk\"",
+                                         "how likely popular",
+                                         "the tools `search_index` and `predict`",
+                                         "and ask this model"}) {
+            EXPECT_NE(prompt.find(needed), std::string::npos) << needed << "\n" << prompt;
+        }
+    }
 
     // Done stays done: calling again calls nothing.
     const std::size_t before = q.engine_calls().size();

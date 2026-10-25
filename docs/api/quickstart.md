@@ -51,7 +51,7 @@ proposed `quickstart_train`; it is `train_quickstart`, an action, beside `train_
 | `start_quickstart` | action, paid | `customer_id`; `workspace_id?`; `quickstart_id?` (resume); `content` with `format` (`csv`, `jsonl`) and `name?`, or `dataset_id` (`<database>/<name>`); `fields?` (the columns to search) | The workspace (the account's first, made when it has none, while `workspace_id` is left out), the dataset, its index, publishing it |
 | `quickstart_status` | read | `customer_id`, `workspace_id`, `quickstart_id?` (default: the newest), `include_costs?` | Every step's state, the ids, the training's progress read live, `next`, the workspace's quickstarts; with `include_costs`, `costs` |
 | `train_quickstart` | action, paid | `customer_id`, `workspace_id`, `quickstart_id?`, `target?` (default: `suggested`), `target_value?` (the value of a category to look for), `entity_column?`, `as_of?` (the snapshot date), `methodology?` (default `M-1`), `holdout_fraction?` (default 0.2), `name?` | Prepares the columns ([columns](#columns)) and starts training; called again once trained, publishes the model; a failed run is trained again by the next call |
-| `quickstart_snippets` | action, authorized as a read (POST) | `customer_id`, `workspace_id`, `quickstart_id?`, `origins?` (the website's origins: makes the key now) | `snippets` (`html`, `react`, `curl`, each `{id, title, language, code}`), `key` (`kind: "browser_key"`, `placeholder`, `capabilities`, `create`: the `create_browser_key` call, `secret` and `browser_key` when it made one, `note`), `mcp`, `ready`, `includes_model` |
+| `quickstart_snippets` | action, authorized as a read (POST) | `customer_id`, `workspace_id`, `quickstart_id?`, `origins?` (the website's origins: makes the key now) | `snippets` (`html`, `react`, `curl`, each `{id, title, language, code}`), `prompt` ([the agent prompt](#the-agent-prompt)), `key` (`kind: "browser_key"`, `placeholder`, `capabilities`, `create`: the `create_browser_key` call, `secret` and `browser_key` when it made one, `note`), `mcp`, `ready`, `includes_model` |
 
 `start_quickstart` takes up to 64 MiB of JSON, as `upload_dataset` does; the engine takes at most
 16 MiB of content.
@@ -242,6 +242,39 @@ sign-in that made it, so signing out leaves the website working.
   account. The quickstart never stores a key: the secret is answered once, and the control plane
   keeps only its hash.
 
+## The agent prompt
+
+lake#1185. Steve, 2026-10-24: *"you should have a tab for copy agent prompt (default), and another tab
+for just the source code... but the copy prompt should include the source and the full context for
+the agent to success in installing it into their website"*.
+
+`quickstart_snippets` answers `prompt`, one Markdown block a person pastes into a coding agent in
+their website's project (`agent_prompt` in `src/api/quickstart_capabilities.cpp`). It holds:
+
+- the goal: a search box over the index, with the model's answer beside each result when a model is
+  published (*how likely `<column>` is `<value>`*, from `training.preparation.label`);
+- what to call: Lake's origin, `GET /v1/search_index` with the account, workspace and index ids,
+  `POST /v1/predict` with the model id when there is one, the `Authorization: Bearer` header, and the
+  index's fields;
+- the key: already in it when this call made it with `origins`, otherwise `YOUR_LAKE_SEARCH_KEY` with
+  the `create_browser_key` input and where to make one in the console; what it can and cannot do
+  (only this index and model, changes nothing, only the listed origins, its calls a minute, billed to
+  the account, revocable) and that it belongs in client code;
+- the allowed origins (the key's, when made) and what to do on another origin (a new key; never a
+  workaround for the CORS refusal);
+- the answers: the `{ok, value}` / `{ok: false, error}` envelope, `search_index`'s `hits` (`id`,
+  `score`, `fields`) and `predict`'s `ranked` (`row`, `risk`);
+- how to build it: find the right place, use the site's framework, components and styles, debounce,
+  show fields not JSON, handle nothing typed, searching, no results, errors and `429 rate_limited`;
+- the source: the plain web page and the React component, as in `snippets`;
+- how to check it: a curl search with `Origin` and `-D -`, the `Access-Control-Allow-Origin` header,
+  and results (and answers) in the browser;
+- Lake's MCP server (`/mcp`) and `llms.txt`.
+
+The secret is in the prompt only when the same call made the key; the console puts in the key it
+holds, the same way it does for the code. The console shows the prompt first, in the *Copy agent
+prompt* tab, and the snippets in *Source code* ([../ui/quickstart.md](../ui/quickstart.md)).
+
 ## Where it lives
 
 Everything is in the user's workspace Zetta: the dataset, the index and the model are the engine's,
@@ -261,6 +294,9 @@ decision 53), both of which multitenancy already holds. Audit goes to the worksp
   balance refused with the top-up link and nothing started, another account's workspace refused,
   a person with no workspace waiting for one, input refusals, and the OpenAPI, MCP, `llms.txt`,
   `llms-full.txt` and skill listings.
+- `Quickstart.ADroppedDatasetBecomesSearchThenModelAnswers` checks the agent prompt's contents
+  search-only without a key, with the key a call made (its secret and origin in it), and with the
+  model published (`predict`, its id and answer shape).
 - `QuickstartColumns.*` (`tests/test_quickstart_columns.cpp`) covers the column rules: every kind,
   what is offered first, the choice checks, the training copy (numbered rows, the 0/1 answer, CSV),
   dates found in values, and every refusal explained without its code.

@@ -27,6 +27,9 @@ import {
   uploadContent,
   valuesOf,
   withKey,
+  agentPrompt,
+  DEFAULT_WEBSITE_VIEW,
+  WEBSITE_VIEWS,
   type Column,
 } from "../src/pages/quickstart/quickstart.ts";
 
@@ -193,4 +196,18 @@ test("training sends the choices, and the snapshot date only when it was changed
 test("after a failure the button trains with the changed choices, never 'Try again'", () => {
   assert.equal(trainLabel(false), "Train a model");
   assert.equal(trainLabel(true), "Train with these choices");
+});
+
+test("the website step opens on the agent prompt, with the source code beside it (lake#1185)", () => {
+  assert.equal(DEFAULT_WEBSITE_VIEW, "prompt");
+  assert.deepEqual(WEBSITE_VIEWS.map((v) => v.label), ["Copy agent prompt", "Source code"]);
+});
+
+test("the agent prompt carries the key only where the page holds it", () => {
+  const key = { kind: "browser_key" as const, placeholder: "YOUR_LAKE_SEARCH_KEY", capabilities: ["search_index"], create: { capability: "create_browser_key", input: {} }, secret: null, browser_key: null, note: "" };
+  const snippets = { prompt: "Authorization: Bearer YOUR_LAKE_SEARCH_KEY ... Bearer YOUR_LAKE_SEARCH_KEY", key };
+  assert.equal(agentPrompt(snippets, null), snippets.prompt, "no key: it says how to make one");
+  assert.equal(agentPrompt(snippets, "lbk.abc"), "Authorization: Bearer lbk.abc ... Bearer lbk.abc");
+  assert.equal(agentPrompt({ key }, "lbk.abc"), null, "a Lake that answers no prompt");
+  assert.equal(agentPrompt(null, null), null);
 });

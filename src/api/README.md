@@ -17,7 +17,8 @@ region serves. `http_server.cpp` answers them from the region picker's middlewar
 metering stay each capability's own; its bookkeeping reads (`get_run`, `list_models`,
 `get_dataset`) use `call_workspace`. The state is a sealed `lake_quickstarts` record per quickstart
 in the workspace Zetta. The website code is built here; with `origins` it makes a browser key through
-a nested `create_browser_key` and puts the secret in the code, otherwise `key.create` names that call.
+a nested `create_browser_key` and puts the secret in the code, otherwise `key.create` names that call;
+`agent_prompt` writes the same as one block for a coding agent (`prompt`, lake#1185).
 `quickstart_columns.cpp` (lake#1181) holds its pure column rules: each column's kind from the
 engine's `analyze_dataset`, what is offered first, the training copy's rows and the engine's
 `transform_required` refusals in plain words; `train_quickstart` reads rows through `call_workspace`

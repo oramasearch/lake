@@ -1764,6 +1764,173 @@ std::string curl_snippet(const std::string& origin,
     return out;
 }
 
+// The prompt a person pastes into their coding agent (lake#1185): one self-contained block with the
+// goal, the endpoint, ids and key, what the key can and cannot do, the response shapes, the source,
+// how to fit it into the site, the origins, how to verify, and where Lake's tools are. The secret
+// is in it only when this call made the key; otherwise it says how to make one.
+struct PromptFacts {
+    std::string origin;
+    json search;
+    json model;
+    std::string table;
+    json fields; // the index's fields
+    json label;  // the model's question: {column, positive}, or null
+    std::string secret;
+    json made;         // the key this call made, or null
+    json create_input; // the create_browser_key call
+    std::string html;
+    std::string react;
+};
+
+std::string agent_prompt(const PromptFacts& facts) {
+    const bool with_model = !facts.model.is_null();
+    const std::string key = facts.secret.empty() ? std::string(key_placeholder) : facts.secret;
+    std::string question;
+    if (with_model && facts.label.is_object()) {
+        const std::string column = text(facts.label, "column");
+        const std::string positive = text(facts.label, "positive");
+        question = positive.empty() || positive == "1" ? column : column + " is " + positive;
+    }
+    std::string fields;
+    for (const json& field : facts.fields) {
+        if (field.is_string()) {
+            fields += (fields.empty() ? "" : ", ") + field.get<std::string>();
+        }
+    }
+    json origins = json::array();
+    int rate = control::browser_key_default_rate_limit;
+    if (facts.made.is_object()) {
+        origins = facts.made.value("origins", json::array());
+        rate = facts.made.value("rate_limit_per_minute", rate);
+    }
+    std::string allowed;
+    for (const json& origin : origins) {
+        allowed += "  - " + origin.get<std::string>() + "\n";
+    }
+    std::string out;
+    out +=
+        "# Add search" + std::string(with_model ? " and model answers" : "") + " to my website\n\n";
+    out += "You are working in my website's code. Add a search box over my Lake search index " +
+           (facts.table.empty() ? std::string("of my dataset")
+                                : "of my dataset `" + facts.table + "`") +
+           (with_model ? ", and beside each result show my model's answer: how likely " +
+                             (question.empty() ? std::string("its outcome") : question) +
+                             " is for that row, from 0 to 1."
+                       : ".") +
+           " Put it where a visitor would look for search, built the way the rest of the site is "
+           "built (its framework, components and styles), not pasted as a foreign block.\n\n";
+
+    out += "## What to call\n\n";
+    out += "- Lake: " + facts.origin + "\n";
+    out += "- Search: `GET " + facts.origin +
+           "/v1/search_index` with `customer_id=" + text(facts.search, "customer_id") +
+           "`, `workspace_id=" + text(facts.search, "workspace_id") +
+           "`, `index_id=" + text(facts.search, "index_id") +
+           "`, `query=<what the visitor typed>`, optional `top_k` (1 to 100, default 10).\n";
+    if (with_model) {
+        out += "- Model answers: `POST " + facts.origin +
+               "/v1/predict` with JSON `{\"customer_id\": \"" + text(facts.model, "customer_id") +
+               "\", \"workspace_id\": \"" + text(facts.model, "workspace_id") +
+               "\", \"model_id\": \"" + text(facts.model, "model_id") +
+               "\", \"rows\": [<each hit's fields>]}`.\n";
+    }
+    out += "- Every call sends `Authorization: Bearer " + key + "`.";
+    if (!fields.empty()) {
+        out += " The index's fields: " + fields + ".";
+    }
+    out += "\n\n";
+
+    out += "## The key\n\n";
+    if (facts.secret.empty()) {
+        out += "The code below has `" + std::string(key_placeholder) +
+               "` where the key goes. I have not made it yet: ask me to make a website key in "
+               "Lake (Quickstart step 3, or Ship → Search Index → Website Keys) for this site's "
+               "address, or call `create_browser_key` with this input, changing `origins` to the "
+               "site's origins:\n\n```json\n" +
+               facts.create_input.dump(2) +
+               "\n```\n\nIts `secret` is shown once; put it where the code says " +
+               std::string(key_placeholder) + ".\n\n";
+    } else {
+        out += "The key is already in the code below.\n\n";
+    }
+    out += "It is a browser key, made to sit in a public web page: keep it in the client code, "
+           "never move it behind a server or treat it as a secret. It can only search this "
+           "index" +
+           std::string(with_model ? " and ask this model" : "") +
+           ", it changes nothing, it answers only pages served from the origins it lists, and it "
+           "makes at most " +
+           std::to_string(rate) + " calls a minute. Every search" +
+           std::string(with_model ? " and answer" : "") +
+           " is billed to my Lake account. I can revoke it on the index's page in Lake.\n\n";
+
+    out += "## Allowed origins\n\n";
+    if (!allowed.empty()) {
+        out += "The key answers only pages served from:\n\n" + allowed + "\n";
+    } else {
+        out += "The key answers only the origins it is made for (`https://host[:port]`; "
+               "`http://` only for localhost).\n\n";
+    }
+    out += "If the site runs anywhere else (another domain, a preview URL, `localhost` while you "
+           "develop), a call from there is refused and the browser reports a CORS error. Do not "
+           "work around it: make another key for that origin (Ship → Search Index → Website Keys "
+           "in Lake, or `create_browser_key`).\n\n";
+
+    out += "## What Lake answers\n\n";
+    out += "Every answer is JSON. Success: `{\"ok\": true, \"value\": ...}`. Refusal: "
+           "`{\"ok\": false, \"error\": {\"code\": \"...\", \"message\": \"...\"}}`.\n\n";
+    out +=
+        "`search_index` value:\n\n```json\n"
+        "{\"hits\": [{\"id\": \"<row id>\", \"score\": 3.21, \"fields\": {\"<column>\": "
+        "\"<value>\"}}]}\n```\n\nHits are ranked best first; `fields` holds the row's columns.\n\n";
+    if (with_model) {
+        out += "`predict` value:\n\n```json\n"
+               "{\"model_id\": \"" +
+               text(facts.model, "model_id") +
+               "\", \"rows\": 2, \"ranked\": [{\"row\": 0, \"risk\": 0.87}, {\"row\": 1, "
+               "\"risk\": 0.12}]}\n```\n\n`row` is the position in the `rows` you sent; `risk` is "
+               "the model's answer for it, from 0 to 1. Send the hits' `fields` as `rows`, in "
+               "order.\n\n";
+    }
+
+    out += "## How to build it\n\n";
+    out += "1. Find where search belongs in this site (a header, a search page, a listing) and "
+           "use the site's own framework, components and styles.\n";
+    out += "2. Search as the visitor types, waiting about 250 ms after the last keystroke, and "
+           "cancel a search that a newer one replaces.\n";
+    out += "3. Show each hit's useful fields, not raw JSON." +
+           std::string(with_model ? " Beside each, show the model's answer (for example as a "
+                                    "percentage), labelled in words the visitor understands."
+                                  : "") +
+           "\n";
+    out += "4. Handle every state: nothing typed, searching, no results (say so), an error "
+           "(show `error.message` quietly, keep the box usable), and `429 rate_limited` (too many "
+           "calls this minute: wait and try again, never retry in a loop).\n";
+    out += "5. Keep the key in the client code as it is.\n\n";
+
+    out += "## The source\n\nA plain web page (HTML and JavaScript):\n\n```html\n" + facts.html +
+           "```\n\nThe same as a React component:\n\n```jsx\n" + facts.react + "```\n\n";
+
+    out += "## How to check it works\n\n";
+    out += "1. From the site's origin, a search returns hits:\n\n```shell\ncurl -s -G \"" +
+           facts.origin + "/v1/search_index\" -H \"Authorization: Bearer " + key +
+           "\" -H \"Origin: <the site's origin>\" -D - \\\n  --data-urlencode \"customer_id=" +
+           text(facts.search, "customer_id") +
+           "\" --data-urlencode \"workspace_id=" + text(facts.search, "workspace_id") +
+           "\" --data-urlencode \"index_id=" + text(facts.search, "index_id") +
+           "\" --data-urlencode \"query=<a word in the data>\"\n"
+           "```\n\n";
+    out += "2. The answer's headers include `Access-Control-Allow-Origin: <the site's origin>`; "
+           "without it the origin is not one the key lists.\n";
+    out += std::string("3. In the browser, typing in the box shows results") +
+           (with_model ? ", each with the model's answer beside it." : ".") + "\n\n";
+
+    out += "## More from Lake\n\n";
+    out += "- MCP server: " + facts.origin + "/mcp (the tools `search_index`" +
+           std::string(with_model ? " and `predict`" : "") + ", for an agent that uses tools)\n";
+    out += "- Everything Lake can do, for agents: " + facts.origin + "/llms.txt\n";
+    return out;
+}
+
 liquid::runtime::task<ApiResult> quickstart_snippets(const json& input, ApiContext& context) {
     if (!context.store || !context.workspaces) {
         co_return ApiResult::failure("store_unavailable", "workspaces are not configured");
@@ -1892,6 +2059,25 @@ liquid::runtime::task<ApiResult> quickstart_snippets(const json& input, ApiConte
           {"title", "curl"},
           {"language", "shell"},
           {"code", with_secret(curl_snippet(origin, search, model, site))}}});
+    PromptFacts facts{origin,
+                      search,
+                      model,
+                      table,
+                      index.value("fields", json::array()),
+                      nullptr,
+                      secret,
+                      made,
+                      create_input,
+                      out["snippets"][0]["code"],
+                      out["snippets"][1]["code"]};
+    if (const json training = record.value("training", json(nullptr)); training.is_object()) {
+        const json preparation = training.value("preparation", json(nullptr));
+        facts.label =
+            preparation.is_object() && preparation.value("label", json(nullptr)).is_object()
+                ? preparation["label"]
+                : json{{"column", target}, {"positive", text(training, "target_value")}};
+    }
+    out["prompt"] = agent_prompt(facts);
     out["next"] = !secret.empty() ? "Paste a snippet into your site: the key is already in it."
                   : model.is_null()
                       ? "Make the key (quickstart_snippets with `origins`, or create_browser_key) "
@@ -2120,7 +2306,11 @@ void register_quickstart_capabilities(Registry& registry) {
             "without `origins` it makes nothing and `key.create` is the create_browser_key call "
             "whose `secret` goes where the code says YOUR_LAKE_SEARCH_KEY. Anyone who opens the "
             "page can read the key; it can only search and ask, and every call is billed to the "
-            "account.",
+            "account. `prompt` is the same as one block to paste into a coding agent (lake#1185): "
+            "the goal, endpoint, ids and key, what the key can and cannot do, the search_index "
+            "and predict answers, the source, how to fit it to the site and handle empty, error "
+            "and 429 answers, the allowed origins, how to check it, and links to MCP and "
+            "llms.txt.",
         .input_schema = input_schema(
             {{"workspace_id", workspace_schema("the workspace the quickstart is in")},
              {"quickstart_id", quickstart_id_schema()},
@@ -2140,6 +2330,13 @@ void register_quickstart_capabilities(Registry& registry) {
                             {"ready", {{"type", "boolean"}}},
                             {"includes_model", {{"type", "boolean"}}},
                             {"snippets", {{"type", "array"}, {"items", {{"type", "object"}}}}},
+                            {"prompt",
+                             {{"type", "string"},
+                              {"description",
+                               "one self-contained prompt for a coding agent to install the "
+                               "search (and model answers) into a website: the source, the ids, "
+                               "the key (when this call made it), its limits, the response "
+                               "shapes, the origins and how to check it (lake#1185)"}}},
                             {"key", {{"type", json::array({"object", "null"})}}},
                             {"mcp", {{"type", "object"}}},
                             {"next", {{"type", "string"}}}}},

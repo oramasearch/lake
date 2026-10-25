@@ -429,6 +429,10 @@ constant columns out, and, when the dataset cannot train as it is, trains on a `
 nested `upload_dataset`. A `transform_required` it can satisfy is applied and tried once; any other is
 answered in plain words. Dates are not yet features: zetta v0.5.0's `train_model` takes no `as_of`
 (zetta#1494). See [`docs/api/quickstart.md#columns`](docs/api/quickstart.md#columns).
+`quickstart_snippets` also answers `prompt` (lake#1185): one block for a coding agent with the source,
+ids, key (when that call made it), its limits, the answer shapes, the origins and how to check it;
+the console's website step opens on *Copy agent prompt*, with *Source code* beside it. See
+[`docs/api/quickstart.md#the-agent-prompt`](docs/api/quickstart.md#the-agent-prompt).
 
 Browser keys (lake#1152, migration `0102_browser_keys`): the key a website's page holds, bound to one
 workspace, one search index and optionally one model, callable only for `search_index` and
