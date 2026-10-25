@@ -101,9 +101,10 @@ void register_transcript_capabilities(Registry& registry);
 // delete_solution, duplicate_solution.
 void register_solution_capabilities(Registry& registry);
 // The quickstart process (lake#1128, docs/api/quickstart.md): start_quickstart, quickstart_status,
-// train_quickstart and quickstart_snippets, which compose upload_dataset, create_index,
-// expose_index, train_model and expose_model through the registry; the state is a sealed record
-// per quickstart in the workspace Zetta.
+// train_quickstart, quickstart_snippets and start_quickstart_conversation (lake#1182), which
+// compose upload_dataset, create_index, expose_index, train_model, expose_model and
+// send_ask_message through the registry; the state is a sealed record per quickstart in the
+// workspace Zetta.
 void register_quickstart_capabilities(Registry& registry);
 // Browser keys (lake#1152, docs/api/browser-keys.md): create_browser_key, list_browser_keys and
 // revoke_browser_key. browser_key_json is a key as they answer it, never its secret.

@@ -15,9 +15,13 @@ stands, and you can leave and come back: the page goes on from where you stopped
    press **Make a website key**, then copy the code for a plain web page or a React component.
    Lake's address, your account, workspace and index are already in it, and so is the key. Paste it
    into your site and search there.
-4. **Train a model.** Choose the column to predict and the column that names a row (Lake guesses the
-   last column and the first text column), then press **Train a model**. The page follows the
-   training; you can leave and come back.
+4. **Decide what to build.** Ask Orama opens on your dataset by itself and proposes what is worth
+   building on it: a model (even when no column is a yes-or-no answer: it can derive one, such as
+   a price above a threshold, or group your rows with clustering), opportunities, an app such as
+   a dashboard, an analysis, or generated data first. Ask it anything, then press **Confirm** on
+   what you want; nothing runs before you confirm. Confirming a model trains it, and the page
+   follows the training; you can leave and come back. **Choose the columns myself** lets you pick
+   the column to predict instead.
 5. **Model answers on your website.** When the model is trained, Lake publishes it. The search box
    on the page shows its answer beside each result. Make a new website key (the first one can only
    search) and copy the code again: your site shows the answers too.
@@ -43,13 +47,14 @@ addresses. Every search and answer your website asks for is billed to your accou
 
 ## From Code and AI Agents
 
-The quickstart is four tools, the same over REST and MCP:
+The quickstart is five tools, the same over REST and MCP:
 
 | Tool | What it does |
 |---|---|
 | `start_quickstart` | Adds the dataset (`content` and `format`, or a `dataset_id`), making a workspace when there is none, and builds and publishes its search index |
 | `quickstart_status` | Where each step stands, and what to call next; with `include_costs`, what the paid steps cost and your balance |
-| `train_quickstart` | Trains a model on the same dataset; called again once it is trained, publishes it |
+| `start_quickstart_conversation` | Opens an Ask Orama conversation about the dataset that proposes what to build; reply with `send_ask_message` and the `conversation.page` it answers, confirm a proposal with `confirm_ask_proposal` |
+| `train_quickstart` | Trains a model on the same dataset (`target`, or `derived_target`, a column and a rule such as price above 50, or `methodology: "M-3"` for clustering); called again once it is trained, publishes it |
 | `quickstart_snippets` | The website code; with `origins` (your website's address), it also makes the website key and puts it in the code. Without, it names the `create_browser_key` call that makes it |
 
 ```sh

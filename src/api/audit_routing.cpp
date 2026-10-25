@@ -538,6 +538,7 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "start_app",
     "start_experiment",
     "start_quickstart",
+    "start_quickstart_conversation",
     "start_solution",
     "stop_agent_launch",
     "stop_app",

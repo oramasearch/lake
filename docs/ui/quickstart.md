@@ -2,8 +2,8 @@
 
 lake#1128. The home page of a signed-in person (`/`), first in the rail's Home group, above Ask
 Orama. It runs the [quickstart process](../api/quickstart.md): drop a dataset, get a search box over
-it, put that search on a website, train a model on the same data, and see the model's answers beside
-each result, on the page and on the website.
+it, put that search on a website, decide with Ask Orama what to build on the same data (lake#1182),
+and, for a model, see its answers beside each result, on the page and on the website.
 
 ## What the page shows
 
@@ -13,7 +13,35 @@ each result, on the page and on the website.
 | Step 1: Drop a Dataset | A drop zone for a CSV, JSON or JSON Lines file of up to 16 MiB; a JSON array is sent as one line per object; Parquet is refused with what to do. Without a workspace, one is made and the page holds the file until it is ready, then starts again by itself | `start_quickstart` |
 | Step 2: Search Your Data | A search box over the published index, results as you type; once the model is published, its answer beside each result | `search_index`, `predict` |
 | Step 3: Search on Your Website | The website's address (`https://…`; `http://` only for localhost, checked as it is typed) and Make a website key: one click makes a browser key bound to the index (and the model), the workspace and that address, shown once, and two tabs (lake#1185): **Copy agent prompt** (the default), one block for a coding agent with the source, the ids, the key once made, what it can do, Lake's answers, the origins and how to check it ([the agent prompt](../api/quickstart.md#the-agent-prompt)); and **Source code**, the code for a plain web page, React or curl with the key, Lake's host and the ids filled in (lake#1152, [browser keys](../api/browser-keys.md)). A key made before the model was published can only search: the page says so and offers a new one. *Website keys* links to the index's page, which lists and revokes them | `quickstart_snippets` (POSTed; with `origins` it makes the key through `create_browser_key`) |
-| Step 4: Train a Model on the Same Data | The column to predict, listing only columns the model can predict, each with its detected type (first pick: `suggested`); for a category, the value to look for; the column that names a row (identifiers marked; first pick: a detected identifier; *None: Lake numbers the rows*); the snapshot date (a date field, sent as `as_of` when changed); *How Lake reads your columns*, every column with its type and whether it is predicted, names a row, is learned from or is left out and why; what training costs, Train a model. A refusal is shown in plain words with the choices still open and *Train with these choices*; a dataset with nothing to predict says what column to add. The progress while it runs, then what it learned from and left out; once trained, the page publishes the model by itself, as part of the same click (lake#1181) | `train_quickstart`, `quickstart_status` |
+| Step 4: Decide What to Build (lake#1182) | An **Ask Orama conversation** about the dataset just added, opened by itself once search works ([below](#step-4-decide-what-to-build)). Ask Orama proposes what is worth building; the person talks it through and confirms in the chat. Confirming a model trains it and the card becomes the next row. *Choose the columns myself* is a small fallback that opens the form of the next row. **Start over** opens a new conversation | `start_quickstart_conversation`, `send_ask_message`, `get_ask_conversation`, `get_agent_task`, `settle_ask_turn`, `confirm_ask_proposal` |
+| Step 4, once a model trains: Train a Model on the Same Data | The column to predict, listing only columns the model can predict, each with its detected type (first pick: `suggested`); for a category, the value to look for; the column that names a row (identifiers marked; first pick: a detected identifier; *None: Lake numbers the rows*); the snapshot date (a date field, sent as `as_of` when changed); *How Lake reads your columns*, every column with its type and whether it is predicted, names a row, is learned from or is left out and why; what training costs, Train a model. A refusal is shown in plain words with the choices still open and *Train with these choices*; a dataset with no column to pick says Ask Orama can derive one or group the rows with clustering, never a dead end. A target derived in the conversation is shown by its rule (*Spend above 15*). A clustering model (M-3) says it is trained, links Train → Models for its segments, and is not added to the website. The progress while it runs, then what it learned from and left out; once trained, the page publishes the model by itself, as part of the same click (lake#1181) | `train_quickstart`, `quickstart_status` |
+
+## Step 4: Decide What to Build
+
+lake#1182, approved by Steve on 2026-10-25. Before it, step 4 guessed a column to predict and ended
+in *Nothing to Predict Yet* when there was none. Now it is a conversation.
+
+- **It opens by itself.** Once the search index is published, nothing is training and the balance
+  allows it, the page calls `start_quickstart_conversation` once. The person's first message is
+  *"I just added the dataset `<name>`. What could I build with it? Which ideas are the most
+  interesting?"*, and every message carries the quickstart's context as `page`
+  (`conversation.page`: the dataset, its row count, each column with its detected kind and whether
+  it can be predicted, the search index). So Ask Orama starts from "here is what you could build
+  with this dataset", never "which dataset?".
+- **It is the Ask Orama conversation**, the same component as `/ask` (`AskMessages`,
+  `AskComposer` and `useConversation` from `pages/ask/conversation.tsx`, given the quickstart's
+  workspace as `scope`). Proposals are its confirm cards: Lake states the exact call; nothing runs
+  before **Confirm**.
+- **What it can lead to**: a model (`train_quickstart`, with a target derived from a column such as
+  a price threshold, or clustering with M-3); opportunities from the Auto-Suggest Agent; an app such as an
+  analysis dashboard from the Application Agent; an analysis in the conversation; or a generated
+  corpus or labels first, cost shown before it runs. A confirmed proposal that is not a model links
+  where it lives (Ship → Apps, Design → Opportunities, Data → Datasets, Design → Projects;
+  `whereItLives`).
+- **Confirming a model** runs `train_quickstart` with what was agreed. The page reads the status
+  again, the card becomes *Train a Model on the Same Data* with the training's progress, and the
+  conversation stays below it, folded.
+- A blocked balance shows **Add funds** instead of opening the conversation.
 
 **Start another** opens the drop zone again; **Your quickstarts** opens an earlier one. A person who
 leaves and comes back sees the newest quickstart of the workspace where it stopped.
@@ -35,7 +63,8 @@ agent in Ask Orama* go to `/ask`.
 - `frontend/src/pages/quickstart/quickstart.ts`: the pure rules (a file's format, the first model's
   columns: `predictable`, `startingChoice`, `valuesOf`, `columnUses`, `trainInput`, `trainLabel`
   (lake#1181), with `firstColumns` for an engine that could not profile them, polling, publishing a trained model, the key in the code, whether the key covers the
-  model, the website step's tabs and the agent prompt with the page's key (`agentPrompt`, lake#1185), the website's address as the origin a browser key lists (`siteOrigin`), the balance),
+  model, when step 4 opens its conversation (`opensConversation`), where a confirmed proposal's
+  result lives (`whereItLives`) and the step's title (`modelStepTitle`, lake#1182), the website step's tabs and the agent prompt with the page's key (`agentPrompt`, lake#1185), the website's address as the origin a browser key lists (`siteOrigin`), the balance),
   tested by `frontend/tests/quickstart.test.ts`.
 - `frontend/src/pages/ask/home.ts`: what `/` shows each viewer and where the old Ask Orama links
   go, tested by `frontend/tests/home.test.ts`.
@@ -50,13 +79,18 @@ Stable `data-testid`s for walkthroughs: `quickstart-page`, `quickstart-steps`,
 `quickstart-target`, `quickstart-target-value`, `quickstart-entity`, `quickstart-as-of`,
 `quickstart-columns`, `quickstart-column` (with `data-use`), `quickstart-model-problem`,
 `quickstart-no-target`, `quickstart-prepared`, `quickstart-train-button`, `quickstart-training`,
-`quickstart-cost-<step>`, `quickstart-top-up`. `Button` passes `data-testid` through.
+`quickstart-cost-<step>`, `quickstart-top-up`; step 4's conversation (lake#1182):
+`quickstart-model-step`, `quickstart-conversation` (with `data-conversation`),
+`quickstart-conversation-opening`, `quickstart-conversation-open`, `quickstart-conversation-restart`,
+`quickstart-conversation-done`, `quickstart-choose-columns`, `quickstart-clustered`. `Button` passes `data-testid` through.
 
 ## Verify
 
 `npm test` in `frontend/` (the build runs it). In a browser, `tools/e2e/quickstart.mjs` signs in
-with a Clerk ticket and walks it, copies the plain web page code into a page on another origin and
-searches there. On 2026-10-24 the whole page was walked against a local lake with a workspace on a
+with a Clerk ticket, tops up a blocked balance on Stripe's test Checkout (`lib.ensureFunds`), walks
+it, copies the plain web page code into a page on another origin and searches there, then drives
+step 4's conversation: it waits for Ask Orama's answer, asks for a model when none was proposed,
+confirms the `train_quickstart` proposal and follows it to the model's answers. On 2026-10-24 the whole page was walked against a local lake with a workspace on a
 local Zetta v0.5.0: a 40-row CSV became a search box (8 hits for "space"), the plain web page code
 served from another origin returned results, training and publishing finished, and both the page
 and the website showed the model's answer beside each result.

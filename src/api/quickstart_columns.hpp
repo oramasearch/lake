@@ -119,6 +119,56 @@ Prepare prepare_rows(const json& columns,
                      const Choice& choice,
                      const Fixes& fixes);
 
+// A column to predict derived from another (lake#1182, docs/api/quickstart.md#a-derived-target):
+// when no column is a yes-or-no answer or a short category, a rule over one column makes one, such
+// as "price above 50" or the band "price at least 20 and below 50" (numbers), or "city is one of
+// Paris, Rome" (any values). The derived column is "yes" where the rule holds and "no" where it
+// does not; a row whose value is empty, or not a number for a numeric rule, has no answer.
+struct Derived {
+    std::string column;
+    std::string name; // the derived column's name; empty: derived_name
+    std::optional<double> above;
+    std::optional<double> at_least;
+    std::optional<double> below;
+    std::optional<double> at_most;
+    std::vector<std::string> values;
+};
+
+// train_quickstart's `derived_target` read against the dataset's detected columns: the rule, or
+// the problem in plain words with the input it names.
+struct DerivedParse {
+    std::optional<Derived> derived;
+    Problem problem;
+};
+DerivedParse parse_derived(const json& input, const json& columns);
+
+// The rule in words: "price above 50", "price at least 20 and below 50", "city is Paris or Rome".
+std::string derived_rule(const Derived& derived);
+
+// The derived column's name when none is given: the rule in letters, digits and underscores
+// (price_above_50), made unique among `columns`.
+std::string derived_name(const Derived& derived, const json& columns);
+
+// The columns with the derived one added (kind boolean, values yes and no, `derived` {from, rule})
+// and the column it is derived from left out of the inputs, since it gives the answer away; and
+// the rows with the derived value set. `problem` says why it cannot be trained (no row on one side
+// of the rule).
+struct Derive {
+    json columns = json::array();
+    std::vector<json> rows;
+    std::string problem;
+};
+Derive derive_target(const json& columns, const std::vector<json>& rows, const Derived& derived);
+
+// Whether a methodology learns without a column to predict: segmentation / clustering (M-3,
+// zetta#1042), named by its id or a model kind.
+bool label_free(std::string_view methodology);
+
+// The training copy for a label-free methodology: the column that names a row (a row number when
+// `entity` is empty or repeats) and the usable inputs, every row kept.
+Prepare
+prepare_unlabeled(const json& columns, const std::vector<json>& rows, const std::string& entity);
+
 // The most upload_dataset takes in one call (the engine's limit).
 inline constexpr std::size_t max_upload_bytes = 16 * 1024 * 1024;
 

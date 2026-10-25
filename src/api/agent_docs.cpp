@@ -38,10 +38,13 @@ constexpr std::array group_rules{
     // before anything else.
     GroupRule{"Quickstart",
               "Start here. The quickstart process takes a dataset to search and model answers on "
-              "your own website in four calls: start_quickstart (makes the workspace when there "
+              "your own website in a few calls: start_quickstart (makes the workspace when there "
               "is none, adds the dataset, builds and publishes its search index), "
-              "quickstart_status (each step's state and what to call next), train_quickstart "
-              "(trains a model on the same data, then publishes it) and quickstart_snippets (the "
+              "quickstart_status (each step's state and what to call next), "
+              "start_quickstart_conversation (an Ask Orama conversation about the dataset that "
+              "proposes what to build: a model, opportunities, an app, an analysis or a corpus), "
+              "train_quickstart (trains a model on the same data, then publishes it) and "
+              "quickstart_snippets (the "
               "plain web page, React and curl code with the hosts and ids filled in; with "
               "`origins` it also makes the browser key the code needs). A step that fails says why "
               "and is resumed by the "
@@ -49,7 +52,8 @@ constexpr std::array group_rules{
               "balance is blocked.",
               [](std::string_view n) {
                   return n == "start_quickstart" || n == "quickstart_status" ||
-                         n == "train_quickstart" || n == "quickstart_snippets";
+                         n == "train_quickstart" || n == "quickstart_snippets" ||
+                         n == "start_quickstart_conversation";
               }},
     GroupRule{
         "Experiments",
@@ -574,7 +578,9 @@ constexpr std::string_view start_here =
     "New to Lake, or helping someone who is? Run the **quickstart process**: `start_quickstart` "
     "with a dataset file's text makes the workspace if there is none, loads the dataset, and "
     "builds and publishes a search index; `quickstart_snippets` answers the code that puts a "
-    "search box on a website; `train_quickstart` trains a model on the same data and publishes "
+    "search box on a website; `start_quickstart_conversation` opens an Ask Orama conversation "
+    "about the dataset that proposes what is worth building on it; `train_quickstart` trains a "
+    "model on the same data and publishes "
     "it, so the snippets show its answer beside each result. `quickstart_status` says where each "
     "step stands and what to call next. The worked flow is the first one below.\n";
 
@@ -656,10 +662,18 @@ const std::vector<Flow>& flows() {
            "[\"https://www.example.com\"]): plain web page, React and curl code with a browser "
            "key made for that website already in it (`key.secret`, shown once). Without "
            "`origins` it makes nothing, and `key.create` is the create_browser_key call"},
+          {"start_quickstart_conversation",
+           "`customer_id`, `workspace_id`: an Ask Orama conversation about the dataset "
+           "(`conversation` in the answer). Follow its turn with get_agent_task and "
+           "settle_ask_turn, read it with get_ask_conversation, reply with send_ask_message and "
+           "the `conversation.page`, and confirm a proposal with confirm_ask_proposal: a model "
+           "runs train_quickstart"},
           {"train_quickstart",
-           "`customer_id`, `workspace_id`, `target` (the column to predict), `entity_column` "
-           "(the column that names a row): starts training; read quickstart_status until the "
-           "model step is done, then call it again to publish the model"},
+           "`customer_id`, `workspace_id`, `target` (the column to predict) or `derived_target` "
+           "({column, above|at_least|below|at_most, values}), `entity_column` (the column that "
+           "names a row), `methodology` (M-3 for clustering): starts training; read "
+           "quickstart_status until the model step is done, then call it again to publish the "
+           "model"},
           {"quickstart_snippets",
            "again: the code now shows the model's answer beside each "
            "search result"}}},

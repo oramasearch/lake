@@ -25,6 +25,8 @@
 #include "lake/api/mcp.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
+#include "lake/control/agent_bus.hpp"
+#include "lake/control/agent_runs.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/zetta_control.hpp"
 #include "lake/control/zetta_workspace.hpp"
@@ -846,6 +848,228 @@ TEST(Quickstart, AnyColumnTypesTrainADatedDatasetIsPreparedNotRefused) {
     auto read = q.by(me, "quickstart_status", where);
     EXPECT_EQ(read.value["training"]["preparation"]["dataset_id"], "datasets/people_training");
     EXPECT_EQ(read.value["snapshot_date"], snapshot);
+}
+
+// lake#1182: when no column is a yes-or-no answer, a target derived from a number column trains,
+// and the column it is derived from is left out of what the model learns from.
+TEST(Quickstart, ATargetDerivedFromANumberColumnTrainsOnTheTrainingCopy) {
+    Quickstart q;
+    People::load(q.engine);
+    const auto& me = q.first;
+    ASSERT_TRUE(q.by(me,
+                     "start_quickstart",
+                     {{"workspace_id", me.workspace_id},
+                      {"content", "customer_id\nc-0\n"},
+                      {"format", "csv"},
+                      {"name", "people"}})
+                    .ok);
+    auto training = q.by(me,
+                         "train_quickstart",
+                         {{"workspace_id", me.workspace_id},
+                          {"derived_target", {{"column", "Spend"}, {"above", 15}}}});
+    ASSERT_TRUE(training.ok) << training.error.message;
+    ASSERT_EQ(training.value["state"], "training") << training.value.dump(2);
+    const json& trained = training.value["training"];
+    EXPECT_EQ(trained["target"], "spend_above_15");
+    EXPECT_EQ(trained["target_value"], "yes");
+    EXPECT_EQ(trained["derived_target"]["rule"], "Spend above 15");
+    EXPECT_EQ(trained["derived_target"]["name"], "spend_above_15");
+    EXPECT_EQ(trained["preparation"]["copy"], true);
+    const auto uploaded = copies(q);
+    ASSERT_EQ(uploaded.size(), 1U);
+    ASSERT_EQ(uploaded[0].size(), 12U);
+    EXPECT_EQ(uploaded[0][0]["spend_above_15"], 0);  // 10.5
+    EXPECT_EQ(uploaded[0][11]["spend_above_15"], 1); // 21.5
+    EXPECT_FALSE(uploaded[0][0].contains("Spend")) << "it would give the answer away";
+    const auto trains = calls_of(q, "train_model");
+    ASSERT_EQ(trains.size(), 1U);
+    EXPECT_EQ(trains[0]["target"], "spend_above_15");
+    EXPECT_EQ(trains[0]["dataset_path"], "datasets.people_training");
+
+    // A rule that cannot teach anything is refused before anything is trained (the run failed, so
+    // the next call trains again with what it sends).
+    q.engine.run_status = "failed";
+    auto refused = q.by(me,
+                        "train_quickstart",
+                        {{"workspace_id", me.workspace_id},
+                         {"derived_target", {{"column", "Spend"}, {"above", 500}}}});
+    EXPECT_FALSE(refused.ok) << refused.value.dump(2);
+    EXPECT_EQ(refused.error.code, "invalid_input");
+    EXPECT_NE(refused.error.message.find("No row has Spend above 500"), std::string::npos)
+        << refused.error.message;
+    auto wrong_kind = q.by(me,
+                           "train_quickstart",
+                           {{"workspace_id", me.workspace_id},
+                            {"derived_target", {{"column", "Country"}, {"below", 3}}}});
+    EXPECT_FALSE(wrong_kind.ok);
+    EXPECT_EQ(wrong_kind.error.path, "/derived_target/column");
+}
+
+// lake#1182: segmentation / clustering (M-3) trains without a column to predict, keyed by the
+// column that names a row, and its model is not published for the website.
+TEST(Quickstart, AClusteringModelTrainsWithoutATargetAndIsNotPublishedForTheWebsite) {
+    Quickstart q;
+    People::load(q.engine);
+    const auto& me = q.first;
+    ASSERT_TRUE(q.by(me,
+                     "start_quickstart",
+                     {{"workspace_id", me.workspace_id},
+                      {"content", "customer_id\nc-0\n"},
+                      {"format", "csv"},
+                      {"name", "people"}})
+                    .ok);
+    auto training =
+        q.by(me, "train_quickstart", {{"workspace_id", me.workspace_id}, {"methodology", "M-3"}});
+    ASSERT_TRUE(training.ok) << training.error.message;
+    ASSERT_EQ(training.value["state"], "training") << training.value.dump(2);
+    EXPECT_EQ(training.value["training"]["target"], nullptr);
+    EXPECT_EQ(training.value["training"]["methodology"], "M-3");
+    const auto trains = calls_of(q, "train_model");
+    ASSERT_EQ(trains.size(), 1U);
+    EXPECT_FALSE(trains[0].contains("target"));
+    EXPECT_EQ(trains[0]["methodology"], "M-3");
+    EXPECT_EQ(trains[0]["entity_column"], "customer_id") << "the detected identifier";
+    EXPECT_EQ(trains[0]["dataset_path"], "datasets.people") << "unique names: as it is";
+    EXPECT_TRUE(copies(q).empty());
+
+    q.engine.run_status = "succeeded";
+    auto finished = q.by(me, "train_quickstart", {{"workspace_id", me.workspace_id}});
+    ASSERT_TRUE(finished.ok) << finished.error.message;
+    EXPECT_EQ(finished.value["state"], "done") << finished.value.dump(2);
+    EXPECT_EQ(finished.value["model"]["serves"], false);
+    EXPECT_EQ(finished.value["model"]["published"], false);
+    const json answers = Quickstart::step(finished.value, "model_answers");
+    EXPECT_EQ(answers["state"], "skipped");
+    EXPECT_FALSE(answers["note"].get<std::string>().empty());
+    EXPECT_EQ(count(q.engine_calls(), "expose_model"), 0U);
+    EXPECT_EQ(finished.value["predict"], nullptr);
+}
+
+// Ask Orama on lake's agent bus, as the deployed Lake runs it: a turn is a task the agent claims.
+struct AskOramaOnTheBus {
+    class NoDirectCalls final : public lake::control::AgentCaller {
+    public:
+        liquid::runtime::task<ZettaControlResult<json>>
+        turn(std::string, std::string, json) override {
+            co_return ZettaControlResult<json>(std::unexpected(
+                ZettaControlError{"store_unavailable", "library agents use the bus"}));
+        }
+    };
+    std::shared_ptr<lake::control::WorkspaceService> service;
+    std::shared_ptr<lake::control::MemoryAgentBus> dispatch =
+        std::make_shared<lake::control::MemoryAgentBus>();
+    std::shared_ptr<lake::control::AgentTaskBus> bus;
+    NoDirectCalls agents;
+
+    explicit AskOramaOnTheBus(Quickstart& q) {
+        lake::control::WorkspaceConfig config{q.workspaces.dir.string(), 0};
+        config.agent_endpoints = {{"agent-ask-orama", "http://ask:8080"}};
+        config.internal_url = "http://lake.internal";
+        service =
+            std::make_shared<lake::control::WorkspaceService>(config, q.store, q.workspaces.zetta);
+        bus = std::make_shared<lake::control::AgentTaskBus>(
+            q.store,
+            dispatch,
+            std::vector<std::string>{"agent-ask-orama"},
+            std::chrono::seconds(0));
+        EXPECT_TRUE(lake::control::settled(liquid::runtime::block_on(bus->start())));
+    }
+
+    lake::api::ApiResult
+    by(Quickstart& q, const Quickstart::Account& who, const std::string& name, json input) {
+        auto context = q.as(who);
+        context.workspaces = service.get();
+        context.agent_bus = bus.get();
+        context.agent_caller = &agents;
+        if (!input.contains("customer_id")) {
+            input["customer_id"] = who.customer_id;
+        }
+        return q.call(name, std::move(input), context);
+    }
+};
+
+// lake#1182: the model step is an Ask Orama conversation about the dataset just added. Its first
+// turn carries the dataset, its columns and the index, and quickstart_status names it.
+TEST(Quickstart, TheModelStepIsAnAskOramaConversationAboutTheDataset) {
+    Quickstart q;
+    AskOramaOnTheBus ask(q);
+    const auto& me = q.first;
+    const json where{{"workspace_id", me.workspace_id}};
+    ASSERT_TRUE(ask.by(q,
+                       me,
+                       "start_quickstart",
+                       {{"workspace_id", me.workspace_id},
+                        {"content", movies},
+                        {"format", "csv"},
+                        {"name", "movies"}})
+                    .ok);
+    auto before = q.by(me, "quickstart_status", where);
+    ASSERT_TRUE(before.ok);
+    EXPECT_EQ(before.value["conversation"], nullptr);
+    EXPECT_NE(before.value["next"].get<std::string>().find("start_quickstart_conversation"),
+              std::string::npos);
+
+    auto opened = ask.by(q, me, "start_quickstart_conversation", where);
+    ASSERT_TRUE(opened.ok) << opened.error.code << ": " << opened.error.message;
+    const json& conversation = opened.value["conversation"];
+    ASSERT_TRUE(conversation.is_object()) << opened.value.dump(2);
+    const std::string id = conversation["conversation_id"];
+    EXPECT_FALSE(id.empty());
+    const json& page = conversation["page"];
+    EXPECT_EQ(page["dataset"], "movies");
+    EXPECT_EQ(page["dataset_id"], "datasets/movies");
+    EXPECT_EQ(page["rows"], "4");
+    EXPECT_EQ(page["search_index"], "index-1");
+    EXPECT_EQ(page["quickstart_id"], opened.value["quickstart_id"]);
+    EXPECT_NE(page["columns"].get<std::string>().find("popular"), std::string::npos);
+    EXPECT_EQ(page["predictable_columns"], "genre, popular");
+    for (const auto& [key, value] : page.items()) {
+        EXPECT_TRUE(value.is_string()) << key << ": send_ask_message's page takes text";
+    }
+    EXPECT_EQ(conversation["read"]["capability"], "get_ask_conversation");
+    EXPECT_EQ(conversation["reply"]["capability"], "send_ask_message");
+    EXPECT_EQ(conversation["reply"]["input"]["conversation_id"], id);
+
+    // The person's opening message is in the workspace's conversation, which they can read.
+    auto read = ask.by(q,
+                       me,
+                       "get_ask_conversation",
+                       {{"workspace_id", me.workspace_id}, {"conversation_id", id}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    ASSERT_FALSE(read.value["messages"].empty());
+    EXPECT_EQ(read.value["messages"][0]["role"], "user");
+    EXPECT_NE(read.value["messages"][0]["content"].get<std::string>().find("movies"),
+              std::string::npos);
+
+    // Named by the status, kept, and answered again rather than started twice.
+    auto status = q.by(me, "quickstart_status", where);
+    EXPECT_EQ(status.value["conversation"]["conversation_id"], id);
+    auto again = ask.by(q, me, "start_quickstart_conversation", where);
+    ASSERT_TRUE(again.ok);
+    EXPECT_EQ(again.value["conversation"]["conversation_id"], id);
+    auto restarted = ask.by(q,
+                            me,
+                            "start_quickstart_conversation",
+                            {{"workspace_id", me.workspace_id},
+                             {"restart", true},
+                             {"message", "Ideas for a dashboard?"}});
+    ASSERT_TRUE(restarted.ok) << restarted.error.message;
+    EXPECT_NE(restarted.value["conversation"]["conversation_id"], id);
+
+    // The turn is a task for Ask Orama carrying the page (lake#269): nothing waited on the agent.
+    const std::string task = opened.value["conversation"]["task_id"];
+    ASSERT_FALSE(task.empty());
+    const auto asked = q.store->get_agent_task(task);
+    ASSERT_TRUE(asked);
+    EXPECT_EQ(asked->agent, "agent-ask-orama");
+    EXPECT_EQ(asked->conversation_id, id);
+
+    // Another account cannot open it in this workspace.
+    auto other = ask.by(q,
+                        q.second,
+                        "start_quickstart_conversation",
+                        {{"customer_id", me.customer_id}, {"workspace_id", me.workspace_id}});
+    EXPECT_FALSE(other.ok);
 }
 
 TEST(Quickstart, ATransformRequiredLakeCanSatisfyIsAppliedAndTriedOnce) {

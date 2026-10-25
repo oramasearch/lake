@@ -2,6 +2,7 @@
 // from the engine's profile, the columns offered first, the training copy, and the engine's
 // refusals in plain words. Pure: no engine.
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -344,6 +345,113 @@ TEST(QuickstartColumns, RefusalsAreFixedByTheCopyOrExplainedNeverShownRaw) {
               std::string::npos);
     EXPECT_EQ(qc::explain_run_failure("a: b: the disk is full", choice),
               "Training stopped: the disk is full. Change the choices and train again.");
+}
+
+// lake#1182: a dataset with no yes-or-no column trains on a target derived from a number column
+// (a threshold or a band) or from the values that count as yes, and the source column is left out.
+TEST(QuickstartColumns, ATargetDerivedFromAColumnTrainsWhenNoColumnIsAYesOrNoAnswer) {
+    const json columns = people_columns();
+    const std::vector<json> rows = people_rows();
+
+    auto parsed = qc::parse_derived({{"column", "Age"}, {"above", 23}}, columns);
+    ASSERT_TRUE(parsed.derived) << parsed.problem.message;
+    EXPECT_EQ(parsed.derived->name, "age_above_23");
+    EXPECT_EQ(qc::derived_rule(*parsed.derived), "Age above 23");
+
+    const qc::Derive made = qc::derive_target(columns, rows, *parsed.derived);
+    ASSERT_TRUE(made.problem.empty()) << made.problem;
+    const json* derived = qc::find(made.columns, "age_above_23");
+    ASSERT_NE(derived, nullptr);
+    EXPECT_EQ((*derived)["kind"], "boolean");
+    EXPECT_EQ((*derived)["predict"]["can"], true);
+    EXPECT_EQ((*derived)["derived"]["from"], "Age");
+    EXPECT_EQ((*qc::find(made.columns, "Age"))["feature"]["use"], false)
+        << "the source gives the answer away";
+    EXPECT_EQ(made.rows[0]["age_above_23"], "no");  // 20
+    EXPECT_EQ(made.rows[7]["age_above_23"], "yes"); // 27
+
+    // It trains through the same training copy, with the answer as 0/1 and Age left out.
+    const qc::Choice choice{"age_above_23", "yes", "customer_id"};
+    EXPECT_TRUE(qc::check_choice(made.columns, choice).message.empty());
+    EXPECT_FALSE(qc::trains_as_is(made.columns, choice, {}));
+    const qc::Prepare prepared = qc::prepare_rows(made.columns, made.rows, choice, {});
+    ASSERT_TRUE(prepared.prepared) << prepared.problem;
+    EXPECT_EQ(prepared.prepared->label["rows_yes"], 4);
+    EXPECT_EQ(prepared.prepared->label["rows_no"], 4);
+    EXPECT_EQ(std::ranges::find(prepared.prepared->used, json("Age")),
+              prepared.prepared->used.end());
+
+    // A band, and values of a category.
+    auto band = qc::parse_derived({{"column", "Age"}, {"at_least", 22}, {"below", 25}}, columns);
+    ASSERT_TRUE(band.derived) << band.problem.message;
+    EXPECT_EQ(qc::derived_rule(*band.derived), "Age at least 22 and below 25");
+    EXPECT_EQ(band.derived->name, "age_at_least_22_and_below_25");
+    const qc::Derive banded = qc::derive_target(columns, rows, *band.derived);
+    EXPECT_TRUE(banded.problem.empty()) << banded.problem;
+    EXPECT_EQ(banded.rows[2]["age_at_least_22_and_below_25"], "yes");
+    EXPECT_EQ(banded.rows[5]["age_at_least_22_and_below_25"], "no");
+    auto valued = qc::parse_derived(
+        {{"column", "Country"}, {"values", {"Japan"}}, {"name", "in_japan"}}, columns);
+    ASSERT_TRUE(valued.derived) << valued.problem.message;
+    EXPECT_EQ(qc::derived_rule(*valued.derived), "Country is Japan");
+    EXPECT_EQ(qc::derive_target(columns, rows, *valued.derived).rows[2]["in_japan"], "yes");
+}
+
+TEST(QuickstartColumns, ADerivedTargetThatCannotTeachAnythingIsSaidInPlainWords) {
+    const json columns = people_columns();
+    const std::vector<json> rows = people_rows();
+    const auto problem = [&](const json& input) {
+        return qc::parse_derived(input, columns).problem.message;
+    };
+    EXPECT_NE(problem({{"column", "Nope"}, {"above", 1}}).find("no column named Nope"),
+              std::string::npos);
+    EXPECT_NE(problem({{"column", "Age"}}).find("needs a rule"), std::string::npos);
+    EXPECT_NE(problem({{"column", "Country"}, {"above", 1}}).find("is not a number"),
+              std::string::npos);
+    EXPECT_NE(problem({{"column", "Age"}, {"above", 1}, {"values", {"x"}}}).find("not both"),
+              std::string::npos);
+    EXPECT_NE(problem({{"column", "Age"}, {"at_least", 30}, {"below", 25}}).find("lower bound"),
+              std::string::npos);
+    EXPECT_NE(problem({{"column", "Age"}, {"above", 1}, {"name", "Plan"}}).find("already has"),
+              std::string::npos);
+    auto all = qc::parse_derived({{"column", "Age"}, {"above", 1}}, columns);
+    ASSERT_TRUE(all.derived);
+    EXPECT_NE(qc::derive_target(columns, rows, *all.derived).problem.find("Every row has"),
+              std::string::npos);
+    auto none = qc::parse_derived({{"column", "Age"}, {"above", 99}}, columns);
+    ASSERT_TRUE(none.derived);
+    EXPECT_NE(qc::derive_target(columns, rows, *none.derived).problem.find("No row has"),
+              std::string::npos);
+}
+
+// lake#1182: segmentation / clustering (M-3) has no column to predict; its training copy keeps the
+// usable columns and numbers the rows when no column names each one.
+TEST(QuickstartColumns, ClusteringNeedsNoTargetAndNumbersTheRowsWhenNothingNamesThem) {
+    EXPECT_TRUE(qc::label_free("M-3"));
+    EXPECT_TRUE(qc::label_free("clustering"));
+    EXPECT_FALSE(qc::label_free("M-1"));
+    const json columns = people_columns();
+    const std::vector<json> rows = people_rows();
+
+    const qc::Prepare named = qc::prepare_unlabeled(columns, rows, "customer_id");
+    ASSERT_TRUE(named.prepared) << named.problem;
+    EXPECT_EQ(named.prepared->entity, "customer_id") << "unique: the dataset trains as it is";
+    EXPECT_EQ(named.prepared->rows, 8U);
+
+    const qc::Prepare numbered = qc::prepare_unlabeled(columns, rows, "");
+    ASSERT_TRUE(numbered.prepared) << numbered.problem;
+    EXPECT_EQ(numbered.prepared->entity, "row_number");
+    EXPECT_NE(numbered.prepared->content.find("\"row_number\":8"), std::string::npos);
+    EXPECT_NE(std::ranges::find(numbered.prepared->used, json("Age")),
+              numbered.prepared->used.end());
+    EXPECT_EQ(std::ranges::find(numbered.prepared->used, json("Bio")),
+              numbered.prepared->used.end())
+        << "free text is left out";
+
+    const qc::Prepare repeated = qc::prepare_unlabeled(columns, rows, "First Name");
+    ASSERT_TRUE(repeated.prepared);
+    EXPECT_EQ(repeated.prepared->entity, "row_number");
+    EXPECT_FALSE(repeated.prepared->note.empty());
 }
 
 } // namespace
