@@ -78,6 +78,11 @@ void register_application_capabilities(Registry& registry);
 void register_agent_capabilities(Registry& registry);
 void register_platform_capabilities(Registry& registry);
 void register_web_app_capabilities(Registry& registry);
+// When a resource fails (lake#1207, docs/api/notifications.md): list_notifications,
+// dismiss_notification, get_auto_fix and set_auto_fix, general over the resource kind (`app` now,
+// `agent` with lake#1209), and repair_app and change_app, which start Application Agent turns of
+// kind repair and change through agent_turn.
+void register_repair_capabilities(Registry& registry);
 void register_build_capabilities(Registry& registry);
 void register_stream_capabilities(Registry& registry);
 void register_experiment_capabilities(Registry& registry);

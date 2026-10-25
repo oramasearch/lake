@@ -274,6 +274,10 @@ The stores' `assign_legacy_audit_events` reruns migration `0063`'s assignment wi
 workspace actions and `legacy_audit_events` pages the assigned central events in append order, for
 the copy only.
 
+`resource_repairs.cpp` is the notifications and repair records (lake#1207): one notification per
+failure keyed by what it is about, so a failure is recorded once, and one repair record per
+resource (`<kind>.<id>`) holding auto-fix, its attempts and who deployed it.
+
 Both stores keep the prepaid balance (migration `0099_account_balances`, lake#1114): an account's
 row is written only against the `version` read (the memory store counts from its own row, PostgreSQL
 creates the row at version 1), a credit is recorded once per event id (`billing_payment_events`)

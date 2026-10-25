@@ -7257,6 +7257,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_agent_capabilities(registry);
     register_platform_capabilities(registry);
     register_web_app_capabilities(registry);
+    register_repair_capabilities(registry);
     register_build_capabilities(registry);
     register_image_capabilities(registry);
     register_stream_capabilities(registry);
