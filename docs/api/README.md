@@ -36,7 +36,8 @@ public trust, admin revocation and pending session history.
 lake#831: [orders.md](orders.md) documents the apex order sheet: its offers and prices from one
 configuration (`LAKE_ORDER_SHEET`), Stripe Checkout for a private warehouse or dedicated cluster,
 the order form that skips payment, `cloud_orders` (migration `0089`), email through Resend, the
-signed status link, the abuse limits and the audit of every state change.
+signed status link, the abuse limits and the audit of every state change. Private Warehouse and
+every offer above it list their own domain, white-labelled, available on request (lake#1129).
 
 lake#757: [regions.md](regions.md) documents regions: the four variables the operator sets,
 `server_info`'s `region` and `regions`, and the apex host's region picker (closest region from
