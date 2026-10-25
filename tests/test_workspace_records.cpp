@@ -685,8 +685,14 @@ TEST_P(WorkspaceRecordStores, OpportunitiesStayInTheWorkspaceTheirScanRanIn) {
     EXPECT_EQ(home[1]["status"], "not_yet");
     EXPECT_EQ(home[0]["id"], lake::control::opportunity_id(home_scan, 1));
     EXPECT_EQ(t.opportunities(first, 0, home_scan).size(), 2U) << "a second settle writes nothing";
-    EXPECT_TRUE(t.opportunities(first, 1, home_scan).empty())
-        << "a scan of another workspace is not saved here, even when named";
+    // The lab workspace lists its own latest scan (lake#1195), never the home scan, even when
+    // named.
+    const auto lab = t.opportunities(first, 1, home_scan);
+    ASSERT_EQ(lab.size(), 2U);
+    for (const auto& row : lab) {
+        EXPECT_EQ(row["task_id"], lab_scan)
+            << "a scan of another workspace is not saved here, even when named";
+    }
     EXPECT_EQ(t.opportunities(first, 1, lab_scan).size(), 2U);
     EXPECT_EQ(t.opportunities(second, 0, theirs_scan).size(), 2U);
     EXPECT_TRUE(t.opportunities(second, 1).empty());
@@ -779,6 +785,61 @@ TEST_P(WorkspaceRecordStores, OpportunitiesStayInTheWorkspaceTheirScanRanIn) {
     EXPECT_EQ(deleted.error.code, "invalid_input");
     EXPECT_EQ(deleted.error.path, "/workspace_id");
     EXPECT_EQ(t.opportunities(first, 0).size(), 4U);
+}
+
+// lake#1195: a scan survives leaving the page. Opportunities lists the workspace's newest scan as
+// `last_scan` (pending, running, then finished), and a finished scan's Opportunities are listed
+// without its task id, so a page opened on any tab or device shows the progress and the results.
+TEST_P(WorkspaceRecordStores, OpportunitiesReportTheLatestScanWithoutItsTaskId) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const auto listed = [&](std::size_t workspace) {
+        const auto read = t.call(
+            first,
+            "list_opportunities",
+            {{"customer_id", first.customer_id}, {"workspace_id", first.workspaces[workspace]}});
+        EXPECT_TRUE(read.ok) << read.error.message;
+        return read.value;
+    };
+    const auto before = listed(0);
+    EXPECT_TRUE(before.at("last_scan").is_null()) << "no scan yet";
+    EXPECT_TRUE(before.at("opportunities").empty());
+
+    // A scan that was asked for and not yet claimed, then one the agent is working on.
+    const auto asked = store->create_agent_task({.customer_id = first.customer_id,
+                                                 .agent = "agent-autosuggest",
+                                                 .kind = "discover",
+                                                 .workspace_id = first.workspaces[0],
+                                                 .body = {{"message", "scan"}},
+                                                 .scopes = {"list_datasets"},
+                                                 .requested_by_user_id = first.principal.user_id});
+    ASSERT_TRUE(asked) << asked.error().message;
+    auto pending = listed(0).at("last_scan");
+    ASSERT_TRUE(pending.is_object());
+    EXPECT_EQ(pending["task_id"], asked->id);
+    EXPECT_EQ(pending["status"], "pending");
+    EXPECT_FALSE(pending["started_at"].get<std::string>().empty());
+    EXPECT_TRUE(pending["finished_at"].is_null());
+    ASSERT_TRUE(store->claim_agent_task(asked->id, "agent-autosuggest", "sha"));
+    const auto running = listed(0);
+    EXPECT_EQ(running.at("last_scan")["status"], "running");
+    EXPECT_TRUE(running.at("opportunities").empty()) << "nothing to list while it runs";
+    EXPECT_TRUE(listed(1).at("last_scan").is_null()) << "a scan belongs to its own workspace";
+
+    // A finished scan (its answer recorded, as publish_agent_event keeps it) is listed with no
+    // task id, and reported finished.
+    const std::string finished = t.scan(first, first.workspaces[0], "Predict churn");
+    const auto done = listed(0);
+    ASSERT_EQ(done.at("opportunities").size(), 2U);
+    EXPECT_EQ(done.at("opportunities")[0]["task_id"], finished);
+    EXPECT_EQ(done.at("last_scan")["task_id"], finished);
+    EXPECT_EQ(done.at("last_scan")["status"], "succeeded");
+    EXPECT_FALSE(done.at("last_scan")["finished_at"].is_null());
+    EXPECT_EQ(listed(0).at("opportunities").size(), 2U) << "a second read writes nothing";
 }
 
 TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {

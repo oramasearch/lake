@@ -39,6 +39,8 @@ import {
   proposedFoundation,
   runModelName,
   runsBadge,
+  scanPollInterval,
+  scanState,
   slugText,
   solutionProjectOf,
   solutionState,
@@ -239,6 +241,35 @@ test("Opportunities group by the newest scan", () => {
   assert.deepEqual(groups.earlier.map((r) => r.id), ["1"]);
   assert.deepEqual(groups.later.map((r) => r.id), ["4"]);
   assert.deepEqual(groups.made.map((r) => r.id), ["5"]);
+});
+
+test("Opportunities follow the workspace's latest scan with no task in the address (lake#1195)", () => {
+  // No scan yet.
+  assert.deepEqual(scanState(null), { taskId: "", status: "", scanning: false, failed: false, startedAt: "", finishedAt: "", message: "" });
+  assert.equal(scanPollInterval({ opportunities: [], last_scan: null }), false);
+  // A scan asked for on another tab, then running: the page reads again every 3 seconds.
+  const pending = { task_id: "t1", status: "pending", started_at: "2026-10-25T19:28:03Z", finished_at: null, message: "" };
+  assert.equal(scanState(pending).scanning, true);
+  assert.equal(scanState(pending).startedAt, "2026-10-25T19:28:03Z");
+  assert.equal(scanState(pending).finishedAt, "");
+  const running = { ...pending, status: "running", message: "Reading accounts" };
+  assert.equal(scanState(running).scanning, true);
+  assert.equal(scanState(running).message, "Reading accounts");
+  assert.equal(scanPollInterval({ opportunities: [], last_scan: running }), 3000);
+  // Finished: its results are in the list, and the page stops reading again.
+  const done = { ...running, status: "succeeded", finished_at: "2026-10-25T19:29:11Z" };
+  assert.equal(scanState(done).scanning, false);
+  assert.equal(scanState(done).finishedAt, "2026-10-25T19:29:11Z");
+  assert.equal(scanPollInterval({ opportunities: [{ id: "o1", task_id: "t1" }], last_scan: done }), false);
+  assert.equal(scanState({ ...done, status: "failed", message: "the agent stopped" }).failed, true);
+});
+
+test("the Opportunities page reads its scan from list_opportunities, not from ?task= (lake#1195)", () => {
+  const page = readFileSync(new URL("../src/pages/design/OpportunitiesPage.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(page, /useSearchParams|params\.get\("task"\)|get_agent_task/);
+  assert.match(page, /scanState\(listed\.data\?\.last_scan\)/);
+  assert.match(page, /Scanning… started /);
+  assert.match(page, /scanning \? "Scanning…" : label/);
 });
 
 test("the Run form's model name and the Project Agent's question", () => {

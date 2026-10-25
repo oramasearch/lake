@@ -544,6 +544,28 @@ export function groupOpportunities(rows: J[]) {
   return { lastScan, latestTask, fresh, earlier, made, later, dismissed };
 }
 
+/** The workspace's newest scan as Opportunities shows it (list_opportunities' `last_scan`,
+ * lake#1195): whoever started it and wherever, so the page shows a running scan and then its
+ * results with no task id in the address. No scan yet is not scanning. */
+export function scanState(lastScan: J | null | undefined) {
+  const taskId = text(lastScan, "task_id");
+  const status = taskId ? text(lastScan, "status") : "";
+  return {
+    taskId,
+    status,
+    scanning: taskIsActive(status),
+    failed: status === "failed",
+    startedAt: text(lastScan, "started_at"),
+    finishedAt: text(lastScan, "finished_at"),
+    message: text(lastScan, "message"),
+  };
+}
+
+/** How often Opportunities reads again: every 3 seconds while its latest scan runs, else never. */
+export function scanPollInterval(listed: J | null | undefined): number | false {
+  return scanState(listed?.last_scan).scanning ? 3000 : false;
+}
+
 /** What the pipeline page says while a pipeline is proposed, beside Check (lake#813). */
 export const APPROVE_FIRST = "Approve the pipeline first; checks run on an approved pipeline.";
 

@@ -2070,13 +2070,46 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesProjects) {
                      cookie,
                      "get_agent_task?" + scope + "&task_id=" + task)["value"]["status"],
               "pending");
+    // The page finds the running scan without its task id (lake#1195), and a second Scan while
+    // it runs joins it instead of starting another.
+    const auto while_running = get_v1(*connection, cookie, "list_opportunities?" + scope);
+    ASSERT_TRUE(while_running.value("ok", false)) << while_running.dump();
+    EXPECT_EQ(while_running["value"]["last_scan"]["task_id"], task);
+    EXPECT_EQ(while_running["value"]["last_scan"]["status"], "pending");
+    EXPECT_TRUE(while_running["value"]["opportunities"].empty());
+    const auto [joined_response, joined] =
+        post_v1(*connection,
+                cookie,
+                "agent_turn",
+                {{"customer_id", customer_id},
+                 {"workspace_id", connection->workspace_id},
+                 {"agent", "agent-autosuggest"},
+                 {"kind", "discover"},
+                 {"message", "What could this workspace build from its data?"}});
+    ASSERT_TRUE(joined.value("ok", false)) << joined_response.substr(0, 300);
+    EXPECT_EQ(joined["value"]["task_id"], task) << "a second scan joins the running one";
+    EXPECT_EQ(joined["value"]["joined"], true);
+    // Nobody reads the scan while it finishes: lake saves its Opportunities when the agent's
+    // result settles the task, not when a page reads it.
+    const std::size_t calls_before = workspace_caller_->calls.size();
     run_agent_task(*connection, task);
     EXPECT_FALSE(agents_->turns.back().contains("profile"))
         << "Auto-Suggest Agent builds the profile itself with its read-only credential";
     EXPECT_FALSE(agents_->turns.back()["zetta_token"].get<std::string>().empty());
+    std::set<std::string> saved_keys;
+    for (std::size_t i = calls_before; i < workspace_caller_->calls.size(); ++i) {
+        const auto& [capability, read, input] = workspace_caller_->calls[i];
+        if (capability == "put_record" &&
+            input.value("collection", std::string()).find("opportunities") != std::string::npos) {
+            saved_keys.insert(input.value("key", std::string()));
+        }
+    }
+    EXPECT_EQ(saved_keys.size(), 2U)
+        << "the suggestion and the decline are saved as the task settles";
 
-    const auto found =
-        get_v1(*connection, cookie, "list_opportunities?" + scope + "&task_id=" + task);
+    const auto found = get_v1(*connection, cookie, "list_opportunities?" + scope);
+    EXPECT_EQ(found["value"]["last_scan"]["status"], "succeeded");
+    EXPECT_EQ(found["value"]["last_scan"]["task_id"], task);
     ASSERT_TRUE(found.value("ok", false)) << found.dump();
     const std::string listed_scan = found["value"].dump();
     EXPECT_NE(listed_scan.find("Predict which accounts will churn"), std::string::npos);

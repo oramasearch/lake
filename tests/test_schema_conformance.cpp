@@ -357,6 +357,9 @@ void check_web_app(HttpEvidence& http,
     };
     task("agent-project", "build:schema", "");
     http.call("latest_agent_task", with({{"subject", "build:schema"}}));
+    // A pending workspace scan, reported as list_opportunities' last_scan (lake#1195).
+    task("agent-autosuggest", "discover", "");
+    http.call("list_opportunities", with(json::object()));
     const std::string conversation = lake::control::new_uuid_v4();
     auto factory = task("agent-creator", "factory", conversation);
     lake::api::ApiContext context;

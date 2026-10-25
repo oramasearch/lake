@@ -1,5 +1,41 @@
 # Design → Opportunities
 
+**Updated 2026-10-25 (lake#1195): a scan survives leaving the page.** Before, the page kept the
+scan's task only in its address (`?task=`), and a finished scan was saved into Opportunities only when
+`list_opportunities` was read with that `task_id`: leave the page while the scan ran, and both the
+progress and the results were lost (lake-dev, 2026-10-25). Now:
+
+- **Lake saves a finished scan itself.** When Auto-Suggest Agent publishes its `result` for a
+  `discover` task (`publish_agent_event`), lake saves the scan's Opportunities into the workspace Zetta
+  at once, whether or not anyone is reading. It uses `settle_discover`, the one save function every
+  reader (`get_agent_task`, `receive_agent_events`, `list_opportunities`) already settles with, so a
+  scan is still saved once (each record's key is derived from the scan and its rank). A workspace that
+  cannot take them at that moment is retried by the next `list_opportunities`, which saves the
+  workspace's newest finished scan when its Opportunities are not listed yet.
+- **`list_opportunities` answers `last_scan`**: the workspace's newest scan, whoever started it,
+  `{task_id, status, started_at, finished_at, message}` (`status` is `pending`, `running`, `succeeded`
+  or `failed`; `started_at` is when it was asked for; `finished_at` is null while it runs; `message` is
+  the agent's last word or lake's notice), or `null` before the first scan. We chose this over a
+  `discover` subject on `latest_agent_task`: it is one read the page already makes, it works the same
+  over REST and MCP, and it lets every member of the workspace see the scan (Opportunities belong to
+  the workspace; `latest_agent_task` follows only the caller's own task). `task_id` is still accepted
+  and still harmless.
+- **One scan of a workspace at a time.** `agent_turn {agent: "agent-autosuggest", kind: "discover"}`
+  while that workspace's newest scan is pending or running does not start another: it answers that
+  scan's task with `joined: true`.
+- **The page** reads `last_scan` with the Opportunities, again every 3 seconds while the scan runs,
+  and has no `?task=`. It says *Scanning… started 2m ago* (with the agent's last message when there is
+  one) from any tab or device, the Scan button says *Scanning…* and is disabled, and the results appear
+  when it finishes. A failed latest scan says *The scan did not finish* with its message.
+
+Verify: `Stores/WorkspaceRecordStores.OpportunitiesReportTheLatestScanWithoutItsTaskId` (memory and
+PostgreSQL: no scan, pending, running, finished and listed without `task_id`),
+`HttpServer/HttpResponseIsolation.DiscoverOpportunitiesScansAndCreatesProjects` (the running scan in
+`last_scan`, a second scan joins it, the Opportunities saved as the agent's result settles the task,
+then listed without `task_id`), the web app's `npm test` (`scanState`, `scanPollInterval`, and the page
+reading no `?task=`), and `frontend/checks/opportunities-scan.mjs` (the page in a browser with the
+running scan, then its results, and no `?task=`).
+
 **Updated 2026-10-25 (lake#1153): a clean table gets its Opportunity.** Auto-Suggest Agent plans every
 dataset with `plan_features`, which now reads the cutoff a table's rows were observed at from its
 snapshot column (`as_of`, `observed_at`, ...) instead of declining every table with a date as

@@ -3510,6 +3510,23 @@ liquid::runtime::task<ApiResult> settle_discover(ApiContext& context, control::A
     co_return ApiResult::success({{"written", *written}});
 }
 
+// A Discover scan that has not finished: pending (not claimed yet) or running (lake#1195).
+bool scan_running(const control::AgentTask& task) {
+    return task.phase != "Succeeded" && task.phase != "Failed";
+}
+
+// The workspace's newest Discover scan as list_opportunities reports it (lake#1195): enough for a
+// page opened on any tab or device to say "Scanning… started 2 min ago" or when the last scan
+// finished, without the scan's task id. `started_at` is when the scan was asked for.
+json last_scan_json(const control::AgentTask& task) {
+    const json shown = task_json(task);
+    return {{"task_id", task.id},
+            {"status", shown.at("status")},
+            {"started_at", task.created_at},
+            {"finished_at", task.finished_at.empty() ? json(nullptr) : json(task.finished_at)},
+            {"message", task.message}};
+}
+
 json opportunity_json(const control::Opportunity& row) {
     return {{"id", row.id},
             {"task_id", row.task_id},
@@ -6345,15 +6362,31 @@ void register_agent_run_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_opportunities",
         .title = "List Opportunities",
-        .description = "What Auto-Suggest Agent recommended for the account's data in this workspace, kept "
-                       "across scans, newest scan first: each Opportunity's intent, catalogue "
-                       "solution, methodology, why the data supports it, and its status (new, "
-                       "project, dismissed, or not_yet when Auto-Suggest Agent declined it). "
-                       "Opportunities live in the workspace Zetta of the workspace their scan ran "
-                       "in; another workspace of the account never lists them. `task_id` settles a "
-                       "scan of this workspace that just finished.",
+        .description =
+            "What Auto-Suggest Agent recommended for the account's data in this workspace, kept "
+            "across scans, newest scan first: each Opportunity's intent, catalogue "
+            "solution, methodology, why the data supports it, and its status (new, "
+            "project, dismissed, or not_yet when Auto-Suggest Agent declined it). "
+            "Opportunities live in the workspace Zetta of the workspace their scan ran "
+            "in; another workspace of the account never lists them. `last_scan` is the "
+            "workspace's newest scan, whoever started it ({task_id, status pending, "
+            "running, succeeded or failed, started_at, finished_at, message}; null "
+            "before the first): a page follows a running scan with it, and a finished "
+            "scan's Opportunities are listed without its task id. `task_id` (optional) "
+            "also settles that scan of this workspace.",
         .input_schema = customer_agent_schema({{"task_id", {{"type", "string"}}}}, json::array()),
-        .output_schema = {{"type", "object"}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"opportunities", {{"type", "array"}, {"items", {{"type", "object"}}}}},
+                            {"last_scan",
+                             {{"type", json::array({"object", "null"})},
+                              {"properties",
+                               {{"task_id", {{"type", "string"}}},
+                                {"status", {{"type", "string"}}},
+                                {"started_at", {{"type", "string"}}},
+                                {"finished_at", {{"type", json::array({"string", "null"})}}},
+                                {"message", {{"type", "string"}}}}}}}}},
+                          {"required", json::array({"opportunities", "last_scan"})}},
         .kind = CapabilityKind::Read,
         .object = "customer",
         .action = "read",
@@ -6400,11 +6433,41 @@ void register_agent_run_capabilities(Registry& registry) {
                     }
                 }
             }
+            // The workspace's newest scan, whoever started it (lake#1195): the page learns a
+            // running or finished scan without its task id, and a finished scan that was not
+            // saved when it settled (its workspace was unavailable then) is saved now, once.
+            json last_scan = nullptr;
+            auto latest = context.store->latest_agent_task(customer_id, "discover", workspace_id);
+            if (!latest && latest.error().code != "not_found") {
+                co_return ApiResult::failure(latest.error().code, latest.error().message);
+            }
+            if (latest && latest->agent == "agent-autosuggest") {
+                // Its message is in its workspace (lake#375); without it the scan is still shown.
+                const bool loaded =
+                    control::settled(co_await load_agent_task_content(context, *latest))
+                        .value_or(false);
+                if (loaded && latest->phase == "Succeeded" &&
+                    std::ranges::none_of(*rows, [&](const control::Opportunity& row) {
+                        return row.task_id == latest->id;
+                    })) {
+                    const ApiResult settled = called(co_await settle_discover(context, *latest));
+                    if (settled.ok && settled.value.value("written", 0) > 0) {
+                        rows = control::settled(
+                            co_await control::list_opportunities(*records, customer_id));
+                        if (!rows) {
+                            co_return ApiResult::failure(
+                                rows.error().code, rows.error().message, rows.error().path);
+                        }
+                    }
+                }
+                last_scan = last_scan_json(*latest);
+            }
             json out = json::array();
             for (const control::Opportunity& row : *rows) {
                 out.push_back(opportunity_json(row));
             }
-            co_return ApiResult::success({{"opportunities", std::move(out)}});
+            co_return ApiResult::success(
+                {{"opportunities", std::move(out)}, {"last_scan", std::move(last_scan)}});
         }});
     registry.add(Capability{
         .name = "dismiss_opportunity",
@@ -6452,10 +6515,11 @@ void register_agent_run_capabilities(Registry& registry) {
             "(agent-ask-orama, agent-project, agent-application, agent-experiments, "
             "agent-autosuggest, agent-creator, agent-eval-generator for an eval, "
             "agent-autosuggest-corpus or agent-project-corpus for a training corpus) or an agent "
-            "of this account by its id. A library agent's turn runs in the background: the answer is "
-            "{task_id, status} at once, and get_agent_task follows it to its answer. A native "
-            "agent answers from the workspace; a Python agent from its running service (started "
-            "on first use).",
+            "of this account by its id. A library agent's turn runs in the background: the answer "
+            "is {task_id, status} at once, and get_agent_task follows it to its answer. A "
+            "native agent answers from the workspace; a Python agent from its running service "
+            "(started on first use). A workspace scan (agent-autosuggest, kind discover) while one is "
+            "pending or running joins it: the answer is that scan's task with joined: true.",
         .input_schema = customer_agent_schema({{"agent", {{"type", "string"}}},
                                                {"message", {{"type", "string"}}},
                                                {"conversation_id", {{"type", "string"}}},
@@ -6750,6 +6814,20 @@ void register_agent_run_capabilities(Registry& registry) {
                 }
                 // A turn another agent asked for names the asking turn (lake#451), so its
                 // progress is reported there too.
+                // One scan of a workspace at a time (lake#1195): a second Scan while one is
+                // pending or running joins it, so every tab and member follows the same scan.
+                if (agent == "agent-autosuggest" && task_kind == "discover") {
+                    auto running = context.store->latest_agent_task(
+                        customer_id, "discover", input.at("workspace_id"));
+                    if (!running && running.error().code != "not_found") {
+                        co_return ApiResult::failure(running.error().code, running.error().message);
+                    }
+                    if (running && running->agent == agent && scan_running(*running)) {
+                        json joined = task_json(*running);
+                        joined["joined"] = true;
+                        co_return ApiResult::success(std::move(joined));
+                    }
+                }
                 const auto asking = calling_turn(context, customer_id, input.at("workspace_id"));
                 if (asking) {
                     body["parent_task_id"] = asking->id;
@@ -7740,6 +7818,14 @@ void register_agent_bus_capabilities(Registry& registry) {
             }
             if (!published) {
                 co_return ApiResult::failure("store_unavailable", published.error().message);
+            }
+            // A finished Discover scan's Opportunities are saved now, whether or not anyone is
+            // reading (lake#1195), by the same function every reader settles with. A workspace
+            // that cannot take them now is retried by the next list_opportunities.
+            if (type == "result" && applied->phase == "Succeeded" && applied->kind == "discover") {
+                control::AgentTask finished = *applied;
+                finished.result = input.value("result", json());
+                static_cast<void>(called(co_await settle_discover(context, std::move(finished))));
             }
             // A delegated turn's progress is the asking turn's progress too (lake#451).
             if (const std::string parent = task->parent_task_id; !parent.empty()) {

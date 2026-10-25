@@ -596,7 +596,9 @@ docs/api/web-app.md); `latest_agent_task`, `compile_pipeline` and `render_pipeli
 conversation capabilities, and `resolve_model` with `find_hub_repository` in
 `model_capabilities.cpp`. `settle_discover`, `list_opportunities`, `dismiss_opportunity` and
 `create_projects_from_opportunities` keep Design → Opportunities in the workspace the scan ran in
-(lake#376); the Opportunities page reads them concurrently with the methodology registry. The record store capabilities stay out of
+(lake#376); `publish_agent_event` saves a finished scan with `settle_discover` as its result settles the
+task, `list_opportunities` reports the workspace's newest scan as `last_scan`, and `agent_turn` joins a
+running scan instead of starting a second (lake#1195); the Opportunities page reads them concurrently with the methodology registry. The record store capabilities stay out of
 the `workspace_query`/`workspace_act` allow-lists, so only lake reaches its `lake_*` collections
 (lake#370, `docs/architecture/workspace-records.md`). `stream_capabilities.cpp` reads and claims
 topic creators in the topic's workspace (`lake_stream_owners`, lake#379); the retired

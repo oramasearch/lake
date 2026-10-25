@@ -54,6 +54,10 @@ workspaces' events are stored on different Zettas.
    `conflict` and is never recorded or published as an accepted answer. If publication fails after
    acceptance, the task state remains readable through `get_agent_task`. A finished task stays
    finished. `get_agent_task` and the pages read the task from both halves.
+5. A finished Auto-Suggest Agent scan (kind `discover`) is saved into the workspace's
+   Opportunities in the same call, after its result is accepted, whether or not anyone is reading
+   (lake#1195, [Design → Opportunities](discover.md)). A save that fails there leaves the event
+   accepted and is retried by the next `list_opportunities`.
 
 The dispatch recovery loop runs separately from HTTP requests. It republishes unclaimed tasks
 and reclaims expired claims; it never polls a Lake-bus event topic. Task credentials cannot select
