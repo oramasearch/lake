@@ -879,6 +879,7 @@ std::string tools_flows_and_rules(const Registry& registry) {
 
 // llms-full.txt's reference: every tool with its input schema, the worked flows and the rules.
 std::string tool_reference(const Registry& registry) {
+    const Brand& brand = instance_brand();
     std::string out;
     for (const Group& group : tool_groups(registry)) {
         out += std::format("## {}\n\n{}\n\n", group.title, group.summary);

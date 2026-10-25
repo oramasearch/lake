@@ -54,10 +54,10 @@ constexpr std::array central = std::to_array<std::string_view>({
     "configure_recovery_contact",
     "convert_personal_space",
     "copy_workspace_records",
-    // Coupon codes are billing, in the control plane (lake#1156, decision 56).
-    "create_coupon",
     // A browser key is a credential, kept with the others in the control plane (lake#1152).
     "create_browser_key",
+    // Coupon codes are billing, in the control plane (lake#1156, decision 56).
+    "create_coupon",
     "create_customer",
     "create_federation_issuer",
     "create_grant",
@@ -116,8 +116,8 @@ constexpr std::array central = std::to_array<std::string_view>({
     "lease_dynamic_secret",
     "list_agent_library",
     "list_applications",
-    "list_coupons",
     "list_browser_keys",
+    "list_coupons",
     "list_customers",
     "list_devices",
     "list_docs",
