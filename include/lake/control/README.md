@@ -112,7 +112,9 @@ lake#659): the connection, the person's decision
 for each tool, the auto-approve grants and the streams, with its credential only named
 (`lake-secret://`), and the OAuth state codec (`docs/api/mcp-connections.md`).
 `agent_stream_triggers.hpp` (lake#677) is the stream trigger codec: an agent, a workspace stream, the
-person its runs act as and its cursor (`docs/api/agent-launches.md#stream-triggers`). See
+person its runs act as and its cursor (`docs/api/agent-launches.md#stream-triggers`).
+`workspace_settings.hpp` (lake#1230) is a workspace's settings codec: one record per workspace with
+the model its agents call (`docs/api/workspaces.md#settings`). See
 `docs/architecture/workspace-records.md`. `drive_share_links.hpp` is the drive share link codec
 (lake#350): a mutable record per link keyed by its id and found by repository and folder, and the
 bearer token format `<workspace id>.<link id>.<secret>` that routes a recipient to the workspace.

@@ -121,13 +121,34 @@ struct GatewayRig {
     lake::api::Registry registry;
     FakeProvider fake;
 
+    // `home` and `lab` choose gpt-5.5 for their agents (lake#1230), so the model an agent turn asks
+    // for is the one it calls; AnAgentTurnCallsItsWorkspacesModel... covers a workspace that
+    // chose none and one that chose another.
     GatewayRig() {
         lake::api::register_core_capabilities(registry, "test");
+        choose("gpt-5.5");
     }
     // Over a PostgreSQL control store at `uri`, with the rows the schema seeds.
     GatewayRig(std::shared_ptr<lake::control::Store> backing, std::string uri)
         : store(std::move(backing)), database_uri(std::move(uri)) {
         lake::api::register_core_capabilities(registry, "test");
+        choose("gpt-5.5");
+    }
+
+    void choose(const std::string& model) {
+        for (const std::string& workspace_id : {home, lab}) {
+            choose(workspace_id, model);
+        }
+    }
+    ApiResult choose(const std::string& workspace_id, const json& model) {
+        auto context = admin();
+        auto set = liquid::runtime::block_on(registry.call_async(
+            "set_workspace_settings",
+            {{"customer_id", customer}, {"workspace_id", workspace_id}, {"agent_model", model}},
+            context));
+        EXPECT_TRUE(set);
+        EXPECT_TRUE(set && set->ok) << (set ? set->error.message : set.error().message);
+        return set ? std::move(*set) : ApiResult::failure("store_error", set.error().message);
     }
 
     lake::api::ApiContext admin() {
@@ -175,6 +196,27 @@ struct GatewayRig {
             row.id, agent, lake::control::identity_crypto::sha256_hex("lat." + row.id + ".secret"));
         EXPECT_TRUE(claimed) << claimed.error().message;
         return *claimed;
+    }
+
+    // What a launched agent's credential resolves to: a workspace's own code, run as a job.
+    lake::api::ApiContext launch_context(const std::string& workspace_id) {
+        const auto owner = store->get_customer(customer);
+        EXPECT_TRUE(owner);
+        const auto launch = store->create_agent_launch({.customer_id = customer,
+                                                        .agent_id = "agent-1",
+                                                        .agent_name = "Churn Watcher",
+                                                        .mode = "job",
+                                                        .trigger = "manual",
+                                                        .scopes = {"workspace_query"},
+                                                        .created_by_user_id = owner->user_id,
+                                                        .workspace_id = workspace_id});
+        EXPECT_TRUE(launch) << launch.error().message;
+        auto context = admin();
+        context.acting_identity = "taap:launch-person";
+        context.operator_credential = false;
+        context.credential_kind = "agent_launch";
+        context.credential_session_id = "launch:" + launch->id;
+        return context;
     }
 
     ApiResult call(json input, lake::api::ApiContext& context) {
@@ -246,12 +288,15 @@ TEST(ModelCompletion, RejectsUnlistedModelsBeforeEveryEndpointCallsTheProvider) 
         }
     }
     EXPECT_EQ(rig.fake.calls(), 0U);
-    context.model_gateway_models = {{"private-model", "openai"}};
+    // A configured list is exact. A launched agent's own code calls the model it names (an agent
+    // turn would call its workspace's choice, lake#1230).
+    auto launched = rig.launch_context(rig.home);
+    launched.model_gateway_models = {{"private-model", "openai"}};
     auto custom = chat();
     custom["request"]["model"] = "private-model";
-    EXPECT_TRUE(rig.call(custom, context).ok);
-    context.model_gateway_models.clear();
-    EXPECT_FALSE(rig.call(custom, context).ok);
+    EXPECT_TRUE(rig.call(custom, launched).ok);
+    launched.model_gateway_models.clear();
+    EXPECT_FALSE(rig.call(custom, launched).ok);
     EXPECT_EQ(rig.fake.calls(), 1U);
 }
 
@@ -295,8 +340,15 @@ TEST(ModelCompletion, BillingRequiresBothPositiveExactModelPricesBeforeDispatch)
     EXPECT_FALSE(priced_but_unlisted.ok);
     EXPECT_EQ(priced_but_unlisted.error.code, "invalid_input");
     EXPECT_EQ(rig.fake.calls(), 0U);
+    // gpt-5.5's long prompts cost more (lake#1230): without its long-context rates it is unpriced.
     plan.prices = {{"model_tokens", 6'000'000, 1'000'000, 0, "gpt-5.5/input"},
                    {"model_tokens", 36'000'000, 1'000'000, 0, "gpt-5.5/output"}};
+    ASSERT_TRUE(rig.store->put_billing_plan(plan));
+    reject();
+    plan.prices.push_back({"model_tokens", 12'000'000, 1'000'000, 0, "gpt-5.5@long/input"});
+    ASSERT_TRUE(rig.store->put_billing_plan(plan));
+    reject();
+    plan.prices.push_back({"model_tokens", 54'000'000, 1'000'000, 0, "gpt-5.5@long/output"});
     ASSERT_TRUE(rig.store->put_billing_plan(plan));
     ASSERT_TRUE(rig.call(chat(), context).ok);
     EXPECT_EQ(rig.fake.calls(), 1U);
@@ -315,11 +367,24 @@ struct SeededModelPrice {
     std::uint64_t input;
     std::uint64_t output;
 };
+// The gpt-6.x models follow from migration 0105 (Steve 2026-10-26, the same page read 2026-10-26).
 constexpr SeededModelPrice seeded_model_prices[] = {
+    {"gpt-6.1-sol", 2'600'000, 13'000'000},      // $2.00 / $10.00
+    {"gpt-6.1-terra", 1'300'000, 6'500'000},     // $1.00 / $5.00
+    {"gpt-6-astra", 13'000'000, 65'000'000},     // $10.00 / $50.00
+    {"gpt-6-luna", 130'000, 650'000},            // $0.10 / $0.50
     {"gpt-5.5", 6'500'000, 39'000'000},          // $5.00 / $30.00
     {"gpt-5", 1'625'000, 13'000'000},            // $1.25 / $10.00
     {"gpt-4o", 3'250'000, 13'000'000},           // $2.50 / $10.00
     {"text-embedding-3-small", 26'000, 26'000}}; // $0.02, no output tokens
+
+// The long-context rates of migration 0105: a prompt over 272,000 input tokens is priced by OpenAI
+// at 2x input and 1.5x output, plus 30%.
+constexpr SeededModelPrice seeded_long_prices[] = {{"gpt-6.1-sol", 5'200'000, 19'500'000},
+                                                   {"gpt-6.1-terra", 2'600'000, 9'750'000},
+                                                   {"gpt-6-astra", 26'000'000, 97'500'000},
+                                                   {"gpt-6-luna", 260'000, 975'000},
+                                                   {"gpt-5.5", 13'000'000, 58'500'000}};
 
 // A fresh control plane (the schema applied to an empty PostgreSQL database, as the operator
 // applies it) can make a model call with billing on, for every default model, and the bill prices
@@ -367,6 +432,16 @@ TEST(ModelCompletion, ASeededInstanceCallsTheDefaultModelsWithBillingOnAtTheSeed
         EXPECT_TRUE(lake::api::validate_gateway_model(seeded.model, context));
     }
     EXPECT_EQ(std::size(seeded_model_prices), lake::api::default_gateway_models().size());
+    for (const auto& seeded : seeded_long_prices) {
+        SCOPED_TRACE(std::string(seeded.model) + "@long");
+        EXPECT_TRUE(lake::api::has_long_context_rate(seeded.model));
+        const json input = rate(std::string(seeded.model) + "@long/input");
+        const json output = rate(std::string(seeded.model) + "@long/output");
+        ASSERT_TRUE(input.is_object());
+        ASSERT_TRUE(output.is_object());
+        EXPECT_EQ(input["unit_micros"], seeded.input);
+        EXPECT_EQ(output["unit_micros"], seeded.output);
+    }
 
     // A gpt-5.5 call answered with 1,200 input and 300 output tokens (chat_answer).
     const auto task = rig.task(rig.home, "agent-project");
@@ -1677,6 +1752,157 @@ TEST(ModelGatewayRoute, CountsAStreamItsCallerAbandoned) {
     server.stop();
     EXPECT_EQ(workspaces.records(home).metric_total("lake_usage", {{"dimension", "model_tokens"}}),
               42);
+}
+
+// lake#1230: an agent turn calls the model its workspace chose, whatever model the agent asked
+// for, and its tokens are counted under that model; a workspace that chose none calls gpt-6.1-sol.
+// Embeddings, and a workspace's own launched code, which names its model itself, are left alone.
+TEST(ModelCompletion, AnAgentTurnCallsItsWorkspacesModelAndUnsetMeansGpt61Sol) {
+    GatewayRig rig;
+    const std::string fresh = rig.workspaces.create(rig.customer, "fresh");
+    const auto task = rig.task(fresh, "agent-ask-orama");
+    auto context = rig.task_context(task);
+    const auto called = rig.call(chat(), context);
+    ASSERT_TRUE(called.ok) << called.error.code << ": " << called.error.message;
+    ASSERT_EQ(rig.fake.calls(), 1U);
+    EXPECT_EQ(json::parse(rig.fake.requests[0].body)["model"], "gpt-6.1-sol");
+    EXPECT_EQ(context.audit_details["model"], "gpt-6.1-sol");
+    EXPECT_EQ(context.audit_details["agent_asked_model"], "gpt-5.5");
+
+    const auto chosen = rig.choose(fresh, "gpt-6-luna");
+    EXPECT_EQ(chosen.value["agent_model"], "gpt-6-luna");
+    auto again = rig.task_context(task);
+    ASSERT_TRUE(rig.call(chat(), again).ok);
+    ASSERT_EQ(rig.fake.calls(), 2U);
+    EXPECT_EQ(json::parse(rig.fake.requests[1].body)["model"], "gpt-6-luna");
+    // The Responses API follows the choice the same way.
+    auto responses = rig.task_context(task);
+    ASSERT_TRUE(rig.call({{"endpoint", "responses"},
+                          {"request", {{"model", "gpt-5"}, {"input", "What is churn?"}}}},
+                         responses)
+                    .ok);
+    EXPECT_EQ(json::parse(rig.fake.requests[2].body)["model"], "gpt-6-luna");
+
+    // Embeddings keep their model.
+    rig.fake.answer = {200,
+                       json{{"object", "list"},
+                            {"model", "text-embedding-3-small"},
+                            {"data", json::array()},
+                            {"usage", {{"prompt_tokens", 8}, {"total_tokens", 8}}}}
+                           .dump(),
+                       {}};
+    auto embedding = rig.task_context(task);
+    ASSERT_TRUE(rig.call({{"endpoint", "embeddings"},
+                          {"request", {{"model", "text-embedding-3-small"}, {"input", "churn"}}}},
+                         embedding)
+                    .ok);
+    EXPECT_EQ(json::parse(rig.fake.requests[3].body)["model"], "text-embedding-3-small");
+
+    // A launched agent's own code calls what it names.
+    rig.fake.answer = {200, chat_answer.dump(), {}};
+    auto launched = rig.launch_context(fresh);
+    auto named = chat();
+    named["request"]["model"] = "gpt-5";
+    ASSERT_TRUE(rig.call(named, launched).ok);
+    EXPECT_EQ(json::parse(rig.fake.requests[4].body)["model"], "gpt-5");
+
+    // Counted under the model called: two gpt-6-luna turns of 1,200 and 300 tokens; none under
+    // the model the agent asked for.
+    static_cast<void>(liquid::runtime::block_on(rig.recorder.flush()));
+    auto& records = rig.workspaces.records(fresh);
+    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-6.1-sol/input"}}), 1200);
+    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-6-luna/input"}}), 2400);
+    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-6-luna/output"}}), 600);
+    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-5.5/input"}}), 0);
+    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-5/input"}}), 1200);
+
+    // Back to the default.
+    rig.choose(fresh, nullptr);
+    auto reset = rig.task_context(task);
+    ASSERT_TRUE(rig.call(chat(), reset).ok);
+    EXPECT_EQ(json::parse(rig.fake.requests.back().body)["model"], "gpt-6.1-sol");
+
+    // A chosen model this Lake no longer serves is refused, never swapped for another.
+    rig.choose(fresh, "gpt-6-astra");
+    auto narrowed = rig.task_context(task);
+    narrowed.model_gateway_models = {{"gpt-5.5", "openai"}};
+    const auto calls = rig.fake.calls();
+    const auto refused = rig.call(chat(), narrowed);
+    EXPECT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "invalid_input");
+    EXPECT_NE(refused.error.message.find("gpt-6-astra"), std::string::npos);
+    EXPECT_EQ(rig.fake.calls(), calls);
+}
+
+// lake#1230: OpenAI prices a prompt over 272,000 input tokens at 2x input and 1.5x output for the
+// whole request, so its tokens are counted under the long-context classes; at 272,000 they are not.
+TEST(ModelCompletion, ALongPromptIsCountedUnderTheLongContextClasses) {
+    GatewayRig rig;
+    const auto task = rig.task(rig.home, "agent-project");
+    for (const std::uint64_t prompt : {272'000ULL, 272'001ULL}) {
+        json answer = chat_answer;
+        answer["usage"] = {{"prompt_tokens", prompt}, {"completion_tokens", 10}};
+        rig.fake.answer = {200, answer.dump(), {}};
+        auto context = rig.task_context(task);
+        ASSERT_TRUE(rig.call(chat(), context).ok);
+    }
+    static_cast<void>(liquid::runtime::block_on(rig.recorder.flush()));
+    auto& records = rig.workspaces.records(rig.home);
+    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-5.5/input"}}), 272'000);
+    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-5.5/output"}}), 10);
+    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-5.5@long/input"}}), 272'001);
+    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-5.5@long/output"}}), 10);
+
+    using lake::api::model_token_class;
+    EXPECT_EQ(model_token_class("gpt-6.1-sol", "input", 300'000), "gpt-6.1-sol@long/input");
+    EXPECT_EQ(model_token_class("gpt-6-luna", "output", 300'000), "gpt-6-luna@long/output");
+    EXPECT_EQ(model_token_class("gpt-6.1-sol", "input", 272'000), "gpt-6.1-sol/input");
+    // A model without long-context rates keeps its one rate.
+    EXPECT_EQ(model_token_class("gpt-4o", "input", 300'000), "gpt-4o/input");
+    EXPECT_EQ(model_token_class("text-embedding-3-small", "input", 300'000),
+              "text-embedding-3-small/input");
+}
+
+// lake#1230: the gateway never asks the provider for a costlier processing mode. A service_tier
+// other than `default` is refused before the provider is called; every chat or responses request
+// is sent with `service_tier: default`.
+TEST(ModelGateway, RefusesACostlierServiceTierAndAlwaysAsksForTheStandardOne) {
+    using lake::api::prepare_model_request;
+    for (const std::string endpoint : {"chat/completions", "responses"}) {
+        for (const json& tier :
+             {json("priority"), json("flex"), json("auto"), json("scale"), json("fast"), json(1)}) {
+            const auto refused =
+                prepare_model_request(endpoint, {{"model", "gpt-5.5"}, {"service_tier", tier}});
+            ASSERT_FALSE(refused) << endpoint << " " << tier.dump();
+            EXPECT_EQ(refused.error().path, "/request/service_tier");
+        }
+        for (const json& request : {json{{"model", "gpt-5.5"}},
+                                    json{{"model", "gpt-5.5"}, {"service_tier", nullptr}},
+                                    json{{"model", "gpt-5.5"}, {"service_tier", "default"}}}) {
+            const auto prepared = prepare_model_request(endpoint, request);
+            ASSERT_TRUE(prepared) << endpoint << " " << request.dump() << ": "
+                                  << prepared.error().message;
+            EXPECT_EQ((*prepared)["service_tier"], "default");
+        }
+    }
+    const auto embedding =
+        prepare_model_request("embeddings", {{"model", "text-embedding-3-small"}, {"input", "x"}});
+    ASSERT_TRUE(embedding);
+    EXPECT_FALSE(embedding->contains("service_tier"));
+}
+
+// lake#1230: the served models, and which a workspace may choose for its agents.
+TEST(ModelGateway, ServesTheGpt6ModelsAndOnlyChatModelsAreChoosable) {
+    const auto models = lake::api::default_gateway_models();
+    for (const std::string name :
+         {"gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-luna", "gpt-5.5"}) {
+        EXPECT_TRUE(lake::api::gateway_model_allowed(models, name)) << name;
+    }
+    const auto chat_models = lake::api::gateway_chat_models(models);
+    EXPECT_EQ(chat_models.front(), lake::api::default_agent_model);
+    EXPECT_EQ(std::ranges::find(chat_models, "text-embedding-3-small"), chat_models.end());
+    EXPECT_NE(std::ranges::find(chat_models, "gpt-5.5"), chat_models.end());
+    EXPECT_EQ(lake::api::default_agent_model, "gpt-6.1-sol");
 }
 
 } // namespace

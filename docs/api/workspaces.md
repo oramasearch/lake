@@ -64,6 +64,8 @@ customer's policy object and is authorized by lake before anything reaches Zetta
 | `get_workspace` | read | `read` | Requires `customer_id`, `workspace_id`; returns desired state and operator observations, including `storage_gi` (the desired size of each of its Zetta's volumes, in GiB, default 5) and the operator's `storage_gi_observed`, `storage_phase` and short `storage_reason`; the operator's `storage_message` only for the operator and the instance administrator (migration `0069`; only the operator and the instance administrator change the size, with `set_workspace_storage`, [volumes.md](volumes.md)) |
 | `create_workspace` | action | `write` | Requires `customer_id`, `name`, `environment`; atomically creates workspace and primary service desired state. `environment` is a lowercase DNS label of up to 47 characters, usually `dev`, `staging` or `prod` (the schema's `examples`); the operator uses it only as the namespace prefix and the `orama.cloud/environment` label, so it is not an enum (lake#594) |
 | `update_workspace` | action | `write` | Requires `customer_id`, `workspace_id`; optional name, environment, desired (`running` or `stopped`); changes increment generation, status fields are refused |
+| `get_workspace_settings` | read | `read` | Requires `customer_id`, `workspace_id`; the workspace's [settings](#settings): `agent_model` and the served chat models with their prices (lake#1230) |
+| `set_workspace_settings` | action | `write` | Requires `customer_id`, `workspace_id`; optional `agent_model` (a served chat model; null or `""` goes back to the default; absent leaves it unchanged) ([Settings](#settings)) |
 | `delete_workspace` | action | `admin` | Requires `customer_id`, `workspace_id`, `confirm` equal to the workspace name; deletes the workspace and everything it holds ([Deletion](#deletion)). `dry_run: true` deletes nothing and answers what would be destroyed, with counts (`confirm` optional, checked when given) |
 | `start_workspace` | action | `write` | Idempotent creation of the account's first workspace, named after the account's handle (lake#638; one created earlier as `workspace` keeps that name and is found again), in `prod`; answers its state with its `workspace_id`. It uses the same contract table and never routes data implicitly: later calls name a workspace, and `create_workspace` adds more |
 | `predict` | action (POST, changes nothing) | `read` | Score rows through one **published** model from outside lake (lake#250): `{customer_id, workspace_id, model_id, rows, entity_column?, top_k?}` (`model` is the deprecated name of `model_id`); checks the model is published (`get_model`), then Zetta's `score`. Each `ranked` entry is `{entity, row, risk}`: `row` is the record's position in `rows`, and `entity` the value of its `entity_column` field (default `entity`), omitted when the record has none (lake#450). The engine numbers the rows itself; lake maps each number back. The engine's "score: row 2 has no 'tenure'" (zero-based) is answered `invalid_input` at `/rows/2/tenure`, with the message counting from one and naming the row's key when it is a string or number: "score: row 3 ('partial') has no 'tenure'" (lake#819). Ship → Models shows each published model's `curl`. Every answer about a model the workspace has, a refusal included, is counted in the workspace's per-model series with its status class and duration (lake#599, [../serving/telemetry.md](../serving/telemetry.md#the-per-model-prediction-series)); a model id the workspace does not know is never counted |
@@ -141,6 +143,50 @@ capability's own input. Anything off the lists is refused with `invalid_input`, 
 Zetta's administrative surface (`sql`, users, cloud provisioning) through lake. Audit records carry
 `workspace.query`, `workspace.act`, `workspace.start` or `workspace.delete` with the customer, the workspace and the
 Zetta capability.
+
+## Settings
+
+**Issue:** [lake#1230](https://github.com/oramasearch/lake/issues/1230) · **Code:**
+`src/api/workspace_settings_capabilities.cpp`, `src/control/workspace_settings.cpp` · **Tests:**
+`Stores/WorkspaceRecordStores.AWorkspaceChoosesItsAgentModelAmongTheServedChatModels`,
+`ModelCompletion.AnAgentTurnCallsItsWorkspacesModelAndUnsetMeansGpt61Sol`
+
+A workspace has one setting today, `agent_model`: the model every agent turn of the workspace calls
+through Lake's model gateway, whatever model the agent asks for
+([model-gateway.md](model-gateway.md#the-workspaces-model)). Steve, 2026-10-26: *"let's the users
+choose"*, *"default to sol"*.
+
+- **Allowed values** are the chat models this Lake serves: `LAKE_MODEL_GATEWAY_MODELS` (by default
+  `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, `gpt-6-luna`, `gpt-5.5`, `gpt-5`, `gpt-4o`) without
+  embedding models. With billing on, the model must also be priced in the list in force. Anything else
+  is `invalid_input` at `/agent_model`.
+- **Unset means `gpt-6.1-sol`.** `agent_model` in the answer is the model in effect;
+  `agent_model_chosen` is the one chosen, or null. Choosing null or `""` goes back to the default, so
+  a workspace that never chose follows the default if it changes.
+- **Who.** Anyone who may read the workspace's account reads them (an organization member's grant is
+  `read`); only those who may change it (`write`: the account's owner and organization owners and
+  admins) set them, as `update_workspace`. Another account's people do neither.
+- **Where.** The settings are workspace data, so they are one sealed record in the workspace's Zetta,
+  collection `lake_workspace_settings`, key `workspace`, found by the account
+  ([workspace-records.md](../architecture/workspace-records.md)). Nothing of them is in lake's Postgres
+  (the bridge's multitenancy rule; decision 51). The record carries who changed it last (`set_by`) and
+  when (`updated_at`); the change is audited in the workspace's own log with the previous and new model.
+
+`get_workspace_settings` answers:
+
+```json
+{"workspace_id": "…", "agent_model": "gpt-6.1-sol", "agent_model_chosen": null,
+ "default_agent_model": "gpt-6.1-sol", "updated_at": null, "set_by": null, "currency": "USD",
+ "agent_models": [{"model": "gpt-6.1-sol", "default": true,
+                   "input_micros_per_million": 2600000, "output_micros_per_million": 13000000,
+                   "long_input_micros_per_million": 5200000, "long_output_micros_per_million": 19500000}, …]}
+```
+
+Each price is what a million tokens cost in millionths of `currency`, from the price list in force
+this month; `long_*` is the price of a prompt over 272,000 input tokens
+([billing.md](billing.md#rates)), null for a model without long-context rates. Every price is null
+where billing is off (an enterprise install) or the list has no rate for the model. The console's
+picker is Ship → Workspaces → Settings ([../ui/workspace-selection.md](../ui/workspace-selection.md#settings)).
 
 ## Connections and their credential
 

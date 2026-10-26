@@ -178,6 +178,8 @@ and `agent_definition_of`, the fields of an engine agent a person designs.
 `agent_stream_triggers.cpp` is an agent's stream triggers (lake#677): one record per agent and
 workspace stream in `lake_agent_stream_triggers`, found by the account, with the person its runs act
 as and the last message sequence that started one, moved forward by a conditional write.
+`workspace_settings.cpp` is a workspace's own settings (lake#1230): one record under the key
+`workspace` in `lake_workspace_settings`, found by the account, holding the model its agents call.
 `stream_owners.cpp` is the second
 (lake#379): one `if_absent` record per topic, keyed by the topic's blind index; the stores hold no
 topic creator (the retired table is dropped by `0070`). `drive_share_links.cpp` is the drive share

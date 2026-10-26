@@ -54,6 +54,9 @@ the space and methodology, holding what it read (dataset, target, features, para
 produced (result, metrics, log, model id), written `if_absent` when it is queued and changed once,
 at the revision read, when its result comes back. The dispatch row `methodology_runs` stays in
 PostgreSQL with ids, images, resources and phases only ([methodologies.md](../api/methodologies.md#where-a-run-lives)).
+A workspace's own settings (lake#1230) follow: `lake_workspace_settings`, one record under the key
+`workspace`, found by the account, rewritten at the revision read; today it holds the model the
+workspace's agents call ([workspaces.md](../api/workspaces.md#settings)).
 
 The rule it implements is in [workspace-data-plane.md](workspace-data-plane.md): everything goes in
 a workspace Zetta, including credentials, secrets and metrics. Lake's PostgreSQL and the lake Zetta
