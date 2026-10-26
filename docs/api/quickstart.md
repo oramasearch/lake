@@ -53,7 +53,7 @@ proposed `quickstart_train`; it is `train_quickstart`, an action, beside `train_
 | `start_quickstart` | action, paid | `customer_id`; `workspace_id?`; `quickstart_id?` (resume); `content` with `format` (`csv`, `jsonl`) and `name?`, or `dataset_id` (`<database>/<name>`); `fields?` (the columns to search) | The workspace (the account's first, made when it has none, while `workspace_id` is left out), the dataset, its index, publishing it |
 | `quickstart_status` | read | `customer_id`, `workspace_id`, `quickstart_id?` (default: the newest), `include_costs?` | Every step's state, the ids, the training's progress read live, `next`, the workspace's quickstarts; with `include_costs`, `costs` |
 | `start_quickstart_conversation` | action, paid (an Ask Orama turn, in model tokens) | `customer_id`, `workspace_id`, `quickstart_id?`, `message?` (the person's first message), `restart?` | Opens the Ask Orama conversation that decides what to build on the dataset ([the conversation](#the-conversation-lake1182)); calling again answers the open one |
-| `train_quickstart` | action, paid | `customer_id`, `workspace_id`, `quickstart_id?`, `target?` (default: `suggested`), `target_value?` (the value of a category to look for), `derived_target?` ([a derived target](#a-derived-target)), `entity_column?`, `as_of?` (the snapshot date), `methodology?` (default `M-1`; `M-3` for [clustering](#clustering)), `holdout_fraction?` (default 0.2), `name?` | Prepares the columns ([columns](#columns)) and starts training; called again once trained, publishes the model (a clustering model is not published); a failed run is trained again by the next call |
+| `train_quickstart` | action, paid | `customer_id`, `workspace_id`, `quickstart_id?`, `target?` (default: `suggested`), `target_value?` (the value of a category to look for), `derived_target?` ([a derived target](#a-derived-target)), `entity_column?`, `as_of?` (the snapshot date), `methodology?` (default `M-1`; `M-3` for [clustering](#clustering)), `holdout_fraction?` (default 0.2; never sent for M-3), `name?` | Prepares the columns ([columns](#columns)) and starts training; called again once trained, publishes the model (a clustering model is not published); a failed run is trained again by the next call |
 | `quickstart_snippets` | action, authorized as a read (POST) | `customer_id`, `workspace_id`, `quickstart_id?`, `origins?` (the website's origins: makes the key now) | `snippets` (`html`, `react`, `curl`, each `{id, title, language, code}`), `prompt` ([the agent prompt](#the-agent-prompt)), `key` (`kind: "browser_key"`, `placeholder`, `capabilities`, `create`: the `create_browser_key` call, `secret` and `browser_key` when it made one, `note`), `mcp`, `ready`, `includes_model` |
 
 `start_quickstart` takes up to 64 MiB of JSON, as `upload_dataset` does; the engine takes at most
@@ -303,10 +303,19 @@ Every turn sends `page` (`conversation.page`, text values, as `send_ask_message`
 | `columns` | Each column with its detected kind and *(can be predicted)*, at most 6,000 characters |
 | `predictable_columns` | The columns a model can predict, or `none: …` |
 | `search_index`, `search_index_published`, `snapshot_date` | The index and whether it is published; the snapshot date |
+| `quickstart_state` | Where the Quickstart is (lake#1204): `deciding`, `training`, `failed`, `trained` or `done`; `quickstart` changes with it (*model step: training*, *model step: training failed*, *done: the model is trained*) |
+| `model` | What was asked for (*a clustering model (M-3) that groups the rows into segments*, *a model that predicts churned is yes*), with *training since …* or *trained (model …)* |
+| `model_problem` | When it failed: why, in the model step's plain words |
+| `quickstart_next` | The person's one next step |
+
+The page is worked out from the record and the training's progress on every status read, so the
+page a reply sends always says where the Quickstart is now. Ask Orama reads it: after a confirm it
+says what started and what comes next, asked about progress it reads `quickstart_status`, and after a
+failure it proposes the corrected change as a card (prompt v17).
 
 So Ask Orama starts from "here is what you could build with this dataset", never "which dataset?"
 (lake#1191 is the same question on `/ask`). What it proposes is decided by Ask Orama
-(`oramasearch/agent-ask-orama`, prompt v15): ideas first (opportunities, an analysis, an analysis
+(`oramasearch/agent-ask-orama`, prompt v16, v17 from lake#1204): ideas first (opportunities, an analysis, an analysis
 or dashboard app, models: a yes-or-no target, a [derived target](#a-derived-target),
 [clustering](#clustering)); a generated corpus only when the data supports nothing or the person
 asks. A proposal is confirmed with `confirm_ask_proposal`, which runs only the call Lake stated;
@@ -320,6 +329,21 @@ confirming `train_quickstart` carries the quickstart on.
  "read": {"capability": "get_ask_conversation", "input": {"customer_id": "…", "workspace_id": "…", "conversation_id": "uuid"}},
  "reply": {"capability": "send_ask_message", "input": {"customer_id": "…", "workspace_id": "…", "conversation_id": "uuid", "page": {…}, "message": ""}}}
 ```
+
+### After a confirm
+
+lake#1204. Confirming a `train_quickstart` proposal (`confirm_ask_proposal`) writes what happened in
+the conversation, in words for a person, from train_quickstart's answer
+(`quickstart_columns::confirm_outcome`), never *"Done: train_quickstart."*:
+
+| train_quickstart answered | The conversation says | `ok` |
+|---|---|---|
+| `state: training` | *Training started: a clustering model on customers. The Quickstart page shows its progress; you can leave and come back. When it finishes, Train → Models shows the segments.* (for a model with a column to predict: *… Lake publishes the model, and search shows its answer beside each result.*) | `true` |
+| `trained` or `done` | *The clustering model is trained on customers. Train → Models shows the segments.* | `true` |
+| A failed model step (the engine refused to start it, or Lake could not prepare it) | *That did not work:* and the step's plain words; the call answers `ok: false`, `code: training_failed` | `false` |
+
+Before lake#1204 a refused training answered success with a failed model step, so the confirm said
+*Done* and the page stayed on the conversation.
 
 An agent drives the Quickstart over API or MCP the same way the page does: follow `task_id` with
 `get_agent_task` and call `settle_ask_turn` once it has finished, read the conversation, reply with
@@ -361,6 +385,28 @@ a numbered training copy of the usable columns (`prepare_unlabeled`). Once train
 clustering model answers no question per search result. `model.serves` is `false`, `model_answers`
 is `skipped` with a note, and `state` is `done`; Train → Models shows the segments. Serving a
 segment per row is lake#1197.
+
+**What Lake sends, and what it does not** (lake#1203). zetta's segmentation
+(`src/core/ml/segmentation_methodology.cpp`) refuses a held-out share or a ranked `top_k`, so Lake
+sends M-3 to `train_model` with no `holdout_fraction`, and `training.holdout_fraction` is `null`.
+Until lake#1203 it sent the default 0.2, and every clustering the Quickstart offered was refused
+(*"segmentation has no supervised holdout or ranked top_k; configure its K range in the graph
+hints"*, lake-dev, 2026-10-25). The number of segments is the engine's choice: k-means tries every
+K from its `minimum_k` (2) to its `maximum_k` (8), never more than the rows it samples, and keeps
+the best by silhouette, then Davies-Bouldin (the segmentation config's `minimum_k` and `maximum_k`,
+`src/core/ml/segmentation_graph.cpp`). zetta v0.5.0's `train_model` takes no K range (its input is
+`name`, `methodology`, `dataset_path`, `target`, `entity_column`, `holdout_fraction`, closed to other
+keys), so the Quickstart takes none either; Lake refuses a dataset of fewer than 2 rows in plain
+words before anything trains (`clustering_problem`). A K range a person chooses needs zetta's
+`train_model` to take it first (followed up from lake#1203).
+
+**Failures in plain words** (lake#1204). A refusal to start and a failed run are both kept on the
+model step as `{code, message, detail}`: `message` is for a person (`explain_run_failure`, with the
+clustering reasons: no columns to group by, too few rows, a column that names a row which cannot
+tell rows apart), `detail` is the engine's own reason for an agent. No message names a capability,
+an internal setting or the engine's words. The choices are kept as `training` with `run_id: null`
+and `refused_at`, so the next `train_quickstart` with nothing sent (the page's **Try again**) trains
+the same model; a clustering stays a clustering.
 
 ## Where it lives
 
@@ -404,6 +450,15 @@ decision 53), both of which multitenancy already holds. Audit goes to the worksp
   `AClusteringModelTrainsWithoutATargetAndIsNotPublishedForTheWebsite` cover a derived target and
   M-3; `QuickstartColumns.ATargetDerived*`, `ADerivedTargetThatCannotTeachAnything*` and
   `ClusteringNeedsNoTarget*` the rules.
+- `Quickstart.ARefusedClusteringIsSaidPlainlyAndTryAgainKeepsIt` (lake#1203, lake#1204): a refused
+  M-3 kept in plain words with the engine's reason as `detail`, Try again training M-3 again, the
+  confirm outcome a failure, and the engine's segmentation refusals word for word in plain words.
+  The test double refuses M-3 with a held-out share exactly as zetta v0.5.0 does.
+- `QuickstartZetta.AClusteringModelTrainsOnARealEngine` (lake#1203) trains the Quickstart's M-3, as
+  Ask Orama proposes it (`methodology` only), on a real Zetta v0.5.0 with a text id naming each row,
+  to `done` with `model.serves` false. Against the code before lake#1203 it fails with zetta's
+  *"segmentation has no supervised holdout or ranked top_k; configure its K range in the graph
+  hints"*, the lake-dev failure.
 - By hand over MCP: `tools/call start_quickstart` with a CSV's text, `train_quickstart`,
   `quickstart_status` until `trained`, `train_quickstart` again, `quickstart_snippets` with
   `origins`; the key in the code answers `search_index` and `predict` with that `Origin`, and 403

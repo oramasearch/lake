@@ -17,7 +17,9 @@ export type Status = {
   dataset: { id: string; database: string; name: string; rows?: number | null; columns?: Column[] } | null;
   index: { id: string; fields: string[]; published: boolean } | null;
   training: {
-    run_id?: string;
+    /** Null when the engine refused to start it (lake#1204): the model step says why. */
+    run_id?: string | null;
+    started_at?: string;
     target?: string | null;
     target_value?: string | null;
     entity_column?: string | null;
@@ -345,4 +347,60 @@ export function whereItLives(capability: string): { path: string; label: string 
 /** The model step's title: a conversation until something is training, then the model. */
 export function modelStepTitle(status: Pick<Status, "training" | "model">): string {
   return status.training || status.model ? "Train a Model on the Same Data" : "Decide What to Build";
+}
+
+/** Whether a methodology groups rows without a column to predict (M-3 clustering, lake#1182). */
+export function isClustering(methodology: string | null | undefined): boolean {
+  return ["m-3", "segmentation", "clustering", "cluster"].includes((methodology ?? "").toLowerCase());
+}
+
+/** Where the model step is, for a person (lake#1204), each with one next action:
+ * - `choose`: nothing started yet; the conversation (or the columns) decides what to build;
+ * - `training`: the engine is training; the page follows it;
+ * - `publishing`: trained, and the page publishes it now;
+ * - `failed`: why, in plain words, with Try again and Ask Orama to fix it;
+ * - `done`: published, and search shows its answers;
+ * - `clustered`: a clustering model is trained; its segments are on the model's page. */
+export type ModelView = "choose" | "training" | "publishing" | "failed" | "done" | "clustered";
+export function modelView(status: Pick<Status, "state" | "steps" | "training" | "model">): ModelView {
+  const model = status.steps.find((s) => s.step === "model");
+  const answers = status.steps.find((s) => s.step === "model_answers");
+  if (model?.state === "failed" || answers?.state === "failed") return "failed";
+  if (status.model?.serves === false) return "clustered";
+  if (answers?.state === "done") return "done";
+  if (status.state === "trained" || (model?.state === "done" && status.model && !status.model.published)) return "publishing";
+  if (model?.state === "running" || status.state === "training") return "training";
+  return "choose";
+}
+
+/** Whether the model step shows the training (not the conversation): as soon as a model was asked
+ * for, by Confirm in the conversation or by the columns, whether it trains, failed or is done. The
+ * page moves on by itself after a confirm (lake#1204). */
+export function showsTraining(status: Pick<Status, "state" | "steps" | "training" | "model">): boolean {
+  return !!status.training || !!status.model || modelView(status) !== "choose";
+}
+
+/** How long the training has run, in words ("2 min", "under a minute"); empty without a start. */
+export function elapsed(startedAt: string | null | undefined, now: number): string {
+  const started = startedAt ? Date.parse(startedAt) : NaN;
+  if (!Number.isFinite(started)) return "";
+  const minutes = Math.floor(Math.max(0, now - started) / 60_000);
+  if (minutes < 1) return "under a minute";
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} h ${minutes % 60} min`;
+}
+
+/** Why the model step failed, as the page says it: the step's plain words (never the engine's). */
+export function failureReason(status: Pick<Status, "steps">): string {
+  const model = status.steps.find((s) => s.step === "model");
+  const answers = status.steps.find((s) => s.step === "model_answers");
+  return model?.error?.message || answers?.error?.message || "Lake could not train the model. Try again, or let Ask Orama fix it.";
+}
+
+/** What "Ask Orama to fix it" says in the conversation (lake#1204): what failed and why, asking for
+ * the corrected change as a card the person confirms. */
+export function fixMessage(status: Pick<Status, "steps" | "training">): string {
+  const what = isClustering(status.training?.methodology) ? "The clustering model" : status.training?.target ? `The model that predicts ${status.training.target}` : "The model";
+  return `${what} did not train: ${failureReason(status)} Propose the corrected change so I can confirm it.`;
 }

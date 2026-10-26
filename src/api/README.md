@@ -22,11 +22,17 @@ a nested `create_browser_key` and puts the secret in the code, otherwise `key.cr
 `start_quickstart_conversation` (lake#1182) opens the model step's Ask Orama conversation with a
 nested `send_ask_message`, its `page` built by `conversation_page`; the record keeps only the
 conversation's id. `train_quickstart` takes `derived_target` and trains M-3 (clustering) without a
-target, not publishing that model.
+target and without a held-out share (zetta refuses one for segmentation, lake#1203), not publishing
+that model. A training the engine refuses is kept on the model step in plain words, with the choices
+kept as a `training` with no run so the next call tries the same model (lake#1204); the page sent
+with each conversation turn says where the Quickstart is (`quickstart_state`). A confirmed
+`train_quickstart` is written into the conversation by `confirm_ask_proposal` from
+`quickstart_columns::confirm_outcome` (what started and what comes next, or why it failed).
 `quickstart_columns.cpp` (lake#1181) holds its pure column rules: each column's kind from the
 engine's `analyze_dataset`, what is offered first, the training copy's rows and the engine's
 `transform_required` refusals in plain words, a derived target (`parse_derived`, `derive_target`) and
-the label-free copy for clustering (`prepare_unlabeled`); `train_quickstart` reads rows through `call_workspace`
+the label-free copy for clustering (`prepare_unlabeled`), failures in plain words with the clustering
+reasons (`explain_run_failure`, `clustering_problem`) and a confirm's words (`confirm_outcome`); `train_quickstart` reads rows through `call_workspace`
 `sql` and loads the copy with a nested `upload_dataset`.
 See [quickstart.md](../../docs/api/quickstart.md).
 

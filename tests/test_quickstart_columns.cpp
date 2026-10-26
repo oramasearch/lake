@@ -343,8 +343,10 @@ TEST(QuickstartColumns, RefusalsAreFixedByTheCopyOrExplainedNeverShownRaw) {
                                       choice)
                   .find("same answer for Country"),
               std::string::npos);
+    // Anything else is said without the engine's own words (lake#1204): they stay in `detail`.
     EXPECT_EQ(qc::explain_run_failure("a: b: the disk is full", choice),
-              "Training stopped: the disk is full. Change the choices and train again.");
+              "Lake could not train the model on these choices. Try again, or let Ask Orama fix "
+              "it.");
 }
 
 // lake#1182: a dataset with no yes-or-no column trains on a target derived from a number column
