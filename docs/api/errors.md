@@ -58,6 +58,7 @@ Every capability answers a failure the same way on REST and MCP:
 | `size_invalid` | 413 | The request body is larger than the limit. |
 | `engine_error` | 422 | The workspace engine or the outside service refused the call; the message is its. |
 | `training_failed` | 422 | A Quickstart model confirmed in Ask Orama could not be trained: the engine refused to start it, or Lake could not prepare it. The message says why in plain words. `confirm_ask_proposal` answers it as its `code` with `ok: false` ([after a confirm](quickstart.md#after-a-confirm), lake#1204). |
+| `too_many_rows` | 422 | `sql` through the workspace Zetta route (an App's binding) answers at most 5,000 rows: a statement whose own `LIMIT` is larger is refused before it runs, and one without a `LIMIT` that returns more is refused rather than cut. Aggregate in SQL (`GROUP BY` with `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`) or page with `LIMIT` and `OFFSET` ([workspaces](workspaces.md#apps-reach-it-the-same-way), lake#1229). |
 | `not_supported` | 501 | This lake or its workspace engine cannot do what was asked yet. |
 | `quota_exceeded` | 507 | The customer's storage quota is full; existing content stays readable. |
 | `store_error` | 500 | The server failed; the message says what failed. |

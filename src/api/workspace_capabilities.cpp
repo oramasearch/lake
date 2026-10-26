@@ -3189,11 +3189,14 @@ void register_sql_capability(Registry& registry) {
                        "the database's safe mode warns (Warn All warns on every read), the call "
                        "answers safe_mode_warning with the statement and a confirmation; the same "
                        "call with `safe_mode_confirmation` runs it.",
-        .input_schema =
-            customer_input_schema({{"statement", {{"type", "string"}}},
-                                   {"database", {{"type", "string"}}},
-                                   {"safe_mode_confirmation", safe_mode_confirmation_schema()}},
-                                  json::array({"statement"})),
+        .input_schema = customer_input_schema(
+            {{"statement", {{"type", "string"}}},
+             {"database", {{"type", "string"}}},
+             {"safe_mode_confirmation", safe_mode_confirmation_schema()},
+             {"intent",
+              {{"type", "string"},
+               {"description", "why the query runs, recorded on the engine's trace"}}}},
+            json::array({"statement"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
         // A statement of any length travels as a JSON body (lake#594), as the engine's own sql
@@ -3213,7 +3216,20 @@ void register_sql_capability(Registry& registry) {
                 co_return ApiResult::failure("invalid_input", problem, "/statement");
             }
             set_audit(context, "workspace.sql", input, "sql");
-            json query{{"statement", statement}};
+            // The workspace Zetta route caps what an App reads (lake#1229); a direct call has no
+            // cap. Refused before it runs, or run with LIMIT cap+1 to see a larger answer.
+            const std::size_t cap = context.sql_row_cap;
+            std::string sent = statement;
+            if (cap > 0) {
+                auto capped = cap_sql_statement(statement, cap);
+                if (!capped) {
+                    context.audit_details["row_cap"] = cap;
+                    co_return ApiResult::failure("too_many_rows", capped.error(), "/statement");
+                }
+                sent = std::move(*capped);
+                context.audit_details["row_cap"] = cap;
+            }
+            json query{{"statement", sent}};
             if (const std::string database = input.value("database", std::string());
                 !database.empty()) {
                 query["database"] = database;
@@ -3224,7 +3240,20 @@ void register_sql_capability(Registry& registry) {
                 query["safe_mode_confirmation"] = confirmation;
                 context.audit_details["safe_mode_confirmed"] = true;
             }
-            co_return take(co_await zetta(context, input.at("customer_id"), "sql", true, query));
+            // The engine takes every call's `intent` (app-runtime sends one on each read) and
+            // records it on the call's trace.
+            if (const std::string intent = input.value("intent", std::string()); !intent.empty()) {
+                query["intent"] = intent;
+            }
+            ApiResult answered =
+                take(co_await zetta(context, input.at("customer_id"), "sql", true, query));
+            if (cap > 0 && answered.ok && answered.value.is_object() &&
+                answered.value.value("rows", json::array()).is_array() &&
+                answered.value.value("rows", json::array()).size() > cap) {
+                co_return ApiResult::failure(
+                    "too_many_rows", too_many_rows_message(cap), "/statement");
+            }
+            co_return answered;
         }});
 }
 
@@ -7876,6 +7905,110 @@ bool workspace_action_allowed(std::string_view capability) {
 
 bool workspace_uses_get(std::string_view capability) {
     return workspace_read_allowed(capability) || capability == "chat";
+}
+
+namespace {
+
+// 5000 as "5,000", for the too_many_rows message.
+std::string grouped(std::size_t value) {
+    std::string digits = std::to_string(value);
+    for (std::size_t at = digits.size(); at > 3; at -= 3) {
+        digits.insert(at - 3, ",");
+    }
+    return digits;
+}
+
+} // namespace
+
+std::string too_many_rows_message(std::size_t cap) {
+    return "the query returns more than " + grouped(cap) +
+           " rows, the most an App reads in one query: aggregate in SQL (GROUP BY with COUNT, "
+           "SUM, AVG, MIN or MAX) or page with LIMIT and OFFSET (at most " +
+           grouped(cap) + " rows a page)";
+}
+
+std::expected<std::string, std::string> cap_sql_statement(std::string_view statement,
+                                                          std::size_t cap) {
+    std::string text(statement);
+    while (!text.empty() &&
+           (std::isspace(static_cast<unsigned char>(text.back())) != 0 || text.back() == ';')) {
+        text.pop_back();
+    }
+    // The words outside quotes and parentheses, lower-cased, with where each starts and ends.
+    struct Word {
+        std::string text;
+        std::size_t begin;
+        std::size_t end;
+    };
+    std::vector<Word> words;
+    int depth = 0;
+    char quote = 0;
+    for (std::size_t index = 0; index < text.size();) {
+        const char character = text[index];
+        if (quote != 0) {
+            if (character == quote) {
+                quote = 0;
+            }
+            ++index;
+        } else if (character == '\'' || character == '"' || character == '`') {
+            quote = character;
+            ++index;
+        } else if (character == '(') {
+            ++depth;
+            ++index;
+        } else if (character == ')') {
+            --depth;
+            ++index;
+        } else if (std::isalnum(static_cast<unsigned char>(character)) != 0 || character == '_') {
+            const std::size_t begin = index;
+            std::string word;
+            while (index < text.size() &&
+                   (std::isalnum(static_cast<unsigned char>(text[index])) != 0 ||
+                    text[index] == '_' || text[index] == '.')) {
+                word += static_cast<char>(std::tolower(static_cast<unsigned char>(text[index])));
+                ++index;
+            }
+            if (depth == 0) {
+                words.push_back({std::move(word), begin, index});
+            }
+        } else {
+            ++index;
+        }
+    }
+    std::optional<std::size_t> limit;
+    std::optional<std::size_t> offset;
+    for (std::size_t index = 0; index < words.size(); ++index) {
+        if (words[index].text == "limit") {
+            limit = index;
+        } else if (words[index].text == "offset") {
+            offset = index;
+        }
+    }
+    if (limit) {
+        // Not a number: the workspace's own parse error says so.
+        if (*limit + 1 < words.size()) {
+            const std::string& count = words[*limit + 1].text;
+            if (!count.empty() && std::ranges::all_of(count, [](unsigned char character) {
+                    return std::isdigit(character) != 0;
+                })) {
+                const bool over = count.size() > 18 || std::stoull(count) > cap;
+                if (over) {
+                    return std::unexpected("LIMIT " + count + " is more than " + grouped(cap) +
+                                           " rows, the most an App reads in one query: "
+                                           "aggregate in SQL (GROUP BY with COUNT, SUM, AVG, MIN "
+                                           "or MAX) or page with LIMIT and OFFSET (at most " +
+                                           grouped(cap) + " rows a page)");
+                }
+            }
+        }
+        return std::string(statement);
+    }
+    const std::string clause = "LIMIT " + std::to_string(cap + 1);
+    if (offset) {
+        text.insert(words[*offset].begin, clause + " ");
+        return text;
+    }
+    return text + " " + clause;
 }
 
 // A workspace capability's description as a customer reads it (lake#257): the engine's issue

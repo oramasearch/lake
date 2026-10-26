@@ -69,7 +69,7 @@ customer's policy object and is authorized by lake before anything reaches Zetta
 | `predict` | action (POST, changes nothing) | `read` | Score rows through one **published** model from outside lake (lake#250): `{customer_id, workspace_id, model_id, rows, entity_column?, top_k?}` (`model` is the deprecated name of `model_id`); checks the model is published (`get_model`), then Zetta's `score`. Each `ranked` entry is `{entity, row, risk}`: `row` is the record's position in `rows`, and `entity` the value of its `entity_column` field (default `entity`), omitted when the record has none (lake#450). The engine numbers the rows itself; lake maps each number back. The engine's "score: row 2 has no 'tenure'" (zero-based) is answered `invalid_input` at `/rows/2/tenure`, with the message counting from one and naming the row's key when it is a string or number: "score: row 3 ('partial') has no 'tenure'" (lake#819). Ship → Models shows each published model's `curl`. Every answer about a model the workspace has, a refusal included, is counted in the workspace's per-model series with its status class and duration (lake#599, [../serving/telemetry.md](../serving/telemetry.md#the-per-model-prediction-series)); a model id the workspace does not know is never counted |
 | `model_traffic` | read | `read` | A workspace's `predict` traffic (lake#599): `{customer_id, workspace_id, model_id?, from_ms?, to_ms?, step_ms?}`, by default the last 24 hours in about 48 steps (`step_ms` a whole number of minutes, at most 31 days and 10,000 steps). Answers `{from_ms, to_ms, step_ms, models: [{model_id, calls, errors, client_errors, server_errors, mean_ms?, steps: [{at_ms, calls, errors, mean_ms?}]}], requests: {total, by_status_class}, drift: {measured: false, why}}` from the workspace Zetta's `lake_model_calls` and `lake_model_call_ms` series and its `lake_requests` series (`capability` `predict`) through `query_metric`; a series never written reads as no traffic. Drift is not measured: the workspace keeps no reference distribution of a model's training data. Ship → Models and a model's Monitoring view read it |
 | `edit_pipeline` | action | `write` | One validated pipeline edit (`op`: add_step, rename_step, kind_step, remove_step, add_edge, remove_edge, set_attribute (step, name, value; null clears), rename), or `edits`: a list applied in order as one save, all or nothing (how a Project Agent proposal is applied). Every step keeps its `attributes` (source, table, target, algo) through every edit. It reads the graph, applies the edit with `lake::api::pipeline`, refuses one that leaves duplicate ids, unknown kinds, dangling edges or a cycle, and saves the whole graph with `save_graph` by its id. The page's forms, REST and MCP all edit through it |
-| `workspace_sql` | read (GET, or POST with a JSON body for a long statement, lake#594) | `read` | One read-only query (`statement` starting SELECT or WITH, at most a trailing semicolon, optional `database`) through Zetta's `sql`; DDL, writes, users and several statements are refused before anything reaches the workspace. A statement that does not start with SELECT or WITH is refused at `/statement` naming the word it starts with (`it starts with 'SELEC'`), so a typo reads as one; a read the workspace cannot parse gets the workspace's own error with the token's position (lake#450). The workspace speaks Zetta's SQL subset — one `WHERE` comparison, `COUNT(*)`/`COUNT(col)`/`SUM`/`AVG`/`MIN`/`MAX` with or without `GROUP BY` (without, the whole table is one group and the answer one row), `GROUP BY` on any column including text, `ORDER BY`, `LIMIT`, `OFFSET` (zetta#1039, zetta#1218), no joins or expressions; a column no row carries is an error naming the table's columns — and the description says so, because agents write their queries from it. Audit kind `workspace.sql` |
+| `workspace_sql` | read (GET, or POST with a JSON body for a long statement, lake#594) | `read` | One read-only query (`statement` starting SELECT or WITH, at most a trailing semicolon, optional `database`, optional `intent` for the engine's trace) through Zetta's `sql`; also served as `sql` on the workspace Zetta route, capped at 5,000 rows there ([SQL on this route](#sql-on-this-route), lake#1229); DDL, writes, users and several statements are refused before anything reaches the workspace. A statement that does not start with SELECT or WITH is refused at `/statement` naming the word it starts with (`it starts with 'SELEC'`), so a typo reads as one; a read the workspace cannot parse gets the workspace's own error with the token's position (lake#450). The workspace speaks Zetta's SQL subset — one `WHERE` comparison, `COUNT(*)`/`COUNT(col)`/`SUM`/`AVG`/`MIN`/`MAX` with or without `GROUP BY` (without, the whole table is one group and the answer one row), `GROUP BY` on any column including text, `ORDER BY`, `LIMIT`, `OFFSET` (zetta#1039, zetta#1218), no joins or expressions; a column no row carries is an error naming the table's columns — and the description says so, because agents write their queries from it. Audit kind `workspace.sql` |
 | `list_datasets` | read | `read` | The direct dataset catalogue. It calls Zetta `list_datasets` and adds a stable `<database>/<name>` `id` (the form `get_dataset` takes) and a `kind` (`data`, or `result` for an engine output table) to each row |
 | `list_runs` | read | `read` | A direct REST/MCP run list with optional `project`, `solution` and bounded `limit` filters. Each retained summary is completed concurrently with `get_run` so it includes status, stage reached and the final error line without serial fan-out |
 | `get_pipeline` | read | `read` | A pipeline's graph, approval, `step_status` from the latest run, and its `runs`, newest first — what the pipeline page shows |
@@ -339,7 +339,8 @@ credential's OpenAPI document. A supplied path or input workspace must match the
   - A foundation (`solution:`) turn still carries no workspace action.
 - **Tools from the filtered OpenAPI.** Agents derive their tool list from this document (the
   `new-agent` rule), so they see exactly what they may call. `sql` is not in it: SQL reaches a
-  workspace only through `workspace_sql`, which runs one read-only query.
+  workspace only as `workspace_sql`, which runs one read-only query, called directly or as `sql`
+  on this route ([below](#sql-on-this-route)).
 - **Application Agent's Lake tools.** Its client calls `list_datasets` and `get_dataset` directly,
   so Lake exposes those read tools without changing Zetta's ordinary workspace API. Dataset ids
   are `<database>/<dataset>`; the app task's credential binds the customer. Without `revision`,
@@ -348,14 +349,42 @@ credential's OpenAPI document. A supplied path or input workspace must match the
 
 Verify: `HttpServer/HttpResponseIsolation.AgentsReachAWorkspacesZettaThroughLakeInZettasShape`.
 
-**Apps reach it the same way.** A running App's Zetta binding (`/var/run/orama/bindings/zetta`) is
+### Apps reach it the same way
+
+A running App's Zetta binding (`/var/run/orama/bindings/zetta`) is
 the JSON document the operator writes, `{"lake_url":"<lake>/w/<workspace>","customer_id":…,"token":…}`.
 app-runtime calls `<lake_url>/workspaces/<customer_id>/zetta/v1/<capability>` with the token as its
 bearer. Lake checks the token's `zetta` hash on the app's row: it reads that app's own workspace
 only, with no actions, and only while the app's binding is `{"scopes":["read"]}`. Until lake#1205
-the operator wrote the bare token and every App with workspace data stopped at startup. App-runtime's
-`sql()` is not served on this route yet (lake#1212). Verify:
+the operator wrote the bare token and every App with workspace data stopped at startup. Verify:
 `HttpServer/HttpResponseIsolation.AnAppsZettaBindingReadsItsWorkspaceThroughLake`.
+
+### SQL on this route
+
+`GET <base>/zetta/v1/sql?statement=…` (what app-runtime's `workspace.sql()` sends) and
+`POST <base>/zetta/v1/sql` with a JSON body (`statement`, and optionally `database`,
+`safe_mode_confirmation`, `intent`) run Lake's [`workspace_sql`](#capabilities), not the
+engine's `sql` (lake#1229, lake#1212). An App has only the access its binding gives it (Steve,
+2026-10-26), so:
+
+- **A read.** It needs what every read on this route needs: an App's binding with `read`, or `read`
+  on the customer for a person, or `workspace_sql` among an agent turn's scopes. Anything else is
+  refused before the workspace is called.
+- **Read-only, always.** One `SELECT` or `WITH` query, whatever the caller's scopes; anything else is
+  `invalid_input` with the reason. The workspace's administrative SQL stays out of reach.
+- **The bound workspace only**, and its database's [safe mode](safe-mode.md) applies: a warning
+  answers `safe_mode_warning`, and the same call with `safe_mode_confirmation` runs it.
+- **Audited** as `workspace.sql`, with the App (`app/<id>`) as the object, as other App reads are.
+- **At most 5,000 rows** (`gateway_sql_row_cap`, `include/lake/api/capabilities.hpp`), and nothing is
+  cut silently. A statement without its own `LIMIT` runs with `LIMIT 5001` added (before any
+  `OFFSET`); if 5,001 rows come back the call answers `too_many_rows` (422). A statement whose
+  `LIMIT` is over 5,000 is refused with the same code before it runs; a `LIMIT` at or under it runs
+  unchanged. The message says to aggregate in SQL (`GROUP BY` with `COUNT`, `SUM`, `AVG`, `MIN`,
+  `MAX`) or page with `LIMIT` and `OFFSET`. `workspace_sql` called directly has no cap.
+
+The answer is the engine's `{columns, rows}` in the `{ok, value}` envelope, each row an object
+keyed by column. Verify: `HttpServer/HttpResponseIsolation.AnAppsZettaBindingRunsReadOnlySqlThroughLake`
+and `WorkspaceSql.GatewayRowCap*`.
 
 ## Configuration
 

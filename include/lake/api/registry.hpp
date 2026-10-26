@@ -389,6 +389,9 @@ struct ApiContext {
     std::string credential_rejection;
     std::string workspace_id; // explicitly supplied by the capability or workspace URL
     std::string path_workspace_id; // immutable selection from /w/<workspace>/...
+    // Set only by the workspace Zetta route's `sql` (lake#1229): workspace_sql answers at most
+    // this many rows, or too_many_rows. Zero, the default, is no cap. Never capability input.
+    std::size_t sql_row_cap = 0;
     std::string authentication_method;
     std::string device;
     std::string credential_device_id;

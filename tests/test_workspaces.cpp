@@ -5667,6 +5667,118 @@ TEST(Workspaces, SqlNamesTheWordAMisspeltStatementStartsWith) {
     EXPECT_EQ(r.w.caller->calls.size(), before) << "the read-only guard still holds";
 }
 
+// lake#1229: the workspace Zetta route's `sql` (an App's binding) answers at most
+// gateway_sql_row_cap rows, and never cuts an answer silently.
+TEST(WorkspaceSql, GatewayRowCapRewritesOnlyAStatementWithoutItsOwnLimit) {
+    using lake::api::cap_sql_statement;
+    constexpr std::size_t cap = lake::api::gateway_sql_row_cap;
+    ASSERT_EQ(cap, 5000U);
+    EXPECT_EQ(cap_sql_statement("SELECT * FROM datasets.accounts", cap).value(),
+              "SELECT * FROM datasets.accounts LIMIT 5001");
+    EXPECT_EQ(cap_sql_statement("  select plan from datasets.accounts;  ", cap).value(),
+              "  select plan from datasets.accounts LIMIT 5001");
+    EXPECT_EQ(cap_sql_statement("SELECT * FROM datasets.accounts OFFSET 10", cap).value(),
+              "SELECT * FROM datasets.accounts LIMIT 5001 OFFSET 10")
+        << "LIMIT goes before OFFSET, as the grammar has them";
+    EXPECT_EQ(
+        cap_sql_statement("SELECT * FROM datasets.accounts WHERE note = 'limit 9'", cap).value(),
+        "SELECT * FROM datasets.accounts WHERE note = 'limit 9' LIMIT 5001")
+        << "a word in a quoted value is not the statement's LIMIT";
+    for (const char* unchanged : {"SELECT * FROM datasets.accounts LIMIT 20",
+                                  "SELECT * FROM datasets.accounts limit 5000",
+                                  "SELECT * FROM datasets.accounts LIMIT 5000 OFFSET 5000;",
+                                  "SELECT * FROM datasets.accounts LIMIT n"}) {
+        EXPECT_EQ(cap_sql_statement(unchanged, cap).value(), unchanged) << unchanged;
+    }
+    for (const char* over : {"SELECT * FROM datasets.accounts LIMIT 5001",
+                             "SELECT * FROM datasets.accounts LIMIT 100000 OFFSET 2",
+                             "SELECT * FROM datasets.accounts LIMIT 99999999999999999999999"}) {
+        const auto refused = cap_sql_statement(over, cap);
+        ASSERT_FALSE(refused) << over;
+        EXPECT_NE(refused.error().find("more than 5,000 rows"), std::string::npos)
+            << refused.error();
+        EXPECT_NE(refused.error().find("GROUP BY"), std::string::npos);
+        EXPECT_NE(refused.error().find("LIMIT and OFFSET"), std::string::npos);
+    }
+}
+
+TEST(WorkspaceSql, GatewayRowCapAppliesOnlyWhereTheRouteSetsIt) {
+    ReadyWorkspace r;
+    std::string audit_kind;
+    json audit_details;
+    const auto call = [&](json input, std::size_t cap) {
+        lake::api::ApiContext context;
+        context.store = r.w.store.get();
+        context.workspaces = r.w.service.get();
+        context.authorized = true;
+        context.acting_identity = "admin";
+        context.operator_credential = true;
+        context.request_id = lake::control::new_uuid_v4();
+        context.sql_row_cap = cap;
+        input["customer_id"] = r.w.customer_id;
+        input["workspace_id"] = r.w.workspace_id();
+        auto completed =
+            liquid::runtime::block_on(r.registry.call_async("workspace_sql", input, context));
+        EXPECT_TRUE(completed);
+        audit_kind = context.audit_kind;
+        audit_details = context.audit_details;
+        return std::move(*completed);
+    };
+    const auto rows = [](std::size_t count) {
+        json answer{
+            {"messages", json::array()}, {"columns", json::array({"id"})}, {"rows", json::array()}};
+        for (std::size_t index = 0; index < count; ++index) {
+            answer["rows"].push_back({{"id", index}});
+        }
+        return answer;
+    };
+    constexpr std::size_t cap = lake::api::gateway_sql_row_cap;
+
+    // Fewer rows than the cap: the answer passes unchanged, rows keyed by column.
+    r.w.caller->answers["sql"] = rows(3);
+    const auto few = call({{"statement", "SELECT id FROM datasets.accounts"}}, cap);
+    ASSERT_TRUE(few.ok) << few.error.message;
+    EXPECT_EQ(few.value, rows(3));
+    EXPECT_EQ(r.sent("sql")["statement"], "SELECT id FROM datasets.accounts LIMIT 5001");
+    EXPECT_EQ(audit_kind, "workspace.sql");
+    EXPECT_EQ(audit_details["row_cap"], cap);
+
+    // More than the cap: too_many_rows, never the first 5,000.
+    r.w.caller->answers["sql"] = rows(cap + 1);
+    const auto many = call({{"statement", "SELECT id FROM datasets.accounts"}}, cap);
+    ASSERT_FALSE(many.ok);
+    EXPECT_EQ(many.error.code, "too_many_rows");
+    EXPECT_EQ(lake::api::rest_status(many), 422);
+    EXPECT_NE(many.error.message.find("more than 5,000 rows"), std::string::npos);
+
+    // A LIMIT over the cap is refused before it runs.
+    const std::size_t before = r.w.caller->calls.size();
+    const auto over = call({{"statement", "SELECT id FROM datasets.accounts LIMIT 10000"}}, cap);
+    ASSERT_FALSE(over.ok);
+    EXPECT_EQ(over.error.code, "too_many_rows");
+    EXPECT_EQ(r.w.caller->calls.size(), before) << "nothing reached the workspace";
+
+    // Paging with LIMIT and OFFSET runs as written.
+    r.w.caller->answers["sql"] = rows(cap);
+    const auto page =
+        call({{"statement", "SELECT id FROM datasets.accounts LIMIT 5000 OFFSET 5000"}}, cap);
+    ASSERT_TRUE(page.ok) << page.error.message;
+    EXPECT_EQ(page.value["rows"].size(), cap);
+    EXPECT_EQ(r.sent("sql")["statement"],
+              "SELECT id FROM datasets.accounts LIMIT 5000 OFFSET 5000");
+
+    // Called directly (no cap), workspace_sql is unchanged.
+    r.w.caller->answers["sql"] = rows(cap + 1);
+    const auto direct = call({{"statement", "SELECT id FROM datasets.accounts"},
+                              {"intent", "the dashboard's first chart"}},
+                             0);
+    ASSERT_TRUE(direct.ok) << direct.error.message;
+    EXPECT_EQ(direct.value["rows"].size(), cap + 1);
+    EXPECT_EQ(r.sent("sql")["statement"], "SELECT id FROM datasets.accounts");
+    EXPECT_EQ(r.sent("sql")["intent"], "the dashboard's first chart");
+    EXPECT_FALSE(audit_details.contains("row_cap"));
+}
+
 TEST(Workspaces, SqlDescriptionSaysWhatTheWorkspaceSqlNowAnswers) {
     // zetta#1218: aggregates without GROUP BY, GROUP BY on text, unknown-column errors and parse
     // positions. Agents write their queries from this description.
