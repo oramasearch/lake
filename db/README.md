@@ -5,6 +5,12 @@ applies it to `LAKE_CONTROL_DB_URI` in one transaction under an advisory lock, a
 `PostgresSchema` Job does; `lake manifest` reports its latest migration and guard tables
 (lake#1119, [operator-interface.md](../docs/deployment/operator-interface.md)). Once
 orama-operator#936 consumes them, a new migration needs no operator vendoring.
+Migration `0104_agent_model_prices` (lake#1230) seeds the `model_tokens` rates of the gpt-6.x models
+the gateway now serves and the long-context classes `<model>@long/input` and `<model>@long/output`
+(also for gpt-5.5), OpenAI's standard price plus 30% read 2026-10-26, by `0095`'s rules (once; a new
+publication for this month; an operator's rate kept; another currency left alone). No table changes;
+guard `agent_model_prices_guard`. Apply before the new binary, or a Lake with billing on refuses those
+models. See [billing](../docs/api/billing.md#rates) and [schema.md](../docs/control-plane/schema.md).
 Migration `0103_clerk_session_binding` (lake#1163) adds the nullable `sessions.clerk_session_id` (the
 Clerk session a browser sign-in came from, from the signed `sid` of Clerk's default session token),
 the index `sessions_clerk_session_id_idx` and the guard `clerk_session_binding_guard`. A Clerk session
