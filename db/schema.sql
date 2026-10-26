@@ -5113,3 +5113,14 @@ CREATE TABLE IF NOT EXISTS clerk_session_binding_guard (
 );
 INSERT INTO schema_migrations (version) VALUES ('0103_clerk_session_binding')
     ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0104_app_restarts (lake#1228, docs/control-plane/web-apps.md#restart): restart_app records the
+-- generation it wrote. The operator writes it on the app's pod template, so a restart replaces the
+-- pods even when nothing else about the app changed; before, a restart bumped only `generation`,
+-- the pod template stayed the same, and no pod was replaced. 0: never restarted. Additive.
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS restart_generation bigint NOT NULL DEFAULT 0
+    CHECK (restart_generation >= 0);
+CREATE TABLE IF NOT EXISTS app_restarts_guard (applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0104_app_restarts') ON CONFLICT DO NOTHING;

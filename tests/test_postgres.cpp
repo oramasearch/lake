@@ -1416,6 +1416,61 @@ TEST(PostgresServices, CreateListAndWithdrawFollowTheContract) {
     EXPECT_TRUE(listed_with(crm->id)) << "other services are unaffected";
 }
 
+// lake#1228: restart_app writes restart_generation, the column the operator renders on the pod
+// template; any other change leaves it.
+TEST(PostgresWebApps, ARestartRecordsTheGenerationTheOperatorRollsThePodsOn) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:restart-" + suffix, "restart-" + suffix + "@example.com", "Apps"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "rs-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto workspace = store->create_workspace({customer->id, "apps", "dev", ""});
+    ASSERT_TRUE(workspace);
+    lake::control::NewWebApp app;
+    app.customer_id = customer->id;
+    app.workspace_id = workspace->id;
+    app.name = "insights";
+    app.mode = "image";
+    app.image = "registry.example/insights@sha256:" + std::string(64, 'a');
+    app.framework = "container";
+    app.port = 8080;
+    app.host = "insights-" + suffix + ".apps.example.test";
+    const auto created = store->create_web_app(app);
+    ASSERT_TRUE(created) << created.error().message;
+    EXPECT_EQ(created->restart_generation, 0);
+
+    lake::control::WebAppPatch restart;
+    restart.desired = "running";
+    restart.restart = true;
+    const auto restarted = store->update_web_app(created->id, restart);
+    ASSERT_TRUE(restarted) << restarted.error().message;
+    EXPECT_EQ(restarted->generation, created->generation + 1);
+    EXPECT_EQ(restarted->restart_generation, restarted->generation);
+
+    lake::control::WebAppPatch scale;
+    scale.replicas = 2;
+    const auto scaled = store->update_web_app(created->id, scale);
+    ASSERT_TRUE(scaled) << scaled.error().message;
+    EXPECT_EQ(scaled->generation, restarted->generation + 1);
+    EXPECT_EQ(scaled->restart_generation, restarted->generation);
+
+    pqxx::connection connection(uri);
+    pqxx::work tx(connection);
+    EXPECT_EQ(
+        tx.exec_params("SELECT restart_generation FROM apps WHERE id = $1::uuid", created->id)[0][0]
+            .as<std::int64_t>(),
+        restarted->generation);
+    EXPECT_FALSE(tx.exec("SELECT to_regclass('app_restarts_guard')")[0][0].is_null());
+}
+
 TEST(PostgresWebApps, DesiredStateQuotaNotifyAndOperatorStatusFollowTheContract) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {

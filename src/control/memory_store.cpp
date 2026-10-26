@@ -1487,6 +1487,9 @@ Result<WebApp> InMemoryStore::update_web_app(const std::string& id, const WebApp
     }
     found->desired = desired;
     ++found->generation;
+    if (patch.restart) {
+        found->restart_generation = found->generation;
+    }
     found->updated_at = now_iso8601();
     return *found;
 }

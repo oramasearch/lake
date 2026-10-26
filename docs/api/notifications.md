@@ -23,7 +23,7 @@ is no migration and nothing for the operator to vendor.
 
 | Collection | Key | What |
 |---|---|---|
-| `lake_resource_notifications` | `<event>.<kind>.<resource id>.<generation or build id>` | one notification: `event` (`rollout_failed`, `build_failed`, `auto_fix_stopped`), the reason in plain words, what the resource reported (`detail`), the phase and generation, the person it is for (`recipient_user_id`, who deployed it), `resolved_at`, and the people who dismissed it |
+| `lake_resource_notifications` | `<event>.<kind>.<resource id>.<generation or build id>` | one notification: `event` (`rollout_failed`, `build_failed`, `app_errors`, `auto_fix_stopped`), the reason in plain words, what the resource reported (`detail`), the phase and generation, the person it is for (`recipient_user_id`, who deployed it), `resolved_at`, and the people who dismissed it |
 | `lake_resource_repairs` | `<kind>.<resource id>` | one resource's repair settings: who deployed it (`deployed_by`), the source it was last deployed from, `auto_fix`, `max_attempts`, `attempts`, the generations already attempted, the running attempt's task, whether auto-fix stopped and why, and the repair and change conversations |
 
 The key of a notification is derived from what it is about, so the same failure is recorded once
@@ -45,8 +45,21 @@ every running app of every workspace:
   for (a rollout still in progress is not judged). It records `rollout_failed` for that generation.
 - **A failed build** is the app's newest image build ending `Failed`. It records `build_failed`; a
   newer build that succeeds resolves it.
-- **An app Ready again** at its generation resolves its `rollout_failed` and `auto_fix_stopped`
-  notifications.
+- **Repeated script errors in a healthy app** (lake#1228). A Streamlit or FastAPI app whose code
+  raises on every page stays Running and Ready, so the rollout says nothing. For a running app that
+  is Ready **and has auto-fix on** (and only then, so other apps cost no log read), the pass reads
+  its runtime log through `app_logs`' source: the newest 500 lines of the last five minutes
+  (`app_errors_line_limit`, `app_errors_window_seconds`). A failure is Streamlit's
+  `Uncaught app execution` or Uvicorn's `Exception in ASGI application`, each followed by a
+  traceback. At least two in the window (`app_errors_threshold`; one bad request is not a failure)
+  record `app_errors` for that generation: its reason is the newest traceback's exception line
+  (`AttributeError: 'NoneType' object has no attribute 'sort_values'`), its `detail` that traceback.
+  Auto-fix then starts its one attempt for the generation, exactly as for a failed rollout. Once a
+  read finds fewer than two, the notification is resolved. Without a log source (lake#1206) or when
+  the read fails, nothing is recorded or resolved. The repair turn reads `app_logs` itself and sees
+  the traceback. `app_errors_in_logs` (`include/lake/api/resource_repairs.hpp`) is the detector.
+- **An app Ready again** at its generation, with no repeated script errors, resolves its
+  `rollout_failed` and `auto_fix_stopped` notifications.
 - **Auto-fix**, when on and not stopped, starts one `repair` turn per failed generation, as the person
   who turned it on (their own permissions, balance gate, audit and metering). It waits while that
   turn runs. It stops when the attempts are spent (`Auto-fix tried 3 times and it still fails`) or
@@ -58,7 +71,8 @@ and names the usual causes (an error at start, a missing setting or secret, the 
 its port. The operator's message is kept beside it as `detail`.
 
 The pass's counters: `lake_repair_passes_total`, `lake_notifications_total`,
-`lake_auto_fix_attempts_total`, `lake_auto_fix_stopped_total`, `lake_repair_problems_total`.
+`lake_auto_fix_attempts_total`, `lake_auto_fix_stopped_total`, `lake_repair_problems_total`, and
+`lake_repair_log_reads_total` (app logs read for script errors).
 
 ## Capabilities
 
@@ -137,7 +151,7 @@ console's notification list need no change.
 
 ```sh
 LAKE_TEST_SKIP_STALE_SWEEP=1 ./build/tests/lake-tests \
-  --gtest_filter='AgentRuns.AFailedRollout*:AgentRuns.ARepairTurn*:AgentRuns.AutoFix*:AgentRuns.AChangeTurn*'
+  --gtest_filter='AgentRuns.AFailedRollout*:AgentRuns.ARepairTurn*:AgentRuns.AutoFix*:AgentRuns.AChangeTurn*:AgentRuns.AHealthyApp*:AppErrors.*'
 ```
 
 - `AFailedRolloutRecordsOneNotificationForThePersonWhoDeployedIt`: a crash-looping rollout records
@@ -150,3 +164,9 @@ LAKE_TEST_SKIP_STALE_SWEEP=1 ./build/tests/lake-tests \
   two repair turns run as the person, then auto-fix stops and says so, refuses a third, and turning
   it on again resets it.
 - `AChangeTurnTurnsInstructionsIntoAProposalAndContinuesTheConversation`.
+- `AHealthyAppWhoseScriptKeepsFailingIsRepairedWhenAutoFixIsOn` (lake#1228): with auto-fix off the
+  log is not read; one traceback starts nothing; two record one `app_errors` notification with the
+  exception line and start one repair; the same generation is not attempted twice; the notification
+  resolves when the errors stop.
+- `AppErrors.RepeatedScriptFailuresAreCountedAndTheNewestExceptionIsNamed`: Streamlit and Uvicorn
+  markers, newest-first reads, multi-line entries and chained tracebacks.

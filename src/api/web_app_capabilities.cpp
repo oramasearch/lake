@@ -1088,7 +1088,10 @@ void register_web_app_capabilities(Registry& registry) {
                                ? std::string("Stop an app: its pods are removed and its hosts stop "
                                              "answering, while its configuration is kept.")
                                : std::string("Restart an app's pods at the same revision, for "
-                                             "example after changing a bound secret."),
+                                             "example after changing a bound secret. The app's "
+                                             "`restart_generation` becomes its new generation, "
+                                             "which the operator writes on the pod template, so "
+                                             "the pods are replaced; a stopped app starts."),
             .input_schema = app_input_schema(),
             .output_schema = {{"type", "object"}},
             .kind = CapabilityKind::Action,
@@ -1100,6 +1103,9 @@ void register_web_app_capabilities(Registry& registry) {
                                  ApiContext& context) -> liquid::runtime::task<ApiResult> {
                 control::WebAppPatch patch;
                 patch.desired = desired;
+                // Without a change of its own the pod template stayed the same, and the operator
+                // replaced nothing (lake#1228).
+                patch.restart = event == "restart";
                 co_return co_await patch_and_publish(
                     input, context, std::move(patch), "app." + event, event);
             }});

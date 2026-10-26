@@ -11,6 +11,8 @@
 #include "lake/api/resource_repairs.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <chrono>
 #include <map>
 #include <optional>
@@ -19,6 +21,7 @@
 
 #include "agent_stream_runs.hpp"
 #include "lake/api/capabilities.hpp"
+#include "lake/control/platform.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/resource_repairs.hpp"
 #include "lake/control/store.hpp"
@@ -253,6 +256,9 @@ struct Observed {
     std::string phase;
     std::string detail;
     std::string reason; // empty: not failing
+    // The notification a failure records: the rollout's, or repeated script errors in a healthy
+    // app's log (lake#1228).
+    std::string event = "rollout_failed";
     bool healthy = false;
     // Other notifications the detector wants recorded (an app's failed build), and the events
     // whose notifications it resolves.
@@ -378,8 +384,8 @@ public:
         if (seen.reason.empty()) {
             return;
         }
-        record(notification(seen, repair, "rollout_failed", std::to_string(seen.generation),
-                            seen.reason, seen.detail));
+        record(notification(
+            seen, repair, seen.event, std::to_string(seen.generation), seen.reason, seen.detail));
         auto_fix(seen, repair);
     }
 
@@ -436,13 +442,15 @@ private:
                   {"workspace_id", seen.resource.workspace_id},
                   {"agent", repairer->agent},
                   {"kind", "repair"},
-                  {"message", "Auto-fix: repair the " + seen.resource.kind + " " +
-                                  seen.resource.name + ". Lake reported: " + seen.reason},
+                  {"message",
+                   "Auto-fix: repair the " + seen.resource.kind + " " + seen.resource.name +
+                       ". Lake reported: " + seen.reason},
                   {"context",
                    {{std::string(repairer->context_key), seen.resource.id},
                     {"auto_fix", true},
                     {"notification_id",
-                     control::resource_notification_id("rollout_failed", seen.resource.kind,
+                     control::resource_notification_id(seen.event,
+                                                       seen.resource.kind,
                                                        seen.resource.id,
                                                        std::to_string(seen.generation))}}}};
         if (!repair.repair_conversation_id.empty()) {
@@ -467,10 +475,20 @@ private:
     std::map<std::string, control::ResourceRepair> repairs_;
 };
 
-// The app detector: rollout state from the operator's status, and the app's newest build.
+// Loki's `start`: nanoseconds since the epoch, `seconds` ago.
+std::string log_start(int seconds) {
+    const auto start = std::chrono::system_clock::now() - std::chrono::seconds(seconds);
+    return std::to_string(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(start.time_since_epoch()).count());
+}
+
+// The app detector: rollout state from the operator's status, the app's newest build, and, for a
+// healthy app with auto-fix on, repeated script errors in its runtime log (lake#1228).
 Observed observe_app(const control::WebApp& app,
                      const std::optional<std::vector<control::Build>>& builds,
-                     const WorkspacePass& pass) {
+                     const WorkspacePass& pass,
+                     ApiContext& context,
+                     ResourceRepairPass& report) {
     Observed seen;
     seen.resource = Resource{std::string(control::resource_kind_app), app.id, app.name,
                              app.customer_id, app.workspace_id};
@@ -495,10 +513,123 @@ Observed observe_app(const control::WebApp& app,
             }
         }
     }
+    // A Streamlit or FastAPI app whose code raises on every page stays Running and Ready, so the
+    // rollout says nothing. Its log does. Read only for apps that would act on it: auto-fix on.
+    const control::ResourceRepair repair = pass.repair_of(seen.resource);
+    if (seen.healthy && app.desired == "running" && repair.auto_fix &&
+        context.platform != nullptr) {
+        ++report.log_reads;
+        auto read = liquid::runtime::block_on(context.platform->app_logs(
+            app.id, log_start(app_errors_window_seconds), app_errors_line_limit, "backward"));
+        // No log source (lake#1206) or a failed read says nothing either way: nothing recorded,
+        // nothing resolved.
+        if (read && *read) {
+            const AppErrors errors = app_errors_in_logs((**read).value("items", json::array()));
+            if (errors.count >= app_errors_threshold) {
+                seen.healthy = false;
+                seen.event = "app_errors";
+                seen.reason = errors.last.empty()
+                                  ? "The app's code failed on " + std::to_string(errors.count) +
+                                        " requests in the last " +
+                                        std::to_string(app_errors_window_seconds / 60) + " minutes."
+                                  : errors.last;
+                seen.detail = errors.traceback;
+                seen.resolves.push_back("rollout_failed");
+            } else {
+                seen.resolves.push_back("app_errors");
+            }
+        }
+    }
     return seen;
 }
 
+// A Python traceback's exception line: `AttributeError: 'NoneType' object has no attribute 'x'`,
+// `KeyError: 'plan'`, `pandas.errors.EmptyDataError: No columns`, or a bare `StopIteration`. The
+// name must read as an exception class, so a log line such as `INFO: GET / 500` is not one.
+bool exception_line(std::string_view line) {
+    std::size_t index = 0;
+    while (index < line.size() && (std::isalnum(static_cast<unsigned char>(line[index])) != 0 ||
+                                   line[index] == '_' || line[index] == '.')) {
+        ++index;
+    }
+    std::string_view name = line.substr(0, index);
+    if (const std::size_t dot = name.rfind('.'); dot != std::string_view::npos) {
+        name = name.substr(dot + 1);
+    }
+    if (name.empty() || std::isupper(static_cast<unsigned char>(name.front())) == 0) {
+        return false;
+    }
+    const bool exception_name = std::ranges::any_of(
+        std::array<std::string_view, 6>{
+            "Error", "Exception", "Warning", "Exit", "Interrupt", "Iteration"},
+        [&](std::string_view suffix) { return name.ends_with(suffix); });
+    const std::string_view rest = line.substr(index);
+    return exception_name && (rest.empty() || rest.starts_with(":"));
+}
+
 } // namespace
+
+AppErrors app_errors_in_logs(const json& items) {
+    // In time order, each entry split into its lines.
+    std::vector<std::pair<std::string, std::string>> entries;
+    if (items.is_array()) {
+        for (const json& item : items) {
+            if (item.is_object() && item.value("line", json()).is_string()) {
+                entries.emplace_back(item.value("ts", std::string()),
+                                     item.at("line").get<std::string>());
+            }
+        }
+    }
+    std::ranges::stable_sort(entries, {}, [](const auto& entry) { return entry.first; });
+    std::vector<std::string> lines;
+    for (const auto& [ts, text] : entries) {
+        std::size_t start = 0;
+        while (start <= text.size()) {
+            const std::size_t end = text.find('\n', start);
+            std::string line =
+                text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+                line.pop_back();
+            }
+            lines.push_back(std::move(line));
+            if (end == std::string::npos) {
+                break;
+            }
+            start = end + 1;
+        }
+    }
+    AppErrors errors;
+    std::size_t newest = lines.size();
+    for (std::size_t index = 0; index < lines.size(); ++index) {
+        if (lines[index].contains("Uncaught app execution") ||
+            lines[index].contains("Exception in ASGI application")) {
+            ++errors.count;
+            newest = index;
+        }
+    }
+    if (newest == lines.size()) {
+        return errors;
+    }
+    // The newest traceback: from its marker to the next unindented line that names an exception.
+    std::string traceback;
+    for (std::size_t index = newest; index < lines.size(); ++index) {
+        const std::string& line = lines[index];
+        if (index > newest && (line.contains("Uncaught app execution") ||
+                               line.contains("Exception in ASGI application"))) {
+            break;
+        }
+        if (traceback.size() + line.size() + 1 <= app_errors_detail_bytes) {
+            traceback += line;
+            traceback += '\n';
+        }
+        // A chained traceback prints the exception it ends with last.
+        if (index > newest && !line.empty() && line.front() != ' ' && exception_line(line)) {
+            errors.last = line;
+        }
+    }
+    errors.traceback = std::move(traceback);
+    return errors;
+}
 
 liquid::runtime::task<bool> note_deployment(ApiContext& context,
                                             std::string kind,
@@ -564,7 +695,7 @@ ResourceRepairPass run_resource_repair_pass(ApiContext& context) {
             }
             ++report.workspaces;
             for (const control::WebApp& app : workspace_apps) {
-                pass.handle(observe_app(app, builds, pass));
+                pass.handle(observe_app(app, builds, pass, context, report));
             }
         }
     }
@@ -577,8 +708,11 @@ void register_repair_capabilities(Registry& registry) {
         .title = "List notifications",
         .description =
             "What Lake has told this workspace about its resources: an app whose rollout ended "
-            "Degraded, failed or crash-looping, an app image build that failed, or auto-fix that "
-            "stopped, each with the reason in plain words. `for_you` marks the ones for the person "
+            "Degraded, failed or crash-looping (`rollout_failed`), an app image build that failed "
+            "(`build_failed`), a healthy app with auto-fix on whose code raises on its pages again "
+            "and again (`app_errors`, the exception line as its reason), or auto-fix that stopped "
+            "(`auto_fix_stopped`), each with the reason in plain words. `for_you` marks the ones "
+            "for the person "
             "who deployed the resource. Filter by `resource_kind` and `resource_id`. Dismissed and "
             "resolved ones are left out unless asked for.",
         .input_schema = input_schema({{"resource_kind", resource_kind_schema()},

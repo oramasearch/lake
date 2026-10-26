@@ -14583,7 +14583,13 @@ struct ApiServer::Impl {
         context.audit_recorder = audit_recorder.get();
         context.balance = balance_runtime;
         context.external_origin = options.external_origin;
+        // A healthy app with auto-fix on is read for repeated script errors (lake#1228).
+        context.platform = options.platform.get();
         const ResourceRepairPass done = run_resource_repair_pass(context);
+        if (done.log_reads > 0) {
+            metrics.increment_counter(
+                "lake_repair_log_reads_total", {}, static_cast<double>(done.log_reads));
+        }
         metrics.increment_counter("lake_repair_passes_total");
         if (done.notified > 0) {
             metrics.increment_counter(
