@@ -1,8 +1,8 @@
 # Runbook: edge certificates for app hosts, and the zone settings (human action)
 
-> **Human action needed — Steve.** The operator cannot do these steps itself: they are a paid Cloudflare subscription
-> and the permissions of the API tokens it uses. Everything after them is automatic.
-> **Open as of 2026-10-25** ([lake#798](https://github.com/oramasearch/lake/issues/798), a production degradation).
+> **Human action: done (2026-10-26).** The Cloudflare steps below were taken on 2026-10-26, and the edge certificates are
+> active on both zones ([lake#798](https://github.com/oramasearch/lake/issues/798), closed). Keep this page for a new zone or a
+> replaced token: the same steps apply.
 
 ## Symptom
 
@@ -37,10 +37,14 @@ What the conditions mean:
 | `EdgeCertificateOrders False` naming *Advanced Certificate Manager* | the zone's ACM subscription |
 | `EdgeCertificates True`, `EdgeCertificateOrders True` | nothing: done |
 
-State on 2026-10-25: `lake.live` (both production clusters) `ZoneSettingsUnreadable`; `oramadev.net` (all three nonprod
-members) settings applied, `OrderRefused` for SSL and Certificates.
+State on 2026-10-26, after the steps: both zones `Credentials True`; Advanced Certificates active for `*.eu.lake.live`,
+`*.us.lake.live`, `*.lake-dev.oramadev.net`, `*.lake-testing.oramadev.net` and `*.lake-staging.oramadev.net`.
 
 ## Steps (Steve, in the Cloudflare dashboard)
+
+The tokens are **account** API tokens (*Manage account* → *Account API tokens*), not user tokens. The two permissions go on
+the token's **zone** policy (scope: the zone), not an *Entire account* policy: Cloudflare refuses the zone calls otherwise. In
+the dashboard of 2026-10, *Zone Settings* is under *DNS & Zones* and *Zone SSL & Certificates* under *Cache & Performance*.
 
 1. **Advanced Certificate Manager** on each zone, `lake.live` and `oramadev.net`: the zone → *SSL/TLS* → *Edge
    Certificates* → *Advanced Certificate Manager*. A paid subscription per zone.
