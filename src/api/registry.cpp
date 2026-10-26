@@ -124,7 +124,7 @@ void log_database_diagnostic(std::string_view code, std::string_view message) {
     std::println(stderr, "{}", entry.dump());
 }
 
-constexpr std::array<ErrorCode, 38> documented_error_codes{{
+constexpr std::array<ErrorCode, 39> documented_error_codes{{
     {"invalid_input", 400, "The input is at fault; `path` points at the field."},
     {"secret_required",
      400,
@@ -196,6 +196,10 @@ constexpr std::array<ErrorCode, 38> documented_error_codes{{
      422,
      "A confirmed Quickstart model could not be trained; the message says why in plain words "
      "(confirm_ask_proposal's `code`, lake#1204)."},
+    {"too_many_rows",
+     422,
+     "A query through the workspace Zetta route answers more rows than an App reads at once "
+     "(5,000); aggregate in SQL or page with LIMIT and OFFSET."},
     {"not_supported", 501, "This Lake or its workspace engine cannot do what was asked yet."},
     {"quota_exceeded",
      507,

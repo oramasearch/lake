@@ -176,7 +176,9 @@ rate-limited denials, but does not audit each successful cookie check.
 
 The operator holds tokens in Secret `app-tokens` and writes SHA-256 hex hashes to
 `token_hashes_json`. Lake issues and returns no app tokens. Source calls must also name the app's
-exact revision. Zetta calls retain the workspace read allow-list and read-only SQL checks. Every
+exact revision. Zetta calls retain the workspace read allow-list and read-only SQL checks; app-runtime's
+`workspace.sql()` (`/zetta/v1/sql`) runs as `workspace_sql`, read-only and at most 5,000 rows a query
+([SQL on the Zetta route](workspaces.md#sql-on-this-route), lake#1229). Every
 other capability or target is refused. The registry accepts the pull token only as HTTP Basic user
 `app`, with the token as the password. It cannot read another app or `<space>/cache/...`, and it
 cannot start uploads or publish manifests. New hashes invalidate prior tokens; unbinding or

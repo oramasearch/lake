@@ -1924,6 +1924,161 @@ TEST_P(HttpResponseIsolation, AnAppsZettaBindingReadsItsWorkspaceThroughLake) {
     EXPECT_EQ(workspace_caller_->calls.size(), reached) << "nothing refused reached the workspace";
 }
 
+// lake#1229: app-runtime's workspace.sql() sends GET <base>/zetta/v1/sql?statement=... with the
+// App's Zetta token. Lake runs it as workspace_sql: a read the binding must grant, read-only
+// whatever the caller holds, the App's own workspace, and at most 5,000 rows.
+TEST_P(HttpResponseIsolation, AnAppsZettaBindingRunsReadOnlySqlThroughLake) {
+    auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store_.get());
+    if (memory == nullptr) {
+        GTEST_SKIP() << "the operator's status is written directly only on the memory store";
+    }
+    auto connection = connect();
+    const std::string cookie = sign_in(*connection);
+    const nlohmann::json customers = nlohmann::json::parse(
+        response_body(connection->request("GET", "/v1/list_customers", "", cookie)));
+    const std::string customer_id = customers["value"]["items"][0]["id"];
+    const auto requested = liquid::runtime::block_on(workspaces_->request(customer_id));
+    ASSERT_TRUE(requested && *requested);
+    const auto service = memory->get_service((*requested)->service_id);
+    ASSERT_TRUE(memory->set_service_status(service->id, "Ready", "", "http://ws:4800"));
+    std::ofstream(workspace_dir_ / (service->slug + ".json")) << R"({"kind":"zetta","token":"t"})";
+    const nlohmann::json answer = {
+        {"messages", nlohmann::json::array()},
+        {"columns", {"plan", "accounts"}},
+        {"rows", {{{"plan", "pro"}, {"accounts", 12}}, {{"plan", "free"}, {"accounts", 40}}}}};
+    workspace_caller_->answers["sql"] = answer;
+
+    const auto bound_app = [&](const std::string& name, const nlohmann::json& zetta) {
+        lake::control::NewWebApp input;
+        input.customer_id = customer_id;
+        input.workspace_id = service->workspace_id;
+        input.name = name;
+        input.mode = "runtime";
+        input.source_repository = "source";
+        input.source_revision = "main";
+        input.source_path = ".";
+        input.port = 8080;
+        input.host = name + ".apps.example.test";
+        input.bindings = {{"zetta", zetta}, {"services", nlohmann::json::array()}};
+        const auto app = memory->create_web_app(input);
+        EXPECT_TRUE(app);
+        return app ? app->id : std::string();
+    };
+    const std::string token(64, 'c');
+    const std::string unbound_token(64, 'd');
+    const std::string app_id = bound_app("customer-insights-dashboard", {{"scopes", {"read"}}});
+    ASSERT_TRUE(memory->set_web_app_token_hashes(
+        app_id, {{"zetta", lake::control::identity_crypto::sha256_hex(token)}}));
+    // An App whose binding was detached keeps no read, even with a token the hash matches.
+    const std::string unbound_id = bound_app("unbound-dashboard", nullptr);
+    ASSERT_TRUE(memory->set_web_app_token_hashes(
+        unbound_id, {{"zetta", lake::control::identity_crypto::sha256_hex(unbound_token)}}));
+
+    const std::string base =
+        "/w/" + service->workspace_id + "/workspaces/" + customer_id + "/zetta/v1/";
+    connection->workspace_id.clear();
+    const auto as_app = [&](std::string_view method,
+                            const std::string& path,
+                            std::string_view body = {},
+                            const std::string& bearer = std::string()) {
+        return connection->request(method,
+                                   path,
+                                   body,
+                                   "",
+                                   "HTTP/1.1",
+                                   bearer.empty() ? token : bearer,
+                                   "application/json");
+    };
+
+    // GET with the statement in the query string, as app-runtime sends it (httpx: spaces as +).
+    const std::string read =
+        as_app("GET",
+               base + "sql?statement=SELECT+plan%2C+COUNT(*)+AS+accounts+FROM+datasets.accounts+"
+                      "GROUP+BY+plan&intent=plan+mix");
+    ASSERT_TRUE(read.starts_with("HTTP/1.1 200")) << read.substr(0, 400);
+    const nlohmann::json value = nlohmann::json::parse(response_body(read))["value"];
+    EXPECT_EQ(value["columns"], answer["columns"]);
+    EXPECT_EQ(value["rows"][0]["plan"], "pro") << "rows are objects keyed by column";
+    EXPECT_EQ(value["rows"][1]["accounts"], 40);
+    const auto& [sql_name, sql_read, sql_input] = workspace_caller_->calls.back();
+    EXPECT_EQ(sql_name, "sql");
+    EXPECT_TRUE(sql_read);
+    EXPECT_EQ(sql_input["statement"],
+              "SELECT plan, COUNT(*) AS accounts FROM datasets.accounts GROUP BY plan LIMIT 5001")
+        << "Lake adds LIMIT cap+1 to a statement without one";
+    EXPECT_EQ(sql_input["intent"], "plan mix");
+
+    // POST with a JSON body, for a long statement.
+    const std::string posted =
+        as_app("POST",
+               base + "sql",
+               R"({"statement":"SELECT plan FROM datasets.accounts LIMIT 50 OFFSET 100"})");
+    ASSERT_TRUE(posted.starts_with("HTTP/1.1 200")) << posted.substr(0, 400);
+    EXPECT_EQ(std::get<2>(workspace_caller_->calls.back())["statement"],
+              "SELECT plan FROM datasets.accounts LIMIT 50 OFFSET 100");
+
+    // More rows than the cap: too_many_rows, never a silently cut answer.
+    nlohmann::json large = answer;
+    large["rows"] = nlohmann::json::array();
+    for (int index = 0; index < 5001; ++index) {
+        large["rows"].push_back({{"plan", "pro"}, {"accounts", index}});
+    }
+    workspace_caller_->answers["sql"] = large;
+    const std::string too_large =
+        as_app("GET", base + "sql?statement=SELECT+*+FROM+datasets.accounts");
+    EXPECT_TRUE(too_large.starts_with("HTTP/1.1 422")) << too_large.substr(0, 400);
+    const nlohmann::json too_large_body = nlohmann::json::parse(response_body(too_large));
+    EXPECT_EQ(too_large_body["error"]["code"], "too_many_rows");
+    EXPECT_NE(too_large_body["error"]["message"].get<std::string>().find("more than 5,000 rows"),
+              std::string::npos);
+    workspace_caller_->answers["sql"] = answer;
+
+    // Refused before the workspace is called: a write, several statements, a LIMIT over the cap,
+    // an unbound App, a wrong token, another workspace.
+    const std::size_t reached = workspace_caller_->calls.size();
+    const auto code_of = [](const std::string& response) {
+        return nlohmann::json::parse(response_body(response))["error"]["code"].get<std::string>();
+    };
+    const std::string write = as_app("GET", base + "sql?statement=DELETE+FROM+datasets.accounts");
+    EXPECT_TRUE(write.starts_with("HTTP/1.1 400")) << write.substr(0, 400);
+    EXPECT_EQ(code_of(write), "invalid_input");
+    for (const char* statement : {"DROP TABLE datasets.accounts",
+                                  "INSERT INTO datasets.accounts VALUES (1)",
+                                  "UPDATE datasets.accounts SET plan = 'x'",
+                                  "CREATE USER mallory",
+                                  "SELECT 1; DROP TABLE datasets.accounts"}) {
+        const std::string refused =
+            as_app("POST", base + "sql", nlohmann::json{{"statement", statement}}.dump());
+        EXPECT_TRUE(refused.starts_with("HTTP/1.1 400")) << statement << refused.substr(0, 300);
+        EXPECT_EQ(code_of(refused), "invalid_input") << statement;
+    }
+    const std::string over_cap =
+        as_app("GET", base + "sql?statement=SELECT+*+FROM+datasets.accounts+LIMIT+20000");
+    EXPECT_TRUE(over_cap.starts_with("HTTP/1.1 422")) << over_cap.substr(0, 400);
+    EXPECT_EQ(code_of(over_cap), "too_many_rows");
+    const std::string unbound = as_app(
+        "GET", base + "sql?statement=SELECT+*+FROM+datasets.accounts+LIMIT+5", {}, unbound_token);
+    EXPECT_FALSE(unbound.starts_with("HTTP/1.1 200")) << unbound.substr(0, 300);
+    const std::string wrong_token =
+        as_app("GET",
+               base + "sql?statement=SELECT+*+FROM+datasets.accounts+LIMIT+5",
+               {},
+               std::string(64, 'e'));
+    EXPECT_FALSE(wrong_token.starts_with("HTTP/1.1 200")) << wrong_token.substr(0, 300);
+    const auto other_workspace =
+        memory->create_workspace({customer_id, "elsewhere-sql", "dev", "taap:app-binding"});
+    ASSERT_TRUE(other_workspace);
+    const std::string other_space =
+        as_app("GET",
+               "/w/" + other_workspace->id + "/workspaces/" + customer_id +
+                   "/zetta/v1/sql?statement=SELECT+*+FROM+datasets.accounts+LIMIT+5");
+    EXPECT_FALSE(other_space.starts_with("HTTP/1.1 200")) << other_space.substr(0, 300);
+    const std::string anonymous =
+        connection->request("GET", base + "sql?statement=SELECT+*+FROM+datasets.accounts+LIMIT+5");
+    EXPECT_FALSE(anonymous.starts_with("HTTP/1.1 200")) << anonymous.substr(0, 300);
+    EXPECT_EQ(workspace_caller_->calls.size(), reached) << "nothing refused reached the workspace";
+}
+
 TEST_P(HttpResponseIsolation, LibraryAgentsFinishEveryTurnKindWithoutAWorkspaceEcho) {
     auto connection = connect();
     const std::string cookie = sign_in(*connection);
