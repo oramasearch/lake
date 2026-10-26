@@ -23,7 +23,7 @@ REST and MCP expose the same registry, customer policy and signed audit records.
 | `delete_app` | `app_id`, `confirm` equal to name | `desired = deleted` |
 | `set_app_env`, `unset_app_env` | `app_id`, key; set takes `value`, `secret` (`{mount_id, name, field}`) or `secret_ref` (`lake-secret://…`) | scanned environment update; a secret is checked, never read back |
 | `set_app_auth` | `app_id`, auth; public also requires `confirm_public` | lake sign-in or public access |
-| `restart_app`, `stop_app`, `start_app` | `app_id` | lifecycle intent |
+| `restart_app`, `stop_app`, `start_app` | `app_id` | lifecycle intent; a restart sets `restart_generation`, which the operator puts on the pod template so the pods are replaced ([restart](../control-plane/web-apps.md#restart), lake#1228) |
 | `scale_app` | `app_id`, replicas | desired count within customer quota |
 | `set_app_zetta_binding` | `app_id`, attached | attach or detach read-only workspace access |
 | `bind_service_to_app` | `app_id`, service_id | bind a service from the same customer |

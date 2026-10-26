@@ -40,6 +40,7 @@
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/methodologies.hpp"
+#include "lake/control/platform.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
@@ -4024,8 +4025,10 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
 
 // When an app fails (lake#1207): the pass that the store root's owner runs, with the context it
 // builds (the registry, the bus and the agents, no person).
-lake::api::ResourceRepairPass repair_pass(AgentRuns& r) {
+lake::api::ResourceRepairPass repair_pass(AgentRuns& r,
+                                          lake::control::PlatformService* platform = nullptr) {
     lake::api::ApiContext context;
+    context.platform = platform;
     context.store = &r.store;
     context.workspaces = r.w.service.get();
     context.agent_caller = &r.agents;
@@ -4280,6 +4283,153 @@ TEST(AgentRuns, AutoFixRepairsWithoutAConfirmAndStopsAfterItsAttempts) {
                        {{"resource_kind", "app"}, {"resource_id", app_id}, {"enabled", true}})
                     .ok);
     EXPECT_EQ(repair_pass(r).auto_fix_started, 1U);
+}
+
+// An app's runtime log as the configured Loki-compatible source answers it, and how often it was
+// read.
+class ScriptedLoki final : public lake::control::LokiSource {
+public:
+    json items = json::array();
+    std::size_t reads = 0;
+    std::string since;
+    int limit = 0;
+    std::string direction;
+
+    liquid::runtime::task<lake::control::PlatformResult<json>>
+    query(std::string, std::string start, int lines, std::string order) override {
+        ++reads;
+        since = std::move(start);
+        limit = lines;
+        direction = std::move(order);
+        co_return lake::control::PlatformResult<json>(json{{"items", items}, {"next_since", ""}});
+    }
+};
+
+// Streamlit's output for one page whose script raised (app-runtime runs `streamlit run`).
+json streamlit_failure(const std::string& ts, const std::string& exception) {
+    return json::array(
+        {{{"ts", ts + "1"}, {"line", "2026-10-26 14:02:11.120 Uncaught app execution"}},
+         {{"ts", ts + "2"}, {"line", "Traceback (most recent call last):"}},
+         {{"ts", ts + "3"},
+          {"line", "  File \"/app/app.py\", line 42, in <module>\n    df.plan.value_counts()"}},
+         {{"ts", ts + "4"}, {"line", exception}}});
+}
+
+TEST(AppErrors, RepeatedScriptFailuresAreCountedAndTheNewestExceptionIsNamed) {
+    json items = streamlit_failure("100", "KeyError: 'region'");
+    for (const json& line : streamlit_failure("200",
+                                              "AttributeError: 'DataFrame' object has no "
+                                              "attribute 'plan'")) {
+        items.push_back(line);
+    }
+    items.push_back({{"ts", "300"}, {"line", "INFO:     10.0.0.1 - \"GET / HTTP/1.1\" 200 OK"}});
+    std::ranges::reverse(items); // a backward read answers newest first
+    const auto errors = lake::api::app_errors_in_logs(items);
+    EXPECT_EQ(errors.count, 2U);
+    EXPECT_EQ(errors.last, "AttributeError: 'DataFrame' object has no attribute 'plan'");
+    EXPECT_NE(errors.traceback.find("line 42"), std::string::npos) << errors.traceback;
+
+    // Uvicorn's, for a FastAPI app; a chained traceback names the exception it ends with.
+    const json asgi = json::array(
+        {{{"ts", "1"}, {"line", "ERROR:    Exception in ASGI application"}},
+         {{"ts", "2"}, {"line", "Traceback (most recent call last):\n  File \"main.py\", line 9"}},
+         {{"ts", "3"}, {"line", "ValueError: no rows"}},
+         {{"ts", "4"},
+          {"line", "\nDuring handling of the above exception, another exception occurred:\n"}},
+         {{"ts", "5"}, {"line", "pandas.errors.EmptyDataError: No columns to parse from file"}},
+         {{"ts", "6"}, {"line", "INFO:     10.0.0.1 - \"GET /api HTTP/1.1\" 500"}}});
+    const auto one = lake::api::app_errors_in_logs(asgi);
+    EXPECT_EQ(one.count, 1U) << "one failure alone is below the threshold";
+    EXPECT_LT(one.count, lake::api::app_errors_threshold);
+    EXPECT_EQ(one.last, "pandas.errors.EmptyDataError: No columns to parse from file");
+
+    EXPECT_EQ(lake::api::app_errors_in_logs(json::array({{{"ts", "1"}, {"line", "ready"}}})).count,
+              0U);
+    EXPECT_EQ(lake::api::app_errors_in_logs(json::object()).count, 0U);
+}
+
+// lake#1228: a Streamlit app whose script raises on every page stays Running and Ready. With
+// auto-fix on, the pass reads its log, records `app_errors` and starts one repair; with auto-fix
+// off it reads nothing; once the errors stop, the notification is resolved.
+TEST(AgentRuns, AHealthyAppWhoseScriptKeepsFailingIsRepairedWhenAutoFixIsOn) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-application", "http://application:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+    auto loki = std::make_shared<ScriptedLoki>();
+    lake::control::PlatformService platform(
+        std::shared_ptr<lake::control::Store>(&r.store, [](lake::control::Store*) {}),
+        nullptr,
+        loki,
+        lake::control::PlatformConfig{"test", std::chrono::seconds(15), "", ""});
+    const std::string app_id = repairable_app(r, "customer-insights-dashboard");
+    const std::int64_t generation = r.store.get_web_app(app_id)->generation;
+    ASSERT_TRUE(r.store.set_web_app_status(
+        app_id, "Ready", "https://insights.example", true, "", generation));
+    json failing = streamlit_failure("100",
+                                     "AttributeError: 'NoneType' object has no attribute "
+                                     "'sort_values'");
+    for (const json& line : streamlit_failure("200",
+                                              "AttributeError: 'NoneType' object has no "
+                                              "attribute 'sort_values'")) {
+        failing.push_back(line);
+    }
+    loki->items = failing;
+
+    // Auto-fix off: the log is not read, nothing is told.
+    auto pass = repair_pass(r, &platform);
+    EXPECT_EQ(pass.log_reads, 0U);
+    EXPECT_EQ(loki->reads, 0U);
+    EXPECT_EQ(pass.notified, 0U);
+    EXPECT_EQ(pass.auto_fix_started, 0U);
+
+    ASSERT_TRUE(r.call("set_auto_fix",
+                       {{"resource_kind", "app"}, {"resource_id", app_id}, {"enabled", true}})
+                    .ok);
+
+    // One traceback alone starts nothing.
+    loki->items = streamlit_failure("100", "KeyError: 'plan'");
+    pass = repair_pass(r, &platform);
+    EXPECT_EQ(pass.log_reads, 1U);
+    EXPECT_EQ(pass.notified, 0U);
+    EXPECT_EQ(pass.auto_fix_started, 0U);
+    EXPECT_EQ(loki->direction, "backward") << "the newest lines";
+    EXPECT_EQ(loki->limit, lake::api::app_errors_line_limit);
+    EXPECT_FALSE(loki->since.empty()) << "a bounded window, not the whole log";
+
+    // Two: one notification with the exception line, and one repair attempt.
+    loki->items = failing;
+    pass = repair_pass(r, &platform);
+    EXPECT_EQ(pass.notified, 1U) << (pass.problems.empty() ? "" : pass.problems.front());
+    ASSERT_EQ(pass.auto_fix_started, 1U) << (pass.problems.empty() ? "" : pass.problems.front());
+    const auto listed = r.call("list_notifications", {{"resource_id", app_id}});
+    ASSERT_EQ(listed.value["notifications"].size(), 1U) << listed.value.dump();
+    const json notification = listed.value["notifications"][0];
+    EXPECT_EQ(notification["event"], "app_errors");
+    EXPECT_EQ(notification["reason"],
+              "AttributeError: 'NoneType' object has no attribute "
+              "'sort_values'");
+    EXPECT_NE(notification["detail"].get<std::string>().find("Uncaught app execution"),
+              std::string::npos);
+    const auto tasks = repair_tasks(r);
+    ASSERT_EQ(tasks.size(), 1U);
+    EXPECT_EQ(tasks[0].body["context"]["notification_id"], notification["id"]);
+    EXPECT_NE(tasks[0].body["message"].get<std::string>().find("AttributeError"),
+              std::string::npos);
+    EXPECT_NE(std::ranges::find(tasks[0].scopes, "app_logs"), tasks[0].scopes.end())
+        << "the repair turn reads the traceback itself";
+
+    // The same failing generation: told once, one attempt.
+    pass = repair_pass(r, &platform);
+    EXPECT_EQ(pass.notified, 0U);
+    EXPECT_EQ(pass.auto_fix_started, 0U);
+
+    // The errors stop: resolved.
+    ASSERT_TRUE(r.set_task_status(tasks[0].id, "Succeeded", "", "", {{"ok", true}}));
+    loki->items = json::array({{{"ts", "300"}, {"line", "You can now view your Streamlit app"}}});
+    pass = repair_pass(r, &platform);
+    EXPECT_EQ(pass.resolved, 1U);
+    EXPECT_EQ(r.call("list_notifications", {{"resource_id", app_id}}).value["open"], 0);
 }
 
 TEST(AgentRuns, AChangeTurnTurnsInstructionsIntoAProposalAndContinuesTheConversation) {

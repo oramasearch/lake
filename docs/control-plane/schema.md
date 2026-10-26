@@ -22,6 +22,11 @@ A new migration still follows the rules below: idempotent SQL, its row in `schem
 new `*_guard` table created by the newest migration (`LakeManifest.TheGuardTableIsTheNewestMigrations`
 fails otherwise).
 
+`0104_app_restarts` (lake#1228) adds `apps.restart_generation` (bigint, default 0, never
+negative): the generation `restart_app` wrote. The operator writes it on the app's pod template, so a
+restart replaces the pods even when nothing else changed. Additive; guard `app_restarts_guard`. See
+[web apps](web-apps.md#restart).
+
 `0103_clerk_session_binding` (lake#1163) adds nullable `sessions.clerk_session_id` (1 to 256
 characters): the Clerk session id (`sid`) a Clerk browser exchange came from, taken from Clerk's
 signed default session token. Index `sessions_clerk_session_id_idx` on `(user_id,

@@ -117,7 +117,7 @@ a public app for the agent.
 lake#1207, [the API](../api/notifications.md). What the person sees:
 
 - **Apps list.** Above the grid, one warning banner per open notification about an app: the app's
-  name and what failed (*reports is not running*, *its image did not build*, *auto-fix stopped*),
+  name and what failed (*reports is not running*, *its image did not build*, *its code keeps failing* for repeated script errors in a running app, lake#1228, *auto-fix stopped*),
   the reason in plain words and the operator's message, *for you* when they deployed it, with
   *Fix with the Application Agent*, *Open* and Dismiss.
 - **App page.** A side card, *Fix or Change This App*: the app's open notifications with the same

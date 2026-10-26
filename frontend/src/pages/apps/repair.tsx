@@ -48,6 +48,8 @@ export function notificationTitle(notification: ResourceNotification): string {
       return `${name}: its image did not build`;
     case "auto_fix_stopped":
       return `${name}: auto-fix stopped`;
+    case "app_errors":
+      return `${name}: its code keeps failing`;
     default:
       return `${name} is not running`;
   }
