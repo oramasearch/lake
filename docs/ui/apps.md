@@ -19,13 +19,14 @@ person's authorization and audit. The page writes no app rows or operator state 
 
 The pages follow the console's rich layout (`docs/ui/web-app.md`, *The look*):
 
-- **Apps** opens with figures from `list_apps` (Apps, Ready, Failed, With Zetta), then a search and a
+- **Apps** opens with figures from `list_apps` (Apps, Ready, Needs attention, With Workspace Data), then a search and a
   phase filter over a card grid: each card shows the app's name, phase chip, URL, revision, bindings
   and when it was last updated (`updated_at`). **New app** opens a drawer with *From a repository* and
   *From an image*; its image field, like the App's Deploy field, takes only an image pinned by
   digest (`name@sha256:<64 hex>`), which is all `create_app` and `deploy_app` accept (lake#783).
   **Build with the Application Agent** opens a drawer for the description. A task named
-  by `?task=` is shown above the grid.
+  by `?task=` is shown above the grid. **Needs attention** counts Failed and Degraded apps
+  (`src/pages/apps/attention.ts`, lake#1208) and links to `?filter=attention`, which shows only those.
 - **App** is a Split. The main column has tabs in `?tab=` (Overview, Builds, Logs, Events, Settings,
   Services), and every other query parameter is kept. Overview holds the deploy history with
   Rollback, which now asks once in a dialog, and the latest events. Logs and Events are dark

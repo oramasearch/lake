@@ -23,9 +23,11 @@ to another workspace.
 
 ## Ship → Apps
 
-The page opens with figures (**Apps**, **Ready**, **Failed**, **With Workspace Data**), then **Search apps…**
+The page opens with figures (**Apps**, **Ready**, **Needs attention**, **With Workspace Data**), then **Search apps…**
 and filter chips by phase over a card per app: its name, phase, address, revision or image, its
-bindings and when it last changed. **Open** on a card opens the app.
+bindings and when it last changed. **Open** on a card opens the app. **Needs attention** counts the
+apps that are Failed or Degraded (a Degraded app is crash-looping or unavailable); select it to see
+only those apps, and **Show all apps** to go back.
 
 ### Create an App from a Repository
 
