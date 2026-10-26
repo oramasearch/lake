@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "agent_task_records_api.hpp"
+#include "lake/api/resource_repairs.hpp"
 #include "lake/api/images.hpp"
 #include "lake/api/sealed_delivery.hpp"
 #include "lake/control/agent_bus.hpp"
@@ -851,6 +852,13 @@ void register_web_app_capabilities(Registry& registry) {
                 co_return store_failure(created.error());
             }
             app_audit(context, "app.create", *created);
+            // Who deployed it and from which source, for its notifications and repairs (lake#1207).
+            static_cast<void>(co_await note_deployment(context,
+                                                       "app",
+                                                       created->id,
+                                                       created->customer_id,
+                                                       created->workspace_id,
+                                                       input.value("source", json::object())));
             auto published = co_await publish_event(context, *created, "create");
             if (published && published->ok) {
                 add_app_stores(context, published->value);
@@ -906,12 +914,26 @@ void register_web_app_capabilities(Registry& registry) {
                 } else {
                     details["image"] = normalized.at("image");
                 }
-                co_return co_await patch_and_publish(normalized,
-                                                     context,
-                                                     deployment_patch(normalized),
-                                                     rollback ? "app.rollback" : "app.deploy",
-                                                     rollback ? "rollback" : "deploy",
-                                                     std::move(details));
+                auto completed = co_await patch_and_publish(normalized,
+                                                                context,
+                                                                deployment_patch(normalized),
+                                                                rollback ? "app.rollback" : "app.deploy",
+                                                                rollback ? "rollback" : "deploy",
+                                                                std::move(details));
+                if (!completed) {
+                    co_return ApiResult::failure("store_error", completed.error().message);
+                }
+                ApiResult deployed = std::move(*completed);
+                // Who deployed it and from which source, for its notifications and repairs
+                // (lake#1207).
+                if (deployed.ok) {
+                    if (auto app = context.store->get_web_app(normalized.at("app_id")); app) {
+                        static_cast<void>(co_await note_deployment(
+                            context, "app", app->id, app->customer_id, app->workspace_id,
+                            normalized.value("source", json::object())));
+                    }
+                }
+                co_return deployed;
             }});
     };
     register_deployment("deploy_app", false);

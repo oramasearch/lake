@@ -1,8 +1,9 @@
 /** Design → Opportunities, also at /design/discover (lake's discover_content): what Auto-Suggest Agent
- * recommended for the workspace's data, a scan that runs in the background (`task=`, polled every 3
- * seconds while it works), project drafts made only on confirmation, and dismissal. */
+ * recommended for the workspace's data, the workspace's scan running in the background (list_opportunities'
+ * `last_scan`, read again every 3 seconds while it works, from any tab or device; lake#1195), project
+ * drafts made only on confirmation, and dismissal. */
 import { type ReactNode, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Check, FolderPlus, Lightbulb, ScanSearch, X } from "lucide-react";
 import { act, useRead } from "@/lib/api";
 import { ConfirmButton } from "@/lib/overlay";
@@ -12,7 +13,7 @@ import { relative } from "@/lib/format";
 import { WorkspaceGate } from "@/components/WorkspaceGate";
 import { MethodologyIcon, SolutionIcon } from "@/components/CatalogueIcon";
 import { qs, useScope, useScopedRead, useWq, useWsPath } from "./api";
-import { findMethodology, groupOpportunities, taskIsActive, text, type J } from "./logic";
+import { findMethodology, groupOpportunities, scanPollInterval, scanState, text, type J } from "./logic";
 import { FormError, Markdown, Panel, Refusal, useDesignTrail, useSubmit } from "./parts";
 
 const SCAN_MESSAGE = "What could this workspace build from its data?";
@@ -34,15 +35,13 @@ export default function OpportunitiesPage() {
 
 function Opportunities() {
   const scope = useScope();
-  const [params, setParams] = useSearchParams();
-  const taskId = params.get("task") ?? "";
-  const task = useScopedRead<J>(taskId ? "get_agent_task" : null, { task_id: taskId }, {
-    refetchInterval: (query) => (taskIsActive(text((query.state.data as J | undefined) ?? {}, "status")) ? 3000 : false),
+  // The workspace's newest scan comes with the Opportunities (last_scan, lake#1195), so a scan
+  // started on another tab or device, or before leaving this page, is followed here too; lake
+  // saves a finished scan's Opportunities itself, whether or not this page is open.
+  const listed = useScopedRead<{ opportunities?: J[]; last_scan?: J | null }>("list_opportunities", {}, {
+    refetchInterval: (query) => scanPollInterval(query.state.data as J | undefined),
   });
-  const status = text(task.data ?? {}, "status");
-  const scanning = taskIsActive(status);
-  // With the scan's task, a finished scan is saved into Opportunities the first time it is read.
-  const listed = useScopedRead<{ opportunities?: J[] }>("list_opportunities", { task_id: taskId || undefined }, { refetchInterval: scanning ? 3000 : false });
+  const scan = scanState(listed.data?.last_scan);
   const methodologies = useWq<J>("list_methodologies", {}, { retry: false });
   const library = useRead<{ agents?: J[] }>("list_agent_library", {});
 
@@ -51,18 +50,28 @@ function Opportunities() {
   const running = (library.data?.agents ?? []).some((a) => text(a, "key") === "agent-autosuggest" && a.deployed === true);
   const rows: J[] = Array.isArray(listed.data?.opportunities) ? listed.data!.opportunities! : [];
   const groups = groupOpportunities(rows);
+  // A finished scan that recommended nothing still counts as the last scan.
+  const lastScanned = (scan.status === "succeeded" && scan.finishedAt) || groups.lastScan;
   // Absent on an engine that predates the registry: then no badge.
   const registry = !methodologies.isError && Array.isArray(methodologies.data?.methodologies) ? methodologies.data!.methodologies : null;
   const scanButton = (label?: string) => (
-    <ScanButton customerId={scope.customerId} workspaceId={scope.workspaceId} label={label ?? (groups.lastScan ? "Scan again" : "Scan my workspace")} onTask={(id) => setParams(new URLSearchParams({ task: id }))} />
+    <ScanButton
+      customerId={scope.customerId}
+      workspaceId={scope.workspaceId}
+      label={label ?? (lastScanned ? "Scan again" : "Scan my workspace")}
+      scanning={scan.scanning}
+      onStarted={() => void listed.refetch()}
+    />
   );
 
   return (
     <div className="space-y-4">
-      {scanning ? (
-        <Banner title="Scanning your workspace…">
-          The Auto-Suggest Agent is reading your datasets and matching them to the solutions catalogue. You can leave this page; the Opportunities are kept when it finishes. This page
-          checks again every 3 seconds.
+      {scan.scanning ? (
+        <Banner title={`Scanning… started ${relative(scan.startedAt)}`} action={scanButton()}>
+          <span title={scan.startedAt ? `${scan.startedAt.slice(0, 16)} UTC` : undefined}>
+            The Auto-Suggest Agent is reading your datasets and matching them to the solutions catalogue{scan.message ? ` (${scan.message})` : ""}. You can leave this page; the
+            Opportunities are kept when it finishes and shown here, on any tab or device. This page checks again every 3 seconds.
+          </span>
         </Banner>
       ) : library.isError ? (
         <ErrorBlock error={library.error} retry={() => void library.refetch()} what="the Agent Library" />
@@ -70,18 +79,21 @@ function Opportunities() {
         <Banner tone="quiet">The Auto-Suggest Agent is not running on this Lake, so a new scan is not available.</Banner>
       ) : (
         <Banner
-          title={groups.lastScan ? `Last scanned ${relative(groups.lastScan)}` : "Scan your workspace"}
+          title={lastScanned ? `Last scanned ${relative(lastScanned)}` : "Scan your workspace"}
           action={scanButton()}
         >
-          {groups.lastScan ? (
-            <span title={`${groups.lastScan.slice(0, 16)} UTC`}>Scan again after your data changes; earlier Opportunities stay.</span>
+          {lastScanned ? (
+            <span title={`${lastScanned.slice(0, 16)} UTC`}>Scan again after your data changes; earlier Opportunities stay.</span>
           ) : (
             "The Auto-Suggest Agent reads your workspace's datasets and their columns and recommends what to build. It runs in the background and changes nothing."
           )}
         </Banner>
       )}
-      {status === "failed" && <Banner tone="warn" title="The scan did not finish">{text(task.data ?? {}, "message")}</Banner>}
-      {task.isError && <ErrorBlock error={task.error} what="the scan" />}
+      {scan.failed && (
+        <Banner tone="warn" title="The scan did not finish">
+          {scan.message || "The Auto-Suggest Agent stopped before it recommended anything."} Earlier Opportunities stay; scan again to retry.
+        </Banner>
+      )}
       {listed.isError ? (
         <ErrorBlock error={listed.error} retry={() => void listed.refetch()} what="Opportunities" />
       ) : (
@@ -94,7 +106,7 @@ function Opportunities() {
               <Stat label="Dismissed" value={groups.dismissed.length} />
             </StatRow>
           )}
-          {rows.length === 0 && !scanning && (
+          {rows.length === 0 && !scan.scanning && (
             <Empty icon={Lightbulb} title="No Opportunities Yet" action={running && !library.isError ? scanButton("Scan my workspace") : undefined}>
               Scan your workspace to see what your data could be used for.
             </Empty>
@@ -130,17 +142,21 @@ function Opportunities() {
   );
 }
 
-function ScanButton({ customerId, workspaceId, label, onTask }: { customerId: string; workspaceId: string; label: string; onTask: (id: string) => void }) {
+/** Starts a scan, or shows the one running. A second scan while one runs joins it (agent_turn
+ * answers that scan with `joined`), so the button says so instead of starting another. */
+function ScanButton({ customerId, workspaceId, label, scanning, onStarted }: { customerId: string; workspaceId: string; label: string; scanning: boolean; onStarted: () => void }) {
+  const toast = useToast();
   const { busy, error, run } = useSubmit();
   const scan = () =>
     run(async () => {
       const answer = await act<J>("agent_turn", { customer_id: customerId, workspace_id: workspaceId, agent: "agent-autosuggest", kind: "discover", message: SCAN_MESSAGE });
-      onTask(text(answer, "task_id"));
+      if (answer.joined === true) toast("A scan of this workspace is already running; its progress is shown here.");
+      onStarted();
     });
   return (
     <div className="flex flex-col items-end gap-1">
-      <Button variant="primary" loading={busy} onClick={() => void scan()}>
-        <ScanSearch size={14} aria-hidden /> {label}
+      <Button variant="primary" loading={busy || scanning} disabled={scanning} onClick={() => void scan()} data-testid="scan-button">
+        {!scanning && <ScanSearch size={14} aria-hidden />} {scanning ? "Scanning…" : label}
       </Button>
       <FormError error={error} />
     </div>

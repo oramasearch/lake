@@ -17,7 +17,23 @@ region serves. `http_server.cpp` answers them from the region picker's middlewar
 metering stay each capability's own; its bookkeeping reads (`get_run`, `list_models`,
 `get_dataset`) use `call_workspace`. The state is a sealed `lake_quickstarts` record per quickstart
 in the workspace Zetta. The website code is built here; with `origins` it makes a browser key through
-a nested `create_browser_key` and puts the secret in the code, otherwise `key.create` names that call.
+a nested `create_browser_key` and puts the secret in the code, otherwise `key.create` names that call;
+`agent_prompt` writes the same as one block for a coding agent (`prompt`, lake#1185).
+`start_quickstart_conversation` (lake#1182) opens the model step's Ask Orama conversation with a
+nested `send_ask_message`, its `page` built by `conversation_page`; the record keeps only the
+conversation's id. `train_quickstart` takes `derived_target` and trains M-3 (clustering) without a
+target and without a held-out share (zetta refuses one for segmentation, lake#1203), not publishing
+that model. A training the engine refuses is kept on the model step in plain words, with the choices
+kept as a `training` with no run so the next call tries the same model (lake#1204); the page sent
+with each conversation turn says where the Quickstart is (`quickstart_state`). A confirmed
+`train_quickstart` is written into the conversation by `confirm_ask_proposal` from
+`quickstart_columns::confirm_outcome` (what started and what comes next, or why it failed).
+`quickstart_columns.cpp` (lake#1181) holds its pure column rules: each column's kind from the
+engine's `analyze_dataset`, what is offered first, the training copy's rows and the engine's
+`transform_required` refusals in plain words, a derived target (`parse_derived`, `derive_target`) and
+the label-free copy for clustering (`prepare_unlabeled`), failures in plain words with the clustering
+reasons (`explain_run_failure`, `clustering_problem`) and a confirm's words (`confirm_outcome`); `train_quickstart` reads rows through `call_workspace`
+`sql` and loads the copy with a nested `upload_dataset`.
 See [quickstart.md](../../docs/api/quickstart.md).
 
 `browser_key_capabilities.cpp` registers `create_browser_key`, `list_browser_keys` and
@@ -362,6 +378,13 @@ solutions are sealed `lake_solutions` records in the workspace Zetta, listed and
 catalogue, which it reads through the workspace's engine (`list_solutions`, `get_solution`);
 `update_solution` and `delete_solution` answer `forbidden` for Orama's. See `docs/api/solutions.md`.
 
+`feature_planning.cpp` runs around the engine's `plan_features` (lake#1153), on the path
+`workspace_capabilities.cpp` gives both `plan_features` and `workspace_query`: a missing
+`methodology` is chosen from `analyze_dataset`, a missing `as_of` is read from the dataset's
+snapshot column (`dataset_as_of`, the one place Lake reads a dataset's cutoff), and a
+`transform_required` gets `performed_by`, the Lake capabilities that do it. See
+`docs/api/feature-planning.md`.
+
 `methodology_capabilities.cpp` registers a workspace's own methodologies (lake#655): the code is
 committed to a workspace repository through the repository store, registered by the engine
 (`register_methodology`, `update_methodology`, `delete_methodology`), built by `build_image` and run
@@ -488,6 +511,14 @@ name policy before deriving the direct-zone host. Operator hash credentials are 
 registry to source repository/revision reads, customer workspace reads, or one app's event
 publication. See `docs/api/web-apps.md`.
 
+`repair_capabilities.cpp` (lake#1207) owns what happens when a resource fails: `list_notifications`,
+`dismiss_notification`, `get_auto_fix` and `set_auto_fix`, general over the resource kind;
+`repair_app` and `change_app`, which start Application Agent turns through `agent_turn`; and
+`run_resource_repair_pass`, which the store root's owner runs with the MCP stream pass to record
+notifications and start auto-fix attempts as the person who opted in. `workspace_capabilities.cpp`'s
+`prepare_app_turn` gives a `repair` or `change` turn its app and its write tools only after a
+confirmed diff for that app or an auto-fix attempt ([docs/api/notifications.md](../../docs/api/notifications.md)).
+
 `http_server.cpp` also owns the non-registry protected-app routes. `/apps/authorize` validates an
 exact HTTPS app destination against the Lake browser session, and `/v1/apps/auth` exchanges its
 one-use code or verifies the host-only app session. The workspace-prefixed form avoids the generic
@@ -577,14 +608,20 @@ task content and repository descriptions) left it, with its copier and the store
 when migration `0070_drop_moved_tables` dropped its source (lake#311). Ask Orama and the Agent Factory
 conversations are written only by `send_ask_message`, `settle_ask_turn`, `confirm_ask_proposal` and
 `approve_agent_proposal` in `workspace_capabilities.cpp` (lake#561); the web app calls them, and
-`get_ask_conversation` reads, in the input's workspace.
+`get_ask_conversation` reads, in the input's workspace. Before an answer is stored, its proposals
+pass `withhold_invalid_proposals` (the schema, lake#794) and
+`withhold_proposals_naming_missing_projects` (a `get_project` read per named project, lake#1193);
+`send_ask_message` hands Ask Orama `context.proposals` from `ask_proposal_states`, what became of the
+conversation's earlier proposals (lake#1194).
 `console_capabilities.cpp` registers the reads the web app needs that the pages computed for
 themselves (`viewer`, `my_permissions`, `list_packages`, `list_docs`, `get_doc`, `mcp_setup`,
 docs/api/web-app.md); `latest_agent_task`, `compile_pipeline` and `render_pipeline` sit beside the
 conversation capabilities, and `resolve_model` with `find_hub_repository` in
 `model_capabilities.cpp`. `settle_discover`, `list_opportunities`, `dismiss_opportunity` and
 `create_projects_from_opportunities` keep Design → Opportunities in the workspace the scan ran in
-(lake#376); the Opportunities page reads them concurrently with the methodology registry. The record store capabilities stay out of
+(lake#376); `publish_agent_event` saves a finished scan with `settle_discover` as its result settles the
+task, `list_opportunities` reports the workspace's newest scan as `last_scan`, and `agent_turn` joins a
+running scan instead of starting a second (lake#1195); the Opportunities page reads them concurrently with the methodology registry. The record store capabilities stay out of
 the `workspace_query`/`workspace_act` allow-lists, so only lake reaches its `lake_*` collections
 (lake#370, `docs/architecture/workspace-records.md`). `stream_capabilities.cpp` reads and claims
 topic creators in the topic's workspace (`lake_stream_owners`, lake#379); the retired

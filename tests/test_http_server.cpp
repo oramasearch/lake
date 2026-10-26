@@ -737,11 +737,20 @@ public:
     std::vector<std::tuple<std::string, bool, nlohmann::json>> calls;
     std::map<std::string, nlohmann::json> answers;
     lake::test::StreamCaller topics;
+    // A test's own engine for the capabilities it names, answered before `answers` (empty: none).
+    std::function<std::optional<lake::control::ZettaControlResult<nlohmann::json>>(
+        const std::string&, const nlohmann::json&)>
+        respond;
 
     liquid::runtime::task<lake::control::ZettaControlResult<nlohmann::json>>
     call(std::string, std::string, std::string capability, bool read, nlohmann::json input)
         override {
         calls.emplace_back(capability, read, input);
+        if (respond) {
+            if (auto answered = respond(capability, input)) {
+                co_return std::move(*answered);
+            }
+        }
         if (capability == "create_topic" || capability == "publish_event" ||
             capability == "receive_events" || capability == "update_topic" || capability == "drop_topic" ||
             lake::test::RecordTables::handles(capability, input)) {
@@ -1832,6 +1841,89 @@ TEST_P(HttpResponseIsolation, AgentsReachAWorkspacesZettaThroughLakeInZettasShap
               "/w/" + connection->workspace_id + "/workspaces/" + customer_id + "/zetta");
 }
 
+// lake#1205: an App's Zetta binding is the JSON document the operator writes,
+// {"lake_url":"<lake>/w/<workspace>","customer_id":...,"token":...}, and app-runtime calls
+// <lake_url>/workspaces/<customer_id>/zetta/v1/<capability> with the token as its bearer. That
+// exact request reads the App's own workspace, and nothing else.
+TEST_P(HttpResponseIsolation, AnAppsZettaBindingReadsItsWorkspaceThroughLake) {
+    auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store_.get());
+    if (memory == nullptr) {
+        GTEST_SKIP() << "the operator's status is written directly only on the memory store";
+    }
+    auto connection = connect();
+    const std::string cookie = sign_in(*connection);
+    const nlohmann::json customers = nlohmann::json::parse(
+        response_body(connection->request("GET", "/v1/list_customers", "", cookie)));
+    const std::string customer_id = customers["value"]["items"][0]["id"];
+    const auto requested = liquid::runtime::block_on(workspaces_->request(customer_id));
+    ASSERT_TRUE(requested && *requested);
+    const auto service = memory->get_service((*requested)->service_id);
+    ASSERT_TRUE(memory->set_service_status(service->id, "Ready", "", "http://ws:4800"));
+    std::ofstream(workspace_dir_ / (service->slug + ".json")) << R"({"kind":"zetta","token":"t"})";
+    workspace_caller_->answers["list_datasets"] = {
+        {"datasets", nlohmann::json::array({"accounts"})}};
+    workspace_caller_->answers["create_project"] = {{"name", "churn"}};
+    const auto other_workspace =
+        memory->create_workspace({customer_id, "elsewhere", "dev", "taap:app-binding"});
+    ASSERT_TRUE(other_workspace);
+
+    const std::string token(64, 'a');
+    const auto bound_app = [&](const std::string& name, const nlohmann::json& zetta) {
+        lake::control::NewWebApp input;
+        input.customer_id = customer_id;
+        input.workspace_id = service->workspace_id;
+        input.name = name;
+        input.mode = "runtime";
+        input.source_repository = "source";
+        input.source_revision = "main";
+        input.source_path = ".";
+        input.port = 8080;
+        input.host = name + ".apps.example.test";
+        input.bindings = {{"zetta", zetta}, {"services", nlohmann::json::array()}};
+        const auto app = memory->create_web_app(input);
+        EXPECT_TRUE(app);
+        return app ? app->id : std::string();
+    };
+    const std::string app_id = bound_app("segmentation-dashboard", {{"scopes", {"read"}}});
+    ASSERT_TRUE(memory->set_web_app_token_hashes(
+        app_id, {{"zetta", lake::control::identity_crypto::sha256_hex(token)}}));
+
+    // The binding as the operator renders it; app-runtime joins lake_url and the path.
+    const nlohmann::json binding = {{"lake_url", "http://lake.internal/w/" + service->workspace_id},
+                                    {"customer_id", customer_id},
+                                    {"token", token}};
+    const std::string base = "/w/" + service->workspace_id + "/workspaces/" +
+                             binding["customer_id"].get<std::string>() + "/zetta/v1/";
+    connection->workspace_id.clear();
+    const auto as_app = [&](std::string_view method,
+                            const std::string& path,
+                            std::string_view body = {},
+                            const std::string& bearer = std::string()) {
+        return connection->request(method,
+                                   path,
+                                   body,
+                                   "",
+                                   "HTTP/1.1",
+                                   bearer.empty() ? binding["token"].get<std::string>() : bearer,
+                                   "application/json");
+    };
+
+    const std::string read = as_app("GET", base + "list_datasets");
+    ASSERT_TRUE(read.starts_with("HTTP/1.1 200")) << read.substr(0, 400);
+    EXPECT_EQ(nlohmann::json::parse(response_body(read))["value"]["datasets"][0], "accounts");
+
+    const std::size_t reached = workspace_caller_->calls.size();
+    const std::string other_space = as_app(
+        "GET",
+        "/w/" + other_workspace->id + "/workspaces/" + customer_id + "/zetta/v1/list_datasets");
+    EXPECT_FALSE(other_space.starts_with("HTTP/1.1 200")) << other_space.substr(0, 300);
+    const std::string act = as_app("POST", base + "create_project", R"({"name":"churn"})");
+    EXPECT_FALSE(act.starts_with("HTTP/1.1 200")) << act.substr(0, 300);
+    const std::string wrong_token = as_app("GET", base + "list_datasets", {}, std::string(64, 'b'));
+    EXPECT_FALSE(wrong_token.starts_with("HTTP/1.1 200")) << wrong_token.substr(0, 300);
+    EXPECT_EQ(workspace_caller_->calls.size(), reached) << "nothing refused reached the workspace";
+}
+
 TEST_P(HttpResponseIsolation, LibraryAgentsFinishEveryTurnKindWithoutAWorkspaceEcho) {
     auto connection = connect();
     const std::string cookie = sign_in(*connection);
@@ -2070,13 +2162,46 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesProjects) {
                      cookie,
                      "get_agent_task?" + scope + "&task_id=" + task)["value"]["status"],
               "pending");
+    // The page finds the running scan without its task id (lake#1195), and a second Scan while
+    // it runs joins it instead of starting another.
+    const auto while_running = get_v1(*connection, cookie, "list_opportunities?" + scope);
+    ASSERT_TRUE(while_running.value("ok", false)) << while_running.dump();
+    EXPECT_EQ(while_running["value"]["last_scan"]["task_id"], task);
+    EXPECT_EQ(while_running["value"]["last_scan"]["status"], "pending");
+    EXPECT_TRUE(while_running["value"]["opportunities"].empty());
+    const auto [joined_response, joined] =
+        post_v1(*connection,
+                cookie,
+                "agent_turn",
+                {{"customer_id", customer_id},
+                 {"workspace_id", connection->workspace_id},
+                 {"agent", "agent-autosuggest"},
+                 {"kind", "discover"},
+                 {"message", "What could this workspace build from its data?"}});
+    ASSERT_TRUE(joined.value("ok", false)) << joined_response.substr(0, 300);
+    EXPECT_EQ(joined["value"]["task_id"], task) << "a second scan joins the running one";
+    EXPECT_EQ(joined["value"]["joined"], true);
+    // Nobody reads the scan while it finishes: lake saves its Opportunities when the agent's
+    // result settles the task, not when a page reads it.
+    const std::size_t calls_before = workspace_caller_->calls.size();
     run_agent_task(*connection, task);
     EXPECT_FALSE(agents_->turns.back().contains("profile"))
         << "Auto-Suggest Agent builds the profile itself with its read-only credential";
     EXPECT_FALSE(agents_->turns.back()["zetta_token"].get<std::string>().empty());
+    std::set<std::string> saved_keys;
+    for (std::size_t i = calls_before; i < workspace_caller_->calls.size(); ++i) {
+        const auto& [capability, read, input] = workspace_caller_->calls[i];
+        if (capability == "put_record" &&
+            input.value("collection", std::string()).find("opportunities") != std::string::npos) {
+            saved_keys.insert(input.value("key", std::string()));
+        }
+    }
+    EXPECT_EQ(saved_keys.size(), 2U)
+        << "the suggestion and the decline are saved as the task settles";
 
-    const auto found =
-        get_v1(*connection, cookie, "list_opportunities?" + scope + "&task_id=" + task);
+    const auto found = get_v1(*connection, cookie, "list_opportunities?" + scope);
+    EXPECT_EQ(found["value"]["last_scan"]["status"], "succeeded");
+    EXPECT_EQ(found["value"]["last_scan"]["task_id"], task);
     ASSERT_TRUE(found.value("ok", false)) << found.dump();
     const std::string listed_scan = found["value"].dump();
     EXPECT_NE(listed_scan.find("Predict which accounts will churn"), std::string::npos);
@@ -3418,6 +3543,332 @@ TEST_P(HttpResponseIsolation, AskOramaKeepsTheTurnWhenAProposalIsMalformed) {
         "send_ask_message", {{"agent", "space-agent"}, {"message", "Anything?"}});
     ASSERT_TRUE(null_reply_response.starts_with("HTTP/1.1 200")) << null_reply_response;
     ASSERT_EQ(conversation_messages(null_reply["value"]["conversation_id"]).size(), 2U);
+}
+
+// The projects a test's workspace engine holds (lake#1193, lake#1194): get_project, capture_intent
+// and compile_intent answer not_found for any other, as Zetta does, and create_project adds one.
+void serve_projects(RecordingWorkspace& workspace, std::shared_ptr<std::set<std::string>> projects) {
+    workspace.respond = [projects](const std::string& capability, const nlohmann::json& input)
+        -> std::optional<lake::control::ZettaControlResult<nlohmann::json>> {
+        const auto missing = [](const std::string& name) {
+            return lake::control::ZettaControlResult<nlohmann::json>(
+                std::unexpected(lake::control::ZettaControlError{
+                    "not_found", "no project named '" + name + "' (or with that id)"}));
+        };
+        if (capability == "get_project") {
+            const std::string name = input.value("name", std::string());
+            if (!projects->contains(name)) {
+                return missing(name);
+            }
+            return lake::control::ZettaControlResult<nlohmann::json>(
+                nlohmann::json{{"name", name}, {"graphs", nlohmann::json::array()}});
+        }
+        if (capability == "create_project") {
+            projects->insert(input.value("name", std::string()));
+            return lake::control::ZettaControlResult<nlohmann::json>(
+                nlohmann::json{{"name", input.value("name", std::string())}});
+        }
+        if (capability == "capture_intent" || capability == "compile_intent") {
+            const std::string project = input.value("project", std::string());
+            if (!projects->contains(project)) {
+                return missing(project);
+            }
+            return lake::control::ZettaControlResult<nlohmann::json>(
+                capability == "capture_intent" ? nlohmann::json{{"input_id", "in-1"}}
+                                               : nlohmann::json{{"name", "Customer segments"}});
+        }
+        return std::nullopt;
+    };
+}
+
+// lake#1193: Ask Orama proposed compile_intent on a project that did not exist, and confirming it
+// could only fail. Lake reads each project a proposal names before offering it: one that names a
+// missing project, or creates one that exists, is withheld with what to do instead, and nothing is
+// written to check. A new project's pipeline is one proposal, compile_pipeline with
+// `create_project`, and confirming it creates the project and its pipeline.
+TEST_P(HttpResponseIsolation, AskOramaNeverOffersAProposalForAMissingProject) {
+    auto connection = connect();
+    const std::string cookie = sign_in(*connection);
+    const std::string customer_id =
+        nlohmann::json::parse(
+            response_body(connection->request("GET", "/v1/list_customers", "", cookie)))
+            .at("value")
+            .at("items")
+            .at(0)
+            .at("id");
+    select_workspace(*connection, customer_id);
+    const std::string workspace_id = connection->workspace_id;
+    const std::vector<std::pair<std::string, std::string>> same_origin{
+        {"Origin", "http://localhost"}, {"Sec-Fetch-Site", "same-origin"}};
+    const auto call = [&](const std::string& name, nlohmann::json input) {
+        input["customer_id"] = customer_id;
+        input["workspace_id"] = workspace_id;
+        const std::string response = connection->request("POST",
+                                                         "/v1/" + name,
+                                                         input.dump(),
+                                                         cookie,
+                                                         "HTTP/1.1",
+                                                         {},
+                                                         "application/json",
+                                                         same_origin);
+        return std::pair{response, nlohmann::json::parse(response_body(response))};
+    };
+    const auto conversation_messages = [&](const std::string& conversation) {
+        return nlohmann::json::parse(response_body(connection->request(
+            "GET",
+            "/v1/get_ask_conversation?customer_id=" + customer_id +
+                "&workspace_id=" + workspace_id + "&conversation_id=" + conversation,
+            "",
+            cookie)))["value"]["messages"];
+    };
+    const auto projects = std::make_shared<std::set<std::string>>(std::set<std::string>{"segments"});
+    serve_projects(*workspace_caller_, projects);
+    const std::string missing = "Customer Segmentation EDA Dashboard";
+    const std::string intent = "Segment customers from datasets.ux_review_20261018_customers";
+
+    agents_->answer = {
+        {"ok", true},
+        {"reply", "Here is the pipeline."},
+        {"proposals",
+         nlohmann::json::array(
+             {{{"capability", "compile_intent"},
+               {"input", {{"project", missing}, {"intent", intent}, {"methodology", "M-3"}}},
+               {"impact", "Proposes a new M-3 clustering pipeline."}},
+              {{"capability", "compile_pipeline"},
+               {"input", {{"project", "segments"}, {"intent", intent}, {"create_project", true}}},
+               {"impact", "A new project named segments."}},
+              {{"capability", "compile_pipeline"},
+               {"input",
+                {{"project", missing},
+                 {"intent", intent},
+                 {"methodology", "M-3"},
+                 {"create_project", true}}},
+               {"impact", "Creates the project and its M-3 clustering pipeline."}}})},
+        {"reads", nlohmann::json::array()},
+        {"delegations", nlohmann::json::array()}};
+    const auto [sent_response, sent] =
+        call("send_ask_message", {{"message", "Segment my customers in a new project."}});
+    ASSERT_TRUE(sent_response.starts_with("HTTP/1.1 200")) << sent_response;
+    const std::string conversation = sent["value"]["conversation_id"];
+    const std::string task = sent["value"]["task_id"];
+    run_agent_task(*connection, task);
+    const std::size_t calls_before_settle = workspace_caller_->calls.size();
+    const auto [settled_response, settled] = call(
+        "settle_ask_turn", {{"conversation_id", conversation}, {"task_id", task}, {"kind", "ask"}});
+    ASSERT_TRUE(settled_response.starts_with("HTTP/1.1 200")) << settled_response;
+    // Checking a proposal only reads the projects (the conversation's own record is written).
+    for (std::size_t at = calls_before_settle; at < workspace_caller_->calls.size(); ++at) {
+        const std::string& capability = std::get<0>(workspace_caller_->calls[at]);
+        EXPECT_TRUE(capability == "get_project" || capability.ends_with("_record") ||
+                    capability.ends_with("_records"))
+            << "checking a proposal only reads: " << capability;
+    }
+    EXPECT_EQ(*projects, std::set<std::string>{"segments"}) << "nothing was created to check";
+
+    const auto messages = conversation_messages(conversation);
+    ASSERT_EQ(messages.size(), 2U) << messages.dump();
+    const auto& reply = messages[1];
+    const auto& offered = reply["payload"]["proposals"];
+    ASSERT_EQ(offered.size(), 1U) << "only the proposal that can work is offered: " << reply.dump();
+    EXPECT_EQ(offered[0]["capability"], "compile_pipeline");
+    EXPECT_EQ(offered[0]["input"]["project"], missing);
+    const auto& withheld = reply["payload"]["withheld_proposals"];
+    ASSERT_EQ(withheld.size(), 2U) << reply.dump();
+    EXPECT_EQ(withheld[0]["capability"], "compile_intent");
+    EXPECT_EQ(withheld[0]["error"]["code"], "not_found");
+    EXPECT_EQ(withheld[0]["error"]["path"], "/project");
+    EXPECT_EQ(withheld[1]["capability"], "compile_pipeline");
+    EXPECT_EQ(withheld[1]["error"]["code"], "conflict");
+    EXPECT_EQ(withheld[1]["error"]["path"], "/create_project");
+    const std::string content = reply["content"];
+    EXPECT_TRUE(content.starts_with("Here is the pipeline.")) << content;
+    EXPECT_NE(content.find("there is no project named \"" + missing + "\" in this workspace"),
+              std::string::npos)
+        << content;
+    EXPECT_NE(content.find("compile_pipeline with `create_project`"), std::string::npos) << content;
+    EXPECT_NE(content.find("a project named \"segments\" already exists"), std::string::npos)
+        << content;
+    ASSERT_EQ(reply["proposal_calls"].size(), 1U);
+    EXPECT_EQ(reply["proposal_calls"][0]["input"]["create_project"], true);
+
+    // One confirmation creates the project and compiles its pipeline.
+    const auto [confirmed_response, confirmed] =
+        call("confirm_ask_proposal",
+             {{"conversation_id", conversation},
+              {"message_id", reply["id"]},
+              {"index", 0},
+              {"input_sha256", reply["proposal_calls"][0]["input_sha256"]}});
+    ASSERT_TRUE(confirmed_response.starts_with("HTTP/1.1 200")) << confirmed_response;
+    EXPECT_EQ(confirmed["value"]["ok"], true) << confirmed_response;
+    EXPECT_EQ(confirmed["value"]["capability"], "compile_pipeline");
+    EXPECT_TRUE(projects->contains(missing)) << "the project was created";
+    const auto created = std::ranges::find_if(workspace_caller_->calls, [](const auto& c) {
+        return std::get<0>(c) == "create_project";
+    });
+    ASSERT_NE(created, workspace_caller_->calls.end());
+    EXPECT_EQ(std::get<2>(*created)["name"], missing);
+    EXPECT_EQ(std::get<2>(*created)["description"], intent);
+    const auto compiled = std::ranges::find_if(workspace_caller_->calls, [](const auto& c) {
+        return std::get<0>(c) == "compile_intent";
+    });
+    ASSERT_NE(compiled, workspace_caller_->calls.end()) << "and its pipeline compiled";
+    EXPECT_GT(compiled, created) << "after the project exists";
+    EXPECT_EQ(std::get<2>(*compiled)["project"], missing);
+    EXPECT_EQ(std::get<2>(*compiled)["methodology"], "M-3");
+    const auto after = conversation_messages(conversation);
+    ASSERT_EQ(after.size(), 3U);
+    EXPECT_EQ(after[2]["content"], "Done: compile_pipeline.");
+    EXPECT_EQ(after[2]["payload"]["ok"], true);
+
+    // compile_pipeline itself refuses to create a project that exists, and writes nothing.
+    const std::size_t creates = std::ranges::count_if(
+        workspace_caller_->calls, [](const auto& c) { return std::get<0>(c) == "create_project"; });
+    const auto [again_response, again] = call(
+        "compile_pipeline", {{"project", "segments"}, {"intent", intent}, {"create_project", true}});
+    EXPECT_TRUE(again_response.starts_with("HTTP/1.1 409")) << again_response;
+    EXPECT_EQ(again["error"]["path"], "/create_project") << again_response;
+    EXPECT_EQ(std::ranges::count_if(
+                  workspace_caller_->calls,
+                  [](const auto& c) { return std::get<0>(c) == "create_project"; }),
+              creates);
+}
+
+// lake#1194: after a confirm failed, "create it then" got "confirm the proposal in Lake", which
+// pointed at the failed one. Every Ask Orama turn now carries what became of the conversation's
+// earlier proposals (`context.proposals`: pending, confirmed, failed with its error, withheld), so
+// the agent proposes a corrected change; the corrected proposal is offered and confirms.
+TEST_P(HttpResponseIsolation, AskOramaHearsWhatBecameOfItsEarlierProposals) {
+    auto connection = connect();
+    const std::string cookie = sign_in(*connection);
+    const std::string customer_id =
+        nlohmann::json::parse(
+            response_body(connection->request("GET", "/v1/list_customers", "", cookie)))
+            .at("value")
+            .at("items")
+            .at(0)
+            .at("id");
+    select_workspace(*connection, customer_id);
+    const std::string workspace_id = connection->workspace_id;
+    const std::vector<std::pair<std::string, std::string>> same_origin{
+        {"Origin", "http://localhost"}, {"Sec-Fetch-Site", "same-origin"}};
+    const auto call = [&](const std::string& name, nlohmann::json input) {
+        input["customer_id"] = customer_id;
+        input["workspace_id"] = workspace_id;
+        const std::string response = connection->request("POST",
+                                                         "/v1/" + name,
+                                                         input.dump(),
+                                                         cookie,
+                                                         "HTTP/1.1",
+                                                         {},
+                                                         "application/json",
+                                                         same_origin);
+        return std::pair{response, nlohmann::json::parse(response_body(response))};
+    };
+    const auto conversation_messages = [&](const std::string& conversation) {
+        return nlohmann::json::parse(response_body(connection->request(
+            "GET",
+            "/v1/get_ask_conversation?customer_id=" + customer_id +
+                "&workspace_id=" + workspace_id + "&conversation_id=" + conversation,
+            "",
+            cookie)))["value"]["messages"];
+    };
+    const auto projects = std::make_shared<std::set<std::string>>(std::set<std::string>{"segments"});
+    serve_projects(*workspace_caller_, projects);
+    const std::string intent = "Segment customers by behaviour";
+
+    agents_->answer = {
+        {"ok", true},
+        {"reply", "I proposed the clustering pipeline."},
+        {"proposals",
+         nlohmann::json::array({{{"capability", "compile_intent"},
+                                 {"input", {{"project", "segments"}, {"intent", intent}}},
+                                 {"impact", "A clustering pipeline in segments."}}})},
+        {"reads", nlohmann::json::array()},
+        {"delegations", nlohmann::json::array()}};
+    const auto [sent_response, sent] =
+        call("send_ask_message", {{"message", "Build a clustering pipeline."}});
+    ASSERT_TRUE(sent_response.starts_with("HTTP/1.1 200")) << sent_response;
+    const std::string conversation = sent["value"]["conversation_id"];
+    run_agent_task(*connection, sent["value"]["task_id"]);
+    EXPECT_FALSE(agents_->turns.back().contains("context"))
+        << "a first turn has no earlier proposals: " << agents_->turns.back().dump();
+    call("settle_ask_turn",
+         {{"conversation_id", conversation}, {"task_id", sent["value"]["task_id"]}, {"kind", "ask"}});
+    auto messages = conversation_messages(conversation);
+    ASSERT_EQ(messages.size(), 2U);
+    const auto first = messages[1];
+    ASSERT_EQ(first["payload"]["proposals"].size(), 1U) << "segments exists: " << first.dump();
+
+    // The project is gone by the time the person confirms: the confirm fails, and says why.
+    projects->erase("segments");
+    const auto [refused_response, refused] =
+        call("confirm_ask_proposal",
+             {{"conversation_id", conversation},
+              {"message_id", first["id"]},
+              {"index", 0},
+              {"input_sha256", first["proposal_calls"][0]["input_sha256"]}});
+    ASSERT_TRUE(refused_response.starts_with("HTTP/1.1 200")) << refused_response;
+    EXPECT_EQ(refused["value"]["ok"], false);
+    EXPECT_EQ(refused["value"]["code"], "not_found");
+
+    // "create it then": the turn carries the failed proposal with its error, and Ask Orama answers
+    // with a corrected proposal, which Lake offers.
+    agents_->answer = {
+        {"ok", true},
+        {"reply", "Here is the corrected change; confirm it below."},
+        {"proposals",
+         nlohmann::json::array(
+             {{{"capability", "compile_pipeline"},
+               {"input", {{"project", "segments"}, {"intent", intent}, {"create_project", true}}},
+               {"impact", "Creates segments and its clustering pipeline."}}})},
+        {"reads", nlohmann::json::array()},
+        {"delegations", nlohmann::json::array()}};
+    const auto [next_response, next] =
+        call("send_ask_message", {{"conversation_id", conversation}, {"message", "create it then"}});
+    ASSERT_TRUE(next_response.starts_with("HTTP/1.1 200")) << next_response;
+    run_agent_task(*connection, next["value"]["task_id"]);
+    const auto& body = agents_->turns.back();
+    ASSERT_TRUE(body.contains("context")) << body.dump();
+    const auto& states = body["context"]["proposals"];
+    ASSERT_EQ(states.size(), 1U) << states.dump();
+    EXPECT_EQ(states[0]["message_id"], first["id"]);
+    EXPECT_EQ(states[0]["index"], 0);
+    EXPECT_EQ(states[0]["capability"], "compile_intent");
+    EXPECT_EQ(states[0]["input"]["project"], "segments");
+    EXPECT_EQ(states[0]["state"], "failed");
+    EXPECT_EQ(states[0]["code"], "not_found");
+    EXPECT_EQ(states[0]["retry"], false);
+    EXPECT_NE(states[0]["error"].get<std::string>().find("no project named 'segments'"),
+              std::string::npos)
+        << states.dump();
+    call("settle_ask_turn",
+         {{"conversation_id", conversation}, {"task_id", next["value"]["task_id"]}, {"kind", "ask"}});
+    messages = conversation_messages(conversation);
+    ASSERT_EQ(messages.size(), 5U) << messages.dump();
+    const auto corrected = messages[4];
+    ASSERT_EQ(corrected["payload"]["proposals"].size(), 1U) << corrected.dump();
+    const auto [done_response, done] =
+        call("confirm_ask_proposal",
+             {{"conversation_id", conversation},
+              {"message_id", corrected["id"]},
+              {"index", 0},
+              {"input_sha256", corrected["proposal_calls"][0]["input_sha256"]}});
+    ASSERT_TRUE(done_response.starts_with("HTTP/1.1 200")) << done_response;
+    EXPECT_EQ(done["value"]["ok"], true) << done_response;
+    EXPECT_TRUE(projects->contains("segments"));
+
+    // The next turn hears both: the failed proposal and the confirmed correction.
+    agents_->answer = {{"ok", true}, {"reply", "Both are recorded."}};
+    const auto [third_response, third] =
+        call("send_ask_message", {{"conversation_id", conversation}, {"message", "Where are we?"}});
+    ASSERT_TRUE(third_response.starts_with("HTTP/1.1 200")) << third_response;
+    run_agent_task(*connection, third["value"]["task_id"]);
+    const auto& latest = agents_->turns.back()["context"]["proposals"];
+    ASSERT_EQ(latest.size(), 2U) << latest.dump();
+    EXPECT_EQ(latest[0]["state"], "failed");
+    EXPECT_EQ(latest[1]["state"], "confirmed");
+    EXPECT_EQ(latest[1]["capability"], "compile_pipeline");
+    EXPECT_FALSE(latest[1].contains("error"));
 }
 
 // lake#794 review: a confirm refused for a reason that may pass later with the same input (the

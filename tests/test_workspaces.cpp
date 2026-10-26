@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -19,6 +20,7 @@
 #include <zetta/connect/egress_policy.hpp>
 #include <zetta/connect/http_transport.hpp>
 
+#include "api/feature_planning.hpp"
 #include "experiment_fixture.hpp"
 #include "lake/api/agent_docs.hpp"
 #include "lake/api/audit_routing.hpp"
@@ -27,6 +29,7 @@
 #include "lake/api/mcp.hpp"
 #include "lake/api/pipeline.hpp"
 #include "lake/api/registry.hpp"
+#include "lake/api/resource_repairs.hpp"
 #include "lake/api/rest.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/audit/audit.hpp"
@@ -1989,6 +1992,197 @@ TEST(Workspaces, DatasetWritesAreCheckedAndIdsAgree) {
     EXPECT_EQ(without->value["kind"], "data");
 }
 
+// plan_features takes a dataset alone (lake#1153): the methodology is chosen from the analysis, the
+// cutoff is read from the dataset's snapshot column, and a transform the engine still asks for
+// names the Lake capability that performs it. Each shape is one the issue's Auto-Suggest Agent scan
+// declined.
+TEST(Workspaces, PlanFeaturesTakesADatasetAloneAndReadsItsSnapshotCutoff) {
+    Workspaces w;
+    lake::control::InMemoryStore& store = *w.store;
+    const auto principal = store.context_for(w.secret);
+    auto requested = w.run(w.service->request(w.customer_id));
+    const auto workspace = store.get_service(requested->service_id);
+    ASSERT_TRUE(store.set_service_status(workspace->id, "Ready", "", "http://ws:4800"));
+    w.deliver(*workspace, {{"kind", "zetta"}, {"token", "t"}});
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const auto call = [&](const std::string& name, json input) {
+        lake::api::ApiContext context;
+        context.store = &store;
+        context.workspaces = w.service.get();
+        context.registry = &registry;
+        context.authorized = true;
+        context.acting_user_id = principal->user_id;
+        context.acting_identity = principal->taap_id;
+        context.credential_session_id = principal->session_id;
+        context.credential_kind = principal->kind;
+        context.scopes = principal->scopes;
+        context.request_id = lake::control::new_uuid_v4();
+        input["customer_id"] = w.customer_id;
+        input["workspace_id"] = w.workspace_id();
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(completed);
+        return std::move(*completed);
+    };
+    const auto sent = [&](const std::string& capability) {
+        for (auto it = w.caller->calls.rbegin(); it != w.caller->calls.rend(); ++it) {
+            if (it->first == capability) {
+                return it->second;
+            }
+        }
+        return json();
+    };
+    const auto column = [](const char* name) { return json{{"name", name}, {"type", "string"}}; };
+    const json labelled = {
+        {"columns",
+         json::array({{{"name", "account"}, {"role_candidates", json::array()}},
+                      {{"name", "churned"}, {"role_candidates", json::array({"label"})}}})}};
+    w.caller->answers["analyze_dataset"] = labelled;
+    w.caller->answers["plan_features"] = {
+        {"status", "ready"}, {"dataset", "datasets.ux_review_churn"}, {"methodology", "M-1"},
+        {"entries", json::array()}, {"excluded", json::array()}, {"transform_required", nullptr}};
+
+    // Shape 3: account, as_of, churn_window_days, ... churned. No methodology, no cutoff named.
+    w.caller->answers["get_dataset"] = {
+        {"name", "ux_review_churn"}, {"database", "datasets"},
+        {"columns", json::array({column("account"), column("as_of"), column("churn_window_days"),
+                                 column("churned")})}};
+    // Blanks and nulls may sort first; the latest date is taken.
+    w.caller->answers["sql"] = {
+        {"columns", json::array({"as_of"})},
+        {"rows", json::array({{{"as_of", nullptr}}, {{"as_of", ""}}, {{"as_of", "2026-09-27"}},
+                              {{"as_of", "2026-09-01"}}})}};
+    w.caller->calls.clear();
+    auto planned = call("plan_features", {{"dataset", "datasets.ux_review_churn"}});
+    ASSERT_TRUE(planned.ok) << planned.error.code << ": " << planned.error.message;
+    json engine = sent("plan_features");
+    EXPECT_EQ(engine["dataset"], "datasets.ux_review_churn");
+    EXPECT_EQ(engine["methodology"], "M-1");
+    EXPECT_EQ(engine["as_of"], "2026-09-27");
+    EXPECT_EQ(engine["time_column"], "as_of");
+    EXPECT_EQ(sent("sql")["statement"],
+              "SELECT as_of FROM datasets.ux_review_churn ORDER BY as_of DESC LIMIT 16");
+    EXPECT_EQ(sent("get_dataset"), (json{{"dataset", "ux_review_churn"}, {"database", "datasets"}}));
+    EXPECT_EQ(planned.value["inferred"]["methodology"]["id"], "M-1");
+    EXPECT_NE(planned.value["inferred"]["methodology"]["reason"].get<std::string>().find("churned"),
+              std::string::npos);
+    EXPECT_EQ(planned.value["inferred"]["as_of"]["column"], "as_of");
+    EXPECT_EQ(planned.value["inferred"]["as_of"]["value"], "2026-09-27");
+    EXPECT_FALSE(planned.value.contains("as_of_unavailable"));
+
+    // The same through workspace_query, with a bare name, as Auto-Suggest Agent asks.
+    w.caller->calls.clear();
+    planned = call("workspace_query",
+                   {{"capability", "plan_features"},
+                    {"input", {{"dataset", "ux_review_churn"}, {"methodology", "M-3"}}}});
+    ASSERT_TRUE(planned.ok) << planned.error.message;
+    engine = sent("plan_features");
+    EXPECT_EQ(engine["methodology"], "M-3") << "a named methodology is kept";
+    EXPECT_EQ(engine["as_of"], "2026-09-27");
+    EXPECT_EQ(sent("get_dataset"), (json{{"dataset", "ux_review_churn"}}));
+    EXPECT_TRUE(sent("analyze_dataset").is_null()) << "no analysis when the methodology is named";
+    EXPECT_FALSE(planned.value["inferred"].contains("methodology"));
+
+    // Shape 2: observed_at is the snapshot column; a time_column named by the caller wins.
+    w.caller->answers["get_dataset"] = {
+        {"name", "churn"}, {"database", "datasets"},
+        {"columns", json::array({column("account"), column("observed_at"), column("churned")})}};
+    w.caller->answers["sql"] = {{"rows", json::array({{{"observed_at", "2026-10-01"}}})}};
+    planned = call("plan_features", {{"dataset", "churn"}, {"methodology", "M-1"}});
+    ASSERT_TRUE(planned.ok);
+    EXPECT_EQ(sent("plan_features")["as_of"], "2026-10-01");
+    EXPECT_EQ(sent("plan_features")["time_column"], "observed_at");
+    planned = call("plan_features",
+                   {{"dataset", "churn"}, {"methodology", "M-1"}, {"time_column", "missing"}});
+    ASSERT_TRUE(planned.ok);
+    EXPECT_FALSE(sent("plan_features").contains("as_of"));
+
+    // A cutoff the caller names is used as named, and Lake reads nothing to find one.
+    w.caller->calls.clear();
+    planned = call("plan_features",
+                   {{"dataset", "churn"}, {"methodology", "M-1"}, {"as_of", "2026-06-30"}});
+    ASSERT_TRUE(planned.ok);
+    EXPECT_EQ(w.caller->calls.size(), 1U) << w.caller->calls.front().first;
+    EXPECT_EQ(sent("plan_features")["as_of"], "2026-06-30");
+    EXPECT_FALSE(planned.value.contains("inferred"));
+
+    // Shape 1: no date at all. Nothing is inferred and the engine plans it as it is.
+    w.caller->answers["get_dataset"] = {
+        {"name", "churn_plain"}, {"database", "datasets"},
+        {"columns", json::array({column("account"), column("tenure_months"), column("churned")})}};
+    planned = call("plan_features", {{"dataset", "churn_plain"}});
+    ASSERT_TRUE(planned.ok);
+    EXPECT_FALSE(sent("plan_features").contains("as_of"));
+    EXPECT_EQ(sent("plan_features")["methodology"], "M-1");
+    EXPECT_FALSE(planned.value["inferred"].contains("as_of"));
+
+    // A date that is not a snapshot (signup_date) still needs a cutoff: the transform names the
+    // capabilities that give it, and why Lake did not.
+    w.caller->answers["get_dataset"] = {
+        {"name", "accounts"}, {"database", "datasets"},
+        {"columns", json::array({column("account"), column("signup_date"), column("churned")})}};
+    w.caller->answers["plan_features"] = {
+        {"status", "transform_required"}, {"dataset", "datasets.accounts"}, {"methodology", "M-1"},
+        {"entries", json::array()}, {"excluded", json::array()},
+        {"transform_required",
+         {{"name", "add_snapshot_date"},
+          {"description", "Datetime features must be computed relative to a declared as_of"},
+          {"proposed_create_dataset_from_query_sql", ""},
+          {"clean_step", "Add a snapshot date for each prediction row and pass it as as_of."}}}};
+    planned = call("plan_features", {{"dataset", "accounts"}, {"methodology", "M-1"}});
+    ASSERT_TRUE(planned.ok);
+    const json transform = planned.value["transform_required"];
+    ASSERT_TRUE(transform["performed_by"].is_array());
+    EXPECT_EQ(transform["performed_by"][0]["capability"], "plan_features");
+    EXPECT_EQ(transform["performed_by"][0]["input"]["dataset"], "datasets.accounts");
+    EXPECT_EQ(transform["performed_by"][1]["capability"], "upload_dataset");
+    EXPECT_NE(transform["why_no_as_of"].get<std::string>().find("snapshot date"),
+              std::string::npos);
+    EXPECT_FALSE(planned.value.contains("inferred"));
+
+    // Event rows: the engine's proposed SELECT runs with workspace_sql, the result loads with
+    // upload_dataset.
+    w.caller->answers["plan_features"]["transform_required"] = {
+        {"name", "aggregate_events_to_entity"},
+        {"description", "one row per entity"},
+        {"proposed_create_dataset_from_query_sql",
+         "SELECT account, COUNT(*) AS event_count FROM datasets.events GROUP BY account"},
+        {"clean_step", ""}};
+    planned = call("plan_features", {{"dataset", "accounts"}, {"methodology", "M-1"}});
+    ASSERT_TRUE(planned.ok);
+    EXPECT_EQ(planned.value["transform_required"]["performed_by"][0]["capability"],
+              "workspace_sql");
+    EXPECT_EQ(planned.value["transform_required"]["performed_by"][0]["input"]["statement"],
+              "SELECT account, COUNT(*) AS event_count FROM datasets.events GROUP BY account");
+    EXPECT_EQ(planned.value["transform_required"]["performed_by"][1]["capability"],
+              "upload_dataset");
+
+    // With no methodology and a dataset the engine cannot analyze, the refusal says both.
+    w.caller->failure = lake::control::ZettaControlError{
+        "invalid_input", "dataset: no dataset named 'nothing'"};
+    w.caller->failure_for = "analyze_dataset";
+    auto refused = call("plan_features", {{"dataset", "nothing"}});
+    ASSERT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "invalid_input");
+    EXPECT_EQ(refused.error.path, "/dataset");
+    EXPECT_NE(refused.error.message.find("needs a methodology"), std::string::npos);
+    EXPECT_NE(refused.error.message.find("no dataset named 'nothing'"), std::string::npos);
+    w.caller->failure.reset();
+    w.caller->failure_for.clear();
+
+    // Without a label the plan is segmentation.
+    w.caller->answers["analyze_dataset"] = {
+        {"columns", json::array({{{"name", "account"}, {"role_candidates", json::array()}}})}};
+    planned = call("plan_features", {{"dataset", "churn_plain"}});
+    ASSERT_TRUE(planned.ok);
+    EXPECT_EQ(sent("plan_features")["methodology"], "M-3");
+    EXPECT_EQ(planned.value["inferred"]["methodology"]["id"], "M-3");
+
+    EXPECT_TRUE(lake::api::is_snapshot_column("As_Of"));
+    EXPECT_TRUE(lake::api::is_snapshot_column("snapshot_date"));
+    EXPECT_FALSE(lake::api::is_snapshot_column("signup_date"));
+}
+
 // Train > Agents (docs/api/train-agents.md, lake#229): the agents people build live in the
 // workspace's Zetta, and the Agent Library lists every specialized agent Orama ships.
 TEST(Workspaces, AgentCallsAreAllowListedAndChatIsAWriteZettaTakesWithGet) {
@@ -3826,6 +4020,318 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
                   {{"app", created.value["id"]}, {"image", pinned_image("reports:confirmed")}});
     ASSERT_TRUE(deployed.ok) << deployed.error.message;
     EXPECT_EQ(deployed.value["image"], pinned_image("reports:confirmed"));
+}
+
+// When an app fails (lake#1207): the pass that the store root's owner runs, with the context it
+// builds (the registry, the bus and the agents, no person).
+lake::api::ResourceRepairPass repair_pass(AgentRuns& r) {
+    lake::api::ApiContext context;
+    context.store = &r.store;
+    context.workspaces = r.w.service.get();
+    context.agent_caller = &r.agents;
+    context.agent_bus = r.agent_bus.get();
+    context.registry = &r.registry;
+    context.instance_kek = lake::test::test_instance_kek();
+    context.request_id = lake::control::new_uuid_v4();
+    return lake::api::run_resource_repair_pass(context);
+}
+
+// An image app of the fixture's workspace, created as its person.
+std::string repairable_app(AgentRuns& r, const std::string& name) {
+    const auto created = r.call_as(r.principal,
+                                   "create_app",
+                                   {{"name", name},
+                                    {"mode", "image"},
+                                    {"image", pinned_image(name + ":first")},
+                                    {"framework", "container"},
+                                    {"port", 8080}});
+    EXPECT_TRUE(created.ok) << created.error.message;
+    return created.value.value("id", std::string());
+}
+
+std::int64_t deploy_again(AgentRuns& r, const std::string& app_id, const std::string& tag) {
+    const auto deployed = r.call_as(
+        r.principal, "deploy_app", {{"app_id", app_id}, {"image", pinned_image(tag)}});
+    EXPECT_TRUE(deployed.ok) << deployed.error.message;
+    return deployed.value.value("generation", std::int64_t{0});
+}
+
+std::vector<lake::control::AgentTask> repair_tasks(AgentRuns& r) {
+    std::vector<lake::control::AgentTask> tasks;
+    std::set<std::string> seen;
+    for (const auto& event : r.bus->events("agent-tasks.agent-application")) {
+        const std::string id = event.payload.value("task_id", std::string());
+        if (!seen.insert(id).second) {
+            continue;
+        }
+        if (auto task = r.task(id); task && task->kind == "repair") {
+            tasks.push_back(*task);
+        }
+    }
+    return tasks;
+}
+
+TEST(AgentRuns, AFailedRolloutRecordsOneNotificationForThePersonWhoDeployedIt) {
+    AgentRuns r;
+    const std::string app_id = repairable_app(r, "reports");
+    ASSERT_FALSE(app_id.empty());
+    auto app = r.store.get_web_app(app_id);
+    ASSERT_TRUE(app);
+
+    // Still rolling out: nothing to say yet.
+    EXPECT_EQ(repair_pass(r).notified, 0U);
+    ASSERT_TRUE(r.store.set_web_app_status(
+        app_id, "Degraded", "", false,
+        "Back-off restarting failed container: CrashLoopBackOff", app->generation));
+    const auto first = repair_pass(r);
+    EXPECT_EQ(first.notified, 1U) << (first.problems.empty() ? "" : first.problems.front());
+    EXPECT_EQ(repair_pass(r).notified, 0U) << "the same failure is told once";
+
+    const auto listed = r.call("list_notifications", {{"resource_kind", "app"}});
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value["notifications"].size(), 1U);
+    const json notification = listed.value["notifications"][0];
+    EXPECT_EQ(notification["event"], "rollout_failed");
+    EXPECT_EQ(notification["resource_id"], app_id);
+    EXPECT_EQ(notification["resource_name"], "reports");
+    EXPECT_EQ(notification["for_you"], true) << "for the person who deployed it";
+    EXPECT_NE(notification["reason"].get<std::string>().find("starts and then stops"),
+              std::string::npos)
+        << notification["reason"];
+    EXPECT_EQ(listed.value["open"], 1);
+
+    // A failed build of the app is told too.
+    const auto repository = r.store.create_repository(
+        {.customer_id = r.w.customer_id, .name = "reports-src", .workspace_id = r.w.workspace_id()});
+    ASSERT_TRUE(repository) << repository.error().message;
+    const auto build = r.store.create_build({.customer_id = r.w.customer_id,
+                                             .workspace_id = r.w.workspace_id(),
+                                             .repository = repository->id,
+                                             .revision = "abc",
+                                             .target = "registry/space/reports:build-1"});
+    ASSERT_TRUE(build) << build.error().message;
+    ASSERT_TRUE(r.store.set_build_status(
+        build->id, {"Failed", "", 0, "pip install: No matching distribution for plotlyy"}));
+    EXPECT_EQ(repair_pass(r).notified, 1U);
+    const auto with_build = r.call("list_notifications", {{"resource_id", app_id}});
+    EXPECT_EQ(with_build.value["notifications"].size(), 2U);
+
+    // Dismissed, it is gone for that person only; Ready again, the rollout's is resolved.
+    const auto dismissed = r.call("dismiss_notification", {{"notification_id", notification["id"]}});
+    ASSERT_TRUE(dismissed.ok) << dismissed.error.message;
+    EXPECT_EQ(dismissed.value["dismissed"], true);
+    EXPECT_EQ(r.call("list_notifications", json::object()).value["notifications"].size(), 1U);
+    ASSERT_TRUE(r.store.set_web_app_status(app_id, "Ready", "https://reports.example", true, "",
+                                           app->generation));
+    EXPECT_EQ(repair_pass(r).resolved, 1U);
+    const auto all = r.call("list_notifications",
+                            {{"include_resolved", true}, {"include_dismissed", true}});
+    ASSERT_EQ(all.value["notifications"].size(), 2U);
+    for (const json& item : all.value["notifications"]) {
+        EXPECT_EQ(item["resolved"], item["event"] == "rollout_failed") << item.dump();
+    }
+}
+
+TEST(AgentRuns, ARepairTurnProposesThenWritesOnlyThatAppOnceConfirmed) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-application", "http://application:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+    const std::string app_id = repairable_app(r, "reports");
+    const std::string other_id = repairable_app(r, "other");
+
+    const auto started = r.call("repair_app", {{"app_id", app_id}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const auto first = r.task(started.value["task_id"]);
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->kind, "repair");
+    EXPECT_EQ(first->body["kind"], "repair");
+    EXPECT_EQ(first->body["context"]["app_id"], app_id);
+    EXPECT_EQ(first->body["context"]["app"]["name"], "reports");
+    EXPECT_EQ(first->body["context"]["repair"]["deployed_by"], r.principal.user_id);
+    for (const std::string_view capability : {"get_app", "app_logs", "receive_app_events",
+                                              "build_logs", "repository_file", "get_auto_fix"}) {
+        EXPECT_NE(std::ranges::find(first->scopes, capability), first->scopes.end()) << capability;
+    }
+    for (const std::string_view capability :
+         {"commit_repository_files", "deploy_app", "build_app", "create_app", "create_repository"}) {
+        EXPECT_EQ(std::ranges::find(first->scopes, capability), first->scopes.end()) << capability;
+    }
+    EXPECT_EQ(r.call("get_auto_fix", {{"resource_kind", "app"}, {"resource_id", app_id}})
+                  .value["repair_conversation_id"],
+              first->conversation_id);
+
+    const json proposal{{"kind", "proposal"},
+                        {"confirm", true},
+                        {"turn", "repair"},
+                        {"diff", "--- a/app.py\n+++ b/app.py\n-port = 3000\n+port = 8080\n"},
+                        {"files", json::array({{{"path", "app.py"}, {"contents", "port = 8080\n"}}})},
+                        {"app", {{"id", app_id}, {"name", "reports"}, {"auth", "none"}}}};
+    ASSERT_TRUE(r.set_task_status(first->id, "Succeeded", "", "",
+                                  {{"ok", true}, {"reply", "The port is wrong."}, {"result", proposal}}));
+    const auto task_view = r.call("get_agent_task", {{"task_id", first->id}});
+    const std::string sha = task_view.value["proposal_sha256"];
+    EXPECT_NE(task_view.value["review_url"].get<std::string>().find("/ship/app?"), std::string::npos);
+    const json confirm{{"agent", "agent-application"},
+                       {"kind", "repair"},
+                       {"message", "Apply the reviewed fix."},
+                       {"conversation_id", first->conversation_id},
+                       {"proposal_task_id", first->id},
+                       {"proposal_sha256", sha},
+                       {"context", {{"app_id", app_id}, {"confirmed_proposal", proposal}}}};
+    // Confirming it for another app, or as a new-app turn, is refused.
+    json elsewhere = confirm;
+    elsewhere["context"]["app_id"] = other_id;
+    EXPECT_EQ(r.call("agent_turn", elsewhere).error.path, "/context/confirmed_proposal/app/id");
+    json as_new_app = confirm;
+    as_new_app["kind"] = "app";
+    EXPECT_EQ(r.call("agent_turn", as_new_app).error.path, "/proposal_task_id");
+
+    // Confirmed (a public app's repair asks nothing about access), the turn may commit the fix
+    // and redeploy, and never create an app.
+    const auto confirmed = r.call("agent_turn", confirm);
+    ASSERT_TRUE(confirmed.ok) << confirmed.error.message;
+    const auto second = r.task(confirmed.value["task_id"]);
+    ASSERT_TRUE(second);
+    EXPECT_EQ(second->body["context"]["confirmed_proposal"], proposal);
+    for (const std::string_view capability : {"commit_repository_files", "deploy_app", "build_app"}) {
+        EXPECT_NE(std::ranges::find(second->scopes, capability), second->scopes.end()) << capability;
+    }
+    for (const std::string_view capability : {"create_app", "create_repository"}) {
+        EXPECT_EQ(std::ranges::find(second->scopes, capability), second->scopes.end()) << capability;
+    }
+    const std::string credential = "lat." + second->id + ".0123456789abcdef0123456789abcdef";
+    ASSERT_TRUE(r.store.claim_agent_task(second->id, "agent-application",
+                                         lake::control::identity_crypto::sha256_hex(credential)));
+    const auto agent = r.store.context_for(credential);
+    ASSERT_TRUE(agent);
+    const auto before = r.store.get_web_app(app_id);
+    const auto redeployed = r.call_as(
+        *agent, "deploy_app", {{"app", app_id}, {"image", pinned_image("reports:fixed")}});
+    ASSERT_TRUE(redeployed.ok) << redeployed.error.message;
+    EXPECT_EQ(redeployed.value["generation"], before->generation + 1);
+}
+
+TEST(AgentRuns, AutoFixRepairsWithoutAConfirmAndStopsAfterItsAttempts) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-application", "http://application:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+    const std::string app_id = repairable_app(r, "reports");
+    const auto fail = [&](std::int64_t generation) {
+        ASSERT_TRUE(r.store.set_web_app_status(app_id, "Degraded", "", false,
+                                               "CrashLoopBackOff", generation));
+    };
+    fail(r.store.get_web_app(app_id)->generation);
+
+    // Off by default: the pass only notifies, and an auto-fix turn is refused.
+    EXPECT_EQ(repair_pass(r).auto_fix_started, 0U);
+    const json auto_turn{{"agent", "agent-application"},
+                         {"kind", "repair"},
+                         {"message", "Auto-fix"},
+                         {"context", {{"app_id", app_id}, {"auto_fix", true}}}};
+    EXPECT_EQ(r.call("agent_turn", auto_turn).error.path, "/context/auto_fix");
+
+    const auto on = r.call("set_auto_fix", {{"resource_kind", "app"},
+                                            {"resource_id", app_id},
+                                            {"enabled", true},
+                                            {"max_attempts", 2}});
+    ASSERT_TRUE(on.ok) << on.error.message;
+    EXPECT_EQ(on.value["max_attempts"], 2);
+
+    // Attempt 1: a repair turn that may write without a confirmed proposal.
+    auto pass = repair_pass(r);
+    ASSERT_EQ(pass.auto_fix_started, 1U) << (pass.problems.empty() ? "" : pass.problems.front());
+    auto tasks = repair_tasks(r);
+    ASSERT_EQ(tasks.size(), 1U);
+    EXPECT_EQ(tasks[0].body["context"]["auto_fix"]["attempt"], 1);
+    EXPECT_EQ(tasks[0].requested_by_user_id, r.principal.user_id) << "as the person who opted in";
+    for (const std::string_view capability : {"commit_repository_files", "deploy_app"}) {
+        EXPECT_NE(std::ranges::find(tasks[0].scopes, capability), tasks[0].scopes.end());
+    }
+    EXPECT_EQ(repair_pass(r).auto_fix_started, 0U) << "one attempt at a time";
+    ASSERT_TRUE(r.set_task_status(tasks[0].id, "Succeeded", "", "", {{"ok", true}}));
+    fail(deploy_again(r, app_id, "reports:attempt-1"));
+
+    // Attempt 2, then the limit: auto-fix stops and says so.
+    EXPECT_EQ(repair_pass(r).auto_fix_started, 1U);
+    tasks = repair_tasks(r);
+    ASSERT_EQ(tasks.size(), 2U);
+    ASSERT_TRUE(r.set_task_status(tasks[1].id, "Succeeded", "", "", {{"ok", true}}));
+    fail(deploy_again(r, app_id, "reports:attempt-2"));
+    pass = repair_pass(r);
+    EXPECT_EQ(pass.auto_fix_started, 0U);
+    EXPECT_EQ(pass.auto_fix_stopped, 1U);
+    EXPECT_EQ(repair_pass(r).auto_fix_started, 0U);
+    EXPECT_EQ(repair_tasks(r).size(), 2U);
+    const auto state = r.call("get_auto_fix", {{"resource_kind", "app"}, {"resource_id", app_id}});
+    EXPECT_EQ(state.value["attempts"], 2);
+    EXPECT_EQ(state.value["auto_fix_stopped"], true);
+    const auto told = r.call("list_notifications", {{"resource_id", app_id}});
+    const auto& items = told.value["notifications"];
+    EXPECT_TRUE(std::ranges::any_of(items, [](const json& item) {
+        return item["event"] == "auto_fix_stopped" &&
+               item["reason"].get<std::string>().find("tried 2 times") != std::string::npos;
+    })) << told.value.dump();
+    EXPECT_EQ(r.call("agent_turn", auto_turn).error.code, "conflict");
+
+    // Turning it on again resets the attempts.
+    ASSERT_TRUE(r.call("set_auto_fix",
+                       {{"resource_kind", "app"}, {"resource_id", app_id}, {"enabled", true}})
+                    .ok);
+    EXPECT_EQ(repair_pass(r).auto_fix_started, 1U);
+}
+
+TEST(AgentRuns, AChangeTurnTurnsInstructionsIntoAProposalAndContinuesTheConversation) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-application", "http://application:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+    const std::string app_id = repairable_app(r, "reports");
+
+    EXPECT_FALSE(r.call("change_app", {{"app_id", app_id}}).ok) << "a change needs instructions";
+    const auto started =
+        r.call("change_app", {{"app_id", app_id}, {"message", "Add a chart by region."}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const auto first = r.task(started.value["task_id"]);
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->kind, "change");
+    EXPECT_EQ(first->body["message"], "Add a chart by region.");
+    EXPECT_EQ(std::ranges::find(first->scopes, "commit_repository_files"), first->scopes.end());
+    const json answer{{"ok", true},
+                      {"reply", "Done?"},
+                      {"result",
+                       {{"kind", "proposal"},
+                        {"confirm", true},
+                        {"turn", "change"},
+                        {"diff", "+chart"},
+                        {"files", json::array({{{"path", "app.py"}, {"contents", "chart\n"}}})},
+                        {"app", {{"id", app_id}, {"name", "reports"}}}}}};
+    ASSERT_TRUE(r.set_task_status(first->id, "Succeeded", "", "", answer));
+
+    // Later instructions continue the same conversation, with the earlier turn.
+    const auto later = r.call("change_app", {{"app_id", app_id}, {"message", "Filter by plan."}});
+    ASSERT_TRUE(later.ok) << later.error.message;
+    const auto second = r.task(later.value["task_id"]);
+    ASSERT_TRUE(second);
+    EXPECT_EQ(second->conversation_id, first->conversation_id);
+    EXPECT_EQ(second->body["prior_turn"]["task_id"], first->id);
+
+    // Confirmed, the change may be committed and deployed.
+    const json proposal = answer["result"];
+    const auto confirmed = r.call(
+        "agent_turn",
+        {{"agent", "agent-application"},
+         {"kind", "change"},
+         {"message", "Apply the reviewed change."},
+         {"proposal_task_id", first->id},
+         {"proposal_sha256", lake::api::agent_proposal_digest(proposal)},
+         {"context", {{"app_id", app_id}, {"confirmed_proposal", proposal}}}});
+    ASSERT_TRUE(confirmed.ok) << confirmed.error.message;
+    const auto third = r.task(confirmed.value["task_id"]);
+    ASSERT_TRUE(third);
+    EXPECT_NE(std::ranges::find(third->scopes, "commit_repository_files"), third->scopes.end());
+    EXPECT_NE(std::ranges::find(third->scopes, "deploy_app"), third->scopes.end());
 }
 
 TEST(AgentRuns, AConversationFollowUpCarriesThePriorTurn) {
@@ -5689,4 +6195,145 @@ TEST(SafeMode, AWarningCarriesItsStatementsAndTheConfirmationRunsTheCall) {
     ASSERT_FALSE(other.ok);
     EXPECT_TRUE(other.error.details.is_null());
     EXPECT_FALSE(other.envelope()["error"].contains("details"));
+}
+
+// lake#1153 on a real Zetta (a local `zetta --headless`, LAKE_TEST_ZETTA_URL and
+// LAKE_TEST_ZETTA_TOKEN): each churn table the issue's Auto-Suggest Agent scan declined plans `ready`
+// through Lake, from the dataset alone, and a date that is not a snapshot names how to give one.
+TEST(FeaturePlanZetta, EachChurnShapeFromTheIssuePlansFromTheDatasetAlone) {
+    const char* url = std::getenv("LAKE_TEST_ZETTA_URL");
+    const char* token = std::getenv("LAKE_TEST_ZETTA_TOKEN");
+    if (url == nullptr || token == nullptr || *url == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_ZETTA_URL and LAKE_TEST_ZETTA_TOKEN are not set";
+    }
+    lake::control::install_zetta_control_transport();
+    struct Shutdown {
+        ~Shutdown() {
+            lake::control::shutdown_zetta_control_transport();
+        }
+    } shutdown;
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const std::filesystem::path dir =
+        lake::test::fixture_path("feature-plan-zetta-" + lake::control::new_uuid_v4());
+    std::filesystem::create_directories(dir);
+    auto service = std::make_shared<lake::control::WorkspaceService>(
+        lake::control::WorkspaceConfig{dir.string(), 0},
+        store,
+        std::make_shared<lake::control::ZettaWorkspaceCaller>());
+    const std::string identity = "taap:1:ed25519:feature-plan-zetta";
+    const auto user = store->create_user({identity, "plan@example.test", "Plan"});
+    ASSERT_TRUE(user);
+    const auto customer = store->create_customer({"individual", user->id, "", "fpzetta"});
+    ASSERT_TRUE(customer);
+    const auto object = store->find_policy_object("customer", customer->id);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(store->create_grant({identity, object->id, "admin", "a", "admin", "r"}));
+    const auto workspace = store->create_workspace({customer->id, "home", "dev", ""});
+    ASSERT_TRUE(workspace) << workspace.error().message;
+    const auto zetta_service = store->get_service(workspace->zetta_service_id);
+    ASSERT_TRUE(zetta_service);
+    ASSERT_TRUE(store->set_service_status(zetta_service->id, "Ready", "", url));
+    std::ofstream(dir / (zetta_service->slug + ".json"))
+        << json{{"kind", "zetta"}, {"token", token}}.dump();
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const auto call = [&](const std::string& name, json input) {
+        lake::api::ApiContext context;
+        context.store = store.get();
+        context.workspaces = service.get();
+        context.registry = &registry;
+        context.authorized = true;
+        context.acting_identity = identity;
+        context.acting_user_id = user->id;
+        context.session_credential = true;
+        context.scopes = {"*"};
+        context.request_id = lake::control::new_uuid_v4();
+        input["customer_id"] = customer->id;
+        input["workspace_id"] = workspace->id;
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(completed);
+        return completed ? std::move(*completed) : lake::api::ApiResult{};
+    };
+
+    // The issue's shapes: 200 accounts, one row each, a churned label.
+    const std::string run = lake::control::new_uuid_v4().substr(0, 8);
+    std::string plain = "account,tenure_months,monthly_spend,support_tickets,churn_risk,churned\n";
+    std::string observed = "account,tenure_months,monthly_spend,support_tickets,churn_risk,churned,"
+                           "observed_at,churn_window_days\n";
+    std::string as_of =
+        "account,as_of,churn_window_days,tenure_months,monthly_spend,support_tickets,churned\n";
+    std::string signup = "account,signup_date,tenure_months,churned\n";
+    for (int row = 0; row < 200; ++row) {
+        const std::string account = "acct-" + std::to_string(1000 + row);
+        const std::string tenure = std::to_string(1 + row % 60);
+        const std::string spend = row % 37 == 0 ? "999" : std::to_string(20 + row % 250) + ".5";
+        const std::string tickets = std::to_string(row % 9);
+        const std::string risk = "0." + std::to_string(100 + row % 900);
+        const std::string churned = (row % 9 > 5 || row % 60 < 5) ? "1" : "0";
+        const std::string day = "2026-0" + std::to_string(1 + row % 9) + "-" +
+                                (row % 28 < 9 ? "0" : "") + std::to_string(1 + row % 28);
+        plain += account + "," + tenure + "," + spend + "," + tickets + "," + risk + "," +
+                 churned + "\n";
+        observed += account + "," + tenure + "," + spend + "," + tickets + "," + risk + "," +
+                    churned + "," + day + ",90\n";
+        as_of += account + "," + day + ",90," + tenure + "," + spend + "," + tickets + "," +
+                 churned + "\n";
+        signup += account + "," + day + "," + tenure + "," + churned + "\n";
+    }
+    const auto upload = [&](const std::string& table, const std::string& csv) {
+        auto loaded = call("upload_dataset",
+                           {{"table_name", table}, {"format", "csv"}, {"content", csv}});
+        ASSERT_TRUE(loaded.ok) << table << ": " << loaded.error.message;
+    };
+    upload("plain_" + run, plain);
+    upload("observed_" + run, observed);
+    upload("asof_" + run, as_of);
+    upload("signup_" + run, signup);
+
+    // Before lake#1153 this answered `invalid_input: no subschema has succeeded`.
+    auto plan = call("plan_features", {{"dataset", "datasets.asof_" + run}});
+    ASSERT_TRUE(plan.ok) << plan.error.code << ": " << plan.error.message;
+    EXPECT_EQ(plan.value["status"], "ready") << plan.value["transform_required"].dump();
+    EXPECT_EQ(plan.value["methodology"], "M-1");
+    EXPECT_EQ(plan.value["inferred"]["methodology"]["id"], "M-1");
+    EXPECT_EQ(plan.value["inferred"]["as_of"]["column"], "as_of");
+    EXPECT_EQ(plan.value["inferred"]["as_of"]["value"], "2026-09-27");
+
+    // Every methodology S-1 composes at level 1, on every shape, as Auto-Suggest Agent asks for it.
+    for (const std::string table : {"plain_" + run, "observed_" + run, "asof_" + run}) {
+        for (const char* methodology : {"M-1", "M-2", "M-3"}) {
+            auto planned = call("workspace_query",
+                                {{"capability", "plan_features"},
+                                 {"input", {{"dataset", table}, {"methodology", methodology}}}});
+            ASSERT_TRUE(planned.ok) << table << " " << methodology << ": "
+                                    << planned.error.message;
+            EXPECT_EQ(planned.value["status"], "ready")
+                << table << " " << methodology << ": "
+                << planned.value["transform_required"].dump();
+        }
+    }
+    plan = call("plan_features", {{"dataset", "observed_" + run}, {"methodology", "M-1"}});
+    ASSERT_TRUE(plan.ok);
+    EXPECT_EQ(plan.value["inferred"]["as_of"]["column"], "observed_at");
+    plan = call("plan_features", {{"dataset", "plain_" + run}});
+    ASSERT_TRUE(plan.ok);
+    EXPECT_FALSE(plan.value["inferred"].contains("as_of"));
+
+    // A signup date is a feature, not the cutoff: the engine still asks for one, and Lake says
+    // which capabilities give it. Declaring it makes the plan ready.
+    plan = call("plan_features", {{"dataset", "signup_" + run}, {"methodology", "M-1"}});
+    ASSERT_TRUE(plan.ok) << plan.error.message;
+    ASSERT_EQ(plan.value["status"], "transform_required");
+    EXPECT_EQ(plan.value["transform_required"]["name"], "add_snapshot_date");
+    EXPECT_EQ(plan.value["transform_required"]["performed_by"][0]["capability"], "plan_features");
+    EXPECT_EQ(plan.value["transform_required"]["performed_by"][1]["capability"], "upload_dataset");
+    plan = call("plan_features",
+                {{"dataset", "signup_" + run}, {"methodology", "M-1"}, {"as_of", "2026-10-01"}});
+    ASSERT_TRUE(plan.ok);
+    EXPECT_EQ(plan.value["status"], "ready") << plan.value["transform_required"].dump();
+
+    for (const std::string table :
+         {"plain_" + run, "observed_" + run, "asof_" + run, "signup_" + run}) {
+        static_cast<void>(call("delete_dataset", {{"id", "datasets/" + table}}));
+    }
 }

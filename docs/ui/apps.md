@@ -19,13 +19,14 @@ person's authorization and audit. The page writes no app rows or operator state 
 
 The pages follow the console's rich layout (`docs/ui/web-app.md`, *The look*):
 
-- **Apps** opens with figures from `list_apps` (Apps, Ready, Failed, With Zetta), then a search and a
+- **Apps** opens with figures from `list_apps` (Apps, Ready, Needs attention, With Workspace Data), then a search and a
   phase filter over a card grid: each card shows the app's name, phase chip, URL, revision, bindings
   and when it was last updated (`updated_at`). **New app** opens a drawer with *From a repository* and
   *From an image*; its image field, like the App's Deploy field, takes only an image pinned by
   digest (`name@sha256:<64 hex>`), which is all `create_app` and `deploy_app` accept (lake#783).
   **Build with the Application Agent** opens a drawer for the description. A task named
-  by `?task=` is shown above the grid.
+  by `?task=` is shown above the grid. **Needs attention** counts Failed and Degraded apps
+  (`src/pages/apps/attention.ts`, lake#1208) and links to `?filter=attention`, which shows only those.
 - **App** is a Split. The main column has tabs in `?tab=` (Overview, Builds, Logs, Events, Settings,
   Services), and every other query parameter is kept. Overview holds the deploy history with
   Rollback, which now asks once in a dialog, and the latest events. Logs and Events are dark
@@ -110,6 +111,31 @@ sign-in**, a warning that anyone with the app's address can open it, and a requi
 this app will be public* checkbox (lake#452). Confirming without it starts no turn; with it, the
 confirmed turn carries `context.confirm_public: true`, which `create_app` requires before it creates
 a public app for the agent.
+
+## When an app fails
+
+lake#1207, [the API](../api/notifications.md). What the person sees:
+
+- **Apps list.** Above the grid, one warning banner per open notification about an app: the app's
+  name and what failed (*reports is not running*, *its image did not build*, *auto-fix stopped*),
+  the reason in plain words and the operator's message, *for you* when they deployed it, with
+  *Fix with the Application Agent*, *Open* and Dismiss.
+- **App page.** A side card, *Fix or Change This App*: the app's open notifications with the same
+  actions (or *Fix with the Application Agent* on its own when nothing is open); *Change this app
+  with the Application Agent*, a box for more instructions; and **Auto-fix**: off, on with its
+  attempts (`1 of 3`), or stopped with the reason, turned on with a number of attempts (1 to 10,
+  default 3) or off.
+- **The turn, on the app page** (`?task=`): working, then the proposal (the diagnosis, how many
+  files change, the diff, *Confirm and apply the fix* or *…the change*), then the result (running
+  again, or still failing and why, with *What changed*). A box under each continues the same
+  conversation. Confirming re-reads the task and refuses a proposal that changed, as the new-app
+  confirmation does.
+- **Account → Notifications** (`/settings?tab=notifications`): every notification of the current
+  workspace, resolved ones included, with the same actions.
+
+The components are `frontend/src/pages/apps/repair.tsx`: `AppNotifications`, `AppRepairCard`,
+`AppTurnPanel`, `NotificationsList` and `NotificationBanner`, which take any resource kind, so the
+agent page (lake#1209) reuses them.
 
 ## Verification
 

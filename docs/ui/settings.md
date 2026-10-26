@@ -53,7 +53,7 @@ identity and what it signs as) and, for a managed key, offers **Use my own ident
 shows and paste the output (`use_own_identity`); a refused signature starts again from the document
 ([identity.md](../api/identity.md#your-own-identity)); Sessions and devices reads
 `list_sessions` and `list_devices`; Passkeys and Tokens link to `/passkeys` and `/tokens`, where the capability forms
-are ([identity.md](identity.md)); Notifications says no delivery preferences are configured.
+are ([identity.md](identity.md)); Notifications lists what Lake told the current workspace about failed apps, failed builds and auto-fix that stopped, with Fix, Open and Dismiss ([apps.md](apps.md#when-an-app-fails), lake#1207).
 
 ### Deleting your account
 

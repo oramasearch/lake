@@ -4,8 +4,8 @@
  * website code, and whether the balance lets a paid step start. No React here. */
 
 /** A step as quickstart_status answers it. */
-export type StepState = "pending" | "running" | "done" | "failed";
-export type Step = { step: string; title: string; state: StepState; error: { code: string; message: string } | null; progress?: { status?: string; started_at?: string } | null };
+export type StepState = "pending" | "running" | "done" | "failed" | "skipped";
+export type Step = { step: string; title: string; state: StepState; error: { code: string; message: string } | null; note?: string; progress?: { status?: string; started_at?: string } | null };
 export type QuickstartState = "waiting_for_workspace" | "not_started" | "in_progress" | "search_ready" | "training" | "trained" | "done" | "failed";
 export type Status = {
   quickstart_id: string | null;
@@ -14,13 +14,63 @@ export type Status = {
   state: QuickstartState;
   next: string;
   steps: Step[];
-  dataset: { id: string; database: string; name: string; rows?: number | null; columns?: { name: string; type: string }[] } | null;
+  dataset: { id: string; database: string; name: string; rows?: number | null; columns?: Column[] } | null;
   index: { id: string; fields: string[]; published: boolean } | null;
-  training: { run_id?: string; target?: string | null; entity_column?: string | null; methodology?: string } | null;
-  model: { id: string; published: boolean } | null;
+  training: {
+    /** Null when the engine refused to start it (lake#1204): the model step says why. */
+    run_id?: string | null;
+    started_at?: string;
+    target?: string | null;
+    target_value?: string | null;
+    entity_column?: string | null;
+    methodology?: string;
+    as_of?: string;
+    preparation?: Preparation | null;
+    /** A target derived from a column (lake#1182). */
+    derived_target?: { column: string; name: string; rule: string } | null;
+  } | null;
+  /** The date the dataset's dates are read as of (lake#1181). */
+  snapshot_date?: string | null;
+  /** The column to predict (and value) and the row's name offered first. */
+  suggested?: { target: string | null; target_value: string | null; entity_column: string | null } | null;
+  /** `serves: false`: a clustering model, trained but not published for the website (lake#1182). */
+  model: { id: string; published: boolean; serves?: boolean } | null;
+  /** The Ask Orama conversation that decides what to build (start_quickstart_conversation, lake#1182). */
+  conversation?: Conversation | null;
   workspace?: { ready?: boolean; phase?: string; message?: string };
   quickstarts?: { quickstart_id: string; dataset_id: string | null; created_at: string | null }[];
   costs?: Costs;
+};
+/** The quickstart's Ask Orama conversation as quickstart_status names it: `page` goes with every
+ * message, so the agent always knows the dataset (lake#1182). */
+export type Conversation = {
+  conversation_id: string;
+  task_id: string | null;
+  started_at?: string | null;
+  page: Record<string, string>;
+};
+/** A dataset column with its detected kind (lake#1181, docs/api/quickstart.md#columns). `kind` is
+ * null when the engine could not profile it. */
+export type Column = {
+  name: string;
+  type: string;
+  kind?: string | null;
+  title?: string;
+  distinct_count?: number;
+  values?: string[];
+  feature?: { use: boolean; reason?: string };
+  predict?: { can: boolean; reason?: string; values?: string[]; choose_value?: boolean; positive?: string };
+};
+/** How a training was prepared: the copy it trained on, what was left out and why. */
+export type Preparation = {
+  copy: boolean;
+  dataset_id?: string | null;
+  entity?: string;
+  used?: string[];
+  dropped?: { name: string; reason: string }[];
+  label?: { column: string; positive: string } | null;
+  note?: string | null;
+  applied?: string[];
 };
 export type Rate = { unit_micros: number; per: number } | null;
 export type Costs = {
@@ -36,6 +86,8 @@ export type Snippets = {
   ready: boolean;
   includes_model: boolean;
   snippets: Snippet[];
+  /** One block for a coding agent to install it (lake#1185): the source, ids, key and context. */
+  prompt?: string;
   /** The browser key the code needs (lake#1152): `secret` once, when the call made it with `origins`. */
   key: {
     kind: "browser_key";
@@ -131,6 +183,77 @@ export function firstColumns(fields: string[], columns: { name: string; type: st
   return { target, entity: text ? text.name : names[0] };
 }
 
+/** Whether every column carries a detected kind, so the page offers the detected choices. */
+export function detected(columns: Column[] | undefined): boolean {
+  return !!columns && columns.length > 0 && columns.every((c) => typeof c.kind === "string");
+}
+
+/** The columns the model can predict, each with its detected type, as the choice lists them. */
+export function predictable(columns: Column[]): { name: string; label: string }[] {
+  return columns.filter((c) => c.predict?.can).map((c) => ({ name: c.name, label: c.title ? `${c.name} (${c.title})` : c.name }));
+}
+
+/** A column's detected type, as the column list shows it. */
+export function kindLabel(column: Column): string {
+  return column.title ?? column.type ?? "";
+}
+
+/** What the person has chosen for training. */
+export type Choice = { target: string; value: string; entity: string; asOf: string };
+
+/** The choices the page starts with: what the last training used, else what Lake suggests, else
+ * (an engine that could not profile the columns) the file's order. */
+export function startingChoice(status: Pick<Status, "dataset" | "index" | "training" | "suggested" | "snapshot_date">): Choice {
+  const columns = status.dataset?.columns ?? [];
+  const asOf = dateInput(status.training?.as_of ?? status.snapshot_date ?? "");
+  if (!detected(columns)) {
+    const guess = firstColumns(columns.length ? columns.map((c) => c.name) : status.index?.fields ?? [], columns);
+    return { target: status.training?.target ?? guess.target, value: "", entity: status.training?.entity_column ?? guess.entity, asOf };
+  }
+  const can = new Set(predictable(columns).map((c) => c.name));
+  const trained = status.training?.target && can.has(status.training.target) ? status.training : null;
+  const target = trained?.target ?? status.suggested?.target ?? "";
+  const value = trained ? trained.target_value ?? "" : status.suggested?.target === target ? status.suggested?.target_value ?? "" : "";
+  const entity = trained ? trained.entity_column ?? "" : status.suggested?.entity_column ?? "";
+  return { target, value: value || valuesOf(columns, target)[0] || "", entity, asOf };
+}
+
+/** The values offered for a category to predict; empty for a column with two values. */
+export function valuesOf(columns: Column[], target: string): string[] {
+  const column = columns.find((c) => c.name === target);
+  return column?.predict?.choose_value ? column.predict.values ?? [] : [];
+}
+
+/** What happens to each column with these choices, in the file's order. */
+export function columnUses(columns: Column[], choice: Pick<Choice, "target" | "entity">): { name: string; kind: string; use: string; reason: string; used: boolean }[] {
+  return columns.map((c) => {
+    const kind = kindLabel(c);
+    if (c.name === choice.target) return { name: c.name, kind, use: "Predicted", reason: "", used: true };
+    if (c.name === choice.entity) return { name: c.name, kind, use: "Names a row", reason: "", used: true };
+    if (c.feature?.use) return { name: c.name, kind, use: "Learned from", reason: c.feature.reason ?? "", used: true };
+    return { name: c.name, kind, use: "Left out", reason: c.feature?.reason ?? "", used: false };
+  });
+}
+
+/** A date or ISO time as a date field's value (YYYY-MM-DD); empty when it is not one. */
+export function dateInput(value: string): string {
+  return /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : "";
+}
+
+/** train_quickstart's input for these choices: as_of only when the date was changed. */
+export function trainInput(choice: Choice, columns: Column[], snapshot: string | null | undefined): Record<string, string> {
+  const input: Record<string, string> = { target: choice.target };
+  if (choice.value && valuesOf(columns, choice.target).length) input.target_value = choice.value;
+  if (choice.entity) input.entity_column = choice.entity;
+  if (choice.asOf && choice.asOf !== dateInput(snapshot ?? "")) input.as_of = choice.asOf;
+  return input;
+}
+
+/** The train button's words: a first training, or another with changed choices after a failure. */
+export function trainLabel(failed: boolean): string {
+  return failed ? "Train with these choices" : "Train a model";
+}
+
 /** How often the page reads the status: often while the workspace starts or the model trains,
  * not at all otherwise. */
 export function pollInterval(state: QuickstartState | undefined): number | false {
@@ -175,6 +298,7 @@ export function rateLabel(rate: Rate, unit: string, money: (micros: number) => s
 
 /** The status read's tone for a step's state. */
 export function stepTone(state: StepState): "success" | "info" | "danger" | "neutral" {
+  if (state === "skipped") return "neutral";
   return state === "done" ? "success" : state === "running" ? "info" : state === "failed" ? "danger" : "neutral";
 }
 
@@ -184,4 +308,99 @@ export function hitLine(fields: Record<string, unknown> | undefined): string {
     .map((value) => (value === null || value === undefined ? "" : String(value)))
     .filter(Boolean)
     .join(" · ");
+}
+
+/** The website step's tabs (lake#1185): the agent prompt first, then the source code alone. */
+export type WebsiteView = "prompt" | "code";
+export const WEBSITE_VIEWS: { value: WebsiteView; label: string }[] = [
+  { value: "prompt", label: "Copy agent prompt" },
+  { value: "code", label: "Source code" },
+];
+export const DEFAULT_WEBSITE_VIEW: WebsiteView = "prompt";
+
+/** The agent prompt with the key the page holds put in it; without one, as Lake wrote it (it says
+ * how to make the key). Null when this Lake answers no prompt. */
+export function agentPrompt(snippets: Pick<Snippets, "prompt" | "key"> | null | undefined, secret: string | null): string | null {
+  if (!snippets?.prompt) return null;
+  return withKey(snippets.prompt, snippets.key?.placeholder ?? "YOUR_LAKE_SEARCH_KEY", secret);
+}
+
+/** Whether the model step opens its Ask Orama conversation now (lake#1182): the search works, no
+ * conversation is open, nothing is training or trained, and the balance lets a turn start. Opened
+ * once per quickstart; the person never has to ask for it. */
+export function opensConversation(status: Pick<Status, "quickstart_id" | "index" | "conversation" | "training" | "model"> | null | undefined, blocked: boolean): boolean {
+  return !!status?.quickstart_id && !!status.index?.published && !status.conversation && !status.training && !status.model && !blocked;
+}
+
+/** Where what a confirmed proposal made lives (lake#1182), so the conversation can link it: a model
+ * goes on in this page (null), the rest open in their own page. */
+export function whereItLives(capability: string): { path: string; label: string } | null {
+  if (capability === "train_quickstart") return null;
+  if (/^(create|deploy|build|start|scale|restart)_app$/.test(capability)) return { path: "/ship/apps", label: "Ship → Apps" };
+  if (capability === "discover" || capability.endsWith("_opportunities") || capability === "dismiss_opportunity") return { path: "/design/opportunities", label: "Design → Opportunities" };
+  if (["generate_dataset", "upload_dataset", "create_dataset_from_query", "load_drive_dataset"].includes(capability)) return { path: "/train/data", label: "Data → Datasets" };
+  if (["create_project", "compile_intent", "compose_solution", "run_solution", "create_pipeline", "start_run"].includes(capability)) return { path: "/design/projects", label: "Design → Projects" };
+  if (capability === "train_model" || capability === "retrain_model") return { path: "/train/models", label: "Train → Models" };
+  return null;
+}
+
+/** The model step's title: a conversation until something is training, then the model. */
+export function modelStepTitle(status: Pick<Status, "training" | "model">): string {
+  return status.training || status.model ? "Train a Model on the Same Data" : "Decide What to Build";
+}
+
+/** Whether a methodology groups rows without a column to predict (M-3 clustering, lake#1182). */
+export function isClustering(methodology: string | null | undefined): boolean {
+  return ["m-3", "segmentation", "clustering", "cluster"].includes((methodology ?? "").toLowerCase());
+}
+
+/** Where the model step is, for a person (lake#1204), each with one next action:
+ * - `choose`: nothing started yet; the conversation (or the columns) decides what to build;
+ * - `training`: the engine is training; the page follows it;
+ * - `publishing`: trained, and the page publishes it now;
+ * - `failed`: why, in plain words, with Try again and Ask Orama to fix it;
+ * - `done`: published, and search shows its answers;
+ * - `clustered`: a clustering model is trained; its segments are on the model's page. */
+export type ModelView = "choose" | "training" | "publishing" | "failed" | "done" | "clustered";
+export function modelView(status: Pick<Status, "state" | "steps" | "training" | "model">): ModelView {
+  const model = status.steps.find((s) => s.step === "model");
+  const answers = status.steps.find((s) => s.step === "model_answers");
+  if (model?.state === "failed" || answers?.state === "failed") return "failed";
+  if (status.model?.serves === false) return "clustered";
+  if (answers?.state === "done") return "done";
+  if (status.state === "trained" || (model?.state === "done" && status.model && !status.model.published)) return "publishing";
+  if (model?.state === "running" || status.state === "training") return "training";
+  return "choose";
+}
+
+/** Whether the model step shows the training (not the conversation): as soon as a model was asked
+ * for, by Confirm in the conversation or by the columns, whether it trains, failed or is done. The
+ * page moves on by itself after a confirm (lake#1204). */
+export function showsTraining(status: Pick<Status, "state" | "steps" | "training" | "model">): boolean {
+  return !!status.training || !!status.model || modelView(status) !== "choose";
+}
+
+/** How long the training has run, in words ("2 min", "under a minute"); empty without a start. */
+export function elapsed(startedAt: string | null | undefined, now: number): string {
+  const started = startedAt ? Date.parse(startedAt) : NaN;
+  if (!Number.isFinite(started)) return "";
+  const minutes = Math.floor(Math.max(0, now - started) / 60_000);
+  if (minutes < 1) return "under a minute";
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} h ${minutes % 60} min`;
+}
+
+/** Why the model step failed, as the page says it: the step's plain words (never the engine's). */
+export function failureReason(status: Pick<Status, "steps">): string {
+  const model = status.steps.find((s) => s.step === "model");
+  const answers = status.steps.find((s) => s.step === "model_answers");
+  return model?.error?.message || answers?.error?.message || "Lake could not train the model. Try again, or let Ask Orama fix it.";
+}
+
+/** What "Ask Orama to fix it" says in the conversation (lake#1204): what failed and why, asking for
+ * the corrected change as a card the person confirms. */
+export function fixMessage(status: Pick<Status, "steps" | "training">): string {
+  const what = isClustering(status.training?.methodology) ? "The clustering model" : status.training?.target ? `The model that predicts ${status.training.target}` : "The model";
+  return `${what} did not train: ${failureReason(status)} Propose the corrected change so I can confirm it.`;
 }

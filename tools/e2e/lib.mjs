@@ -80,12 +80,14 @@ export async function signIn(page, base, ticketFile) {
   const state = process.env.LAKE_E2E_STATE;
   if (state && fs.existsSync(state)) {
     // A session saved by an earlier script: no ticket is spent.
-    await page.goto(`${base}/`);
+    await page.goto(`${base}/`, { waitUntil: "domcontentloaded" });
   } else {
     const ticket = fs.readFileSync(ticketFile, "utf8").trim();
-    await page.goto(`${base}/sign-in?__clerk_ticket=${encodeURIComponent(ticket)}`);
+    await page.goto(`${base}/sign-in?__clerk_ticket=${encodeURIComponent(ticket)}`, { waitUntil: "domcontentloaded" });
   }
-  await page.waitForURL((url) => url.origin === base && url.pathname === "/", { timeout: 90000 });
+  // Not the `load` event: on lake-dev it never fires (a request the page starts stays open), so
+  // wait for the document and then the Quickstart page itself.
+  await page.waitForURL((url) => url.origin === base && url.pathname === "/", { timeout: 90000, waitUntil: "domcontentloaded" });
   await page.getByTestId("quickstart-page").waitFor({ timeout: 60000 });
   if (state && !fs.existsSync(state)) {
     // Keep the session for the next script. It is a credential: mode 600, delete it when done.

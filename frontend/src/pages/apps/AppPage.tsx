@@ -15,7 +15,8 @@ import { entityCrumb, useTrail } from "@/lib/trail";
 import { Button, Card, type Column, DataTable, Empty, ErrorBlock, KeyValue, Page, Skeleton, Split, Status } from "@/lib/ui";
 import { envInput, secretEnvLabel } from "./secretEnv";
 import { AppPhase, AppUrl, decimal, formValues } from "./AppsPage";
-import { PageError, pause, qs, QueryTabs, storedNumber, storeNumber, streamHref, Terminal, useQueryTab, useRunner, useWorkspaceLink } from "./shared";
+import { PageError, pause, qs, QueryTabs, storedNumber, storeNumber, streamHref, Terminal, useAgentDeployed, useQueryTab, useRunner, useWorkspaceLink } from "./shared";
+import { AppRepairCard, AppTurnPanel } from "./repair";
 import { stopsPolling } from "@/lib/errors";
 import { UsageThisMonth } from "../usage/UsageThisMonth";
 import { StorePicker } from "../drives/StorePicker";
@@ -84,6 +85,9 @@ export default function AppPage() {
   const appId = params.get("app_id") ?? "";
   const tab = useQueryTab<Tab>(TABS);
   const runner = useRunner();
+  // A repair or change turn of this app (lake#1207), reviewed here.
+  const turnId = params.get("task") ?? "";
+  const applicationAgent = useAgentDeployed("agent-application");
 
   const appQuery = useRead<Row>(customerId && appId ? "get_app" : null, { customer_id: customerId, workspace_id: workspaceId ?? undefined, app_id: appId });
   const app = appQuery.data;
@@ -168,6 +172,11 @@ export default function AppPage() {
       }
     >
       <PageError error={runner.error} />
+      {turnId && (
+        <div className="mb-5">
+          <AppTurnPanel taskId={turnId} appId={appId} customerId={customerId} workspaceId={workspaceId} />
+        </div>
+      )}
       <Split
         side={
           <>
@@ -190,6 +199,8 @@ export default function AppPage() {
               />
               {app.message ? <p className="muted mb-0 text-[13px]">{String(app.message)}</p> : null}
             </Card>
+
+            <AppRepairCard app={app} customerId={customerId} workspaceId={workspaceId} agentDeployed={applicationAgent.deployed} />
 
             <Card label="Scale" title="Replicas">
               <form className="row-form flex flex-wrap items-end gap-2" onSubmit={submit("scale", (form) => call("scale", "scale_app", { replicas: decimal(form.replicas) }, "Scaled"))}>

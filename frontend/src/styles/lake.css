@@ -787,6 +787,55 @@ dd {
 .ask-proposal-impact {
   color: var(--lake-text-secondary);
 }
+/* The exact call's arguments (lake#1192): name, value and description each on their own row, so a
+   value has the card's full width and wraps at any character instead of shrinking to one
+   character per line beside a long description. */
+.ask-proposal-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lake-space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ask-proposal-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lake-space-1);
+  min-width: 0;
+}
+.ask-proposal-field-name,
+.ask-proposal-field > .ask-proposal-value {
+  align-self: flex-start;
+}
+.ask-proposal-value {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ask-proposal-value-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--lake-space-1);
+  min-width: 0;
+}
+.ask-proposal-value-block .ask-proposal-value {
+  align-self: stretch;
+}
+/* A long value shows its first lines until "Show all"; the rest stays in the page. */
+.ask-proposal-value-collapsed {
+  max-height: calc(6 * var(--lake-leading-copy) * 1em + 20px); /* six lines and the block padding */
+  overflow: hidden;
+}
+.ask-proposal-field-about {
+  margin: 0;
+  color: var(--lake-text-secondary);
+  font-size: var(--lake-text-12);
+}
 /* An agent's markdown reply: tables scroll inside the message rather than widen the page. */
 .ask-reply > :first-child {
   margin-top: 0;

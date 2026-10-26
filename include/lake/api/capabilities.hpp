@@ -78,6 +78,11 @@ void register_application_capabilities(Registry& registry);
 void register_agent_capabilities(Registry& registry);
 void register_platform_capabilities(Registry& registry);
 void register_web_app_capabilities(Registry& registry);
+// When a resource fails (lake#1207, docs/api/notifications.md): list_notifications,
+// dismiss_notification, get_auto_fix and set_auto_fix, general over the resource kind (`app` now,
+// `agent` with lake#1209), and repair_app and change_app, which start Application Agent turns of
+// kind repair and change through agent_turn.
+void register_repair_capabilities(Registry& registry);
 void register_build_capabilities(Registry& registry);
 void register_stream_capabilities(Registry& registry);
 void register_experiment_capabilities(Registry& registry);
@@ -101,9 +106,10 @@ void register_transcript_capabilities(Registry& registry);
 // delete_solution, duplicate_solution.
 void register_solution_capabilities(Registry& registry);
 // The quickstart process (lake#1128, docs/api/quickstart.md): start_quickstart, quickstart_status,
-// train_quickstart and quickstart_snippets, which compose upload_dataset, create_index,
-// expose_index, train_model and expose_model through the registry; the state is a sealed record
-// per quickstart in the workspace Zetta.
+// train_quickstart, quickstart_snippets and start_quickstart_conversation (lake#1182), which
+// compose upload_dataset, create_index, expose_index, train_model, expose_model and
+// send_ask_message through the registry; the state is a sealed record per quickstart in the
+// workspace Zetta.
 void register_quickstart_capabilities(Registry& registry);
 // Browser keys (lake#1152, docs/api/browser-keys.md): create_browser_key, list_browser_keys and
 // revoke_browser_key. browser_key_json is a key as they answer it, never its secret.
@@ -304,6 +310,12 @@ nlohmann::json workspace_openapi(const nlohmann::json& document, std::string_vie
 // The pipeline is named `name`, or pipeline_title(intent) when it is empty, numbered " (2)",
 // " (3)" past a pipeline of the project that has the name (lake#816). The description stays the
 // project's captured intent.
+//
+// `create_project` (lake#1193) creates the project first, its description the intent, so a new
+// project's pipeline is one call (and one Ask Orama confirmation); a project that already has the
+// name is refused as `conflict` at `/create_project` and nothing is created. The answer then carries
+// `project_created: true`. When the compile fails after the project was created, the project stays
+// and the failure says so.
 liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
                                                   std::string customer_id,
                                                   std::string project,
@@ -312,7 +324,8 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
                                                   nlohmann::json model = nullptr,
                                                   std::string methodology = {},
                                                   nlohmann::json columns = nlohmann::json::object(),
-                                                  std::string name = {});
+                                                  std::string name = {},
+                                                  bool create_project = false);
 // A short, readable pipeline title from its description (lake#816): the first clause, without a
 // leading request ("Predict which", "Build a"), helper words ("will", "likely to") or what follows
 // a preposition, at most four words and 48 characters (code points), first letter capitalized.

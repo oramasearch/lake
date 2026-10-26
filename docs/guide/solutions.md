@@ -337,8 +337,10 @@ act on them.
 
 1. Press **Scan my workspace** (or **Scan again** after a scan). Auto-Suggest Agent reads your workspace's
    datasets and their columns and matches them to the solutions catalogue. It runs in the
-   background and changes nothing; you can leave the page. While it works the page says *Scanning
-   your workspace…* and checks again every 3 seconds.
+   background and changes nothing; you can leave the page, and the results are kept when it
+   finishes. While it works the page says *Scanning… started 2m ago*, on any tab or device, the
+   button says *Scanning…*, and the page checks again every 3 seconds. Pressing Scan while a scan
+   runs joins that scan instead of starting another.
 2. The results are grouped:
    - **Recommended**: each card names the intent and whether the methodology it needs runs today.
    - **Not Yet**: what your data does not support yet, and why.
@@ -358,7 +360,12 @@ The scan is an Auto-Suggest Agent turn:
 
 Then list, create and dismiss:
 
-`GET /v1/list_opportunities?customer_id=<customer id>&workspace_id=<workspace id>&task_id=<task id>`
+`GET /v1/list_opportunities?customer_id=<customer id>&workspace_id=<workspace id>`
+
+`list_opportunities` answers `{opportunities, last_scan}`: `last_scan` is the workspace's newest scan
+(`task_id`, `status` pending, running, succeeded or failed, `started_at`, `finished_at`, `message`),
+or null before the first. `task_id` is optional. A second `agent_turn` scan while one runs answers
+the running scan with `joined: true`.
 
 `POST /v1/create_projects_from_opportunities`
 

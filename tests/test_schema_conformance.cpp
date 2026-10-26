@@ -342,6 +342,9 @@ void check_web_app(HttpEvidence& http,
                     {"message_id", sent.at("reply_id")},
                     {"index", 0},
                     {"input_sha256", asked.at("proposal_calls").at(0).at("input_sha256")}}));
+    // The Quickstart's model step (lake#1182): the newest quickstart of this workspace, made
+    // earlier in the test, talked through with the space's own chat agent, which answers at once.
+    http.call("start_quickstart_conversation", with({{"agent", "schema-agent"}}));
 
     // Background turns: the Project Agent's build of a project, and an Agent Creator Agent proposal.
     const auto task = [&](std::string agent, std::string kind, std::string conversation) {
@@ -357,6 +360,9 @@ void check_web_app(HttpEvidence& http,
     };
     task("agent-project", "build:schema", "");
     http.call("latest_agent_task", with({{"subject", "build:schema"}}));
+    // A pending workspace scan, reported as list_opportunities' last_scan (lake#1195).
+    task("agent-autosuggest", "discover", "");
+    http.call("list_opportunities", with(json::object()));
     const std::string conversation = lake::control::new_uuid_v4();
     auto factory = task("agent-creator", "factory", conversation);
     lake::api::ApiContext context;

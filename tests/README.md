@@ -125,6 +125,11 @@ The Streams task-credential fixture takes a real claim before making calls. See
 `HttpResponseIsolation.AskOramaSaysWhoIsWorkingOnALongTurn` (lake#451) runs a real Ask Orama
 claim, a delegation with its turn key, and the subagent's progress and result, and follows the turn
 through `settle_ask_turn`'s task message and the asking turn's `agent-events`.
+`HttpResponseIsolation.AskOramaNeverOffersAProposalForAMissingProject` (lake#1193) and
+`AskOramaHearsWhatBecameOfItsEarlierProposals` (lake#1194) give the workspace engine a set of
+projects (`serve_projects`, through `RecordingWorkspace::respond`): a proposal for a missing project
+is withheld, a new project's `compile_pipeline` with `create_project` confirms in one step, and the
+turn after a failed confirm carries the failure in `context.proposals`.
 `Workspaces.TalkToOffersEveryAgentAndMarksTheOnesNotRunning` checks which agents *Talk to* offers, `Workspaces.EveryCatalogueAgentIsInTalkToWhenItRuns` that none of the catalogue is left out, and `Workspaces.ListAgentLibraryListsEveryAgentWhateverIncludeInternalSays` that `include_internal` no longer filters (lake#788).
 `AgentNames.*` (`test_agent_names.cpp`, lake#763) keeps the Agent Library the one source of agent
 names: every name follows the scheme (title-case words, "Agent" last but for Ask Orama), no old or
@@ -558,7 +563,13 @@ origin), a failed step kept with why and resumed, a blocked balance
 refused with the top-up link before any step, another account's workspace refused, a person with no
 workspace waiting for one, input refusals, and the OpenAPI, MCP, `llms.txt`, `llms-full.txt` and
 skill listings. `QuickstartZetta.*` runs the whole process against a real Zetta named by
-`LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` and skips without them.
+`LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` and skips without them, including a dated dataset of
+every column kind (lake#1181) and a clustering (M-3) model trained to `done` (lake#1203). Run a
+local `zetta --headless --mcp-listen 127.0.0.1:<port> --admin-token <token> --data-dir <dir>` from the
+zetta pin and point both variables at it. `Quickstart.ARefusedClusteringIsSaidPlainlyAndTryAgainKeepsIt`
+covers a refused training in plain words, Try again and the confirm's words (lake#1204); the test
+double refuses M-3 with a held-out share as zetta v0.5.0 does. `test_quickstart_columns.cpp` (`QuickstartColumns.*`) covers the
+quickstart's pure column rules: detection, suggestions, the training copy and refusals in plain words.
 
 `test_transcripts.cpp` covers the pure parts of speech-to-text and transcripts (lake#561):
 `.vtt`/`.srt` cleaning, audio decoding and its 25 MiB limit, file names, the OpenAI multipart
@@ -566,6 +577,11 @@ request and its errors through a fake `TranscriptPost`, paging, excerpts and the
 classification. `test_workspace_records.cpp`'s `TranscriptsLiveInTheirWorkspaceAndKeepNoAudio`
 runs the six capabilities with a fake `Transcriber` over the memory and PostgreSQL stores; no test
 calls OpenAI.
+
+`test_workspaces.cpp`'s `AgentRuns.AFailedRollout*`, `ARepairTurn*`, `AutoFix*` and `AChangeTurn*`
+cover lake#1207: a failed rollout or build notifies the deployer once and Ready resolves it; a repair
+or change turn writes only its app after a confirmed diff; auto-fix runs as the person who opted in
+and stops after its attempts.
 
 `test_mcp_client.cpp` covers Lake's MCP client (lake#652): the event-stream parser, server URLs,
 public addresses and tool bounds, then the client over the server's own transport against

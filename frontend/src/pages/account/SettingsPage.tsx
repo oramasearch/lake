@@ -2,17 +2,18 @@
  * and Notifications, each a tab of cards. Identity is which key the account signs with (lake#762). An unknown tab shows Notifications, as the server page did.
  * Profile ends with Delete account (lake#810, docs/ui/settings.md#deleting-your-account). */
 import { Link, useSearchParams } from "react-router-dom";
-import { Bell, Fingerprint, KeyRound, MonitorSmartphone, ShieldCheck, Trash2 } from "lucide-react";
+import { Fingerprint, KeyRound, MonitorSmartphone, ShieldCheck, Trash2 } from "lucide-react";
 import { signOut } from "@/components/Shell";
 import { type Row, useList } from "@/lib/api";
 import { accountBlockers, accountLines, accountTyped } from "@/lib/deletion";
 import { DeletionButton } from "@/lib/deletionDialog";
 import { useSession } from "@/lib/session";
 import { useTrail } from "@/lib/trail";
-import { Button, Card, Empty, ErrorBlock, KeyValue, Page, Skeleton, Stat, StatRow, Status } from "@/lib/ui";
+import { Button, Card, ErrorBlock, KeyValue, Page, Skeleton, Stat, StatRow, Status } from "@/lib/ui";
 import { QueryTabs } from "@/pages/organizations/shared";
 import { IdentityPanel } from "./IdentityPanel";
 import { NO_WORKSPACE } from "./signIn";
+import { NotificationsList } from "@/pages/apps/repair";
 import type { DeviceRow, SessionRow } from "./labels";
 
 const TABS = [
@@ -110,12 +111,19 @@ function Panel({ selected }: { selected: string }) {
         </Card>
       );
     default:
-      return (
-        <Empty icon={Bell} title="Notifications">
-          No notification delivery preferences are configured.
-        </Empty>
-      );
+      return <WorkspaceNotifications />;
   }
+}
+
+/** What Lake has told you about the current workspace's resources (lake#1207): failed apps,
+ * failed builds and auto-fix that stopped, kept in the workspace. */
+function WorkspaceNotifications() {
+  const { space, workspaceId } = useSession();
+  return (
+    <Card label="Notifications" title="This workspace">
+      <NotificationsList customerId={space?.id ?? ""} workspaceId={workspaceId} />
+    </Card>
+  );
 }
 
 function SessionsSummary() {

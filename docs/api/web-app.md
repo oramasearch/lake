@@ -18,7 +18,7 @@ calls the capability or the shared function, so the two cannot disagree.
 | `mcp_setup` | read | signed in | — | `{origin, mcp_url, tool_groups, flows, scopes}` |
 | `resolve_model` | read | anyone, for a public model | `namespace?`, `name` | `{repository_id, revision}` |
 | `latest_agent_task` | read | read on the account | `customer_id`, `workspace_id`, `subject` | `{task: <get_agent_task value> \| null}` |
-| `compile_pipeline` | action | write on the account | `customer_id`, `workspace_id`, `project`, `intent`, `dataset?`, `label_column?`, `entity_column?`, `methodology?`, `name?` | `{graph, template?}` |
+| `compile_pipeline` | action | write on the account | `customer_id`, `workspace_id`, `project`, `intent`, `dataset?`, `label_column?`, `entity_column?`, `methodology?`, `name?`, `create_project?` | `{graph, template?, project_created?}` |
 | `render_pipeline` | read | read on the account | `customer_id`, `workspace_id`, `project`, `graph`, `step?` | `{svg}` |
 
 The Ask Orama and Agent Factory conversation (`send_ask_message`, `settle_ask_turn`,
@@ -159,7 +159,15 @@ churn*), numbered ` (2)`, ` (3)` past a pipeline of the project that has it, and
 the same cases) and sends what the person leaves or types there as `name`. The intent itself stays
 the project's description. The step names (`load_customers`, `notify_retention` …) are the
 template's until edited, and Build a Pipeline says so when it finishes. Each step is its own audited
-capability call. The web app's project page calls it. For example,
+capability call. The web app's project page calls it.
+
+With `create_project: true` (lake#1193) it first creates the project (`create_project`, described
+by the intent), so a new project's pipeline is one call and one Ask Orama confirmation
+([ask-orama.md](ask-orama.md#a-new-project-in-one-confirmation-lake1193)). A project that already
+has the name is `conflict` at `/create_project` and nothing is written; the answer carries
+`project_created: true`; a compile that fails after the project was created says *the project '…'
+was created, but its pipeline was not: …*. Without it, a missing project is `not_found` at
+`/project` and the message names both ways to create it. For example,
 `POST /w/<workspace_id>/v1/compile_pipeline`:
 
 ```json

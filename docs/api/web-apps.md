@@ -256,6 +256,16 @@ true`. The full input and refusals are in [apps.md](apps.md#applicationagent-and
 the App write capabilities itself. See [agent-launches.md](agent-launches.md) and
 [the page contract](../ui/apps.md).
 
+## When an app fails
+
+A rollout that ends Degraded, failed or crash-looping, and an app image build that fails, each
+record a notification for the person who deployed the app, shown on the Apps list, the app page and
+Account → Notifications. *Fix with the Application Agent* (`repair_app`) and *Change this app*
+(`change_app`) start Application Agent turns that propose a diff and, confirmed, commit it to the
+app's repository and redeploy; opt-in auto-fix (`set_auto_fix`) lets the agent do that itself up to
+a number of attempts. `create_app` and `deploy_app` record who deployed the app and its source for
+this. See [notifications.md](notifications.md) (lake#1207).
+
 ## Verification
 
 `WebApps.*` and `PostgresWebApps.*` cover the memory and Postgres stores, built-in and configured

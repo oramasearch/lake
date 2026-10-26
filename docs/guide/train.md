@@ -48,6 +48,8 @@ pretending to train.
   then `POST /v1/compile_pipeline` with
   `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "project": "retention", "intent": "Predict the churned column of accounts", "dataset": "datasets.accounts"}`.
   Without the project, `compile_pipeline` answers `not_found` at `/project` and says to create it.
+  Or skip the first call: `compile_pipeline` with `"create_project": true` creates the project
+  (described by the intent) and its pipeline in one call, and refuses a name already in use.
   `dataset` is `<database>.<table>`; `methodology` (for example `M-3`) is optional. `name` names
   the pipeline; without it Lake makes a short title from the description. The answer's
   `graph` is the new pipeline's name; `template` says

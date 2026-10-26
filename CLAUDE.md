@@ -8,7 +8,7 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
-Status: 2026-10-22. The current release is **v0.4.0** ([`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md): the security release from the multi-tenant audit and the pre-launch review, SAML sign-in, OpenID Connect discovery and `delete_account`); before it **v0.3.1** (billing through a shared Stripe account); before that **v0.3.0**
+Status: 2026-10-25. The current release is **v0.7.1** ([`docs/releases/v0.7.1.md`](docs/releases/v0.7.1.md); every release is indexed in [`docs/releases/README.md`](docs/releases/README.md)). Of the older ones, **v0.4.0** ([`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md): the security release from the multi-tenant audit and the pre-launch review, SAML sign-in, OpenID Connect discovery and `delete_account`); before it **v0.3.1** (billing through a shared Stripe account); before that **v0.3.0**
 ([`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md): the lake.live order sheet and the 2026-10-18
 UX review's fixes, with its known issues); v0.2.0 ([`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md))
 added secure networking, regions, the managed key and own identity, Clerk webhooks, the agents'
@@ -138,6 +138,16 @@ paint), the pages lake renders, the order and balance emails, `llms.txt`, `llms-
 skill at `/skills/<short_name>/SKILL.md`, MCP and OpenAPI take the brand. Lake's own brand changes
 nothing. The operator must render the variables (orama-operator#947). See
 [`docs/serving/brand.md`](docs/serving/brand.md).
+
+When a resource fails, Lake says so and an agent can fix it (lake#1207, no migration): a failed app
+rollout (Degraded, failed, crash-looping) or image build records a notification for the person who
+deployed it in the workspace Zetta (`lake_resource_notifications`), shown on the Apps list, the app
+page and Account → Notifications; `repair_app` and `change_app` start Application Agent `repair` and
+`change` turns that propose a diff and, confirmed, commit it to the app's repository and redeploy;
+opt-in auto-fix (`set_auto_fix`, default 3 attempts, `lake_resource_repairs`) runs attempts as the
+person who turned it on and stops at the limit. General over the resource kind; custom agents are
+lake#1209. Not deployed; needs agent-application with repair turns. See
+[`docs/api/notifications.md`](docs/api/notifications.md).
 
 The newest dated record, [`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md),
 and [`docs/design/status.md`](docs/design/status.md) still describe the 2026-10-01 deployment
@@ -421,6 +431,23 @@ nested registry call of an existing capability (balance gate, audit and metering
 is a sealed `lake_quickstarts` record per quickstart in the workspace Zetta. Signed-in people land
 on Quickstart at `/`; Ask Orama moved to `/ask`. The website key is a browser key (lake#1152, below). Not deployed. See [`docs/api/quickstart.md`](docs/api/quickstart.md) and
 [`docs/ui/quickstart.md`](docs/ui/quickstart.md).
+It trains on any column types (lake#1181, no migration): each column's kind comes from the engine's
+`analyze_dataset`; `quickstart_status` answers them with `snapshot_date` and `suggested`;
+`train_quickstart` takes `target_value` and `as_of`, leaves dates, identifiers, free text, empty and
+constant columns out, and, when the dataset cannot train as it is, trains on a `<name>_training` copy
+(usable columns, numbered rows when no unique column names them, the target as 0/1) loaded with a
+nested `upload_dataset`. A `transform_required` it can satisfy is applied and tried once; any other is
+answered in plain words. Dates are not yet features: zetta v0.5.0's `train_model` takes no `as_of`
+(zetta#1494). See [`docs/api/quickstart.md#columns`](docs/api/quickstart.md#columns).
+`quickstart_snippets` also answers `prompt` (lake#1185): one block for a coding agent with the source,
+ids, key (when that call made it), its limits, the answer shapes, the origins and how to check it;
+the console's website step opens on *Copy agent prompt*, with *Source code* beside it. See
+[`docs/api/quickstart.md#the-agent-prompt`](docs/api/quickstart.md#the-agent-prompt).
+The model step is an Ask Orama conversation (lake#1182, no migration): `start_quickstart_conversation`
+opens it on the dataset (a nested `send_ask_message` whose `page` carries the dataset, its columns'
+kinds and the index), `quickstart_status` names it, and confirming a model runs `train_quickstart`,
+which also takes `derived_target` and trains M-3 clustering (not published for the website). See
+[`docs/api/quickstart.md#the-conversation-lake1182`](docs/api/quickstart.md#the-conversation-lake1182).
 
 Browser keys (lake#1152, migration `0102_browser_keys`): the key a website's page holds, bound to one
 workspace, one search index and optionally one model, callable only for `search_index` and

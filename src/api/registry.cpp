@@ -124,7 +124,7 @@ void log_database_diagnostic(std::string_view code, std::string_view message) {
     std::println(stderr, "{}", entry.dump());
 }
 
-constexpr std::array<ErrorCode, 37> documented_error_codes{{
+constexpr std::array<ErrorCode, 38> documented_error_codes{{
     {"invalid_input", 400, "The input is at fault; `path` points at the field."},
     {"secret_required",
      400,
@@ -192,6 +192,10 @@ constexpr std::array<ErrorCode, 37> documented_error_codes{{
     {"engine_error",
      422,
      "The workspace engine or the outside service refused the call; the message is its."},
+    {"training_failed",
+     422,
+     "A confirmed Quickstart model could not be trained; the message says why in plain words "
+     "(confirm_ask_proposal's `code`, lake#1204)."},
     {"not_supported", 501, "This Lake or its workspace engine cannot do what was asked yet."},
     {"quota_exceeded",
      507,

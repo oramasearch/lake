@@ -27,6 +27,8 @@ import {
   useRunner,
   useWorkspaceLink,
 } from "./shared";
+import { ATTENTION_FILTER, needsAttention } from "./attention";
+import { AppNotifications } from "./repair";
 
 /** A form's fields as strings. */
 export function formValues(event: FormEvent<HTMLFormElement>): Record<string, string> {
@@ -82,6 +84,7 @@ export default function AppsPage() {
   const customerId = space?.id ?? "";
   const taskId = params.get("task") ?? "";
   const flash = params.get("error") ?? "";
+  const attentionOnly = params.get("filter") === ATTENTION_FILTER;
   const runner = useRunner();
   const [open, setOpen] = useState<"create" | "agent" | null>(null);
   const [mode, setMode] = useState<"runtime" | "image">("runtime");
@@ -138,13 +141,14 @@ export default function AppsPage() {
   const filtered = (rows ?? []).filter((app) => {
     const needle = search.trim().toLowerCase();
     const hay = `${app.name ?? ""} ${app.url ?? ""} ${app.framework ?? ""}`.toLowerCase();
-    return (!needle || hay.includes(needle)) && (!phase || phaseWords(app.phase) === phase);
+    return (!needle || hay.includes(needle)) && (!phase || phaseWords(app.phase) === phase) && (!attentionOnly || needsAttention(app.phase));
   });
   const all = rows ?? [];
   const ready = all.filter((app) => app.ready).length;
-  const failed = all.filter((app) => app.phase === "Failed").length;
+  const attention = all.filter((app) => needsAttention(app.phase)).length;
   const withZetta = all.filter((app) => app.bindings?.zetta !== undefined && app.bindings?.zetta !== null).length;
   const appHref = (app: Row) => ws("/ship/app") + qs({ customer_id: customerId, app_id: String(app.id) });
+  const appsHref = (filter?: string) => ws("/ship/apps") + qs({ customer_id: customerId, filter });
 
   return (
     <Page
@@ -165,6 +169,7 @@ export default function AppsPage() {
       {flash && !runner.error && <Banner tone="warn">{flash}</Banner>}
       {!open && <PageError error={runner.error} />}
       {taskId && <TaskPanels taskId={taskId} q={task} customerId={customerId} runner={runner} startTurn={startTurn} />}
+      <AppNotifications customerId={customerId} workspaceId={workspaceId} />
 
       {apps.isLoading ? (
         <Skeleton lines={4} />
@@ -187,13 +192,18 @@ export default function AppsPage() {
           <StatRow>
             <Stat label="Apps" value={all.length} icon={Box} />
             <Stat label="Ready" value={ready} tone={ready ? "ok" : undefined} sub={`of ${all.length}`} />
-            <Stat label="Failed" value={failed} tone={failed ? "bad" : undefined} />
+            <Stat label="Needs attention" value={attention} tone={attention ? "bad" : undefined} sub="failed or degraded" to={appsHref(ATTENTION_FILTER)} />
             <Stat label="With Workspace Data" value={withZetta} sub="bound to the workspace" />
           </StatRow>
           <Toolbar>
             <SearchInput value={search} onChange={setSearch} placeholder="Search apps…" label="Search apps" />
             <FilterChips options={phases} value={phase} onChange={setPhase} />
           </Toolbar>
+          {attentionOnly && (
+            <p className="muted mb-3">
+              Showing the apps that need attention. <Link to={appsHref()}>Show all apps</Link>
+            </p>
+          )}
           {filtered.length === 0 ? (
             <Empty compact title="No app matches these filters">
               Clear a filter to see more.

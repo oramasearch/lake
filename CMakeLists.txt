@@ -27,7 +27,7 @@ if(NOT DEFINED CMAKE_CXX_COMPILER AND NOT LAKE_USE_SYSTEM_COMPILER)
   endif()
 endif()
 
-project(lake VERSION 0.7.0 LANGUAGES C CXX)
+project(lake VERSION 0.7.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -259,6 +259,7 @@ add_library(lake-core STATIC
   src/control/methodologies.cpp
   src/control/methodology_templates.cpp
   src/control/transcripts.cpp
+  src/control/resource_repairs.cpp
   src/control/mcp_connections.cpp
   src/control/agent_revisions.cpp
   src/control/agent_stream_triggers.cpp
@@ -291,11 +292,13 @@ add_library(lake-core STATIC
   src/api/oidc_jwks.cpp
   src/api/clerk.cpp
   src/api/workspace_capabilities.cpp
+  src/api/feature_planning.cpp
   src/api/repository_records_api.cpp
   src/api/workspace_deletion.cpp
   src/api/workspace_record_capabilities.cpp
   src/api/solution_capabilities.cpp
   src/api/quickstart_capabilities.cpp
+  src/api/quickstart_columns.cpp
   src/api/browser_key_capabilities.cpp
   src/api/methodology_capabilities.cpp
   src/api/transcript_capabilities.cpp
@@ -352,6 +355,7 @@ add_library(lake-core STATIC
   src/api/agent_capabilities.cpp
   src/api/platform_capabilities.cpp
   src/api/web_app_capabilities.cpp
+  src/api/repair_capabilities.cpp
   src/api/store_mounts.cpp
   src/api/build_capabilities.cpp
   src/api/image_capabilities.cpp

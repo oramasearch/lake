@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "agent_task_records_api.hpp"
+#include "feature_planning.hpp"
 #include "lake/api/agent_stream_triggers.hpp"
 #include "lake/api/datasets.hpp"
 #include "lake/api/oauth.hpp"
@@ -29,6 +30,7 @@
 #include "lake/control/agent_library.hpp"
 #include "lake/control/agent_revisions.hpp"
 #include "lake/control/agent_runs.hpp"
+#include "lake/control/resource_repairs.hpp"
 #include "lake/control/ask_messages.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/opportunities.hpp"
@@ -37,6 +39,7 @@
 #include "lake/control/store.hpp"
 #include "lake/control/store_buckets.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "quickstart_columns.hpp"
 #include "store_mounts.hpp"
 #include "workspace_bus.hpp"
 #include "workspace_records_api.hpp"
@@ -975,6 +978,21 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
         } else {
             normalize_dataset_reference(capability, arguments);
         }
+        // plan_features takes a dataset alone (lake#1153): Lake chooses the methodology from the
+        // analysis and reads the cutoff from the dataset's snapshot column when the caller names
+        // neither, and says so in the plan.
+        json feature_plan_inferred;
+        if (read && capability == "plan_features") {
+            auto prepared =
+                co_await prepare_feature_plan(context, input.at("customer_id"), arguments);
+            if (!prepared) {
+                co_return ApiResult::failure("store_error", prepared.error().message);
+            }
+            if (!*prepared) {
+                co_return std::move(prepared->error());
+            }
+            feature_plan_inferred = std::move(**prepared);
+        }
         // The agent a delete_agent removes: its stream triggers go with it (lake#677).
         const std::string deleted_agent =
             capability == "delete_agent" ? arguments.value("id", std::string()) : std::string();
@@ -1123,6 +1141,9 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
                     value["deployment"] = served.value.value("deployment", json(nullptr));
                 }
             }
+        }
+        if (capability == "plan_features") {
+            describe_feature_plan(value, feature_plan_inferred);
         }
         if (capability == "list_datasets") {
             datasets::annotate_list(value);
@@ -3365,8 +3386,15 @@ json task_json(const control::AgentTask& task) {
     if (task.agent == "agent-application" &&
         app_proposal.value("kind", std::string()) == "proposal" &&
         app_proposal.value("confirm", false)) {
+        // A repair or change is reviewed on its app's page (lake#1207).
+        const json proposed_app = app_proposal.value("app", json::object());
+        const std::string app_id =
+            proposed_app.is_object() ? proposed_app.value("id", std::string()) : std::string();
         out["review_url"] =
-            "/ship/apps?customer_id=" + task.customer_id + "&task=" + task.id + "#proposal";
+            (task.kind == "repair" || task.kind == "change") && !app_id.empty()
+                ? "/ship/app?customer_id=" + task.customer_id + "&app_id=" +
+                      oauth_url_encode(app_id) + "&task=" + task.id + "#proposal"
+                : "/ship/apps?customer_id=" + task.customer_id + "&task=" + task.id + "#proposal";
         // What agent_turn's confirmation names: the proposal as lake stored it (lake#561).
         out["proposal_sha256"] = agent_proposal_digest(app_proposal);
     }
@@ -3491,6 +3519,23 @@ liquid::runtime::task<ApiResult> settle_discover(ApiContext& context, control::A
     co_return ApiResult::success({{"written", *written}});
 }
 
+// A Discover scan that has not finished: pending (not claimed yet) or running (lake#1195).
+bool scan_running(const control::AgentTask& task) {
+    return task.phase != "Succeeded" && task.phase != "Failed";
+}
+
+// The workspace's newest Discover scan as list_opportunities reports it (lake#1195): enough for a
+// page opened on any tab or device to say "Scanning… started 2 min ago" or when the last scan
+// finished, without the scan's task id. `started_at` is when the scan was asked for.
+json last_scan_json(const control::AgentTask& task) {
+    const json shown = task_json(task);
+    return {{"task_id", task.id},
+            {"status", shown.at("status")},
+            {"started_at", task.created_at},
+            {"finished_at", task.finished_at.empty() ? json(nullptr) : json(task.finished_at)},
+            {"message", task.message}};
+}
+
 json opportunity_json(const control::Opportunity& row) {
     return {{"id", row.id},
             {"task_id", row.task_id},
@@ -3578,6 +3623,13 @@ ApiResult called(std::expected<ApiResult, liquid::error> completed) {
                      : ApiResult::failure("store_error", completed.error().message);
 }
 
+// The kind of an Application Agent turn: `repair` (fix a failed app) and `change` (change an app
+// from instructions) name an existing app (lake#1207); everything else builds a new one (`app`).
+std::string application_turn_kind(const json& input) {
+    const std::string kind = input.value("kind", std::string("app"));
+    return kind == "repair" || kind == "change" ? kind : std::string("app");
+}
+
 // A confirmed proposal hands an Application Agent or Experiments Agent turn its write tools, so lake
 // checks it here rather than trusting the caller's copy (lake#561): it must be the proposal in the
 // answer of `proposal_task_id`, a finished turn of the same agent and kind that the caller may
@@ -3588,6 +3640,10 @@ ApiResult called(std::expected<ApiResult, liquid::error> completed) {
 liquid::runtime::task<ApiResult>
 verified_confirmed_proposal(const json& input, ApiContext& context, std::string_view agent) {
     const bool experiments = agent == "agent-experiments";
+    // An Application Agent proposal is confirmed by a turn of the kind that proposed it: app,
+    // repair or change (lake#1207).
+    const std::string expected_kind =
+        experiments ? std::string("experiment") : application_turn_kind(input);
     const std::string who = control::agent_display_name(agent);
     const json context_input = input.value("context", json::object());
     const json offered = context_input.value("confirmed_proposal", json());
@@ -3616,7 +3672,7 @@ verified_confirmed_proposal(const json& input, ApiContext& context, std::string_
                                     : proposal.value("app", json()).is_object() &&
                                           proposal.value("files", json()).is_array();
     if (task.value("agent", std::string()) != agent ||
-        task.value("kind", std::string()) != (experiments ? "experiment" : "app") ||
+        task.value("kind", std::string()) != expected_kind ||
         task.value("status", std::string()) != "succeeded" ||
         proposal.value("kind", std::string()) != "proposal" || !proposal.value("confirm", false) ||
         !shaped) {
@@ -3646,6 +3702,11 @@ verified_confirmed_proposal(const json& input, ApiContext& context, std::string_
     if (offered != proposal) {
         co_return ApiResult::failure("conflict", changed, "/context");
     }
+    // A repair or change keeps the app's access as it is (its turn has no set_app_auth), so only a
+    // new app's proposal asks about public access.
+    if (expected_kind != "app") {
+        co_return ApiResult::success(std::move(proposal));
+    }
     // A public app needs the person's acknowledgement that anyone with its address can open it
     // (lake#452); create_app accepts the agent's public app only with it.
     const json app = proposal.at("app");
@@ -3660,6 +3721,117 @@ verified_confirmed_proposal(const json& input, ApiContext& context, std::string_
             "/context/confirm_public");
     }
     co_return ApiResult::success(std::move(proposal));
+}
+
+// A repair or change turn of the Application Agent (lake#1207): the app it names must be a live app
+// of this workspace; the turn is handed the app and its repair record, and reads its builds and
+// logs. It writes (commit_repository_files, build_app, deploy_app, and set_app_env for the APP_DEPS a
+// changed manifest needs; never create_app or set_app_auth) only with a
+// confirmed proposal for that same app, or, for repair, when the person turned auto-fix on and
+// attempts remain, which this records as one attempt (an audit event of its own).
+liquid::runtime::task<ApiResult> prepare_app_turn(const json& input,
+                                                  ApiContext& context,
+                                                  const std::string& kind,
+                                                  json& handed,
+                                                  std::vector<std::string>& scopes,
+                                                  std::string& planned_task_id) {
+    const std::string customer_id = input.at("customer_id");
+    const std::string workspace_id = input.at("workspace_id");
+    const std::string app_id = handed.value("app_id", std::string());
+    if (app_id.empty()) {
+        co_return ApiResult::failure(
+            "invalid_input", "a " + kind + " turn names its app as context.app_id", "/context/app_id");
+    }
+    const auto app = context.store->get_web_app(app_id);
+    if (!app || app->customer_id != customer_id || app->workspace_id != workspace_id ||
+        app->desired == "deleted") {
+        co_return ApiResult::failure("not_found", "no such app in this workspace", "/context/app_id");
+    }
+    auto records = workspace_records(context, customer_id, workspace_id);
+    if (!records) {
+        co_return ApiResult::failure(records.error().code, records.error().message, "/workspace_id");
+    }
+    auto repair = control::settled(co_await control::get_resource_repair(*records, customer_id, "app", app_id));
+    if (!repair) {
+        co_return ApiResult::failure(repair.error().code, repair.error().message);
+    }
+    handed["app"] = control::web_app_json(*app);
+    handed["repair"] = control::resource_repair_json(*repair);
+    scopes.insert(scopes.end(),
+                  {"get_auto_fix", "list_builds", "get_build", "build_logs",
+                   "receive_build_events"});
+    const bool confirming = handed.contains("confirmed_proposal");
+    const bool auto_fix = handed.value("auto_fix", json(false)) == json(true);
+    handed.erase("auto_fix");
+    const auto grant_writes = [&scopes] {
+        scopes.insert(scopes.end(),
+                      {"commit_repository_files", "build_app", "deploy_app", "set_app_env"});
+    };
+    if (auto_fix && (confirming || kind != "repair")) {
+        co_return ApiResult::failure(
+            "invalid_input",
+            "auto-fix is a repair turn without a confirmed proposal",
+            "/context/auto_fix");
+    }
+    if (confirming) {
+        const ApiResult confirmed =
+            called(co_await verified_confirmed_proposal(input, context, "agent-application"));
+        if (!confirmed.ok) {
+            co_return confirmed;
+        }
+        const json proposed = confirmed.value.value("app", json::object());
+        if (!proposed.is_object() || proposed.value("id", std::string()) != app_id) {
+            co_return ApiResult::failure("invalid_input",
+                                         "the confirmed proposal is for another app",
+                                         "/context/confirmed_proposal/app/id");
+        }
+        handed["confirmed_proposal"] = confirmed.value;
+        grant_writes();
+        co_return ApiResult::success(json::object());
+    }
+    if (!auto_fix) {
+        co_return ApiResult::success(json::object());
+    }
+    if (!repair->auto_fix) {
+        co_return ApiResult::failure("invalid_input",
+                                     "auto-fix is off for this app; turn it on with "
+                                     "set_auto_fix",
+                                     "/context/auto_fix");
+    }
+    if (repair->auto_fix_stopped || repair->attempts >= repair->max_attempts) {
+        co_return ApiResult::failure(
+            "conflict",
+            "auto-fix has stopped for this app after " + std::to_string(repair->attempts) +
+                " attempts; turn it on again to reset them",
+            "/context/auto_fix");
+    }
+    planned_task_id = control::new_uuid_v4();
+    const std::string task_id = planned_task_id;
+    const std::int64_t generation = app->generation;
+    auto counted = control::settled(co_await control::change_resource_repair(
+        *records, customer_id, "app", app_id, [&](control::ResourceRepair& value) {
+            value.attempts += 1;
+            value.attempted_generations.push_back(generation);
+            value.auto_fix_task_id = task_id;
+            value.auto_fix_generation = generation;
+        }));
+    if (!counted) {
+        co_return ApiResult::failure(counted.error().code, counted.error().message);
+    }
+    handed["auto_fix"] = {{"attempt", counted->attempts}, {"max_attempts", counted->max_attempts}};
+    handed["repair"] = control::resource_repair_json(*counted);
+    agent_audit(context,
+                "app.auto_fix.attempt",
+                customer_id,
+                {{"agent", "agent-application"},
+                 {"app_id", app_id},
+                 {"generation", generation},
+                 {"attempt", counted->attempts},
+                 {"max_attempts", counted->max_attempts},
+                 {"task_id", task_id}});
+    context.audit_object = "app/" + app_id;
+    grant_writes();
+    co_return ApiResult::success(json::object());
 }
 
 std::string base64(std::string_view bytes) {
@@ -3970,7 +4142,8 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
                                                   json model,
                                                   std::string methodology,
                                                   json columns,
-                                                  std::string name) {
+                                                  std::string name,
+                                                  bool create_project) {
     const auto act = [&](std::string capability, json input) {
         return call_capability(context,
                                "workspace_act",
@@ -3978,6 +4151,35 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
                                 {"capability", std::move(capability)},
                                 {"input", std::move(input)}});
     };
+    // A new project's pipeline in one call (lake#1193): the project is created first, described by
+    // the intent. A name already in use is refused before anything is written, so a confirmed
+    // proposal never adds a pipeline to a project the person did not mean.
+    if (create_project) {
+        const ApiResult existing = called(co_await call_capability(context,
+                                                                   "workspace_query",
+                                                                   {{"customer_id", customer_id},
+                                                                    {"capability", "get_project"},
+                                                                    {"input", {{"name", project}}}}));
+        if (existing.ok) {
+            co_return ApiResult::failure("conflict",
+                                         "a project named '" + project +
+                                             "' already exists; leave out create_project to add "
+                                             "the pipeline to it",
+                                         "/create_project");
+        }
+        if (existing.error.code != "not_found") {
+            co_return existing;
+        }
+        const ApiResult created = called(co_await act(
+            "create_project", {{"name", project}, {"description", intent}}));
+        if (!created.ok) {
+            ApiResult refused = created;
+            if (refused.error.path.starts_with("/input/")) {
+                refused.error.path.erase(0, 6);
+            }
+            co_return refused;
+        }
+    }
     ApiResult result = called(co_await act("capture_intent", {{"project", project}, {"text", intent}}));
     if (result.ok) {
         // A short title rather than the engine's, which is the description's words with the
@@ -4030,9 +4232,13 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
         if (result.error.path.starts_with("/input/")) {
             result.error.path.erase(0, 6);
         }
-        if (result.error.code == "not_found" && result.error.path == "/project") {
+        if (create_project) {
+            result.error.message = "the project '" + project + "' was created, but its pipeline " +
+                                   "was not: " + result.error.message;
+        } else if (result.error.code == "not_found" && result.error.path == "/project") {
             result.error.message +=
-                "; create the project first with workspace_act create_project {name, intent}";
+                "; create the project first with workspace_act create_project {name, intent}, "
+                "or call compile_pipeline with create_project";
         }
         co_return result;
     }
@@ -4043,6 +4249,9 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
     const auto with_template = [&](ApiResult answer) {
         if (answer.ok && !template_name.empty()) {
             answer.value["template"] = template_name;
+        }
+        if (answer.ok && create_project) {
+            answer.value["project_created"] = true;
         }
         return answer;
     };
@@ -5305,6 +5514,189 @@ void withhold_invalid_proposals(const ApiContext& context,
     content += said;
 }
 
+// The capabilities whose `project` names a project that must already exist (lake#1193), by Lake's
+// name and, for a proposal sent through workspace_act by an older agent, by the engine's.
+// compile_pipeline is here too, unless it is asked to create the project (`create_project`).
+bool names_existing_project(const std::string& capability) {
+    static constexpr std::array<std::string_view, 19> owning = {
+        "compile_intent", "capture_intent", "compile_n8n",      "compile_python",
+        "import_n8n",     "save_pipeline",  "check_pipeline",   "start_run",
+        "deploy_pipeline", "approve_pipeline", "compile_pipeline", "run_pipeline",
+        "edit_pipeline",  "create_pipeline", "save_graph",       "gate",
+        "run",            "deploy",         "approve_plan"};
+    return std::ranges::find(owning, capability) != owning.end();
+}
+
+// The project a proposal names and whether it must exist (true) or must not (false, a
+// compile_pipeline that creates it). Empty when the proposal names no project to check.
+std::optional<std::pair<std::string, bool>> proposal_project(const json& proposal) {
+    std::string capability = text_of(proposal, "capability");
+    json input = proposal.is_object() ? proposal.value("input", json::object()) : json();
+    if (!input.is_object()) {
+        return std::nullopt;
+    }
+    if (capability == "workspace_act") {
+        capability = text_of(input, "capability");
+        input = input.value("input", json::object());
+        if (!input.is_object()) {
+            return std::nullopt;
+        }
+    }
+    if (!names_existing_project(capability)) {
+        return std::nullopt;
+    }
+    const std::string project = text_of(input, "project");
+    if (project.empty()) {
+        return std::nullopt;
+    }
+    const bool creates = capability == "compile_pipeline" && input.value("create_project", json(false)) == true;
+    return std::pair{project, !creates};
+}
+
+// Proposals that name a project the workspace does not have, or create one it already has, are
+// never offered (lake#1193): confirming one could only fail. Each named project is read once with
+// the engine's get_project, as the person; a project the read cannot settle (the workspace not
+// reachable) leaves the proposal offered, and confirm still checks. A withheld proposal says what
+// is wrong and how to go on: a new project's pipeline is one compile_pipeline with
+// `create_project`.
+liquid::runtime::task<void> withhold_proposals_naming_missing_projects(ApiContext& context,
+                                                                       std::string customer_id,
+                                                                       std::string workspace_id,
+                                                                       std::string& content,
+                                                                       json& payload) {
+    if (!payload.is_object() || !payload.value("proposals", json()).is_array() ||
+        payload.at("proposals").empty()) {
+        co_return {};
+    }
+    std::map<std::string, std::optional<bool>> exists;
+    json offered = json::array();
+    json withheld = payload.value("withheld_proposals", json::array());
+    std::string said;
+    for (const json& proposal : payload.at("proposals")) {
+        const auto named = proposal_project(proposal);
+        if (!named) {
+            offered.push_back(proposal);
+            continue;
+        }
+        const auto& [project, must_exist] = *named;
+        if (!exists.contains(project)) {
+            const ApiResult read = called(co_await call_capability(
+                context,
+                "workspace_query",
+                {{"customer_id", customer_id},
+                 {"workspace_id", workspace_id},
+                 {"capability", "get_project"},
+                 {"input", {{"name", project}}}}));
+            exists[project] = read.ok                          ? std::optional<bool>(true)
+                              : read.error.code == "not_found" ? std::optional<bool>(false)
+                                                               : std::nullopt;
+        }
+        const std::optional<bool> found = exists[project];
+        if (!found || *found == must_exist) {
+            offered.push_back(proposal);
+            continue;
+        }
+        const std::string capability = text_of(proposal, "capability");
+        json entry = proposal;
+        std::string text;
+        if (must_exist) {
+            text = "there is no project named \"" + project + "\" in this workspace, so " +
+                   capability +
+                   " could not run. To build it in a new project, I can propose "
+                   "compile_pipeline with `create_project`, which creates the project and its "
+                   "pipeline in one confirmation.";
+            entry["error"] = {{"code", "not_found"}, {"message", text}, {"path", "/project"}};
+        } else {
+            text = "a project named \"" + project +
+                   "\" already exists, so compile_pipeline cannot create it. I can propose the "
+                   "pipeline in that project instead, without `create_project`.";
+            entry["error"] = {{"code", "conflict"}, {"message", text}, {"path", "/create_project"}};
+        }
+        withheld.push_back(std::move(entry));
+        said += "\n\nI could not offer this change: " + text +
+                " Tell me how to go on and I will propose it again.";
+    }
+    if (said.empty()) {
+        co_return {};
+    }
+    payload["proposals"] = std::move(offered);
+    payload["withheld_proposals"] = std::move(withheld);
+    content += said;
+    co_return {};
+}
+
+// What became of each change Ask Orama proposed in this conversation (lake#1194), oldest first,
+// as Lake recorded it: `pending` (offered, not confirmed), `confirmed`, `failed` with the stored
+// error and whether trying again could work, or `withheld` (never offered, with the reason). Ask
+// Orama receives the last few with each turn, so after a failure it proposes a corrected change
+// instead of pointing at one that can no longer run.
+json ask_proposal_states(const std::vector<control::AskMessage>& messages, std::size_t keep = 10) {
+    json states = json::array();
+    std::map<std::string, std::size_t> at;
+    for (const control::AskMessage& message : messages) {
+        if (message.role != "assistant" || !message.payload.is_object()) {
+            continue;
+        }
+        const json& payload = message.payload;
+        if (const json proposals = payload.value("proposals", json()); proposals.is_array()) {
+            for (std::size_t index = 0; index < proposals.size(); ++index) {
+                const json& proposal = proposals[index];
+                json state{{"message_id", message.id},
+                           {"index", index},
+                           {"capability", text_of(proposal, "capability")},
+                           {"input", proposal.is_object() ? proposal.value("input", json::object())
+                                                          : json::object()},
+                           {"state", "pending"}};
+                at[message.id + "/" + std::to_string(index)] = states.size();
+                states.push_back(std::move(state));
+            }
+        }
+        if (const json withheld = payload.value("withheld_proposals", json());
+            withheld.is_array()) {
+            for (const json& proposal : withheld) {
+                const json error = proposal.is_object() ? proposal.value("error", json::object())
+                                                        : json::object();
+                states.push_back({{"message_id", message.id},
+                                  {"capability", text_of(proposal, "capability")},
+                                  {"input", proposal.is_object()
+                                                ? proposal.value("input", json::object())
+                                                : json::object()},
+                                  {"state", "withheld"},
+                                  {"error", text_of(error, "message")}});
+            }
+        }
+        if (const json mark = payload.value("confirmed", json()); mark.is_object()) {
+            const json index = mark.value("index", json());
+            const std::string key =
+                text_of(mark, "message_id") + "/" +
+                (index.is_string() ? index.get<std::string>()
+                 : index.is_number_unsigned() ? std::to_string(index.get<std::size_t>())
+                                              : std::string());
+            const auto found = at.find(key);
+            if (found == at.end()) {
+                continue;
+            }
+            json& state = states[found->second];
+            if (payload.value("ok", json(true)) == false) {
+                const json error = payload.value("error", json::object());
+                state["state"] = "failed";
+                state["error"] = error.is_object() ? text_of(error, "message") : std::string();
+                state["code"] = error.is_object() ? text_of(error, "code") : std::string();
+                state["retry"] = payload.value("retry", json(false)) == true;
+            } else {
+                state["state"] = "confirmed";
+                state.erase("error");
+                state.erase("code");
+                state.erase("retry");
+            }
+        }
+    }
+    if (states.size() > keep) {
+        states.erase(states.begin(), states.begin() + static_cast<std::ptrdiff_t>(states.size() - keep));
+    }
+    return states;
+}
+
 json conversation_kind_schema() {
     return {{"type", "string"}, {"enum", {"ask", "factory"}}};
 }
@@ -5380,6 +5772,18 @@ liquid::runtime::task<ApiResult> send_ask_message(const json& input, ApiContext&
     if (!factory) {
         turn["page"] = input.value("page", json::object());
     }
+    // What became of Ask Orama's earlier proposals in this conversation (lake#1194): a failed one
+    // is never pointed at again; Ask Orama proposes a corrected change instead. A conversation
+    // that cannot be read now sends none, and the turn still runs.
+    if (agent == "agent-ask-orama") {
+        auto earlier = control::settled(
+            co_await conversation_messages(context, customer_id, workspace_id, conversation_id));
+        if (earlier) {
+            if (json states = ask_proposal_states(*earlier); !states.empty()) {
+                turn["context"] = {{"proposals", std::move(states)}};
+            }
+        }
+    }
     const ApiResult answered = called(co_await call_capability(context, "agent_turn", turn));
     if (!answered.ok) {
         co_return answered;
@@ -5393,6 +5797,8 @@ liquid::runtime::task<ApiResult> send_ask_message(const json& input, ApiContext&
     }
     auto [content, payload] = answer_message(factory, true, answered.value, agent, "", "");
     withhold_invalid_proposals(context, customer_id, workspace_id, content, payload);
+    static_cast<void>(co_await withhold_proposals_naming_missing_projects(
+        context, customer_id, workspace_id, content, payload));
     auto reply = control::settled(co_await append_message(context,
                                                           customer_id,
                                                           workspace_id,
@@ -5456,6 +5862,8 @@ liquid::runtime::task<ApiResult> settle_ask_turn(const json& input, ApiContext& 
                        task_id,
                        text_of(task, "message", "the agent did not answer"));
     withhold_invalid_proposals(context, customer_id, workspace_id, content, payload);
+    static_cast<void>(co_await withhold_proposals_naming_missing_projects(
+        context, customer_id, workspace_id, content, payload));
     auto written =
         control::settled(co_await append_message(context,
                                                  customer_id,
@@ -5527,7 +5935,16 @@ liquid::runtime::task<ApiResult> confirm_ask_proposal(const json& input, ApiCont
     // MCP connection's call_mcp_tool from Ask Orama, lake#652); proposal_call filled them.
     const auto target = context.registry->find(capability);
     const json& proposed = call->at("input");
-    const ApiResult done = called(co_await call_capability(context, capability, proposed));
+    ApiResult done = called(co_await call_capability(context, capability, proposed));
+    // A Quickstart model is said as what started and what comes next (lake#1204); a training the
+    // engine refused is a failure, in plain words, so Ask Orama proposes the corrected change.
+    std::optional<quickstart_columns::Outcome> quickstart;
+    if (capability == "train_quickstart" && done.ok) {
+        quickstart = quickstart_columns::confirm_outcome(done.value);
+        if (quickstart && !quickstart->ok) {
+            done = ApiResult::failure("training_failed", quickstart->text);
+        }
+    }
     context.audit_details["ok"] = done.ok;
     // Input the capability refused is said plainly, naming what is missing (lake#794). The stored
     // outcome keeps the error's code and whether pressing Try again could help: only a refusal
@@ -5544,7 +5961,9 @@ liquid::runtime::task<ApiResult> confirm_ask_proposal(const json& input, ApiCont
                 why += '.';
             }
         }
-        if (!retry) {
+        if (quickstart) {
+            // The Quickstart's own words already say what to do next.
+        } else if (!retry) {
             why += " Ask Orama again with what to use and it will propose the change again.";
         }
     }
@@ -5560,8 +5979,11 @@ liquid::runtime::task<ApiResult> confirm_ask_proposal(const json& input, ApiCont
                                                             workspace_id,
                                                             conversation_id,
                                                             "assistant",
-                                                            done.ok ? "Done: " + capability + "."
-                                                                    : "That did not work: " + why,
+                                                            done.ok && quickstart
+                                                                ? quickstart->text
+                                                            : done.ok
+                                                                ? "Done: " + capability + "."
+                                                                : "That did not work: " + why,
                                                             std::move(recorded)));
     if (!outcome) {
         co_return ApiResult::failure(outcome.error().code,
@@ -5926,18 +6348,28 @@ void register_conversation_capabilities(Registry& registry) {
             "intent (\"Predict which customers will churn, with the reasons\" is \"Customers "
             "churn\"), numbered \" (2)\" when the project has one by that name; the intent stays "
             "the project's description. Answers the new pipeline's name as `graph` and, from an "
-            "engine that says so, the `template` its steps started from.",
+            "engine that says so, the `template` its steps started from. With `create_project` it "
+            "creates the project first (its description the intent), so a new project's "
+            "pipeline is one call: a project that already has the name is refused as a "
+            "conflict, and the answer carries `project_created`.",
         .input_schema = customer_input_schema({{"project", {{"type", "string"}, {"minLength", 1}}},
                                                {"intent", {{"type", "string"}, {"minLength", 1}}},
                                                {"dataset", {{"type", "string"}}},
                                                {"label_column", {{"type", "string"}}},
                                                {"entity_column", {{"type", "string"}}},
                                                {"methodology", {{"type", "string"}}},
-                                               {"name", {{"type", "string"}}}},
+                                               {"name", {{"type", "string"}}},
+                                               {"create_project",
+                                                {{"type", "boolean"},
+                                                 {"description",
+                                                  "create the project first, described by the "
+                                                  "intent; refused when a project has this name"}}}},
                                               json::array({"project", "intent"})),
         .output_schema = {{"type", "object"},
                           {"properties",
-                           {{"graph", {{"type", "string"}}}, {"template", {{"type", "string"}}}}},
+                           {{"graph", {{"type", "string"}}},
+                            {"template", {{"type", "string"}}},
+                            {"project_created", {{"type", "boolean"}}}}},
                           {"required", json::array({"graph"})},
                           {"additionalProperties", false}},
         .kind = CapabilityKind::Action,
@@ -5959,7 +6391,8 @@ void register_conversation_capabilities(Registry& registry) {
                 input.value("methodology", std::string()),
                 {{"label_column", input.value("label_column", std::string())},
                  {"entity_column", input.value("entity_column", std::string())}},
-                input.value("name", std::string())));
+                input.value("name", std::string()),
+                input.value("create_project", false)));
         }});
     registry.add(Capability{
         .name = "render_pipeline",
@@ -6326,15 +6759,31 @@ void register_agent_run_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_opportunities",
         .title = "List Opportunities",
-        .description = "What Auto-Suggest Agent recommended for the account's data in this workspace, kept "
-                       "across scans, newest scan first: each Opportunity's intent, catalogue "
-                       "solution, methodology, why the data supports it, and its status (new, "
-                       "project, dismissed, or not_yet when Auto-Suggest Agent declined it). "
-                       "Opportunities live in the workspace Zetta of the workspace their scan ran "
-                       "in; another workspace of the account never lists them. `task_id` settles a "
-                       "scan of this workspace that just finished.",
+        .description =
+            "What Auto-Suggest Agent recommended for the account's data in this workspace, kept "
+            "across scans, newest scan first: each Opportunity's intent, catalogue "
+            "solution, methodology, why the data supports it, and its status (new, "
+            "project, dismissed, or not_yet when Auto-Suggest Agent declined it). "
+            "Opportunities live in the workspace Zetta of the workspace their scan ran "
+            "in; another workspace of the account never lists them. `last_scan` is the "
+            "workspace's newest scan, whoever started it ({task_id, status pending, "
+            "running, succeeded or failed, started_at, finished_at, message}; null "
+            "before the first): a page follows a running scan with it, and a finished "
+            "scan's Opportunities are listed without its task id. `task_id` (optional) "
+            "also settles that scan of this workspace.",
         .input_schema = customer_agent_schema({{"task_id", {{"type", "string"}}}}, json::array()),
-        .output_schema = {{"type", "object"}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"opportunities", {{"type", "array"}, {"items", {{"type", "object"}}}}},
+                            {"last_scan",
+                             {{"type", json::array({"object", "null"})},
+                              {"properties",
+                               {{"task_id", {{"type", "string"}}},
+                                {"status", {{"type", "string"}}},
+                                {"started_at", {{"type", "string"}}},
+                                {"finished_at", {{"type", json::array({"string", "null"})}}},
+                                {"message", {{"type", "string"}}}}}}}}},
+                          {"required", json::array({"opportunities", "last_scan"})}},
         .kind = CapabilityKind::Read,
         .object = "customer",
         .action = "read",
@@ -6381,11 +6830,41 @@ void register_agent_run_capabilities(Registry& registry) {
                     }
                 }
             }
+            // The workspace's newest scan, whoever started it (lake#1195): the page learns a
+            // running or finished scan without its task id, and a finished scan that was not
+            // saved when it settled (its workspace was unavailable then) is saved now, once.
+            json last_scan = nullptr;
+            auto latest = context.store->latest_agent_task(customer_id, "discover", workspace_id);
+            if (!latest && latest.error().code != "not_found") {
+                co_return ApiResult::failure(latest.error().code, latest.error().message);
+            }
+            if (latest && latest->agent == "agent-autosuggest") {
+                // Its message is in its workspace (lake#375); without it the scan is still shown.
+                const bool loaded =
+                    control::settled(co_await load_agent_task_content(context, *latest))
+                        .value_or(false);
+                if (loaded && latest->phase == "Succeeded" &&
+                    std::ranges::none_of(*rows, [&](const control::Opportunity& row) {
+                        return row.task_id == latest->id;
+                    })) {
+                    const ApiResult settled = called(co_await settle_discover(context, *latest));
+                    if (settled.ok && settled.value.value("written", 0) > 0) {
+                        rows = control::settled(
+                            co_await control::list_opportunities(*records, customer_id));
+                        if (!rows) {
+                            co_return ApiResult::failure(
+                                rows.error().code, rows.error().message, rows.error().path);
+                        }
+                    }
+                }
+                last_scan = last_scan_json(*latest);
+            }
             json out = json::array();
             for (const control::Opportunity& row : *rows) {
                 out.push_back(opportunity_json(row));
             }
-            co_return ApiResult::success({{"opportunities", std::move(out)}});
+            co_return ApiResult::success(
+                {{"opportunities", std::move(out)}, {"last_scan", std::move(last_scan)}});
         }});
     registry.add(Capability{
         .name = "dismiss_opportunity",
@@ -6433,10 +6912,11 @@ void register_agent_run_capabilities(Registry& registry) {
             "(agent-ask-orama, agent-project, agent-application, agent-experiments, "
             "agent-autosuggest, agent-creator, agent-eval-generator for an eval, "
             "agent-autosuggest-corpus or agent-project-corpus for a training corpus) or an agent "
-            "of this account by its id. A library agent's turn runs in the background: the answer is "
-            "{task_id, status} at once, and get_agent_task follows it to its answer. A native "
-            "agent answers from the workspace; a Python agent from its running service (started "
-            "on first use).",
+            "of this account by its id. A library agent's turn runs in the background: the answer "
+            "is {task_id, status} at once, and get_agent_task follows it to its answer. A "
+            "native agent answers from the workspace; a Python agent from its running service "
+            "(started on first use). A workspace scan (agent-autosuggest, kind discover) while one is "
+            "pending or running joins it: the answer is that scan's task with joined: true.",
         .input_schema = customer_agent_schema({{"agent", {{"type", "string"}}},
                                                {"message", {{"type", "string"}}},
                                                {"conversation_id", {{"type", "string"}}},
@@ -6485,8 +6965,10 @@ void register_agent_run_capabilities(Registry& registry) {
                 std::vector<std::string> scopes{"workspace_query", "workspace_openapi"};
                 std::string task_kind = input.value("kind", std::string("api"));
                 if (agent == "agent-application") {
-                    task_kind = "app";
+                    task_kind = application_turn_kind(input);
                 }
+                // A turn whose id lake must know before it is recorded (an auto-fix attempt).
+                std::string planned_task_id;
                 std::string lake_url = config.internal_url;
                 auto prior = context.store->latest_agent_conversation_task(
                     customer_id, conversation_id, agent, task_kind, input.at("workspace_id"));
@@ -6531,9 +7013,15 @@ void register_agent_run_capabilities(Registry& registry) {
                             co_return ApiResult::failure(
                                 "invalid_input", "context is an object", "/context");
                         }
+                    } else if (const json sent = input.value("context", json());
+                               sent.is_object() && !sent.empty()) {
+                        // send_ask_message's `proposals`: what became of Ask Orama's earlier
+                        // proposals in the conversation (lake#1194). Information for the turn,
+                        // never authority: Ask Orama's key still carries no action.
+                        body["context"] = sent;
                     }
                 } else if (agent == "agent-application") {
-                    task_kind = "app";
+                    task_kind = application_turn_kind(input);
                     scopes = {"workspace_query",
                               "workspace_openapi",
                               "workspace_sql",
@@ -6549,7 +7037,22 @@ void register_agent_run_capabilities(Registry& registry) {
                               "app_logs",
                               "receive_app_events"};
                     body["context"] = input.value("context", json::object());
-                    if (body["context"].contains("confirmed_proposal")) {
+                    if (!body["context"].is_object()) {
+                        co_return ApiResult::failure(
+                            "invalid_input", "context is an object", "/context");
+                    }
+                    if (task_kind != "app") {
+                        // Repair or change one existing app (lake#1207): the turn is handed the
+                        // app and its repair record, and may write only that app's source and
+                        // deployment, after the person confirms the diff (or, for repair, when
+                        // the person turned auto-fix on and attempts remain).
+                        auto prepared = called(co_await prepare_app_turn(
+                            input, context, task_kind, body["context"], scopes, planned_task_id));
+                        if (!prepared.ok) {
+                            co_return prepared;
+                        }
+                        body["kind"] = task_kind;
+                    } else if (body["context"].contains("confirmed_proposal")) {
                         const ApiResult confirmed =
                             called(co_await verified_confirmed_proposal(input, context, agent));
                         if (!confirmed.ok) {
@@ -6731,11 +7234,26 @@ void register_agent_run_capabilities(Registry& registry) {
                 }
                 // A turn another agent asked for names the asking turn (lake#451), so its
                 // progress is reported there too.
+                // One scan of a workspace at a time (lake#1195): a second Scan while one is
+                // pending or running joins it, so every tab and member follows the same scan.
+                if (agent == "agent-autosuggest" && task_kind == "discover") {
+                    auto running = context.store->latest_agent_task(
+                        customer_id, "discover", input.at("workspace_id"));
+                    if (!running && running.error().code != "not_found") {
+                        co_return ApiResult::failure(running.error().code, running.error().message);
+                    }
+                    if (running && running->agent == agent && scan_running(*running)) {
+                        json joined = task_json(*running);
+                        joined["joined"] = true;
+                        co_return ApiResult::success(std::move(joined));
+                    }
+                }
                 const auto asking = calling_turn(context, customer_id, input.at("workspace_id"));
                 if (asking) {
                     body["parent_task_id"] = asking->id;
                 }
-                control::AgentTask asked{.id = control::new_uuid_v4(),
+                control::AgentTask asked{.id = planned_task_id.empty() ? control::new_uuid_v4()
+                                                                       : planned_task_id,
                                          .customer_id = customer_id,
                                          .agent = agent,
                                          .kind = std::move(task_kind),
@@ -7721,6 +8239,14 @@ void register_agent_bus_capabilities(Registry& registry) {
             }
             if (!published) {
                 co_return ApiResult::failure("store_unavailable", published.error().message);
+            }
+            // A finished Discover scan's Opportunities are saved now, whether or not anyone is
+            // reading (lake#1195), by the same function every reader settles with. A workspace
+            // that cannot take them now is retried by the next list_opportunities.
+            if (type == "result" && applied->phase == "Succeeded" && applied->kind == "discover") {
+                control::AgentTask finished = *applied;
+                finished.result = input.value("result", json());
+                static_cast<void>(called(co_await settle_discover(context, std::move(finished))));
             }
             // A delegated turn's progress is the asking turn's progress too (lake#451).
             if (const std::string parent = task->parent_task_id; !parent.empty()) {
