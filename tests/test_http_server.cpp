@@ -1841,6 +1841,89 @@ TEST_P(HttpResponseIsolation, AgentsReachAWorkspacesZettaThroughLakeInZettasShap
               "/w/" + connection->workspace_id + "/workspaces/" + customer_id + "/zetta");
 }
 
+// lake#1205: an App's Zetta binding is the JSON document the operator writes,
+// {"lake_url":"<lake>/w/<workspace>","customer_id":...,"token":...}, and app-runtime calls
+// <lake_url>/workspaces/<customer_id>/zetta/v1/<capability> with the token as its bearer. That
+// exact request reads the App's own workspace, and nothing else.
+TEST_P(HttpResponseIsolation, AnAppsZettaBindingReadsItsWorkspaceThroughLake) {
+    auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store_.get());
+    if (memory == nullptr) {
+        GTEST_SKIP() << "the operator's status is written directly only on the memory store";
+    }
+    auto connection = connect();
+    const std::string cookie = sign_in(*connection);
+    const nlohmann::json customers = nlohmann::json::parse(
+        response_body(connection->request("GET", "/v1/list_customers", "", cookie)));
+    const std::string customer_id = customers["value"]["items"][0]["id"];
+    const auto requested = liquid::runtime::block_on(workspaces_->request(customer_id));
+    ASSERT_TRUE(requested && *requested);
+    const auto service = memory->get_service((*requested)->service_id);
+    ASSERT_TRUE(memory->set_service_status(service->id, "Ready", "", "http://ws:4800"));
+    std::ofstream(workspace_dir_ / (service->slug + ".json")) << R"({"kind":"zetta","token":"t"})";
+    workspace_caller_->answers["list_datasets"] = {
+        {"datasets", nlohmann::json::array({"accounts"})}};
+    workspace_caller_->answers["create_project"] = {{"name", "churn"}};
+    const auto other_workspace =
+        memory->create_workspace({customer_id, "elsewhere", "dev", "taap:app-binding"});
+    ASSERT_TRUE(other_workspace);
+
+    const std::string token(64, 'a');
+    const auto bound_app = [&](const std::string& name, const nlohmann::json& zetta) {
+        lake::control::NewWebApp input;
+        input.customer_id = customer_id;
+        input.workspace_id = service->workspace_id;
+        input.name = name;
+        input.mode = "runtime";
+        input.source_repository = "source";
+        input.source_revision = "main";
+        input.source_path = ".";
+        input.port = 8080;
+        input.host = name + ".apps.example.test";
+        input.bindings = {{"zetta", zetta}, {"services", nlohmann::json::array()}};
+        const auto app = memory->create_web_app(input);
+        EXPECT_TRUE(app);
+        return app ? app->id : std::string();
+    };
+    const std::string app_id = bound_app("segmentation-dashboard", {{"scopes", {"read"}}});
+    ASSERT_TRUE(memory->set_web_app_token_hashes(
+        app_id, {{"zetta", lake::control::identity_crypto::sha256_hex(token)}}));
+
+    // The binding as the operator renders it; app-runtime joins lake_url and the path.
+    const nlohmann::json binding = {{"lake_url", "http://lake.internal/w/" + service->workspace_id},
+                                    {"customer_id", customer_id},
+                                    {"token", token}};
+    const std::string base = "/w/" + service->workspace_id + "/workspaces/" +
+                             binding["customer_id"].get<std::string>() + "/zetta/v1/";
+    connection->workspace_id.clear();
+    const auto as_app = [&](std::string_view method,
+                            const std::string& path,
+                            std::string_view body = {},
+                            const std::string& bearer = std::string()) {
+        return connection->request(method,
+                                   path,
+                                   body,
+                                   "",
+                                   "HTTP/1.1",
+                                   bearer.empty() ? binding["token"].get<std::string>() : bearer,
+                                   "application/json");
+    };
+
+    const std::string read = as_app("GET", base + "list_datasets");
+    ASSERT_TRUE(read.starts_with("HTTP/1.1 200")) << read.substr(0, 400);
+    EXPECT_EQ(nlohmann::json::parse(response_body(read))["value"]["datasets"][0], "accounts");
+
+    const std::size_t reached = workspace_caller_->calls.size();
+    const std::string other_space = as_app(
+        "GET",
+        "/w/" + other_workspace->id + "/workspaces/" + customer_id + "/zetta/v1/list_datasets");
+    EXPECT_FALSE(other_space.starts_with("HTTP/1.1 200")) << other_space.substr(0, 300);
+    const std::string act = as_app("POST", base + "create_project", R"({"name":"churn"})");
+    EXPECT_FALSE(act.starts_with("HTTP/1.1 200")) << act.substr(0, 300);
+    const std::string wrong_token = as_app("GET", base + "list_datasets", {}, std::string(64, 'b'));
+    EXPECT_FALSE(wrong_token.starts_with("HTTP/1.1 200")) << wrong_token.substr(0, 300);
+    EXPECT_EQ(workspace_caller_->calls.size(), reached) << "nothing refused reached the workspace";
+}
+
 TEST_P(HttpResponseIsolation, LibraryAgentsFinishEveryTurnKindWithoutAWorkspaceEcho) {
     auto connection = connect();
     const std::string cookie = sign_in(*connection);
