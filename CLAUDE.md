@@ -8,7 +8,7 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
-Status: 2026-10-22. The current release is **v0.4.0** ([`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md): the security release from the multi-tenant audit and the pre-launch review, SAML sign-in, OpenID Connect discovery and `delete_account`); before it **v0.3.1** (billing through a shared Stripe account); before that **v0.3.0**
+Status: 2026-10-25. The current release is **v0.7.1** ([`docs/releases/v0.7.1.md`](docs/releases/v0.7.1.md); every release is indexed in [`docs/releases/README.md`](docs/releases/README.md)). Of the older ones, **v0.4.0** ([`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md): the security release from the multi-tenant audit and the pre-launch review, SAML sign-in, OpenID Connect discovery and `delete_account`); before it **v0.3.1** (billing through a shared Stripe account); before that **v0.3.0**
 ([`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md): the lake.live order sheet and the 2026-10-18
 UX review's fixes, with its known issues); v0.2.0 ([`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md))
 added secure networking, regions, the managed key and own identity, Clerk webhooks, the agents'

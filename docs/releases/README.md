@@ -9,6 +9,12 @@ lists (orama-operator#936): a lake release becomes only the `image:` in a set fi
 v0.6.1 predate the commands; the operator keeps its vendored path for them. See
 [`../deployment/operator-interface.md`](../deployment/operator-interface.md).
 
+- [v0.7.1](v0.7.1.md) — 2026-10-25. A patch: the Quickstart's model step as an Ask Orama conversation, training
+  on any column types, clustering that trains and one next step in every state, and a copy-ready agent prompt; a
+  failed app as a notification, fixed or changed with the Application Agent, with opt-in auto-fix, and Degraded
+  apps counted as needing attention; a readable Ask Orama confirm card and no proposal that cannot work;
+  Auto-Suggest finds opportunities again and a scan survives leaving the page. No migrations, no new settings.
+  Ships with agent-ask-orama and agent-application v0.2.1.
 - [v0.7.0](v0.7.0.md) — 2026-10-24. Quickstart (a dropped dataset to search and model answers on your
   website) with browser keys, credits from Orama and coupon codes, sign-out that keeps API keys, a
   white-labelled Lake's domain, sign-in and brand, `lake migrate` and `lake manifest`, and security
