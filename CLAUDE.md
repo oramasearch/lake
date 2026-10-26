@@ -139,6 +139,16 @@ skill at `/skills/<short_name>/SKILL.md`, MCP and OpenAPI take the brand. Lake's
 nothing. The operator must render the variables (orama-operator#947). See
 [`docs/serving/brand.md`](docs/serving/brand.md).
 
+When a resource fails, Lake says so and an agent can fix it (lake#1207, no migration): a failed app
+rollout (Degraded, failed, crash-looping) or image build records a notification for the person who
+deployed it in the workspace Zetta (`lake_resource_notifications`), shown on the Apps list, the app
+page and Account → Notifications; `repair_app` and `change_app` start Application Agent `repair` and
+`change` turns that propose a diff and, confirmed, commit it to the app's repository and redeploy;
+opt-in auto-fix (`set_auto_fix`, default 3 attempts, `lake_resource_repairs`) runs attempts as the
+person who turned it on and stops at the limit. General over the resource kind; custom agents are
+lake#1209. Not deployed; needs agent-application with repair turns. See
+[`docs/api/notifications.md`](docs/api/notifications.md).
+
 The newest dated record, [`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md),
 and [`docs/design/status.md`](docs/design/status.md) still describe the 2026-10-01 deployment
 (`oramasearch/lake:20261001d`, `36679e1`); they have not been brought up to the release. Until they

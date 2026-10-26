@@ -291,11 +291,14 @@ constexpr std::array group_rules{
     GroupRule{
         "Apps and packages",
         "Apps that run from a repository or an image, with their builds, logs, environment, "
-        "sign-in and bound services; the images, npm packages and Python distributions "
-        "published to Lake; and the deployments, environments and domains the operator reports.",
+        "sign-in and bound services, what Lake tells you when one fails and its opt-in "
+        "auto-fix; the images, npm packages and Python distributions published to Lake; and "
+        "the deployments, environments and domains the operator reports.",
         [](std::string_view n) {
             return n.ends_with("_app") || n.find("_app_") != std::string_view::npos ||
                    n.starts_with("app_") || n == "list_apps" ||
+                   n == "list_notifications" || n == "dismiss_notification" ||
+                   n.ends_with("_auto_fix") ||
                    contains_any(
                        n, {"build", "image", "package", "deployment", "environment", "domain"});
         }},

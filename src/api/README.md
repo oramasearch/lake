@@ -511,6 +511,14 @@ name policy before deriving the direct-zone host. Operator hash credentials are 
 registry to source repository/revision reads, customer workspace reads, or one app's event
 publication. See `docs/api/web-apps.md`.
 
+`repair_capabilities.cpp` (lake#1207) owns what happens when a resource fails: `list_notifications`,
+`dismiss_notification`, `get_auto_fix` and `set_auto_fix`, general over the resource kind;
+`repair_app` and `change_app`, which start Application Agent turns through `agent_turn`; and
+`run_resource_repair_pass`, which the store root's owner runs with the MCP stream pass to record
+notifications and start auto-fix attempts as the person who opted in. `workspace_capabilities.cpp`'s
+`prepare_app_turn` gives a `repair` or `change` turn its app and its write tools only after a
+confirmed diff for that app or an auto-fix attempt ([docs/api/notifications.md](../../docs/api/notifications.md)).
+
 `http_server.cpp` also owns the non-registry protected-app routes. `/apps/authorize` validates an
 exact HTTPS app destination against the Lake browser session, and `/v1/apps/auth` exchanges its
 one-use code or verifies the host-only app session. The workspace-prefixed form avoids the generic

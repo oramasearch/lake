@@ -159,6 +159,11 @@ name unique within the application. `NewPasswordUser::user_id` lets a sign-up
 choose the account id it claimed the email for, and `IssuedSession::created_user` says the store
 created the account.
 
+`resource_repairs.hpp` (lake#1207) holds the notification and repair-record codecs, general over
+the resource kind (`app` now, `agent` with lake#1209): `lake_resource_notifications` and
+`lake_resource_repairs` in the resource's workspace, never in PostgreSQL, and the app failure
+signals and plain-words reasons (`docs/api/notifications.md`).
+
 `Repository::workspace_id` and `NewRepository::workspace_id` carry the workspace a repository belongs
 to (migration `0051_repository_workspaces`, lake#315); `list_repositories` takes an optional
 workspace, and `transfer_repository` is no longer part of `Store`.

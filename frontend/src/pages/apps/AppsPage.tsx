@@ -28,6 +28,7 @@ import {
   useWorkspaceLink,
 } from "./shared";
 import { ATTENTION_FILTER, needsAttention } from "./attention";
+import { AppNotifications } from "./repair";
 
 /** A form's fields as strings. */
 export function formValues(event: FormEvent<HTMLFormElement>): Record<string, string> {
@@ -168,6 +169,7 @@ export default function AppsPage() {
       {flash && !runner.error && <Banner tone="warn">{flash}</Banner>}
       {!open && <PageError error={runner.error} />}
       {taskId && <TaskPanels taskId={taskId} q={task} customerId={customerId} runner={runner} startTurn={startTurn} />}
+      <AppNotifications customerId={customerId} workspaceId={workspaceId} />
 
       {apps.isLoading ? (
         <Skeleton lines={4} />

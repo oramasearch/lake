@@ -29,6 +29,7 @@
 #include "lake/api/mcp.hpp"
 #include "lake/api/pipeline.hpp"
 #include "lake/api/registry.hpp"
+#include "lake/api/resource_repairs.hpp"
 #include "lake/api/rest.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/audit/audit.hpp"
@@ -4019,6 +4020,318 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
                   {{"app", created.value["id"]}, {"image", pinned_image("reports:confirmed")}});
     ASSERT_TRUE(deployed.ok) << deployed.error.message;
     EXPECT_EQ(deployed.value["image"], pinned_image("reports:confirmed"));
+}
+
+// When an app fails (lake#1207): the pass that the store root's owner runs, with the context it
+// builds (the registry, the bus and the agents, no person).
+lake::api::ResourceRepairPass repair_pass(AgentRuns& r) {
+    lake::api::ApiContext context;
+    context.store = &r.store;
+    context.workspaces = r.w.service.get();
+    context.agent_caller = &r.agents;
+    context.agent_bus = r.agent_bus.get();
+    context.registry = &r.registry;
+    context.instance_kek = lake::test::test_instance_kek();
+    context.request_id = lake::control::new_uuid_v4();
+    return lake::api::run_resource_repair_pass(context);
+}
+
+// An image app of the fixture's workspace, created as its person.
+std::string repairable_app(AgentRuns& r, const std::string& name) {
+    const auto created = r.call_as(r.principal,
+                                   "create_app",
+                                   {{"name", name},
+                                    {"mode", "image"},
+                                    {"image", pinned_image(name + ":first")},
+                                    {"framework", "container"},
+                                    {"port", 8080}});
+    EXPECT_TRUE(created.ok) << created.error.message;
+    return created.value.value("id", std::string());
+}
+
+std::int64_t deploy_again(AgentRuns& r, const std::string& app_id, const std::string& tag) {
+    const auto deployed = r.call_as(
+        r.principal, "deploy_app", {{"app_id", app_id}, {"image", pinned_image(tag)}});
+    EXPECT_TRUE(deployed.ok) << deployed.error.message;
+    return deployed.value.value("generation", std::int64_t{0});
+}
+
+std::vector<lake::control::AgentTask> repair_tasks(AgentRuns& r) {
+    std::vector<lake::control::AgentTask> tasks;
+    std::set<std::string> seen;
+    for (const auto& event : r.bus->events("agent-tasks.agent-application")) {
+        const std::string id = event.payload.value("task_id", std::string());
+        if (!seen.insert(id).second) {
+            continue;
+        }
+        if (auto task = r.task(id); task && task->kind == "repair") {
+            tasks.push_back(*task);
+        }
+    }
+    return tasks;
+}
+
+TEST(AgentRuns, AFailedRolloutRecordsOneNotificationForThePersonWhoDeployedIt) {
+    AgentRuns r;
+    const std::string app_id = repairable_app(r, "reports");
+    ASSERT_FALSE(app_id.empty());
+    auto app = r.store.get_web_app(app_id);
+    ASSERT_TRUE(app);
+
+    // Still rolling out: nothing to say yet.
+    EXPECT_EQ(repair_pass(r).notified, 0U);
+    ASSERT_TRUE(r.store.set_web_app_status(
+        app_id, "Degraded", "", false,
+        "Back-off restarting failed container: CrashLoopBackOff", app->generation));
+    const auto first = repair_pass(r);
+    EXPECT_EQ(first.notified, 1U) << (first.problems.empty() ? "" : first.problems.front());
+    EXPECT_EQ(repair_pass(r).notified, 0U) << "the same failure is told once";
+
+    const auto listed = r.call("list_notifications", {{"resource_kind", "app"}});
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value["notifications"].size(), 1U);
+    const json notification = listed.value["notifications"][0];
+    EXPECT_EQ(notification["event"], "rollout_failed");
+    EXPECT_EQ(notification["resource_id"], app_id);
+    EXPECT_EQ(notification["resource_name"], "reports");
+    EXPECT_EQ(notification["for_you"], true) << "for the person who deployed it";
+    EXPECT_NE(notification["reason"].get<std::string>().find("starts and then stops"),
+              std::string::npos)
+        << notification["reason"];
+    EXPECT_EQ(listed.value["open"], 1);
+
+    // A failed build of the app is told too.
+    const auto repository = r.store.create_repository(
+        {.customer_id = r.w.customer_id, .name = "reports-src", .workspace_id = r.w.workspace_id()});
+    ASSERT_TRUE(repository) << repository.error().message;
+    const auto build = r.store.create_build({.customer_id = r.w.customer_id,
+                                             .workspace_id = r.w.workspace_id(),
+                                             .repository = repository->id,
+                                             .revision = "abc",
+                                             .target = "registry/space/reports:build-1"});
+    ASSERT_TRUE(build) << build.error().message;
+    ASSERT_TRUE(r.store.set_build_status(
+        build->id, {"Failed", "", 0, "pip install: No matching distribution for plotlyy"}));
+    EXPECT_EQ(repair_pass(r).notified, 1U);
+    const auto with_build = r.call("list_notifications", {{"resource_id", app_id}});
+    EXPECT_EQ(with_build.value["notifications"].size(), 2U);
+
+    // Dismissed, it is gone for that person only; Ready again, the rollout's is resolved.
+    const auto dismissed = r.call("dismiss_notification", {{"notification_id", notification["id"]}});
+    ASSERT_TRUE(dismissed.ok) << dismissed.error.message;
+    EXPECT_EQ(dismissed.value["dismissed"], true);
+    EXPECT_EQ(r.call("list_notifications", json::object()).value["notifications"].size(), 1U);
+    ASSERT_TRUE(r.store.set_web_app_status(app_id, "Ready", "https://reports.example", true, "",
+                                           app->generation));
+    EXPECT_EQ(repair_pass(r).resolved, 1U);
+    const auto all = r.call("list_notifications",
+                            {{"include_resolved", true}, {"include_dismissed", true}});
+    ASSERT_EQ(all.value["notifications"].size(), 2U);
+    for (const json& item : all.value["notifications"]) {
+        EXPECT_EQ(item["resolved"], item["event"] == "rollout_failed") << item.dump();
+    }
+}
+
+TEST(AgentRuns, ARepairTurnProposesThenWritesOnlyThatAppOnceConfirmed) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-application", "http://application:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+    const std::string app_id = repairable_app(r, "reports");
+    const std::string other_id = repairable_app(r, "other");
+
+    const auto started = r.call("repair_app", {{"app_id", app_id}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const auto first = r.task(started.value["task_id"]);
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->kind, "repair");
+    EXPECT_EQ(first->body["kind"], "repair");
+    EXPECT_EQ(first->body["context"]["app_id"], app_id);
+    EXPECT_EQ(first->body["context"]["app"]["name"], "reports");
+    EXPECT_EQ(first->body["context"]["repair"]["deployed_by"], r.principal.user_id);
+    for (const std::string_view capability : {"get_app", "app_logs", "receive_app_events",
+                                              "build_logs", "repository_file", "get_auto_fix"}) {
+        EXPECT_NE(std::ranges::find(first->scopes, capability), first->scopes.end()) << capability;
+    }
+    for (const std::string_view capability :
+         {"commit_repository_files", "deploy_app", "build_app", "create_app", "create_repository"}) {
+        EXPECT_EQ(std::ranges::find(first->scopes, capability), first->scopes.end()) << capability;
+    }
+    EXPECT_EQ(r.call("get_auto_fix", {{"resource_kind", "app"}, {"resource_id", app_id}})
+                  .value["repair_conversation_id"],
+              first->conversation_id);
+
+    const json proposal{{"kind", "proposal"},
+                        {"confirm", true},
+                        {"turn", "repair"},
+                        {"diff", "--- a/app.py\n+++ b/app.py\n-port = 3000\n+port = 8080\n"},
+                        {"files", json::array({{{"path", "app.py"}, {"contents", "port = 8080\n"}}})},
+                        {"app", {{"id", app_id}, {"name", "reports"}, {"auth", "none"}}}};
+    ASSERT_TRUE(r.set_task_status(first->id, "Succeeded", "", "",
+                                  {{"ok", true}, {"reply", "The port is wrong."}, {"result", proposal}}));
+    const auto task_view = r.call("get_agent_task", {{"task_id", first->id}});
+    const std::string sha = task_view.value["proposal_sha256"];
+    EXPECT_NE(task_view.value["review_url"].get<std::string>().find("/ship/app?"), std::string::npos);
+    const json confirm{{"agent", "agent-application"},
+                       {"kind", "repair"},
+                       {"message", "Apply the reviewed fix."},
+                       {"conversation_id", first->conversation_id},
+                       {"proposal_task_id", first->id},
+                       {"proposal_sha256", sha},
+                       {"context", {{"app_id", app_id}, {"confirmed_proposal", proposal}}}};
+    // Confirming it for another app, or as a new-app turn, is refused.
+    json elsewhere = confirm;
+    elsewhere["context"]["app_id"] = other_id;
+    EXPECT_EQ(r.call("agent_turn", elsewhere).error.path, "/context/confirmed_proposal/app/id");
+    json as_new_app = confirm;
+    as_new_app["kind"] = "app";
+    EXPECT_EQ(r.call("agent_turn", as_new_app).error.path, "/proposal_task_id");
+
+    // Confirmed (a public app's repair asks nothing about access), the turn may commit the fix
+    // and redeploy, and never create an app.
+    const auto confirmed = r.call("agent_turn", confirm);
+    ASSERT_TRUE(confirmed.ok) << confirmed.error.message;
+    const auto second = r.task(confirmed.value["task_id"]);
+    ASSERT_TRUE(second);
+    EXPECT_EQ(second->body["context"]["confirmed_proposal"], proposal);
+    for (const std::string_view capability : {"commit_repository_files", "deploy_app", "build_app"}) {
+        EXPECT_NE(std::ranges::find(second->scopes, capability), second->scopes.end()) << capability;
+    }
+    for (const std::string_view capability : {"create_app", "create_repository"}) {
+        EXPECT_EQ(std::ranges::find(second->scopes, capability), second->scopes.end()) << capability;
+    }
+    const std::string credential = "lat." + second->id + ".0123456789abcdef0123456789abcdef";
+    ASSERT_TRUE(r.store.claim_agent_task(second->id, "agent-application",
+                                         lake::control::identity_crypto::sha256_hex(credential)));
+    const auto agent = r.store.context_for(credential);
+    ASSERT_TRUE(agent);
+    const auto before = r.store.get_web_app(app_id);
+    const auto redeployed = r.call_as(
+        *agent, "deploy_app", {{"app", app_id}, {"image", pinned_image("reports:fixed")}});
+    ASSERT_TRUE(redeployed.ok) << redeployed.error.message;
+    EXPECT_EQ(redeployed.value["generation"], before->generation + 1);
+}
+
+TEST(AgentRuns, AutoFixRepairsWithoutAConfirmAndStopsAfterItsAttempts) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-application", "http://application:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+    const std::string app_id = repairable_app(r, "reports");
+    const auto fail = [&](std::int64_t generation) {
+        ASSERT_TRUE(r.store.set_web_app_status(app_id, "Degraded", "", false,
+                                               "CrashLoopBackOff", generation));
+    };
+    fail(r.store.get_web_app(app_id)->generation);
+
+    // Off by default: the pass only notifies, and an auto-fix turn is refused.
+    EXPECT_EQ(repair_pass(r).auto_fix_started, 0U);
+    const json auto_turn{{"agent", "agent-application"},
+                         {"kind", "repair"},
+                         {"message", "Auto-fix"},
+                         {"context", {{"app_id", app_id}, {"auto_fix", true}}}};
+    EXPECT_EQ(r.call("agent_turn", auto_turn).error.path, "/context/auto_fix");
+
+    const auto on = r.call("set_auto_fix", {{"resource_kind", "app"},
+                                            {"resource_id", app_id},
+                                            {"enabled", true},
+                                            {"max_attempts", 2}});
+    ASSERT_TRUE(on.ok) << on.error.message;
+    EXPECT_EQ(on.value["max_attempts"], 2);
+
+    // Attempt 1: a repair turn that may write without a confirmed proposal.
+    auto pass = repair_pass(r);
+    ASSERT_EQ(pass.auto_fix_started, 1U) << (pass.problems.empty() ? "" : pass.problems.front());
+    auto tasks = repair_tasks(r);
+    ASSERT_EQ(tasks.size(), 1U);
+    EXPECT_EQ(tasks[0].body["context"]["auto_fix"]["attempt"], 1);
+    EXPECT_EQ(tasks[0].requested_by_user_id, r.principal.user_id) << "as the person who opted in";
+    for (const std::string_view capability : {"commit_repository_files", "deploy_app"}) {
+        EXPECT_NE(std::ranges::find(tasks[0].scopes, capability), tasks[0].scopes.end());
+    }
+    EXPECT_EQ(repair_pass(r).auto_fix_started, 0U) << "one attempt at a time";
+    ASSERT_TRUE(r.set_task_status(tasks[0].id, "Succeeded", "", "", {{"ok", true}}));
+    fail(deploy_again(r, app_id, "reports:attempt-1"));
+
+    // Attempt 2, then the limit: auto-fix stops and says so.
+    EXPECT_EQ(repair_pass(r).auto_fix_started, 1U);
+    tasks = repair_tasks(r);
+    ASSERT_EQ(tasks.size(), 2U);
+    ASSERT_TRUE(r.set_task_status(tasks[1].id, "Succeeded", "", "", {{"ok", true}}));
+    fail(deploy_again(r, app_id, "reports:attempt-2"));
+    pass = repair_pass(r);
+    EXPECT_EQ(pass.auto_fix_started, 0U);
+    EXPECT_EQ(pass.auto_fix_stopped, 1U);
+    EXPECT_EQ(repair_pass(r).auto_fix_started, 0U);
+    EXPECT_EQ(repair_tasks(r).size(), 2U);
+    const auto state = r.call("get_auto_fix", {{"resource_kind", "app"}, {"resource_id", app_id}});
+    EXPECT_EQ(state.value["attempts"], 2);
+    EXPECT_EQ(state.value["auto_fix_stopped"], true);
+    const auto told = r.call("list_notifications", {{"resource_id", app_id}});
+    const auto& items = told.value["notifications"];
+    EXPECT_TRUE(std::ranges::any_of(items, [](const json& item) {
+        return item["event"] == "auto_fix_stopped" &&
+               item["reason"].get<std::string>().find("tried 2 times") != std::string::npos;
+    })) << told.value.dump();
+    EXPECT_EQ(r.call("agent_turn", auto_turn).error.code, "conflict");
+
+    // Turning it on again resets the attempts.
+    ASSERT_TRUE(r.call("set_auto_fix",
+                       {{"resource_kind", "app"}, {"resource_id", app_id}, {"enabled", true}})
+                    .ok);
+    EXPECT_EQ(repair_pass(r).auto_fix_started, 1U);
+}
+
+TEST(AgentRuns, AChangeTurnTurnsInstructionsIntoAProposalAndContinuesTheConversation) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-application", "http://application:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+    const std::string app_id = repairable_app(r, "reports");
+
+    EXPECT_FALSE(r.call("change_app", {{"app_id", app_id}}).ok) << "a change needs instructions";
+    const auto started =
+        r.call("change_app", {{"app_id", app_id}, {"message", "Add a chart by region."}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const auto first = r.task(started.value["task_id"]);
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->kind, "change");
+    EXPECT_EQ(first->body["message"], "Add a chart by region.");
+    EXPECT_EQ(std::ranges::find(first->scopes, "commit_repository_files"), first->scopes.end());
+    const json answer{{"ok", true},
+                      {"reply", "Done?"},
+                      {"result",
+                       {{"kind", "proposal"},
+                        {"confirm", true},
+                        {"turn", "change"},
+                        {"diff", "+chart"},
+                        {"files", json::array({{{"path", "app.py"}, {"contents", "chart\n"}}})},
+                        {"app", {{"id", app_id}, {"name", "reports"}}}}}};
+    ASSERT_TRUE(r.set_task_status(first->id, "Succeeded", "", "", answer));
+
+    // Later instructions continue the same conversation, with the earlier turn.
+    const auto later = r.call("change_app", {{"app_id", app_id}, {"message", "Filter by plan."}});
+    ASSERT_TRUE(later.ok) << later.error.message;
+    const auto second = r.task(later.value["task_id"]);
+    ASSERT_TRUE(second);
+    EXPECT_EQ(second->conversation_id, first->conversation_id);
+    EXPECT_EQ(second->body["prior_turn"]["task_id"], first->id);
+
+    // Confirmed, the change may be committed and deployed.
+    const json proposal = answer["result"];
+    const auto confirmed = r.call(
+        "agent_turn",
+        {{"agent", "agent-application"},
+         {"kind", "change"},
+         {"message", "Apply the reviewed change."},
+         {"proposal_task_id", first->id},
+         {"proposal_sha256", lake::api::agent_proposal_digest(proposal)},
+         {"context", {{"app_id", app_id}, {"confirmed_proposal", proposal}}}});
+    ASSERT_TRUE(confirmed.ok) << confirmed.error.message;
+    const auto third = r.task(confirmed.value["task_id"]);
+    ASSERT_TRUE(third);
+    EXPECT_NE(std::ranges::find(third->scopes, "commit_repository_files"), third->scopes.end());
+    EXPECT_NE(std::ranges::find(third->scopes, "deploy_app"), third->scopes.end());
 }
 
 TEST(AgentRuns, AConversationFollowUpCarriesThePriorTurn) {

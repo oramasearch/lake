@@ -259,6 +259,7 @@ add_library(lake-core STATIC
   src/control/methodologies.cpp
   src/control/methodology_templates.cpp
   src/control/transcripts.cpp
+  src/control/resource_repairs.cpp
   src/control/mcp_connections.cpp
   src/control/agent_revisions.cpp
   src/control/agent_stream_triggers.cpp
@@ -354,6 +355,7 @@ add_library(lake-core STATIC
   src/api/agent_capabilities.cpp
   src/api/platform_capabilities.cpp
   src/api/web_app_capabilities.cpp
+  src/api/repair_capabilities.cpp
   src/api/store_mounts.cpp
   src/api/build_capabilities.cpp
   src/api/image_capabilities.cpp

@@ -30,6 +30,7 @@
 #include "lake/control/agent_library.hpp"
 #include "lake/control/agent_revisions.hpp"
 #include "lake/control/agent_runs.hpp"
+#include "lake/control/resource_repairs.hpp"
 #include "lake/control/ask_messages.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/opportunities.hpp"
@@ -3385,8 +3386,15 @@ json task_json(const control::AgentTask& task) {
     if (task.agent == "agent-application" &&
         app_proposal.value("kind", std::string()) == "proposal" &&
         app_proposal.value("confirm", false)) {
+        // A repair or change is reviewed on its app's page (lake#1207).
+        const json proposed_app = app_proposal.value("app", json::object());
+        const std::string app_id =
+            proposed_app.is_object() ? proposed_app.value("id", std::string()) : std::string();
         out["review_url"] =
-            "/ship/apps?customer_id=" + task.customer_id + "&task=" + task.id + "#proposal";
+            (task.kind == "repair" || task.kind == "change") && !app_id.empty()
+                ? "/ship/app?customer_id=" + task.customer_id + "&app_id=" +
+                      oauth_url_encode(app_id) + "&task=" + task.id + "#proposal"
+                : "/ship/apps?customer_id=" + task.customer_id + "&task=" + task.id + "#proposal";
         // What agent_turn's confirmation names: the proposal as lake stored it (lake#561).
         out["proposal_sha256"] = agent_proposal_digest(app_proposal);
     }
@@ -3615,6 +3623,13 @@ ApiResult called(std::expected<ApiResult, liquid::error> completed) {
                      : ApiResult::failure("store_error", completed.error().message);
 }
 
+// The kind of an Application Agent turn: `repair` (fix a failed app) and `change` (change an app
+// from instructions) name an existing app (lake#1207); everything else builds a new one (`app`).
+std::string application_turn_kind(const json& input) {
+    const std::string kind = input.value("kind", std::string("app"));
+    return kind == "repair" || kind == "change" ? kind : std::string("app");
+}
+
 // A confirmed proposal hands an Application Agent or Experiments Agent turn its write tools, so lake
 // checks it here rather than trusting the caller's copy (lake#561): it must be the proposal in the
 // answer of `proposal_task_id`, a finished turn of the same agent and kind that the caller may
@@ -3625,6 +3640,10 @@ ApiResult called(std::expected<ApiResult, liquid::error> completed) {
 liquid::runtime::task<ApiResult>
 verified_confirmed_proposal(const json& input, ApiContext& context, std::string_view agent) {
     const bool experiments = agent == "agent-experiments";
+    // An Application Agent proposal is confirmed by a turn of the kind that proposed it: app,
+    // repair or change (lake#1207).
+    const std::string expected_kind =
+        experiments ? std::string("experiment") : application_turn_kind(input);
     const std::string who = control::agent_display_name(agent);
     const json context_input = input.value("context", json::object());
     const json offered = context_input.value("confirmed_proposal", json());
@@ -3653,7 +3672,7 @@ verified_confirmed_proposal(const json& input, ApiContext& context, std::string_
                                     : proposal.value("app", json()).is_object() &&
                                           proposal.value("files", json()).is_array();
     if (task.value("agent", std::string()) != agent ||
-        task.value("kind", std::string()) != (experiments ? "experiment" : "app") ||
+        task.value("kind", std::string()) != expected_kind ||
         task.value("status", std::string()) != "succeeded" ||
         proposal.value("kind", std::string()) != "proposal" || !proposal.value("confirm", false) ||
         !shaped) {
@@ -3683,6 +3702,11 @@ verified_confirmed_proposal(const json& input, ApiContext& context, std::string_
     if (offered != proposal) {
         co_return ApiResult::failure("conflict", changed, "/context");
     }
+    // A repair or change keeps the app's access as it is (its turn has no set_app_auth), so only a
+    // new app's proposal asks about public access.
+    if (expected_kind != "app") {
+        co_return ApiResult::success(std::move(proposal));
+    }
     // A public app needs the person's acknowledgement that anyone with its address can open it
     // (lake#452); create_app accepts the agent's public app only with it.
     const json app = proposal.at("app");
@@ -3697,6 +3721,117 @@ verified_confirmed_proposal(const json& input, ApiContext& context, std::string_
             "/context/confirm_public");
     }
     co_return ApiResult::success(std::move(proposal));
+}
+
+// A repair or change turn of the Application Agent (lake#1207): the app it names must be a live app
+// of this workspace; the turn is handed the app and its repair record, and reads its builds and
+// logs. It writes (commit_repository_files, build_app, deploy_app, and set_app_env for the APP_DEPS a
+// changed manifest needs; never create_app or set_app_auth) only with a
+// confirmed proposal for that same app, or, for repair, when the person turned auto-fix on and
+// attempts remain, which this records as one attempt (an audit event of its own).
+liquid::runtime::task<ApiResult> prepare_app_turn(const json& input,
+                                                  ApiContext& context,
+                                                  const std::string& kind,
+                                                  json& handed,
+                                                  std::vector<std::string>& scopes,
+                                                  std::string& planned_task_id) {
+    const std::string customer_id = input.at("customer_id");
+    const std::string workspace_id = input.at("workspace_id");
+    const std::string app_id = handed.value("app_id", std::string());
+    if (app_id.empty()) {
+        co_return ApiResult::failure(
+            "invalid_input", "a " + kind + " turn names its app as context.app_id", "/context/app_id");
+    }
+    const auto app = context.store->get_web_app(app_id);
+    if (!app || app->customer_id != customer_id || app->workspace_id != workspace_id ||
+        app->desired == "deleted") {
+        co_return ApiResult::failure("not_found", "no such app in this workspace", "/context/app_id");
+    }
+    auto records = workspace_records(context, customer_id, workspace_id);
+    if (!records) {
+        co_return ApiResult::failure(records.error().code, records.error().message, "/workspace_id");
+    }
+    auto repair = control::settled(co_await control::get_resource_repair(*records, customer_id, "app", app_id));
+    if (!repair) {
+        co_return ApiResult::failure(repair.error().code, repair.error().message);
+    }
+    handed["app"] = control::web_app_json(*app);
+    handed["repair"] = control::resource_repair_json(*repair);
+    scopes.insert(scopes.end(),
+                  {"get_auto_fix", "list_builds", "get_build", "build_logs",
+                   "receive_build_events"});
+    const bool confirming = handed.contains("confirmed_proposal");
+    const bool auto_fix = handed.value("auto_fix", json(false)) == json(true);
+    handed.erase("auto_fix");
+    const auto grant_writes = [&scopes] {
+        scopes.insert(scopes.end(),
+                      {"commit_repository_files", "build_app", "deploy_app", "set_app_env"});
+    };
+    if (auto_fix && (confirming || kind != "repair")) {
+        co_return ApiResult::failure(
+            "invalid_input",
+            "auto-fix is a repair turn without a confirmed proposal",
+            "/context/auto_fix");
+    }
+    if (confirming) {
+        const ApiResult confirmed =
+            called(co_await verified_confirmed_proposal(input, context, "agent-application"));
+        if (!confirmed.ok) {
+            co_return confirmed;
+        }
+        const json proposed = confirmed.value.value("app", json::object());
+        if (!proposed.is_object() || proposed.value("id", std::string()) != app_id) {
+            co_return ApiResult::failure("invalid_input",
+                                         "the confirmed proposal is for another app",
+                                         "/context/confirmed_proposal/app/id");
+        }
+        handed["confirmed_proposal"] = confirmed.value;
+        grant_writes();
+        co_return ApiResult::success(json::object());
+    }
+    if (!auto_fix) {
+        co_return ApiResult::success(json::object());
+    }
+    if (!repair->auto_fix) {
+        co_return ApiResult::failure("invalid_input",
+                                     "auto-fix is off for this app; turn it on with "
+                                     "set_auto_fix",
+                                     "/context/auto_fix");
+    }
+    if (repair->auto_fix_stopped || repair->attempts >= repair->max_attempts) {
+        co_return ApiResult::failure(
+            "conflict",
+            "auto-fix has stopped for this app after " + std::to_string(repair->attempts) +
+                " attempts; turn it on again to reset them",
+            "/context/auto_fix");
+    }
+    planned_task_id = control::new_uuid_v4();
+    const std::string task_id = planned_task_id;
+    const std::int64_t generation = app->generation;
+    auto counted = control::settled(co_await control::change_resource_repair(
+        *records, customer_id, "app", app_id, [&](control::ResourceRepair& value) {
+            value.attempts += 1;
+            value.attempted_generations.push_back(generation);
+            value.auto_fix_task_id = task_id;
+            value.auto_fix_generation = generation;
+        }));
+    if (!counted) {
+        co_return ApiResult::failure(counted.error().code, counted.error().message);
+    }
+    handed["auto_fix"] = {{"attempt", counted->attempts}, {"max_attempts", counted->max_attempts}};
+    handed["repair"] = control::resource_repair_json(*counted);
+    agent_audit(context,
+                "app.auto_fix.attempt",
+                customer_id,
+                {{"agent", "agent-application"},
+                 {"app_id", app_id},
+                 {"generation", generation},
+                 {"attempt", counted->attempts},
+                 {"max_attempts", counted->max_attempts},
+                 {"task_id", task_id}});
+    context.audit_object = "app/" + app_id;
+    grant_writes();
+    co_return ApiResult::success(json::object());
 }
 
 std::string base64(std::string_view bytes) {
@@ -6830,8 +6965,10 @@ void register_agent_run_capabilities(Registry& registry) {
                 std::vector<std::string> scopes{"workspace_query", "workspace_openapi"};
                 std::string task_kind = input.value("kind", std::string("api"));
                 if (agent == "agent-application") {
-                    task_kind = "app";
+                    task_kind = application_turn_kind(input);
                 }
+                // A turn whose id lake must know before it is recorded (an auto-fix attempt).
+                std::string planned_task_id;
                 std::string lake_url = config.internal_url;
                 auto prior = context.store->latest_agent_conversation_task(
                     customer_id, conversation_id, agent, task_kind, input.at("workspace_id"));
@@ -6884,7 +7021,7 @@ void register_agent_run_capabilities(Registry& registry) {
                         body["context"] = sent;
                     }
                 } else if (agent == "agent-application") {
-                    task_kind = "app";
+                    task_kind = application_turn_kind(input);
                     scopes = {"workspace_query",
                               "workspace_openapi",
                               "workspace_sql",
@@ -6900,7 +7037,22 @@ void register_agent_run_capabilities(Registry& registry) {
                               "app_logs",
                               "receive_app_events"};
                     body["context"] = input.value("context", json::object());
-                    if (body["context"].contains("confirmed_proposal")) {
+                    if (!body["context"].is_object()) {
+                        co_return ApiResult::failure(
+                            "invalid_input", "context is an object", "/context");
+                    }
+                    if (task_kind != "app") {
+                        // Repair or change one existing app (lake#1207): the turn is handed the
+                        // app and its repair record, and may write only that app's source and
+                        // deployment, after the person confirms the diff (or, for repair, when
+                        // the person turned auto-fix on and attempts remain).
+                        auto prepared = called(co_await prepare_app_turn(
+                            input, context, task_kind, body["context"], scopes, planned_task_id));
+                        if (!prepared.ok) {
+                            co_return prepared;
+                        }
+                        body["kind"] = task_kind;
+                    } else if (body["context"].contains("confirmed_proposal")) {
                         const ApiResult confirmed =
                             called(co_await verified_confirmed_proposal(input, context, agent));
                         if (!confirmed.ok) {
@@ -7100,7 +7252,8 @@ void register_agent_run_capabilities(Registry& registry) {
                 if (asking) {
                     body["parent_task_id"] = asking->id;
                 }
-                control::AgentTask asked{.id = control::new_uuid_v4(),
+                control::AgentTask asked{.id = planned_task_id.empty() ? control::new_uuid_v4()
+                                                                       : planned_task_id,
                                          .customer_id = customer_id,
                                          .agent = agent,
                                          .kind = std::move(task_kind),

@@ -8,6 +8,7 @@
 #include "forge_records_api.hpp"
 #include "http_connections.hpp"
 #include "lake/api/agent_stream_triggers.hpp"
+#include "lake/api/resource_repairs.hpp"
 #include "lake/api/audit_recorder.hpp"
 #include "lake/api/billing.hpp"
 #include "lake/api/clerk_webhooks.hpp"
@@ -14560,6 +14561,45 @@ struct ApiServer::Impl {
             metrics.increment_counter("lake_agent_stream_problems_total",
                                       {},
                                       static_cast<double>(started.problems.size()));
+        }
+        // Failed resources (lake#1207): notifications and opt-in auto-fix, on the same owner-only pass,
+        // so two lakes never notify twice or start two repairs.
+        run_resource_repairs();
+    }
+
+    void run_resource_repairs() {
+        ApiContext context;
+        context.store = options.store.get();
+        context.workspaces = options.workspaces.get();
+        context.instance_kek = options.instance_kek;
+        context.registry = &registry;
+        context.agents = &agents;
+        context.agent_caller = options.agent_caller.get();
+        context.agent_bus = options.agent_bus.get();
+        context.internal_url = options.internal_url;
+        context.metering = options.metering;
+        context.metering_recorder = metering_recorder.get();
+        context.usage_recorder = usage_recorder.get();
+        context.audit_recorder = audit_recorder.get();
+        context.balance = balance_runtime;
+        context.external_origin = options.external_origin;
+        const ResourceRepairPass done = run_resource_repair_pass(context);
+        metrics.increment_counter("lake_repair_passes_total");
+        if (done.notified > 0) {
+            metrics.increment_counter(
+                "lake_notifications_total", {}, static_cast<double>(done.notified));
+        }
+        if (done.auto_fix_started > 0) {
+            metrics.increment_counter(
+                "lake_auto_fix_attempts_total", {}, static_cast<double>(done.auto_fix_started));
+        }
+        if (done.auto_fix_stopped > 0) {
+            metrics.increment_counter(
+                "lake_auto_fix_stopped_total", {}, static_cast<double>(done.auto_fix_stopped));
+        }
+        if (!done.problems.empty()) {
+            metrics.increment_counter(
+                "lake_repair_problems_total", {}, static_cast<double>(done.problems.size()));
         }
     }
 

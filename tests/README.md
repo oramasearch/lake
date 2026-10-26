@@ -578,6 +578,11 @@ classification. `test_workspace_records.cpp`'s `TranscriptsLiveInTheirWorkspaceA
 runs the six capabilities with a fake `Transcriber` over the memory and PostgreSQL stores; no test
 calls OpenAI.
 
+`test_workspaces.cpp`'s `AgentRuns.AFailedRollout*`, `ARepairTurn*`, `AutoFix*` and `AChangeTurn*`
+cover lake#1207: a failed rollout or build notifies the deployer once and Ready resolves it; a repair
+or change turn writes only its app after a confirmed diff; auto-fix runs as the person who opted in
+and stops after its attempts.
+
 `test_mcp_client.cpp` covers Lake's MCP client (lake#652): the event-stream parser, server URLs,
 public addresses and tool bounds, then the client over the server's own transport against
 `mcp_test_server.hpp`, a local MCP server (Streamable HTTP and HTTP+SSE, an OAuth authorization
