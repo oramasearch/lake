@@ -352,8 +352,15 @@ agents use the gateway ([deployment/aks.md](../deployment/aks.md#speech-to-text-
 People choose the model their agents use (lake#1230; Steve, 2026-10-26: *"let's the users choose"*,
 *"default to sol"*). Each workspace has a setting `agent_model`, one of the chat models this Lake
 serves (the configured list without embedding models), read with `get_workspace_settings` and set with
-`set_workspace_settings` ([workspaces.md](workspaces.md#settings)). **Unset means `gpt-6.1-sol`**
+`set_workspace_settings` ([workspaces.md](workspaces.md#settings)). **Unset means `gpt-5.5`**
 (`default_agent_model`).
+
+> **Why the default is gpt-5.5, not gpt-6.1-sol (lake#1245, 2026-10-26).** OpenAI refuses `/v1/chat/completions`
+> requests to the gpt-6.x models that carry both function tools and `reasoning_effort` ("use /v1/responses or set
+> reasoning_effort to 'none'"). The library agents call Chat Completions with both, so every agent turn with tools
+> failed on gpt-6.1-sol. A workspace may still choose a gpt-6.x model, but its agents' tool calls fail until the
+> gateway sends such calls to `/v1/responses` (lake v0.8.0). gpt-6.1-sol becomes the default again then.
+
 
 When an agent turn's task credential calls `chat/completions` or `responses`, the gateway first checks
 that the model the agent asked for is a served one (an unlisted name is still `invalid_input`), then

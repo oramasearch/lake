@@ -1,6 +1,6 @@
 // A workspace's settings (lake#1230, docs/api/workspaces.md#settings). Today one: `agent_model`,
 // the model every agent turn of the workspace calls through Lake's model gateway, chosen among the
-// served chat models; unset means default_agent_model (gpt-6.1-sol). The settings are workspace
+// served chat models; unset means default_agent_model (gpt-5.5). The settings are workspace
 // data, so they are one sealed record in the workspace's Zetta (`lake_workspace_settings`), never
 // a row of lake's Postgres (decision 51, the bridge's multitenancy rule).
 
@@ -240,7 +240,7 @@ void register_workspace_settings_capabilities(Registry& registry) {
         .title = "Get a workspace's settings",
         .description =
             "Read a workspace's settings: `agent_model`, the model its agents call through Lake "
-            "(the one chosen, or gpt-6.1-sol when none is), and every chat model this Lake serves "
+            "(the one chosen, or gpt-5.5 when none is), and every chat model this Lake serves "
             "with its price per million input and output tokens from the price list in force "
             "(null where billing is off or the list has no rate). Prompts over 272,000 input "
             "tokens are billed at the long-context prices.",

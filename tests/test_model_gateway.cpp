@@ -1755,9 +1755,9 @@ TEST(ModelGatewayRoute, CountsAStreamItsCallerAbandoned) {
 }
 
 // lake#1230: an agent turn calls the model its workspace chose, whatever model the agent asked
-// for, and its tokens are counted under that model; a workspace that chose none calls gpt-6.1-sol.
+// for, and its tokens are counted under that model; a workspace that chose none calls gpt-5.5 (lake#1245).
 // Embeddings, and a workspace's own launched code, which names its model itself, are left alone.
-TEST(ModelCompletion, AnAgentTurnCallsItsWorkspacesModelAndUnsetMeansGpt61Sol) {
+TEST(ModelCompletion, AnAgentTurnCallsItsWorkspacesModelAndUnsetMeansGpt55) {
     GatewayRig rig;
     const std::string fresh = rig.workspaces.create(rig.customer, "fresh");
     const auto task = rig.task(fresh, "agent-ask-orama");
@@ -1765,9 +1765,8 @@ TEST(ModelCompletion, AnAgentTurnCallsItsWorkspacesModelAndUnsetMeansGpt61Sol) {
     const auto called = rig.call(chat(), context);
     ASSERT_TRUE(called.ok) << called.error.code << ": " << called.error.message;
     ASSERT_EQ(rig.fake.calls(), 1U);
-    EXPECT_EQ(json::parse(rig.fake.requests[0].body)["model"], "gpt-6.1-sol");
-    EXPECT_EQ(context.audit_details["model"], "gpt-6.1-sol");
-    EXPECT_EQ(context.audit_details["agent_asked_model"], "gpt-5.5");
+    EXPECT_EQ(json::parse(rig.fake.requests[0].body)["model"], "gpt-5.5");
+    EXPECT_EQ(context.audit_details["model"], "gpt-5.5");
 
     const auto chosen = rig.choose(fresh, "gpt-6-luna");
     EXPECT_EQ(chosen.value["agent_model"], "gpt-6-luna");
@@ -1810,17 +1809,17 @@ TEST(ModelCompletion, AnAgentTurnCallsItsWorkspacesModelAndUnsetMeansGpt61Sol) {
     // the model the agent asked for.
     static_cast<void>(liquid::runtime::block_on(rig.recorder.flush()));
     auto& records = rig.workspaces.records(fresh);
-    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-6.1-sol/input"}}), 1200);
+    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-6.1-sol/input"}}), 0);
     EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-6-luna/input"}}), 2400);
     EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-6-luna/output"}}), 600);
-    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-5.5/input"}}), 0);
+    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-5.5/input"}}), 1200);
     EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-5/input"}}), 1200);
 
     // Back to the default.
     rig.choose(fresh, nullptr);
     auto reset = rig.task_context(task);
     ASSERT_TRUE(rig.call(chat(), reset).ok);
-    EXPECT_EQ(json::parse(rig.fake.requests.back().body)["model"], "gpt-6.1-sol");
+    EXPECT_EQ(json::parse(rig.fake.requests.back().body)["model"], "gpt-5.5");
 
     // A chosen model this Lake no longer serves is refused, never swapped for another.
     rig.choose(fresh, "gpt-6-astra");
@@ -1899,10 +1898,10 @@ TEST(ModelGateway, ServesTheGpt6ModelsAndOnlyChatModelsAreChoosable) {
         EXPECT_TRUE(lake::api::gateway_model_allowed(models, name)) << name;
     }
     const auto chat_models = lake::api::gateway_chat_models(models);
-    EXPECT_EQ(chat_models.front(), lake::api::default_agent_model);
+    EXPECT_NE(std::ranges::find(chat_models, lake::api::default_agent_model), chat_models.end());
     EXPECT_EQ(std::ranges::find(chat_models, "text-embedding-3-small"), chat_models.end());
     EXPECT_NE(std::ranges::find(chat_models, "gpt-5.5"), chat_models.end());
-    EXPECT_EQ(lake::api::default_agent_model, "gpt-6.1-sol");
+    EXPECT_EQ(lake::api::default_agent_model, "gpt-5.5");
 }
 
 } // namespace

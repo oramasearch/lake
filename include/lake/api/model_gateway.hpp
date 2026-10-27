@@ -41,7 +41,7 @@ bool gateway_model_allowed(const std::vector<GatewayModel>& models, std::string_
 
 // The model an agent turn calls when its workspace has chosen none (lake#1230,
 // docs/api/model-gateway.md#the-workspaces-model).
-inline constexpr std::string_view default_agent_model = "gpt-6.1-sol";
+inline constexpr std::string_view default_agent_model = "gpt-5.5";
 // A chat model, as opposed to an embedding model: what a workspace may choose for its agents.
 bool is_chat_model(std::string_view name);
 // The served chat models, in the configured order.
