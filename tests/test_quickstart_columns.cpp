@@ -437,7 +437,8 @@ TEST(QuickstartColumns, ClusteringNeedsNoTargetAndNumbersTheRowsWhenNothingNames
 
     const qc::Prepare named = qc::prepare_unlabeled(columns, rows, "customer_id");
     ASSERT_TRUE(named.prepared) << named.problem;
-    EXPECT_EQ(named.prepared->entity, "customer_id") << "unique: the dataset trains as it is";
+    EXPECT_EQ(named.prepared->entity, "customer_id") << "unique: it names each row";
+    EXPECT_TRUE(named.prepared->copy) << "free text and a date are left out or derived, so a copy";
     EXPECT_EQ(named.prepared->rows, 8U);
 
     const qc::Prepare numbered = qc::prepare_unlabeled(columns, rows, "");
@@ -454,6 +455,184 @@ TEST(QuickstartColumns, ClusteringNeedsNoTargetAndNumbersTheRowsWhenNothingNames
     ASSERT_TRUE(repeated.prepared);
     EXPECT_EQ(repeated.prepared->entity, "row_number");
     EXPECT_FALSE(repeated.prepared->note.empty());
+}
+
+
+// lake#1242: the Quickstart's clustering of customers-10000 (Index, Customer Id, First/Last Name,
+// Company, City, Country, Phone 1/2, Email, Subscription Date, Website) trained on the row number
+// `Index` alone, and its two segments were "low Index" and "high Index". The engine's profile
+// reads `Index` as a number (zetta#1216: a number is a key only when its name ends in _id or
+// _key), so it was the one usable input, and with `Customer Id` unique the dataset trained as it
+// was, which hands the engine every column.
+json customers_analysis() {
+    return {{"columns",
+             json::array({profiled("Index", "numeric", 10000, {{1, 1}, {2, 1}}),
+                          profiled("Customer Id", "identifier", 10000, {{"DD37Cf93aecA6Dc", 1}}),
+                          profiled("First Name", "categorical", 690, {{"Sheryl", 30}}),
+                          profiled("Last Name", "categorical", 1000, {{"Baxter", 25}}),
+                          profiled("Company", "identifier", 9900, {{"Rasmussen Group", 2}}),
+                          profiled("City", "categorical", 8000, {{"East Leonard", 3}}),
+                          profiled("Country", "categorical", 243, {{"Chile", 60}}),
+                          profiled("Phone 1", "identifier", 10000, {{"229.077.5154", 1}}),
+                          profiled("Phone 2", "identifier", 10000, {{"397.884.0519x718", 1}}),
+                          profiled("Email", "identifier", 10000, {{"zunigavanessa@smith.info", 1}}),
+                          profiled("Subscription Date", "datetime", 870, {{"2020-08-24", 20}}),
+                          profiled("Website", "identifier", 9900, {{"http://www.stephenson.com/", 2}})})}};
+}
+
+json customers_columns() {
+    json stored = json::array();
+    for (const char* name : {"Index", "Customer Id", "First Name", "Last Name", "Company", "City",
+                             "Country", "Phone 1", "Phone 2", "Email", "Subscription Date",
+                             "Website"}) {
+        stored.push_back({{"name", name}, {"type", std::string(name) == "Index" ? "integer" : "string"}});
+    }
+    return qc::detect_columns(customers_analysis(), stored);
+}
+
+std::vector<json> customers_rows(int count) {
+    std::vector<json> rows;
+    for (int i = 0; i < count; ++i) {
+        const std::string n = std::to_string(i);
+        const int month = 1 + (i % 12);
+        rows.push_back({{"Index", i + 1},
+                        {"Customer Id", "CID" + n},
+                        {"First Name", "First" + n},
+                        {"Last Name", "Last" + n},
+                        {"Company", "Company " + n},
+                        {"City", "City " + n},
+                        {"Country", "Country " + std::to_string(i % 40)},
+                        {"Phone 1", "229.077." + std::to_string(1000 + i)},
+                        {"Phone 2", "+1-397-884-" + std::to_string(1000 + i) + "x7"},
+                        {"Email", "person" + n + "@example.com"},
+                        {"Subscription Date",
+                         std::string(i % 2 == 0 ? "2021-" : "2022-") + (month < 10 ? "0" : "") +
+                             std::to_string(month) + "-1" + std::to_string(i % 10)},
+                        {"Website", "https://www.company" + n + ".com/"}});
+    }
+    return rows;
+}
+
+bool holds(const json& list, const std::string& name) {
+    return std::ranges::find(list, json(name)) != list.end();
+}
+
+TEST(QuickstartColumns, ClusteringNeverGroupsByTheRowNumberOrIdentifiersOrContactDetails) {
+    const json columns = customers_columns();
+    const json* index = qc::find(columns, "Index");
+    ASSERT_NE(index, nullptr);
+    EXPECT_EQ((*index)["kind"], "identifier") << "its name says it numbers the rows";
+    EXPECT_EQ((*index)["feature"]["use"], false);
+    EXPECT_EQ(qc::suggest(columns)["entity_column"], "Index");
+
+    const std::vector<json> rows = customers_rows(120);
+    for (const std::string entity : {"Customer Id", "Index", ""}) {
+        const qc::Prepare made = qc::prepare_unlabeled(columns, rows, entity);
+        ASSERT_TRUE(made.prepared) << made.problem;
+        const qc::Prepared& prepared = *made.prepared;
+        EXPECT_TRUE(prepared.copy) << entity << ": columns were left out, so the engine gets a copy";
+        EXPECT_FALSE(holds(prepared.used, "Index")) << entity << ": " << prepared.used.dump();
+        for (const char* left : {"Customer Id", "First Name", "Last Name", "Company", "City",
+                                 "Phone 1", "Phone 2", "Email", "Website", "Subscription Date"}) {
+            EXPECT_FALSE(holds(prepared.used, left)) << left;
+        }
+        EXPECT_TRUE(holds(prepared.used, "Subscription Date month")) << prepared.used.dump();
+        EXPECT_TRUE(holds(prepared.used, "Subscription Date days before latest"));
+        EXPECT_EQ(prepared.derived.size(), 2U);
+        // The copy holds the row's name and the derived parts, and never the row number.
+        const auto first = json::parse(prepared.content.substr(0, prepared.content.find('\n')));
+        EXPECT_FALSE(first.contains("Index") && prepared.entity != "Index") << first.dump();
+        EXPECT_EQ(first["Subscription Date month"], 1);
+        EXPECT_TRUE(first["Subscription Date days before latest"].is_number_integer());
+        EXPECT_GT(first["Subscription Date days before latest"].get<long long>(), 300);
+        bool said = false;
+        for (const json& dropped : prepared.dropped) {
+            if (dropped["name"] == "Subscription Date") {
+                said = dropped["reason"].get<std::string>().find("Subscription Date month") !=
+                       std::string::npos;
+            }
+        }
+        EXPECT_TRUE(said) << prepared.dropped.dump();
+    }
+}
+
+// A row number the name does not give away (`n`) is told by its values in a table large enough to
+// judge, and a small table's unique, rising measure (ages 20 to 27) is kept (zetta#1216).
+TEST(QuickstartColumns, ClusteringLeavesOutAColumnWhoseValuesNumberTheRows) {
+    const json columns = qc::detect_columns(
+        {{"columns",
+          json::array({profiled("n", "numeric", 60, {{1, 1}}),
+                       profiled("Spend", "numeric", 60, {{10.5, 1}}),
+                       profiled("Plan", "categorical", 3, {{"free", 20}, {"pro", 20}})})}},
+        json::array());
+    std::vector<json> rows;
+    const std::vector<std::string> plans{"free", "pro", "team"};
+    for (int i = 0; i < 60; ++i) {
+        rows.push_back({{"n", 60 - i}, {"Spend", 3.5 * ((i * 7) % 13)}, {"Plan", plans[i % 3]}});
+    }
+    const qc::Prepare made = qc::prepare_unlabeled(columns, rows, "");
+    ASSERT_TRUE(made.prepared) << made.problem;
+    EXPECT_FALSE(holds(made.prepared->used, "n")) << made.prepared->used.dump();
+    EXPECT_TRUE(holds(made.prepared->used, "Spend"));
+    EXPECT_TRUE(holds(made.prepared->used, "Plan"));
+
+    // Shuffled, it still fills 1..60 with no gaps.
+    for (int i = 0; i < 60; ++i) {
+        rows[static_cast<std::size_t>(i)]["n"] = 1 + (i * 7) % 60;
+    }
+    EXPECT_FALSE(holds(qc::prepare_unlabeled(columns, rows, "").prepared->used, "n"));
+
+    const qc::Prepare small = qc::prepare_unlabeled(people_columns(), people_rows(), "");
+    ASSERT_TRUE(small.prepared);
+    EXPECT_TRUE(holds(small.prepared->used, "Age")) << "8 rows are too few to call it a row number";
+}
+
+TEST(QuickstartColumns, ClusteringLeavesOutNamesAndContactDetailsInASmallTable) {
+    const json columns = qc::detect_columns(
+        {{"columns",
+          json::array({profiled("First Name", "categorical", 3, {{"Ana", 2}}),
+                       profiled("Contact", "categorical", 4, {{"ana@example.com", 1}}),
+                       profiled("Spend", "numeric", 4, {{1, 1}})})}},
+        json::array());
+    const std::vector<json> rows{
+        {{"First Name", "Ana"}, {"Contact", "ana@example.com"}, {"Spend", 1}},
+        {{"First Name", "Ben"}, {"Contact", "+1 (415) 555-0101"}, {"Spend", 5}},
+        {{"First Name", "Ana"}, {"Contact", "https://ana.example.com"}, {"Spend", 9}},
+        {{"First Name", "Chen"}, {"Contact", "chen@example.org"}, {"Spend", 2}}};
+    const qc::Prepare made = qc::prepare_unlabeled(columns, rows, "");
+    ASSERT_TRUE(made.prepared) << made.problem;
+    EXPECT_EQ(made.prepared->used, json::array({"Spend"}));
+}
+
+// Nothing to group by: said in words, with why each column was left out, instead of training.
+TEST(QuickstartColumns, ClusteringSaysSoWhenNoColumnQualifies) {
+    json analysis = customers_analysis();
+    analysis["columns"].erase(analysis["columns"].begin() + 10); // Subscription Date
+    std::vector<json> rows = customers_rows(120);
+    for (json& row : rows) {
+        row.erase("Subscription Date");
+    }
+    const json columns = qc::detect_columns(analysis, json::array());
+    const qc::Prepare made = qc::prepare_unlabeled(columns, rows, "Customer Id");
+    EXPECT_FALSE(made.prepared);
+    EXPECT_NE(made.problem.find("found nothing in this dataset to group rows by"), std::string::npos)
+        << made.problem;
+    EXPECT_NE(made.problem.find("Index is an identifier"), std::string::npos) << made.problem;
+}
+
+// A Lake-only identifier (the engine reads `Index` as a number) keeps the dataset from training as
+// it is for the default model too: the engine would learn from it.
+TEST(QuickstartColumns, ARowNumberTheEngineReadsAsANumberIsNotLeftOutByTheEngine) {
+    const json columns = qc::detect_columns(
+        {{"columns",
+          json::array({profiled("Index", "numeric", 60, {{1, 1}}),
+                       profiled("id", "identifier", 60, {{"a", 1}}),
+                       profiled("churned", "numeric", 2, {{0, 40}, {1, 20}})})}},
+        json::array({{{"name", "Index"}, {"type", "integer"}},
+                     {{"name", "id"}, {"type", "string"}},
+                     {{"name", "churned"}, {"type", "integer"}}}));
+    EXPECT_EQ(qc::find(columns, "Index")->at("kind"), "identifier");
+    EXPECT_FALSE(qc::trains_as_is(columns, {"churned", "", "id"}, {}));
 }
 
 } // namespace

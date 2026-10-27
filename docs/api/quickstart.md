@@ -386,6 +386,29 @@ clustering model answers no question per search result. `model.serves` is `false
 is `skipped` with a note, and `state` is `done`; Train → Models shows the segments. Serving a
 segment per row is lake#1197.
 
+**What Lake groups by** (lake#1242). The engine groups by every column of the table it is given, so
+Lake chooses the columns and trains on its own copy unless the table is already only a unique name
+per row plus those columns. It keeps numbers, categories of at most 32 values and yes-or-no
+columns, and leaves out, each with its reason in `preparation.dropped`:
+- identifiers and row numbers: a column the engine calls an identifier, a column named like one
+  (`Index`, `Row`, `#`, `Unnamed: 0`, `id`, `Customer Id`, `customer_id`, `CustomerId`, `*_key`),
+  and, in a table of at least 50 rows, whole numbers that differ in every row and count up or down
+  in file order or fill a range with no gaps;
+- free text, and names or contact details: a column named like a person's name, email, phone,
+  website or address, or whose text is mostly email addresses, web addresses or phone numbers;
+- categories of more than 32 values, empty and constant columns.
+
+A date (or text the rows show to be dates) becomes two numbers, listed in `preparation.derived`:
+its month (`<column> month`) and its days before the column's latest date (`<column> days before
+latest`, a tenure for a subscription date). When nothing qualifies, Lake refuses before training,
+saying why each column was left out. Until lake#1242 the customers-10000 file (Index, Customer Id,
+names, Company, City, Country, phones, Email, Subscription Date, Website) trained as it was,
+because `Customer Id` was unique; the engine reads `Index` as a number (zetta#1216), so the model
+grouped by the row number alone and its two segments were *low Index* and *high Index*. It now
+groups by `Subscription Date month` and `Subscription Date days before latest`. A column named like
+a row number is an identifier for the default model too, and a dataset holding one is no longer
+trained as it is.
+
 **What Lake sends, and what it does not** (lake#1203). zetta's segmentation
 (`src/core/ml/segmentation_methodology.cpp`) refuses a held-out share or a ranked `top_k`, so Lake
 sends M-3 to `train_model` with no `holdout_fraction`, and `training.holdout_fraction` is `null`.
@@ -450,6 +473,12 @@ decision 53), both of which multitenancy already holds. Audit goes to the worksp
   `AClusteringModelTrainsWithoutATargetAndIsNotPublishedForTheWebsite` cover a derived target and
   M-3; `QuickstartColumns.ATargetDerived*`, `ADerivedTargetThatCannotTeachAnything*` and
   `ClusteringNeedsNoTarget*` the rules.
+- `QuickstartColumns.ClusteringNeverGroupsByTheRowNumberOrIdentifiersOrContactDetails`,
+  `ClusteringLeavesOutAColumnWhoseValuesNumberTheRows`,
+  `ClusteringLeavesOutNamesAndContactDetailsInASmallTable`, `ClusteringSaysSoWhenNoColumnQualifies`
+  and `ARowNumberTheEngineReadsAsANumberIsNotLeftOutByTheEngine` (lake#1242): the customers-10000
+  columns, a row number told by its values, names and contact details, the refusal, and the
+  default model's train-as-is check.
 - `Quickstart.ARefusedClusteringIsSaidPlainlyAndTryAgainKeepsIt` (lake#1203, lake#1204): a refused
   M-3 kept in plain words with the engine's reason as `detail`, Try again training M-3 again, the
   confirm outcome a failure, and the engine's segmentation refusals word for word in plain words.

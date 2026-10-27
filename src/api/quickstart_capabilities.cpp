@@ -1789,14 +1789,18 @@ liquid::runtime::task<ApiResult> train_quickstart(const json& input, ApiContext&
             if (rows && !made.prepared) {
                 co_return co_await refuse({{"code", "cannot_prepare"}, {"message", made.problem}});
             }
-            if (made.prepared && made.prepared->entity == choice.entity_column) {
-                // A unique column names every row: the dataset trains as it is.
+            if (made.prepared && !made.prepared->copy) {
+                // A unique column names every row and every other column is an input as it
+                // stands: the dataset trains as it is. Anything Lake left out (a row number, an
+                // identifier, free text) or derived (a date's parts) needs the training copy,
+                // since the engine groups by every column it is given (lake#1242).
                 preparation = {{"methodology", methodology},
                                {"copy", false},
                                {"dataset_id", record["dataset"]["id"]},
                                {"entity", choice.entity_column},
                                {"used", made.prepared->used},
                                {"dropped", made.prepared->dropped},
+                               {"derived", made.prepared->derived},
                                {"label", nullptr},
                                {"applied", json::array()}};
                 train["dataset_path"] = source_path;
@@ -1849,6 +1853,7 @@ liquid::runtime::task<ApiResult> train_quickstart(const json& input, ApiContext&
                     {"entity", prepared.entity},
                     {"used", prepared.used},
                     {"dropped", prepared.dropped},
+                    {"derived", prepared.derived},
                     {"label", nullptr},
                     {"rows", prepared.rows},
                     {"skipped", prepared.skipped},
