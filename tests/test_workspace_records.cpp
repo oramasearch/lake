@@ -5658,13 +5658,13 @@ TEST_P(WorkspaceRecordStores, AWorkspaceChoosesItsAgentModelAmongTheServedChatMo
 
     const auto unset = t.call(first, "get_workspace_settings", at);
     ASSERT_TRUE(unset.ok) << unset.error.message;
-    EXPECT_EQ(unset.value["agent_model"], "gpt-6.1-sol");
+    EXPECT_EQ(unset.value["agent_model"], "gpt-5.5");
     EXPECT_TRUE(unset.value["agent_model_chosen"].is_null());
-    EXPECT_EQ(unset.value["default_agent_model"], "gpt-6.1-sol");
+    EXPECT_EQ(unset.value["default_agent_model"], "gpt-5.5");
     std::vector<std::string> offered;
     for (const json& model : unset.value["agent_models"]) {
         offered.push_back(model["model"]);
-        EXPECT_EQ(model["default"], model["model"] == "gpt-6.1-sol");
+        EXPECT_EQ(model["default"], model["model"] == "gpt-5.5");
         EXPECT_TRUE(model["input_micros_per_million"].is_null()) << "billing is off here";
     }
     EXPECT_EQ(offered,
@@ -5700,7 +5700,7 @@ TEST_P(WorkspaceRecordStores, AWorkspaceChoosesItsAgentModelAmongTheServedChatMo
                "get_workspace_settings",
                {{"customer_id", first.customer_id}, {"workspace_id", first.workspaces[1]}});
     ASSERT_TRUE(lab.ok) << lab.error.message;
-    EXPECT_EQ(lab.value["agent_model"], "gpt-6.1-sol");
+    EXPECT_EQ(lab.value["agent_model"], "gpt-5.5");
     // What the gateway reads.
     {
         auto context = t.context(first);
@@ -5749,7 +5749,7 @@ TEST_P(WorkspaceRecordStores, AWorkspaceChoosesItsAgentModelAmongTheServedChatMo
     // Null goes back to the default.
     const auto reset = t.call(first, "set_workspace_settings", with({{"agent_model", nullptr}}));
     ASSERT_TRUE(reset.ok) << reset.error.message;
-    EXPECT_EQ(reset.value["agent_model"], "gpt-6.1-sol");
+    EXPECT_EQ(reset.value["agent_model"], "gpt-5.5");
     EXPECT_TRUE(reset.value["agent_model_chosen"].is_null());
 }
 

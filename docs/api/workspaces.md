@@ -160,7 +160,7 @@ choose"*, *"default to sol"*.
   `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, `gpt-6-luna`, `gpt-5.5`, `gpt-5`, `gpt-4o`) without
   embedding models. With billing on, the model must also be priced in the list in force. Anything else
   is `invalid_input` at `/agent_model`.
-- **Unset means `gpt-6.1-sol`.** `agent_model` in the answer is the model in effect;
+- **Unset means `gpt-5.5`.** `agent_model` in the answer is the model in effect;
   `agent_model_chosen` is the one chosen, or null. Choosing null or `""` goes back to the default, so
   a workspace that never chose follows the default if it changes.
 - **Who.** Anyone who may read the workspace's account reads them (an organization member's grant is
@@ -175,8 +175,8 @@ choose"*, *"default to sol"*.
 `get_workspace_settings` answers:
 
 ```json
-{"workspace_id": "…", "agent_model": "gpt-6.1-sol", "agent_model_chosen": null,
- "default_agent_model": "gpt-6.1-sol", "updated_at": null, "set_by": null, "currency": "USD",
+{"workspace_id": "…", "agent_model": "gpt-5.5", "agent_model_chosen": null,
+ "default_agent_model": "gpt-5.5", "updated_at": null, "set_by": null, "currency": "USD",
  "agent_models": [{"model": "gpt-6.1-sol", "default": true,
                    "input_micros_per_million": 2600000, "output_micros_per_million": 13000000,
                    "long_input_micros_per_million": 5200000, "long_output_micros_per_million": 19500000}, …]}
