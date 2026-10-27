@@ -140,7 +140,8 @@ nlohmann::json ResourceRepairCodec::encode(const ResourceRepair& repair) {
             {"auto_fix_generation", repair.auto_fix_generation},
             {"attempted_generations", repair.attempted_generations},
             {"repair_conversation_id", repair.repair_conversation_id},
-            {"change_conversation_id", repair.change_conversation_id}};
+            {"change_conversation_id", repair.change_conversation_id},
+            {"change_conversations", repair.change_conversations}};
 }
 
 std::optional<ResourceRepair> ResourceRepairCodec::decode(const StoredRecord& record) {
@@ -166,6 +167,14 @@ std::optional<ResourceRepair> ResourceRepairCodec::decode(const StoredRecord& re
         integers(body.value("attempted_generations", nlohmann::json::array()));
     value.repair_conversation_id = body.value("repair_conversation_id", std::string());
     value.change_conversation_id = body.value("change_conversation_id", std::string());
+    if (const auto found = body.find("change_conversations");
+        found != body.end() && found->is_object()) {
+        for (const auto& [user, conversation] : found->items()) {
+            if (conversation.is_string()) {
+                value.change_conversations[user] = conversation.get<std::string>();
+            }
+        }
+    }
     value.revision = record.revision;
     if (value.customer_id.empty() || value.resource_kind.empty() || value.resource_id.empty() ||
         record.id != resource_repair_key(value.resource_kind, value.resource_id)) {
@@ -202,6 +211,20 @@ nlohmann::json resource_notification_json(const ResourceNotification& notificati
         value["resolved_at"] = notification.resolved_at;
     }
     return value;
+}
+
+std::string person_change_conversation(const ResourceRepair& repair,
+                                       const std::string& user,
+                                       const std::function<bool(const std::string&)>& theirs) {
+    if (const auto found = repair.change_conversations.find(user);
+        found != repair.change_conversations.end() && !found->second.empty()) {
+        return found->second;
+    }
+    if (!repair.change_conversation_id.empty() && repair.change_conversations.empty() && theirs &&
+        theirs(repair.change_conversation_id)) {
+        return repair.change_conversation_id;
+    }
+    return {};
 }
 
 nlohmann::json resource_repair_json(const ResourceRepair& repair) {

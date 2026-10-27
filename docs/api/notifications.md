@@ -86,11 +86,38 @@ REST, MCP and OpenAPI expose them like every capability; their audit goes to the
 | `set_auto_fix` | action (write) | `resource_kind`, `resource_id`, `enabled`, `max_attempts?` (1 to 10, default 3) | the repair settings; turning it on resets the attempts and records the caller as the person attempts act as |
 | `repair_app` | action (write, paid work) | `app_id`, `message?`, `notification_id?`, `conversation_id?` | the `agent_turn` answer (`task_id`) of a `repair` turn |
 | `change_app` | action (write, paid work) | `app_id`, `message`, `conversation_id?` | the `agent_turn` answer of a `change` turn |
+| `get_app_conversation` | read | `app_id` | `{app_id, conversation_id, turns, truncated}`: the caller's own change conversation about the app, oldest turn first, each turn as `get_agent_task` answers it plus `request` (what the person wrote) and `confirmation` (lake#1240) |
 
 `repair_app` and `change_app` start their turn through `agent_turn`, so the turn carries the caller's
 own permissions, the balance gate, audit (`app.repair.start`, `app.change.start`, then
-`agent.turn`) and metering. Without a `conversation_id` they continue the app's last repair or
-change conversation, so later instructions go on in the same one.
+`agent.turn`) and metering. Without a `conversation_id` they continue the app's last repair
+conversation, or the caller's own change conversation, so later instructions go on in the same one.
+
+### A change is a conversation (lake#1240)
+
+- **Each person has their own change conversation per app.** The repair record keeps
+  `change_conversations` (user id → conversation id) in the workspace Zetta beside
+  `change_conversation_id` (the newest, for records written before). `agent_turn` refuses to continue
+  someone else's conversation, so `change_app` continues only the caller's own; a record from before
+  is continued only by the person whose turn is its newest.
+- **The thread is the conversation's chain of turns.** `agent_turn` records each turn's previous turn
+  of the same agent and kind as `prior_turn` in its request (sealed in the workspace with the turn,
+  lake#374), so the thread is followed back from the newest turn with no new index or table. The walk
+  stops at another person's turn and at 50 turns (`truncated`). A confirmation is an ordinary turn of
+  the thread (`agent_turn` kind `change` with the conversation id), and the conversation goes on after
+  it.
+- **The agent is handed the thread.** A `repair` or `change` turn of the Application Agent with
+  earlier turns carries `history` in its request, oldest first, at most 20 turns: each with
+  `task_id`, `message` (what the person wrote), `reply`, `status`, `outcome` (the result's kind:
+  `question`, `proposal`, …), `diff` (the proposed diff, cut at 8,000 bytes) and `confirmed` on a
+  confirmation. `prior_turn` stays as it was.
+- **agent-application does not read `history` yet.** It keeps a conversation's model history in its
+  process memory only (lost on restart, not shared between replicas), and reads neither `prior_turn`
+  nor `history`. Seeding its history from `history` when its memory has none is the change it needs
+  (agent-application `service.py` `State.history` / `run_turn`).
+
+To verify: `AgentRuns.AChangeConversationKeepsItsTurnsAndHandsThemToTheAgent` and
+`ResourceRepairs.EachPersonContinuesTheirOwnChangeConversation`.
 
 ## The turns
 

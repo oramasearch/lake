@@ -1,14 +1,16 @@
 /** When an app fails (lake#1207, docs/ui/apps.md#when-an-app-fails): the notifications Lake keeps
  * in the workspace (`list_notifications`, general over the resource kind), *Fix with the
- * Application Agent* (`repair_app`), *Change this app with the Application Agent* (`change_app`),
+ * Application Agent* (`repair_app`), *Change This App* (`change_app`, a conversation since lake#1240:
+ * AppConversation.tsx),
  * the opt-in auto-fix (`get_auto_fix`, `set_auto_fix`) and the review of a repair or change: the
  * diagnosis and the diff, confirmed with an `agent_turn` of the same kind. */
-import { type FormEvent, type ReactNode, useState } from "react";
+import { type ReactNode, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { AlertTriangle, Bell, Bot, Loader2, Wand2, Wrench, X } from "lucide-react";
+import { AlertTriangle, Bell, Loader2, Wand2, Wrench, X } from "lucide-react";
 import { act, ApiError, useRead, type Row } from "@/lib/api";
 import { relative } from "@/lib/format";
 import { Banner, Button, Card, Empty, ErrorBlock, KeyValue, Notice, Skeleton, Status } from "@/lib/ui";
+import { AppConversation } from "./AppConversation";
 import {
   AgentEventsLink,
   type AgentTask,
@@ -198,8 +200,6 @@ export function NotificationsList({ customerId, workspaceId }: { customerId: str
 /** The app page's side card: its open notifications with Fix, auto-fix, and Change this app. */
 export function AppRepairCard({ app, customerId, workspaceId, agentDeployed }: { app: Row; customerId: string; workspaceId: string | null; agentDeployed: boolean }) {
   const runner = useRunner();
-  const navigate = useNavigate();
-  const ws = useWorkspaceLink();
   const appId = String(app.id ?? "");
   const notifications = useNotifications(customerId, workspaceId, { resource_kind: "app", resource_id: appId });
   const settings = useRead<Row>(customerId && appId ? "get_auto_fix" : null, { customer_id: customerId, workspace_id: workspaceId ?? undefined, resource_kind: "app", resource_id: appId });
@@ -207,20 +207,6 @@ export function AppRepairCard({ app, customerId, workspaceId, agentDeployed }: {
   const open = notifications.data?.notifications ?? [];
   const autoFix = settings.data?.auto_fix === true;
   const [attempts, setAttempts] = useState("3");
-
-  const change = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const element = event.currentTarget;
-    const message = String(new FormData(element).get("instructions") ?? "").trim();
-    if (!message) return;
-    void runner
-      .run("change", () => act<Row>("change_app", { customer_id: customerId, workspace_id: workspaceId, app_id: appId, message }))
-      .then((started) => {
-        if (!started) return;
-        element.reset();
-        navigate(ws("/ship/app") + qs({ customer_id: customerId, app_id: appId, task: String(started.task_id ?? "") }));
-      });
-  };
 
   return (
     <Card label="Application Agent" title="Fix or Change This App">
@@ -238,17 +224,10 @@ export function AppRepairCard({ app, customerId, workspaceId, agentDeployed }: {
           </Button>
         </div>
       )}
-      <form className="stack" onSubmit={change}>
-        <label>
-          Change this app with the Application Agent
-          <textarea name="instructions" rows={3} placeholder="Add a chart by region, filter by plan…" disabled={!agentDeployed} />
-        </label>
-        <div>
-          <Button type="submit" disabled={!agentDeployed} loading={runner.busy === "change"}>
-            <Bot size={14} aria-hidden /> Change this app
-          </Button>
-        </div>
-      </form>
+      <div className="border-t border-hairline pt-3">
+        <h4 className="mb-2 mt-0 text-[13px]">Change This App</h4>
+        <AppConversation appId={appId} customerId={customerId} workspaceId={workspaceId} agentDeployed={agentDeployed} className="max-h-[560px]" />
+      </div>
       <div className="mt-3 border-t border-hairline pt-3">
         {settings.isError ? (
           <ErrorBlock error={settings.error} retry={() => void settings.refetch()} what="auto-fix" />
