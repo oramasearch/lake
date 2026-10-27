@@ -95,6 +95,7 @@ struct Prepared {
     std::vector<std::string> header; // the copy's columns in order: the row's name, inputs, target
     json used = json::array();       // the input columns kept
     json dropped = json::array();    // [{name, reason}]
+    json derived = json::array();    // [{name, from, part}]: inputs Lake derived (a date's parts)
     json label = nullptr;            // {column, positive, values: {"1": "...", "0": "..."}}
     std::size_t rows = 0;
     std::size_t skipped = 0; // rows with no value to predict
@@ -165,7 +166,17 @@ Derive derive_target(const json& columns, const std::vector<json>& rows, const D
 bool label_free(std::string_view methodology);
 
 // The training copy for a label-free methodology: the column that names a row (a row number when
-// `entity` is empty or repeats) and the usable inputs, every row kept.
+// `entity` is empty or repeats) and the inputs worth grouping rows by, every row kept (lake#1242):
+// - numbers, categories of at most max_category_values values and yes-or-no columns;
+// - never an identifier, a row number (a column named like one, or whose whole numbers count the
+//   rows in a table of at least row_number_minimum_rows), free text, or a name or contact details
+//   (a column named like one, or whose values are mostly emails, web addresses or phone numbers);
+// - a date as two numbers derived from it: its month, and its days before the column's latest
+//   date.
+// Refused in plain words, saying why each column was left out, when nothing qualifies. `copy` is
+// false only when the dataset can train as it is: a unique column names every row and nothing was
+// left out or derived.
+inline constexpr std::size_t row_number_minimum_rows = 50;
 Prepare
 prepare_unlabeled(const json& columns, const std::vector<json>& rows, const std::string& entity);
 

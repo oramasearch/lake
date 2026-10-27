@@ -10,7 +10,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <utility>
 
@@ -131,6 +133,108 @@ bool yes_like(std::string_view value) {
     return word == "true" || word == "yes" || word == "y" || word == "1" || word == "t";
 }
 
+// A column name in lower-case words: letters and digits kept, everything else one space
+// ("Customer Id" and "customer_id" both read "customer id"; "Unnamed: 0" reads "unnamed 0").
+std::string name_words(std::string_view name) {
+    std::string out;
+    bool space = false;
+    for (const char c : name) {
+        const auto u = static_cast<unsigned char>(c);
+        if (std::isalnum(u) != 0) {
+            if (space && !out.empty()) {
+                out += ' ';
+            }
+            space = false;
+            out += static_cast<char>(std::tolower(u));
+        } else {
+            space = true;
+        }
+    }
+    return out;
+}
+
+// Whether a column's name says it numbers or names the row (lake#1242): a file's row number
+// (`Index`, `Row`, `#`, pandas' `Unnamed: 0`), an id (`id`, `Customer Id`, `customer_id`,
+// `CustomerId`, `customerID`), a key or a UUID. Measures that merely end in "index" (`price
+// index`) or "number" (`number of orders`) are not.
+bool row_naming_name(std::string_view name) {
+    const std::string words = name_words(name);
+    for (const char* exact : {"",           "index",      "idx",        "row",       "rows",
+                              "row number", "row num",    "rownum",     "row no",    "row id",
+                              "rowid",      "row index",  "no",         "id",        "key",
+                              "uuid",       "guid",       "serial",     "seq",       "sequence",
+                              "unnamed 0",  "record id",  "record number", "record no", "level 0"}) {
+        if (words == exact) {
+            return true;
+        }
+    }
+    for (const char* suffix : {" id", " key", " uuid", " guid"}) {
+        if (words.ends_with(suffix)) {
+            return true;
+        }
+    }
+    // camelCase: CustomerId, customerID (a lower-case letter, then Id or ID at the end).
+    if (name.size() > 2) {
+        const std::string_view last = name.substr(name.size() - 2);
+        const auto before = static_cast<unsigned char>(name[name.size() - 3]);
+        if ((last == "Id" || last == "ID") && std::islower(before) != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Whether a column's name says it holds a person's name or contact details, which describe who a
+// row is, never what to group rows by (lake#1242).
+bool personal_name(std::string_view name) {
+    const std::string words = name_words(name);
+    for (const char* exact : {"name",       "first name", "last name",   "full name",
+                              "surname",    "given name", "family name", "middle name",
+                              "firstname",  "lastname",   "fullname",    "contact name",
+                              "email",      "e mail",     "phone",       "telephone",
+                              "mobile",     "fax",        "website",     "url",
+                              "web site",   "homepage",   "address",     "street",
+                              "street address"}) {
+        if (words == exact) {
+            return true;
+        }
+    }
+    for (const char* part : {"email", "e mail", "phone", "website", "url", "first name",
+                             "last name", "full name", "address"}) {
+        const std::string needle(part);
+        if (words.starts_with(needle + " ") || words.ends_with(" " + needle) ||
+            words.find(" " + needle + " ") != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// An email address, a web address or a phone number.
+bool contact_value(std::string_view value) {
+    const auto at = value.find('@');
+    if (at != std::string_view::npos && at > 0 && value.find('.', at) != std::string_view::npos &&
+        value.find(' ') == std::string_view::npos) {
+        return true;
+    }
+    const std::string word = lowered(value.substr(0, std::min<std::size_t>(value.size(), 8)));
+    if (word.starts_with("http://") || word.starts_with("https://") || word.starts_with("www.")) {
+        return true;
+    }
+    std::size_t numerals = 0;
+    for (const char c : value) {
+        const auto u = static_cast<unsigned char>(c);
+        if (std::isdigit(u) != 0) {
+            ++numerals;
+        } else if (c != ' ' && c != '+' && c != '-' && c != '(' && c != ')' && c != '.' &&
+                   c != 'x' && c != 'X') {
+            return false;
+        }
+    }
+    // A phone number has punctuation or a plus; plain digits are a number.
+    return numerals >= 7 && numerals < value.size();
+}
+
 // What a person reads for a kind.
 std::string title_of(std::string_view kind, std::size_t distinct) {
     if (kind == "numeric") {
@@ -164,6 +268,12 @@ std::string title_of(std::string_view kind, std::size_t distinct) {
 // report says so, so they do not need a training copy.
 bool engine_leaves_out(const json& column) {
     const std::string kind = text_of(column, "kind");
+    // An identifier only Lake recognised (a row number the engine reads as a measure, lake#1242)
+    // is still an input to the engine, so the dataset cannot train as it is.
+    if (kind == "identifier" && column.contains("engine_kind") &&
+        text_of(column, "engine_kind") != "identifier") {
+        return false;
+    }
     return kind == "identifier" || kind == "free_text" ||
            (kind == "categorical" && count_of(column, "distinct_count") > max_category_values);
 }
@@ -200,6 +310,12 @@ json describe(const json& analyzed, const std::string& type) {
         kind = semantic;
     } else {
         kind = "unsupported";
+    }
+    // lake#1242: the engine calls a number a key only when its name ends in `_id` or `_key`
+    // (zetta#1216), so a file's row number (`Index`) or a `Customer Id` written as integers reads
+    // as a measure. A column whose name says it numbers or names the row is an identifier.
+    if ((kind == "numeric" || kind == "categorical") && row_naming_name(name)) {
+        kind = "identifier";
     }
     const bool two = distinct == 2 && kind != "datetime" && kind != "free_text" &&
                      kind != "identifier" && kind != "unsupported";
@@ -268,6 +384,7 @@ json describe(const json& analyzed, const std::string& type) {
     json column{{"name", name},
                 {"type", type},
                 {"kind", kind},
+                {"engine_kind", semantic},
                 {"title", title_of(kind, distinct)},
                 {"distinct_count", distinct},
                 {"null_rate", null_rate},
@@ -1210,6 +1327,123 @@ bool label_free(std::string_view methodology) {
     return word == "m-3" || word == "segmentation" || word == "clustering" || word == "cluster";
 }
 
+namespace {
+
+// A date's day number, from the YYYY-MM-DD at the start of an ISO date or timestamp.
+std::optional<std::chrono::sys_days> day_of(const json& value) {
+    if (!value.is_string()) {
+        return std::nullopt;
+    }
+    const std::string text = value.get<std::string>();
+    if (!iso_instant(text)) {
+        return std::nullopt;
+    }
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    digits(text, 0, 4, year);
+    digits(text, 5, 2, month);
+    digits(text, 8, 2, day);
+    return std::chrono::sys_days{std::chrono::year_month_day{
+        std::chrono::year{year},
+        std::chrono::month{static_cast<unsigned>(month)},
+        std::chrono::day{static_cast<unsigned>(day)}}};
+}
+
+// An integer value: a JSON integer, or a float with nothing after the point.
+std::optional<long long> integer_of(const json& value) {
+    if (value.is_number_integer()) {
+        return value.get<long long>();
+    }
+    if (value.is_number_float()) {
+        const double number = value.get<double>();
+        if (std::isfinite(number) && number == std::floor(number) && std::fabs(number) < 9.0e15) {
+            return static_cast<long long>(number);
+        }
+    }
+    return std::nullopt;
+}
+
+// Whether a column's values number the rows (lake#1242): in a table of at least
+// `row_number_minimum_rows` rows every row has a whole number, no two are the same, and they
+// count up or down in the file's order or fill a range with no gaps (a shuffled row number). A
+// measure is rarely all of that over so many rows; zetta#1216 is why a small table is not judged
+// by its values.
+bool numbers_the_rows(const std::vector<json>& rows, const std::string& name) {
+    if (rows.size() < row_number_minimum_rows) {
+        return false;
+    }
+    std::vector<long long> numbers;
+    numbers.reserve(rows.size());
+    for (const json& row : rows) {
+        const auto value = row.is_object() ? row.find(name) : row.end();
+        if (!row.is_object() || value == row.end()) {
+            return false;
+        }
+        const auto number = integer_of(*value);
+        if (!number) {
+            return false;
+        }
+        numbers.push_back(*number);
+    }
+    const bool rising = std::ranges::adjacent_find(numbers, std::greater_equal<>()) == numbers.end();
+    const bool falling = std::ranges::adjacent_find(numbers, std::less_equal<>()) == numbers.end();
+    if (rising || falling) {
+        return true;
+    }
+    std::vector<long long> sorted = numbers;
+    std::ranges::sort(sorted);
+    if (std::ranges::adjacent_find(sorted) != sorted.end()) {
+        return false;
+    }
+    return sorted.back() - sorted.front() + 1 == static_cast<long long>(sorted.size());
+}
+
+// Whether most of a column's text values are email addresses, web addresses or phone numbers.
+bool holds_contact_details(const std::vector<json>& rows, const std::string& name) {
+    std::size_t texts = 0;
+    std::size_t contacts = 0;
+    for (const json& row : rows) {
+        const auto value = row.is_object() ? row.find(name) : row.end();
+        if (!row.is_object() || value == row.end() || empty_value(*value) ||
+            !value->is_string()) {
+            continue;
+        }
+        ++texts;
+        if (contact_value(value->get<std::string>())) {
+            ++contacts;
+        }
+    }
+    return texts > 0 && static_cast<double>(contacts) >= 0.8 * static_cast<double>(texts);
+}
+
+// A derived column's name: `wanted`, or `wanted_2`, `wanted_3` when a column has it.
+std::string free_name(const json& columns, const std::vector<std::string>& taken, std::string wanted) {
+    const auto used = [&](const std::string& name) {
+        return find(columns, name) != nullptr || std::ranges::find(taken, name) != taken.end();
+    };
+    if (!used(wanted)) {
+        return wanted;
+    }
+    for (int n = 2;; ++n) {
+        const std::string next = wanted + "_" + std::to_string(n);
+        if (!used(next)) {
+            return next;
+        }
+    }
+}
+
+// A number derived from a date column for each row: its month, or its days before the column's
+// latest date (how long ago it was, as of the newest row: a tenure for a subscription date).
+struct DatePart {
+    std::string source;
+    std::string name;
+    bool month = false; // false: days before the latest date
+    std::chrono::sys_days latest{};
+};
+
+} // namespace
+
 Prepare
 prepare_unlabeled(const json& columns, const std::vector<json>& rows, const std::string& entity) {
     Prepare out;
@@ -1236,30 +1470,122 @@ prepare_unlabeled(const json& columns, const std::vector<json>& rows, const std:
     }
     prepared.entity = numbered ? row_number_column(columns) : entity;
     std::vector<std::string> inputs;
+    std::vector<DatePart> parts;
+    std::vector<std::string> derived_names;
+    const auto drop = [&](const std::string& name, const std::string& reason) {
+        prepared.dropped.push_back({{"name", name}, {"reason", reason}});
+    };
+    // Columns whose values are dates though the profile read them as text (the engine's own rule).
+    const std::set<std::string> dated = date_columns_in(rows);
     for (const json& column : columns) {
         const std::string name = text_of(column, "name");
         if (!numbered && name == entity) {
             continue;
         }
-        if (!column.contains("feature") || !column["feature"].value("use", false)) {
-            prepared.dropped.push_back(
-                {{"name", name},
-                 {"reason",
-                  column.contains("feature")
-                      ? column["feature"].value("reason", std::string("not usable"))
-                      : std::string("its kind is not known")}});
+        const std::string kind = text_of(column, "kind");
+        if (kind == "datetime" || (dated.contains(name) && kind != "empty" && kind != "constant")) {
+            // lake#1242: a date says when, which a model groups by through its parts: the month,
+            // and how long before the latest date it is.
+            std::set<unsigned> months;
+            std::set<std::chrono::sys_days> days;
+            for (const json& row : rows) {
+                const auto value = row.is_object() ? row.find(name) : row.end();
+                if (row.is_object() && value != row.end()) {
+                    if (const auto day = day_of(*value)) {
+                        days.insert(*day);
+                        months.insert(static_cast<unsigned>(
+                            std::chrono::year_month_day{*day}.month()));
+                    }
+                }
+            }
+            std::vector<std::string> made;
+            if (months.size() >= 2) {
+                DatePart part{name, free_name(columns, derived_names, name + " month"), true, {}};
+                derived_names.push_back(part.name);
+                made.push_back(part.name);
+                parts.push_back(std::move(part));
+            }
+            if (days.size() >= 2) {
+                DatePart part{name,
+                              free_name(columns, derived_names, name + " days before latest"),
+                              false,
+                              *days.rbegin()};
+                derived_names.push_back(part.name);
+                made.push_back(part.name);
+                parts.push_back(std::move(part));
+            }
+            if (made.empty()) {
+                drop(name, "a date or time with too few different days to group rows by");
+            } else {
+                std::string listed;
+                for (const std::string& part : made) {
+                    listed += (listed.empty() ? "" : " and ") + part;
+                }
+                drop(name, "a date: Lake groups rows by its parts instead (" + listed + ")");
+            }
             continue;
+        }
+        if (!column.contains("feature") || !column["feature"].value("use", false)) {
+            drop(name,
+                 column.contains("feature")
+                     ? column["feature"].value("reason", std::string("not usable"))
+                     : std::string("its kind is not known"));
+            continue;
+        }
+        if (kind == "numeric" && numbers_the_rows(rows, name)) {
+            drop(name,
+                 "a row number: every row has its own whole number, in order, so it tells rows "
+                 "apart by where they sit in the file and says nothing about them");
+            continue;
+        }
+        if (kind == "categorical" || kind == "boolean") {
+            if (personal_name(name)) {
+                drop(name,
+                     "a name or contact details: it says who a row is, not something to group "
+                     "rows by");
+                continue;
+            }
+            if (holds_contact_details(rows, name)) {
+                drop(name,
+                     "email addresses, web addresses or phone numbers: they say who a row is, "
+                     "not something to group rows by");
+                continue;
+            }
         }
         inputs.push_back(name);
         prepared.used.push_back(name);
     }
-    if (inputs.empty()) {
-        out.problem = "None of this dataset's columns is a number or a short category, so there "
-                      "is nothing to group rows by.";
+    for (const DatePart& part : parts) {
+        prepared.used.push_back(part.name);
+        prepared.derived.push_back(
+            {{"name", part.name},
+             {"from", part.source},
+             {"part", part.month ? "month" : "days before latest"}});
+    }
+    if (inputs.empty() && parts.empty()) {
+        std::string why;
+        std::size_t listed = 0;
+        for (const json& dropped : prepared.dropped) {
+            if (listed == 4) {
+                why += "; and " + std::to_string(prepared.dropped.size() - listed) + " more";
+                break;
+            }
+            why += (why.empty() ? "" : "; ") + dropped.value("name", std::string()) + " is " +
+                   dropped.value("reason", std::string());
+            ++listed;
+        }
+        out.problem = "Lake found nothing in this dataset to group rows by, so it did not train a "
+                      "clustering model. Clustering needs a number, a category of at most " +
+                      std::to_string(max_category_values) + " values, or a date" +
+                      (why.empty() ? std::string(".") : " (" + why + ").") +
+                      " Add such a column, or choose a model that predicts a column.";
         return out;
     }
     prepared.header.push_back(prepared.entity);
     prepared.header.insert(prepared.header.end(), inputs.begin(), inputs.end());
+    for (const DatePart& part : parts) {
+        prepared.header.push_back(part.name);
+    }
     std::size_t number = 0;
     for (const json& row : rows) {
         ++number;
@@ -1277,6 +1603,18 @@ prepare_unlabeled(const json& columns, const std::vector<json>& rows, const std:
             const auto value = row.find(input);
             line[input] = value == row.end() ? json(nullptr) : *value;
         }
+        for (const DatePart& part : parts) {
+            const auto value = row.find(part.source);
+            const auto day = value == row.end() ? std::nullopt : day_of(*value);
+            if (!day) {
+                line[part.name] = nullptr;
+            } else if (part.month) {
+                line[part.name] =
+                    static_cast<unsigned>(std::chrono::year_month_day{*day}.month());
+            } else {
+                line[part.name] = (part.latest - *day).count();
+            }
+        }
         prepared.content += line.dump();
         prepared.content += '\n';
         ++prepared.rows;
@@ -1285,6 +1623,10 @@ prepare_unlabeled(const json& columns, const std::vector<json>& rows, const std:
         out.problem = "The dataset has no rows to group.";
         return out;
     }
+    // The dataset trains as it is only when a unique column names every row and every other
+    // column is an input as it stands; anything left out or derived needs the training copy, or
+    // the engine reads the columns Lake left out (lake#1242: the row number `Index`).
+    prepared.copy = numbered || !prepared.dropped.empty() || !parts.empty();
     out.prepared = std::move(prepared);
     return out;
 }
