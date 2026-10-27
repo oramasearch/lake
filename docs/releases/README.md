@@ -9,6 +9,8 @@ lists (orama-operator#936): a lake release becomes only the `image:` in a set fi
 v0.6.1 predate the commands; the operator keeps its vendored path for them. See
 [`../deployment/operator-interface.md`](../deployment/operator-interface.md).
 
+- [v0.7.3](v0.7.3.md) — 2026-10-26. A hotfix: agents default to gpt-5.5 again (gpt-6.x refuses tools with
+  `reasoning_effort` on Chat Completions; lake#1245).
 - [v0.7.2](v0.7.2.md) — 2026-10-26. A patch: an App's `workspace.sql` at its binding's access, read-only and
   capped at 5,000 rows (`too_many_rows`); auto-fix sees a healthy App whose script keeps failing, and Restart is
   recorded (pods replaced with orama-operator#1033); people choose the agents' model per workspace (default
