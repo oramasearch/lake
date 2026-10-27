@@ -113,6 +113,33 @@ void drop_database(pqxx::connection& admin, const std::string& name, bool is_tem
     tx.exec("DROP DATABASE IF EXISTS " + tx.quote_name(name));
 }
 
+} // namespace
+
+// Drops one stale database on a connection of its own, and reports rather than throws when it
+// cannot (lake#1254). Every test process sweeps at start, so under `ctest -j` several sweep the
+// same databases at once. PostgreSQL marks a database invalid (datconnlimit -2) as soon as a DROP
+// starts, and an ALTER DATABASE on an invalid database is FATAL: it ends the session, so the
+// sweeping process's shared admin connection was lost and its test failed in SetUp with "Lost
+// connection to the database server". An invalid database is dropped without the ALTER (a DROP is
+// what PostgreSQL allows on one), and any failure here, the lost connection included, leaves the
+// database to the next sweep and never fails a test.
+bool lake::test::drop_stale_fixture_database(const std::string& admin_uri,
+                                             const std::string& name,
+                                             bool is_template,
+                                             bool invalid) {
+    try {
+        pqxx::connection connection(admin_uri);
+        drop_database(connection, name, is_template && !invalid);
+        return true;
+    } catch (const std::exception& error) {
+        // In use (55006) means a live process owns it; anything else is left for the next run.
+        std::cerr << "PostgreSQL fixture sweep left " << name << ": " << error.what() << '\n';
+        return false;
+    }
+}
+
+namespace {
+
 // Removes databases with this runner's prefix that a killed process left behind. A database
 // that still has a session fails DROP with 55006 and is left alone; nothing outside the prefix is
 // ever listed.
@@ -123,13 +150,15 @@ void sweep_stale_databases(pqxx::connection& admin, const std::string& current_t
         pqxx::nontransaction tx(admin);
         rows = tx.exec(
             "SELECT datname, datistemplate, "
-            "coalesce(shobj_description(oid, 'pg_database'), '') FROM pg_database "
+            "coalesce(shobj_description(oid, 'pg_database'), ''), datconnlimit = -2 "
+            "FROM pg_database "
             "WHERE datname ~ '^lake_fixture_(build_)?[0-9]+_[0-9a-f]{16}$' "
             "OR datname ~ '^lake_fixture_template_[0-9a-f]{16}$'");
     }
     for (const auto& row : rows) {
         const auto name = row[0].as<std::string>();
         const bool is_template = row[1].as<bool>();
+        const bool invalid = row[3].as<bool>();
         long long created = 0;
         long long limit = stale_clone_seconds;
         if (name.starts_with(template_prefix)) {
@@ -144,15 +173,13 @@ void sweep_stale_databases(pqxx::connection& admin, const std::string& current_t
             const auto digits = name.find_first_of("0123456789", fixture_prefix.size());
             created = std::atoll(name.c_str() + digits);
         }
-        if (now - created < limit) {
+        // An invalid database is one whose DROP started (here or in another process) and did
+        // not finish: it is stale whatever its name says.
+        if (!invalid && now - created < limit) {
             continue;
         }
-        try {
-            drop_database(admin, name, is_template);
-        } catch (const pqxx::sql_error& error) {
-            // In use (55006) means a live process owns it; anything else is left for the next run.
-            std::cerr << "PostgreSQL fixture sweep left " << name << ": " << error.what() << '\n';
-        }
+        lake::test::drop_stale_fixture_database(admin.connection_string(), name, is_template,
+                                                invalid);
     }
 }
 

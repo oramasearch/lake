@@ -116,7 +116,9 @@ gtest_discover_tests(lake-tests)
 
 add_executable(lake-postgres-tests test_main.cpp test_postgres.cpp test_operator_contract.cpp test_network.cpp
   # `lake migrate` against empty, current and concurrent databases (lake#1119).
-  test_migrate.cpp)
+  test_migrate.cpp
+  # The fixture's start-up sweep never fails a test (lake#1254).
+  test_fixture_sweep.cpp)
 target_link_libraries(lake-postgres-tests PRIVATE lake-control-postgres pqxx OpenSSL::Crypto GTest::gtest)
 target_compile_definitions(lake-postgres-tests PRIVATE
   LAKE_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"

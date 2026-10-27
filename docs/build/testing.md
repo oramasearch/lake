@@ -55,6 +55,18 @@ Every database the runner creates starts with `lake_fixture_`:
   `DROP DATABASE` and is left alone. The sweep matches only the `lake_fixture_` names above;
   it never touches other databases on the server, including `lake_test_<uuid>` databases left by
   runners before this scheme. Remove those only once you have established who owns them.
+- **Concurrent sweeps** (lake#1254). Every test process sweeps, so under `ctest -j` several reach
+  the same stale database at once. PostgreSQL marks a database invalid (`datconnlimit = -2`) as
+  soon as a `DROP DATABASE` starts, and `ALTER DATABASE` on an invalid database is `FATAL`: it ends
+  the session. The sweep used the process's shared administrative connection, so the process that
+  lost that race failed its first test in `SetUp` with *Lost connection to the database server*
+  (on 2026-10-26 the first four `SharedLinkScenario` cases, the first PostgreSQL cases in ctest's
+  order, failed that way while templates of earlier schema versions were being swept). Each drop
+  now runs on a connection of its own (`lake::test::drop_stale_fixture_database`); an invalid
+  database is dropped without the `ALTER`, whatever its age; and any failure, a lost connection
+  included, is reported on stderr and left for the next sweep, never failing a test.
+  `FixtureSweep.AnInvalidTemplateIsDroppedWithoutLosingTheConnection` (in `lake-postgres-tests`)
+  covers it.
 
 We chose per-test databases because isolation covers every append-only table, sequences and
 advisory locks automatically. A test cannot accidentally omit a tenant or request filter on a
