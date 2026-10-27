@@ -1269,6 +1269,57 @@ TEST(DrivesHttp, TheFirstUploadCreatesMainAndAMissingFolder) {
         bare["value"]["id"]);
 }
 
+// lake#1239: the repository browser's editor commits the exact bytes it shows, and a file changed
+// on main since it was read is a conflict that changes nothing.
+TEST(DrivesHttp, AnEditCommitsTheExactBytesAndAStaleEditIsAConflict) {
+    Lake lake;
+    const json created = lake.call("create_repository", {{"name", "edited"}});
+    ASSERT_TRUE(created.value("ok", false)) << created.dump();
+    const std::string repository_id = created["value"]["id"];
+    const auto commit = [&](const std::string& text, json expected) {
+        json operation{{"type", "file"}, {"path", "app/app.py"}, {"content", base64(text)}};
+        if (!expected.is_null()) {
+            operation["expected_blob"] = std::move(expected);
+        }
+        return lake.call("commit_repository_files",
+                         {{"id", repository_id},
+                          {"revision", "main"},
+                          {"message", "Edit app.py"},
+                          {"operations", json::array({operation})}},
+                         false);
+    };
+    const auto file = [&] {
+        return lake.read("repository_file",
+                         {{"id", repository_id}, {"ref", "main"}, {"path", "app/app.py"}});
+    };
+    // A path that does not exist yet is expected as "".
+    const json first = commit("print('caf\xc3\xa9')\n", "");
+    ASSERT_TRUE(first.value("ok", false)) << first.dump();
+    const json opened = file();
+    ASSERT_TRUE(opened.value("ok", false)) << opened.dump();
+    const std::string blob = opened["value"]["blob"];
+    EXPECT_EQ(opened["value"]["content_base64"], base64("print('caf\xc3\xa9')\n"));
+
+    // Edited from what was opened: the exact bytes, UTF-8 included.
+    const std::string edited = "print('caf\xc3\xa9 \xe2\x9c\x93')\r\n";
+    const json saved = commit(edited, blob);
+    ASSERT_TRUE(saved.value("ok", false)) << saved.dump();
+    EXPECT_FALSE(saved["value"].value("commitOid", "").empty());
+    const json reread = file();
+    EXPECT_EQ(reread["value"]["content_base64"], base64(edited));
+    EXPECT_NE(reread["value"]["blob"], blob);
+
+    // The same editor saving again from the old blob would overwrite that change: refused.
+    const json refs_before = lake.read("refs", {{"repository_id", repository_id}})["value"];
+    const json stale = commit("print('mine')\n", blob);
+    EXPECT_EQ(stale.value("error", json::object()).value("code", ""), "conflict") << stale.dump();
+    EXPECT_EQ(file()["value"]["content_base64"], base64(edited)) << "nothing was overwritten";
+    EXPECT_EQ(lake.read("refs", {{"repository_id", repository_id}})["value"], refs_before);
+    // A path expected absent that exists is a conflict too, and expected_blob must be a string.
+    EXPECT_EQ(commit("x", "").value("error", json::object()).value("code", ""), "conflict");
+    EXPECT_EQ(commit("x", 7).value("error", json::object()).value("code", ""), "invalid_input");
+}
+
 // A writable parent must not authorize nested writes or recursive changes to a policy cut.
 TEST(DrivesHttp, NestedMutationsRefuseProtectedDescendantsBeforeChangingMain) {
     Lake lake;

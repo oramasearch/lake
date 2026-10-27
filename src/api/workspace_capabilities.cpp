@@ -14,6 +14,7 @@
 
 #include <optional>
 #include <regex>
+#include <set>
 #include <span>
 #include <vector>
 
@@ -3437,6 +3438,83 @@ json task_json(const control::AgentTask& task) {
     return out;
 }
 
+// The turns of an agent conversation before and including `latest`, newest first, by following each
+// turn's `prior_turn` (lake#1240): agent_turn records the conversation's previous turn of the same
+// agent and kind in a turn's request, so the chain is the conversation, with no new index. Each
+// turn is read with its content from its workspace. The walk stops at `limit` turns, at a turn of
+// another person (agent_turn refuses to continue someone else's conversation, so their turns are
+// not part of this one), and at a turn it cannot read. The earlier turns an Application Agent
+// repair or change turn is handed, and get_app_conversation lists at most.
+constexpr std::size_t application_history_turns = 20;
+constexpr std::size_t app_conversation_turns = 50;
+
+liquid::runtime::task<std::vector<control::AgentTask>>
+conversation_chain(const ApiContext& context, control::AgentTask latest, std::size_t limit) {
+    std::vector<control::AgentTask> turns;
+    const std::string person = latest.requested_by_user_id;
+    std::set<std::string> seen;
+    std::optional<control::AgentTask> current = std::move(latest);
+    while (current && turns.size() < limit && seen.insert(current->id).second) {
+        const json prior =
+            current->body.is_object() ? current->body.value("prior_turn", json()) : json();
+        const std::string prior_id =
+            prior.is_object() ? prior.value("task_id", std::string()) : std::string();
+        const control::AgentTask turn = *current;
+        turns.push_back(turn);
+        current.reset();
+        if (prior_id.empty() || context.store == nullptr) {
+            break;
+        }
+        auto found = context.store->get_agent_task(prior_id);
+        if (!found || found->customer_id != turn.customer_id ||
+            found->workspace_id != turn.workspace_id ||
+            found->conversation_id != turn.conversation_id || found->agent != turn.agent ||
+            found->requested_by_user_id != person) {
+            break;
+        }
+        if (auto loaded = control::settled(co_await load_agent_task_content(context, *found));
+            !loaded || !*loaded) {
+            break;
+        }
+        current = std::move(*found);
+    }
+    co_return turns;
+}
+
+// What the Application Agent is handed of a repair or change conversation's earlier turns, oldest
+// first (lake#1240): each turn's instruction, the agent's reply, what it answered (a proposal, a
+// question, an applied change) and the diff it proposed, cut to keep a turn's request bounded.
+json application_history(const std::vector<control::AgentTask>& newest_first) {
+    constexpr std::size_t diff_limit = 8000;
+    json history = json::array();
+    for (auto turn = newest_first.rbegin(); turn != newest_first.rend(); ++turn) {
+        const json answer = turn->result.is_object() ? turn->result : json::object();
+        const json result = answer.value("result", json::object());
+        std::string reply = answer.value("reply", std::string());
+        if (reply.empty() && result.is_object()) {
+            reply = result.value("reply", std::string());
+        }
+        json item{
+            {"task_id", turn->id},
+            {"message",
+             turn->body.is_object() ? turn->body.value("message", std::string()) : std::string()},
+            {"reply", reply},
+            {"status", turn->phase.empty() ? std::string("Pending") : turn->phase}};
+        if (result.is_object()) {
+            item["outcome"] = result.value("kind", std::string());
+            if (const std::string diff = result.value("diff", std::string()); !diff.empty()) {
+                item["diff"] = diff.size() > diff_limit ? diff.substr(0, diff_limit) + "\n…" : diff;
+            }
+        }
+        if (turn->body.is_object() && turn->body.value("context", json::object()).is_object() &&
+            turn->body.value("context", json::object()).contains("confirmed_proposal")) {
+            item["confirmed"] = true;
+        }
+        history.push_back(std::move(item));
+    }
+    return history;
+}
+
 // The running turn whose task credential is calling, or nullopt (lake#451). When Ask Orama (or
 // any library agent) delegates with agent_turn, this is the turn that asked.
 std::optional<control::AgentTask> calling_turn(const ApiContext& context,
@@ -6786,6 +6864,98 @@ void register_agent_run_capabilities(Registry& registry) {
             co_return ApiResult::success(std::move(out));
         }});
     registry.add(Capability{
+        .name = "get_app_conversation",
+        .title = "Your conversation about an app",
+        .description =
+            "Your change conversation with the Application Agent about one app (lake#1240), "
+            "oldest turn first: each turn as get_agent_task answers it (status, answer, a proposal "
+            "and its proposal_sha256 to confirm with agent_turn) and `request`, what you wrote. "
+            "Each person has their own conversation per app; change_app continues yours. "
+            "`conversation_id` is empty and `turns` empty before your first change.",
+        .input_schema =
+            customer_agent_schema({{"app_id", {{"type", "string"}}}}, json::array({"app_id"})),
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"app_id", {{"type", "string"}}},
+                            {"conversation_id", {{"type", "string"}}},
+                            {"turns", {{"type", "array"}, {"items", {{"type", "object"}}}}},
+                            {"truncated", {{"type", "boolean"}}}}}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.store || !context.workspaces) {
+                co_return unavailable();
+            }
+            const std::string customer_id = input.at("customer_id");
+            const std::string workspace_id = input.at("workspace_id");
+            const std::string app_id = input.at("app_id");
+            const auto app = context.store->get_web_app(app_id);
+            if (!app || app->customer_id != customer_id || app->workspace_id != workspace_id ||
+                app->desired == "deleted") {
+                co_return ApiResult::failure(
+                    "not_found", "no such app in this workspace", "/app_id");
+            }
+            auto records = workspace_records(context, customer_id, workspace_id);
+            if (!records) {
+                co_return ApiResult::failure(
+                    records.error().code, records.error().message, "/workspace_id");
+            }
+            auto repair = control::settled(
+                co_await control::get_resource_repair(*records, customer_id, "app", app_id));
+            if (!repair) {
+                co_return ApiResult::failure(repair.error().code, repair.error().message);
+            }
+            const std::string user = context.acting_user_id;
+            const auto latest_of = [&](const std::string& conversation) {
+                return context.store->latest_agent_conversation_task(
+                    customer_id, conversation, "agent-application", "change", workspace_id);
+            };
+            const std::string conversation = control::person_change_conversation(
+                *repair, user, [&](const std::string& candidate) {
+                    const auto latest = latest_of(candidate);
+                    return latest && !user.empty() && latest->requested_by_user_id == user;
+                });
+            json out{
+                {"app_id", app_id}, {"conversation_id", conversation}, {"turns", json::array()}};
+            if (conversation.empty()) {
+                co_return ApiResult::success(std::move(out));
+            }
+            auto latest = latest_of(conversation);
+            if (!latest) {
+                if (latest.error().code == "not_found") {
+                    co_return ApiResult::success(std::move(out));
+                }
+                co_return ApiResult::failure(latest.error().code, latest.error().message);
+            }
+            if (latest->requested_by_user_id != user && context.acting_identity != "admin") {
+                co_return ApiResult::success(std::move(out));
+            }
+            if (auto loaded = control::settled(co_await load_agent_task_content(context, *latest));
+                !loaded) {
+                co_return ApiResult::failure(loaded.error().code, loaded.error().message);
+            }
+            auto chained =
+                co_await conversation_chain(context, std::move(*latest), app_conversation_turns);
+            if (!chained) {
+                co_return ApiResult::failure("store_error", chained.error().message);
+            }
+            const std::vector<control::AgentTask>& turns = *chained;
+            for (auto turn = turns.rbegin(); turn != turns.rend(); ++turn) {
+                json item = task_json(*turn);
+                item["request"] =
+                    turn->body.is_object() ? turn->body.value("message", std::string()) : "";
+                const json handed =
+                    turn->body.is_object() ? turn->body.value("context", json::object()) : json();
+                item["confirmation"] = handed.is_object() && handed.contains("confirmed_proposal");
+                out["turns"].push_back(std::move(item));
+            }
+            out["truncated"] = turns.size() >= app_conversation_turns;
+            co_return ApiResult::success(std::move(out));
+        }});
+    registry.add(Capability{
         .name = "list_opportunities",
         .title = "List Opportunities",
         .description =
@@ -7016,6 +7186,16 @@ void register_agent_run_capabilities(Registry& registry) {
                     body["prior_turn"] = {{"task_id", prior->id},
                                           {"message", prior->body.value("message", std::string())},
                                           {"answer", prior->result}};
+                    if (agent == "agent-application" &&
+                        (task_kind == "change" || task_kind == "repair")) {
+                        // The whole thread, so the agent continues the conversation (lake#1240).
+                        auto chained =
+                            co_await conversation_chain(context, *prior, application_history_turns);
+                        if (!chained) {
+                            co_return ApiResult::failure("store_error", chained.error().message);
+                        }
+                        body["history"] = application_history(*chained);
+                    }
                 } else if (prior.error().code != "not_found") {
                     co_return ApiResult::failure(prior.error().code, prior.error().message);
                 }

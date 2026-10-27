@@ -10,6 +10,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <openssl/evp.h>
@@ -812,7 +813,11 @@ void register_model_capabilities(Registry& registry) {
     registry.add(write_capability(
         "commit_repository_files",
         "Commit repository files",
-        "Commit regular, staged LFS, and delete operations to a repository revision.",
+        "Commit regular, staged LFS, and delete operations to a repository revision. An "
+        "operation's optional `expected_blob` is the blob the path held when it was read "
+        "(repository_file `blob`; an empty string: the path did not exist): when the path holds "
+        "anything else at commit time the whole commit is refused with `conflict` and nothing "
+        "changes, so an editor never overwrites a change made since it opened the file.",
         [](const json& input, ApiContext& context) {
             const auto repository = writable_repository(input, context);
             if (!repository) {
@@ -826,6 +831,9 @@ void register_model_capabilities(Registry& registry) {
                     "invalid_input", "operations must be an array", "/operations");
             }
             std::vector<RepositoryWriteOperation> operations;
+            // Each path's blob when the caller read it (lake#1239): checked under the
+            // repository's mutation lock, against the tree the commit replaces.
+            std::vector<std::pair<std::string, std::string>> expected_blobs;
             for (std::size_t index = 0; index < input.at("operations").size(); ++index) {
                 const json& item = input.at("operations").at(index);
                 const std::string path = "/operations/" + std::to_string(index);
@@ -836,6 +844,14 @@ void register_model_capabilities(Registry& registry) {
                 RepositoryWriteOperation operation;
                 operation.path = item.at("path");
                 const std::string type = item.at("type");
+                if (item.contains("expected_blob")) {
+                    if (!item.at("expected_blob").is_string()) {
+                        return ApiResult::failure("invalid_input",
+                                                  "expected_blob must be a string",
+                                                  path + "/expected_blob");
+                    }
+                    expected_blobs.emplace_back(operation.path, item.at("expected_blob"));
+                }
                 if (type == "file") {
                     operation.kind = RepositoryWriteKind::File;
                     const auto decoded =
@@ -864,7 +880,27 @@ void register_model_capabilities(Registry& registry) {
                 uploaded += operation.contents.size();
             }
             record_workspace_transfer(context, repository->workspace_id, uploaded, 0);
-            auto authorize = repository_write_authorizer(*repository, operations, context);
+            auto authorize =
+                [check = repository_write_authorizer(*repository, operations, context),
+                 expected = std::move(expected_blobs)](
+                    const std::vector<RepositoryTreeEntry>& entries) -> SyncStoreResult<void> {
+                for (const auto& [path, blob] : expected) {
+                    const auto entry =
+                        std::ranges::find_if(entries, [&](const RepositoryTreeEntry& item) {
+                            return item.path == path;
+                        });
+                    const std::string current =
+                        entry == entries.end() ? std::string() : entry->blob;
+                    if (current != blob) {
+                        return std::unexpected(SyncStoreError{
+                            "conflict",
+                            path + " changed since it was read; reload it and apply your change "
+                                   "again",
+                            path});
+                    }
+                }
+                return check(entries);
+            };
             const auto committed = context.sync_store->commit_repository_files(
                 repository->customer_id,
                 repository->id,

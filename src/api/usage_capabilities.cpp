@@ -1802,7 +1802,23 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
         context.audit_details["refused"] = "usage_limit";
         co_return std::move(**refusal);
     }
-    ModelProviderRequest request{endpoint, prepared->dump(), stream};
+    // lake#1245: a chat completion with tools to a model that refuses them on Chat Completions
+    // (gpt-6.x) is sent to the Responses API, and its answer comes back as a chat completion. The
+    // tokens are the provider's, counted below exactly as for any other answer.
+    const bool via_responses = endpoint == "chat/completions" && chat_goes_to_responses(*prepared);
+    ModelProviderRequest request{endpoint, std::string(), stream};
+    if (via_responses) {
+        auto translated = chat_request_as_responses(*prepared);
+        if (!translated) {
+            co_return ApiResult::failure(
+                translated.error().code, translated.error().message, translated.error().path);
+        }
+        request.endpoint = "responses";
+        request.body = translated->dump();
+        context.audit_details["provider_endpoint"] = "responses";
+    } else {
+        request.body = prepared->dump();
+    }
     const HeldModelTokens held(caller->customer_id, estimated_model_tokens(request.body.size()));
     if (held.refusal) {
         context.audit_details["refused"] = "usage_limit";
@@ -1815,13 +1831,20 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
     // leaves its tokens uncounted (lake#939).
     const bool relayed = stream && static_cast<bool>(context.model_stream);
     auto passing = std::make_shared<ModelStreamUsage>();
+    // A translated stream is counted from the provider's own events and relayed as chat chunks.
+    auto rewriting = via_responses ? std::make_shared<ResponsesChatStream>() : nullptr;
     if (relayed) {
-        request.on_body =
-            [passing, sink = context.model_stream, open = true](std::string_view piece) mutable {
-                passing->feed(piece);
+        request.on_body = [passing, rewriting, sink = context.model_stream, open = true](
+                              std::string_view piece) mutable {
+            passing->feed(piece);
+            if (rewriting) {
+                const std::string chunks = rewriting->feed(piece);
+                open = open && (chunks.empty() || sink(chunks));
+            } else {
                 open = open && sink(piece);
-                return true;
-            };
+            }
+            return true;
+        };
     }
     auto ran = co_await run_blocking(
         [provider = context.model_provider, request]() { return provider(request); });
@@ -1829,6 +1852,11 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
         co_return ApiResult::failure("busy", ran.error().message);
     }
     const ModelProviderResponse& response = *ran;
+    if (relayed && rewriting && response.status >= 200 && response.status < 300) {
+        if (const std::string rest = rewriting->finish(); !rest.empty()) {
+            context.model_stream(rest);
+        }
+    }
     context.audit_details["provider_status"] = response.status;
     // An explicit HTTP refusal is unbilled. A transport failure with no HTTP status is
     // ambiguous: the provider may have generated an answer, so account for it below.
@@ -1886,6 +1914,9 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
              {"streamed", stream}};
     if (relayed) {
         // The caller already has the stream, piece by piece.
+    } else if (stream && via_responses) {
+        ResponsesChatStream whole;
+        out["events"] = whole.feed(response.body) + whole.finish();
     } else if (stream) {
         out["events"] = response.body;
     } else {
@@ -1893,6 +1924,13 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
         if (!answer.is_object()) {
             co_return ApiResult::failure("engine_error",
                                          "the model provider answered without a JSON object");
+        }
+        if (via_responses) {
+            auto translated = responses_answer_as_chat(answer);
+            if (!translated) {
+                co_return ApiResult::failure(translated.error().code, translated.error().message);
+            }
+            answer = std::move(*translated);
         }
         out["response"] = std::move(answer);
     }

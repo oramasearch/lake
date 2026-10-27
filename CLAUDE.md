@@ -8,7 +8,7 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
-Status: 2026-10-26. The current release is **v0.7.3** ([`docs/releases/v0.7.3.md`](docs/releases/v0.7.3.md), a hotfix after **v0.7.2**; every release is indexed in [`docs/releases/README.md`](docs/releases/README.md)). Of the older ones, **v0.4.0** ([`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md): the security release from the multi-tenant audit and the pre-launch review, SAML sign-in, OpenID Connect discovery and `delete_account`); before it **v0.3.1** (billing through a shared Stripe account); before that **v0.3.0**
+Status: 2026-10-26. The current release is **v0.8.0** ([`docs/releases/v0.8.0.md`](docs/releases/v0.8.0.md): agents on gpt-6.1-sol through the Responses API, and editing Apps from the console; before it the hotfix **v0.7.3** and **v0.7.2**; every release is indexed in [`docs/releases/README.md`](docs/releases/README.md)). Of the older ones, **v0.4.0** ([`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md): the security release from the multi-tenant audit and the pre-launch review, SAML sign-in, OpenID Connect discovery and `delete_account`); before it **v0.3.1** (billing through a shared Stripe account); before that **v0.3.0**
 ([`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md): the lake.live order sheet and the 2026-10-18
 UX review's fixes, with its known issues); v0.2.0 ([`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md))
 added secure networking, regions, the managed key and own identity, Clerk webhooks, the agents'
@@ -432,6 +432,11 @@ priced at OpenAI's 2x input and 1.5x output plus 30%; a `service_tier` other tha
 and `default` is always sent. Ship → Workspaces → Settings is the picker, with prices. Not deployed;
 the operator must vendor the schema and select `agent_model_prices_guard` before the image rolls. See
 [`docs/api/model-gateway.md#the-workspaces-model`](docs/api/model-gateway.md#the-workspaces-model).
+A chat completion with tools to a gpt-6.x model (`responses_for_tools_models`) is sent to OpenAI's
+Responses API and answered as a chat completion, streams included (lake#1245, no migration), because
+OpenAI refuses tools on Chat Completions for those models; gpt-5.5 and calls without tools stay on
+Chat Completions. See
+[`docs/api/model-gateway.md#tools-on-the-gpt-6-models`](docs/api/model-gateway.md#tools-on-the-gpt-6-models).
 
 The quickstart process is the console's home (lake#1128, no migration): `start_quickstart`,
 `quickstart_status`, `train_quickstart` and `quickstart_snippets` take a dropped dataset to a

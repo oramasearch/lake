@@ -41,7 +41,7 @@ bool gateway_model_allowed(const std::vector<GatewayModel>& models, std::string_
 
 // The model an agent turn calls when its workspace has chosen none (lake#1230,
 // docs/api/model-gateway.md#the-workspaces-model).
-inline constexpr std::string_view default_agent_model = "gpt-5.5";
+inline constexpr std::string_view default_agent_model = "gpt-6.1-sol";
 // A chat model, as opposed to an embedding model: what a workspace may choose for its agents.
 bool is_chat_model(std::string_view name);
 // The served chat models, in the configured order.
@@ -77,6 +77,57 @@ std::expected<void, ApiError> validate_gateway_model(std::string_view model, Api
 // with `service_tier: default`, so the provider never processes it in a costlier mode (lake#1230).
 std::expected<nlohmann::json, ApiError> prepare_model_request(std::string_view endpoint,
                                                               nlohmann::json request);
+
+// lake#1245: the models OpenAI refuses on Chat Completions when a request carries function tools
+// at their default reasoning effort ("Function tools with reasoning_effort are not supported for
+// <model> in /v1/chat/completions. To use function tools, use /v1/responses"). The gateway sends
+// such a call to `/v1/responses` and answers it as a chat completion
+// (docs/api/model-gateway.md#tools-on-the-gpt-6-models). A new model is one more line. A dated
+// snapshot of a listed model (`gpt-6.1-sol-2026-...`) is included. gpt-5.5 takes tools on Chat
+// Completions and is not listed.
+inline constexpr std::array<std::string_view, 4> responses_for_tools_models{
+    "gpt-6.1-sol",
+    "gpt-6.1-terra",
+    "gpt-6-astra",
+    "gpt-6-luna",
+};
+bool needs_responses_for_tools(std::string_view model);
+// Whether a prepared chat completion goes to `/v1/responses`: its model is listed above, it carries
+// at least one tool, and it does not ask for `reasoning_effort: none` (which Chat Completions
+// accepts with tools on the models that support it).
+bool chat_goes_to_responses(const nlohmann::json& chat);
+// The prepared chat completion as the Responses request that asks the same: messages become input
+// items (assistant tool calls become `function_call` items and tool results `function_call_output`
+// items, keyed by call id), tools become Responses function tools (`strict` false unless asked, as
+// on Chat Completions), and `reasoning_effort`, `max_completion_tokens`/`max_tokens`,
+// `response_format` and `verbosity` move to their Responses fields. `store: false` and
+// `service_tier: default` are kept. A field Responses has no equivalent for (`n` > 1, `stop`,
+// `logprobs`, `logit_bias`, `seed`, penalties, the deprecated `functions`) is invalid_input.
+std::expected<nlohmann::json, ApiError> chat_request_as_responses(const nlohmann::json& chat);
+// A Responses answer as the chat completion the caller asked for: `choices[0].message` with the
+// answer's text and its `tool_calls`, `finish_reason` (`tool_calls`, `length`, `content_filter` or
+// `stop`), and `usage` with prompt, completion (reasoning included) and total tokens.
+// A failed answer is engine_error with the provider's message.
+std::expected<nlohmann::json, ApiError> responses_answer_as_chat(const nlohmann::json& answer);
+// A Responses event stream rewritten, as it arrives, as the Chat Completions chunks the caller
+// asked for: the role, text and tool-call deltas, the finishing chunk, the usage chunk
+// (`choices: []`) and `data: [DONE]`. Feed it each piece in order; each call returns the chunks
+// the pieces completed so far. `finish()` reads a last line without its line end.
+class ResponsesChatStream {
+public:
+    std::string feed(std::string_view piece);
+    std::string finish();
+
+private:
+    std::string line(std::string_view text);
+    std::string chunk(nlohmann::json delta, nlohmann::json finish_reason = nullptr) const;
+    std::string partial_;
+    std::string id_;
+    std::int64_t created_ = 0;
+    std::string model_;
+    std::vector<std::int64_t> tool_outputs_; // the output_index of each tool call, in order
+    bool done_ = false;
+};
 
 // The tokens one answer used, as the provider reported them: `usage.prompt_tokens` and
 // `usage.completion_tokens` (chat completions, embeddings) or `usage.input_tokens` and

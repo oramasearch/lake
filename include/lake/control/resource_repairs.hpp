@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -86,7 +87,12 @@ struct ResourceRepair {
     std::int64_t auto_fix_generation = 0; // the generation the running attempt is repairing
     std::vector<std::int64_t> attempted_generations;
     std::string repair_conversation_id;
+    // The newest change conversation, whoever had it (kept for records written before lake#1240).
     std::string change_conversation_id;
+    // Each person's own change conversation with the agent about this resource, by user id
+    // (lake#1240): agent_turn continues only the requester's own conversation, so a second person
+    // changing the same app has a thread of their own.
+    std::map<std::string, std::string> change_conversations;
     std::int64_t revision = 0;
 };
 
@@ -113,6 +119,13 @@ std::string resource_notification_id(std::string_view event,
 
 nlohmann::json resource_notification_json(const ResourceNotification& notification,
                                           const std::string& viewer_user_id);
+// The change conversation `user` continues on this resource (lake#1240): their own, else the
+// record's newest one from before per-person conversations when `theirs` says that conversation is
+// that person's, else none (a new conversation starts).
+std::string person_change_conversation(const ResourceRepair& repair,
+                                       const std::string& user,
+                                       const std::function<bool(const std::string&)>& theirs);
+
 nlohmann::json resource_repair_json(const ResourceRepair& repair);
 
 // Records a notification once: an id already present answers false, a new one true.
