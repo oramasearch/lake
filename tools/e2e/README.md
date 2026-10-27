@@ -14,6 +14,7 @@ How to get a Clerk test user and ticket, and what each browser script checks, is
 | `services.mjs` | Ship → Services: every service kind |
 | `change-app.mjs` | An App's Change App split screen: ask, propose, confirm, deploy, and the frame reloads onto the change (lake#1259) |
 | `agents.py` | The Agent Library over the agent bus (below) |
+| `test_agents.py` | Offline tests of `agents.py`'s own logic (which table T3 ranks by), no Lake needed |
 | `start-times.py` | How long each service kind takes to start |
 
 ## Live agent scenarios
@@ -56,3 +57,15 @@ workspace lacks the scenarios' data, the suite uploads `datasets.ux_review_churn
 dataset's entity only under a name it recognizes (`account_id`, `customer_id`, ...) and a study cannot
 name another (agent-experiments#32). It changes the live customer only there and in
 scenarios whose descriptions say so.
+
+T3 needs one known answer, the riskiest account. It ranks by the newest `churn_results.at_risk_*`
+table whose columns include `account` and `risk`, else by `datasets.ux_review_at_risk`. Each
+at_risk table's columns are read first (`SELECT * … LIMIT 1`): a run over other data writes its own
+columns, such as the Quickstart's films (`title`, `genre=…`, `rating`, `risk`, no `account`), and
+that table is named and skipped (lake#1258).
+
+The suite's own logic has offline tests that need no Lake:
+
+```sh
+python3 tools/e2e/test_agents.py
+```
