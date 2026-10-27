@@ -10,8 +10,9 @@ key it holds, and never waits inside a request: every turn is followed with rece
 <token-file> holds a lake API key with every tool (Developer → MCP). The token is never printed. Every
 workspace call names the workspace (`workspace_id`, required since lake v0.5). The scenarios read
 `datasets.ux_review_churn` (200 accounts, with an `as_of` snapshot date, a 90-day churn window,
-`churned` and `tenure_months`) and `datasets.ux_review_at_risk` (each account's risk); when the
-workspace does not have them, the suite uploads them first (`upload_dataset`) and says so. T3 ranks
+`churned` and `tenure_months`) and `datasets.ux_review_at_risk` (each account's risk); T12 reads
+`datasets.ux_review_churn_study`, the same rows keyed by `account_id`. When the workspace does not
+have them, the suite uploads them first (`upload_dataset`) and says so. T3 ranks
 by a `churn_results.at_risk_*` table when a run wrote one, else by `ux_review_at_risk`.
 Scenarios that only propose change nothing. T11 confirms its exact Application Agent proposal,
 deploys that App, and requests its URL. T12 confirms an Experiments Agent experiment, observes its
@@ -283,9 +284,13 @@ def t11_application_agent():
 
 
 def t12_experiments_agent():
+    # The study engine keys a dataset by a column it recognizes (`account_id`, `customer_id`, ...;
+    # zetta src/core/data/dataset_path.cpp entity_column_candidates), and a study cannot name one
+    # itself: on ux_review_churn, keyed by `account`, validate_study refuses and the agent rightly
+    # asks back (agent-experiments#32). The study dataset is the same rows keyed by `account_id`.
     task, seconds, request, _ = turn(
         "agent-experiments",
-        "Tune a churn model on datasets.ux_review_churn for validation AUC with no more than "
+        "Tune a churn model on datasets.ux_review_churn_study for validation AUC with no more than "
         "four trials, one trial at a time, and a fixed seed.",
         "experiment")
     answer = task.get("answer") or {}
@@ -388,19 +393,25 @@ def churn_csv():
     return "\n".join(lines) + "\n"
 
 
+def churn_study_csv():
+    """The churn rows keyed by `account_id`, a column the study engine recognizes as the entity."""
+    return churn_csv().replace("account,", "account_id,", 1)
+
+
 def risk_csv():
     return "account,risk\n" + "".join(f"{a},{r}\n" for a, _, _, _, _, r in churn_rows())
 
 
 def prepare():
-    """The data the scenarios read: uploads datasets.ux_review_churn and datasets.ux_review_at_risk
-    when they are missing, and answers the SQL that ranks accounts by risk (a run's
+    """The data the scenarios read: uploads datasets.ux_review_churn, datasets.ux_review_at_risk and
+    datasets.ux_review_churn_study when they are missing, and answers the SQL that ranks accounts by risk (a run's
     churn_results.at_risk_* table when there is one)."""
     rows = sql_rows("SELECT database, dataset FROM system.datasets")
     if rows is None:
         sys.exit("the workspace cannot list its datasets (workspace_sql); is the workspace ready?")
     names = {(r.get("database"), r.get("dataset")) for r in rows}
-    for table, content in (("ux_review_churn", churn_csv()), ("ux_review_at_risk", risk_csv())):
+    for table, content in (("ux_review_churn", churn_csv()), ("ux_review_at_risk", risk_csv()),
+                           ("ux_review_churn_study", churn_study_csv())):
         if ("datasets", table) in names:
             continue
         uploaded = api("POST", "workspace_act", {

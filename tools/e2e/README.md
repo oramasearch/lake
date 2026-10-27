@@ -49,6 +49,9 @@ tools/e2e/agents.py <base-url> <token-file> <customer-id> <workspace-id> [scenar
 
 Pass the base URL, a file containing a Lake key with every tool, the customer id and the workspace
 id (`/v1/viewer` answers both), and optional scenario names. Every call names the workspace. When the
-workspace lacks the scenarios' data, the suite uploads `datasets.ux_review_churn` and
-`datasets.ux_review_at_risk` first and says so. It changes the live customer only there and in
+workspace lacks the scenarios' data, the suite uploads `datasets.ux_review_churn`,
+`datasets.ux_review_at_risk` and `datasets.ux_review_churn_study` first and says so. T12 studies
+`ux_review_churn_study`: the same rows keyed by `account_id`, because the study engine finds a
+dataset's entity only under a name it recognizes (`account_id`, `customer_id`, ...) and a study cannot
+name another (agent-experiments#32). It changes the live customer only there and in
 scenarios whose descriptions say so.
