@@ -2323,6 +2323,49 @@ void register_search_capabilities(Registry& registry) {
         .input_aliases = {{"index", "index_id"}}});
 }
 
+// Whether a model groups rows into segments rather than predicting a column (lake#1243): the
+// engine's model kind (`segmentation`, zetta#1042), or its weights' kind.
+static bool clustering_model(const json& model) {
+    const auto kind_of = [](const json& value) {
+        if (!value.is_object() || !value.contains("kind") || !value["kind"].is_string()) {
+            return std::string();
+        }
+        std::string kind = value["kind"].get<std::string>();
+        std::ranges::transform(
+            kind, kind.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return kind;
+    };
+    for (const std::string& kind :
+         {kind_of(model), kind_of(model.is_object() ? model.value("feature_schema", json()) : json())}) {
+        if (kind == "segmentation" || kind == "clustering" || kind == "cluster") {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The engine's refusal to score or explain a model whose weights are not gradient-boosted trees
+// (zetta before #1497 reads only those): "score: model 'm' weights unavailable: /: required
+// property 'objective' not found in object". Its schema words are never shown (lake#1243).
+static bool unscorable_weights(std::string_view message) {
+    return message.contains("weights unavailable") && message.contains("'objective'");
+}
+
+static std::string clustering_predict_unsupported(const std::string& model) {
+    return "Model " + model +
+           " is a clustering model: it groups the rows it was trained on into segments and "
+           "predicts no column, so there is nothing to score. Its segments, and the table that "
+           "assigns each row to one, are on its page in Ship → Models. This workspace's engine "
+           "cannot place a new row in a segment yet.";
+}
+
+static std::string unscorable_model(const std::string& model) {
+    return "Model " + model +
+           " cannot score rows in this workspace's engine: it is not a model that predicts a "
+           "column (a clustering model groups rows into segments instead). Its page in Ship → "
+           "Models shows what it made.";
+}
+
 // The engine names a bad row by its zero-based index ("score: row 2 has no 'tenure'"), but people
 // count rows from one: the message names it as row 3, followed by the row's own key when it has one
 // as a string or a number ("row 3 ('partial')", lake#819). The error's `path` keeps the zero-based
@@ -2387,8 +2430,11 @@ liquid::runtime::task<ApiResult> predict_rows(const json& input, ApiContext& con
         co_return std::move(**served);
     }
     const json& rows = input.at("rows");
+    // A clustering model (lake#1243) answers each row's nearest segment, from an engine that can
+    // place a new row in one (zetta#1497); an older engine refuses with its weights' schema.
+    const bool clustering = clustering_model(**described);
     json score{{"model", model}, {"rows", rows}};
-    if (input.contains("top_k")) {
+    if (input.contains("top_k") && !clustering) {
         score["top_k"] = input["top_k"];
     }
     auto scored = co_await call_workspace(context, customer, "score", true, std::move(score));
@@ -2396,8 +2442,14 @@ liquid::runtime::task<ApiResult> predict_rows(const json& input, ApiContext& con
         co_return ApiResult::failure("store_unavailable", scored.error().message);
     }
     if (!*scored) {
-        // "score: row 2 has no 'tenure'" is about /rows/2/tenure, and reads "row 3" (lake#819).
         const std::string message = scored->error().message;
+        if (unscorable_weights(message)) {
+            co_return ApiResult::failure(
+                "not_supported",
+                clustering ? clustering_predict_unsupported(model) : unscorable_model(model),
+                "/model_id");
+        }
+        // "score: row 2 has no 'tenure'" is about /rows/2/tenure, and reads "row 3" (lake#819).
         static const std::regex row_field(R"(row (\d+) has (?:no|a non-numeric) '([^']+)')");
         std::smatch match;
         if (std::regex_search(message, match, row_field)) {
@@ -2408,8 +2460,11 @@ liquid::runtime::task<ApiResult> predict_rows(const json& input, ApiContext& con
         co_return workspace_failure(scored->error(), input);
     }
     json value = std::move(**scored);
-    if (value.is_object() && value.contains("ranked") && value["ranked"].is_array()) {
-        for (json& entry : value["ranked"]) {
+    for (const char* list : {"ranked", "assignments"}) {
+        if (!value.is_object() || !value.contains(list) || !value[list].is_array()) {
+            continue;
+        }
+        for (json& entry : value[list]) {
             if (!entry.is_object() || !entry.contains("entity") ||
                 !entry["entity"].is_number_integer()) {
                 continue;
@@ -2436,8 +2491,12 @@ void register_predict_capability(Registry& registry) {
             "ranked by risk, with the features that drive it. `model_id` is the model's id "
             "(Ship → Models); `rows` are the records, each keyed by the model's feature columns "
             "and carrying its own key in `entity_column` (default `entity`). Every ranked entry "
-            "answers that key as `entity` and the record's position as `row`. A model that is "
-            "not published is refused; publish it with workspace_act expose_model.",
+            "answers that key as `entity` and the record's position as `row`. A clustering "
+            "(segmentation) model answers `assignments` instead, one per row in order: "
+            "{row, entity, segment_id, distance, label}, each record's nearest segment, from a "
+            "workspace engine that can place a new row in a segment; an engine that cannot is "
+            "refused as not_supported. A model that is not published is refused; publish it "
+            "with workspace_act expose_model.",
         .input_schema = customer_input_schema(
             {{"model_id", {{"type", "string"}}},
              {"rows", {{"type", "array"}, {"items", {{"type", "object"}}}, {"minItems", 1}}},
@@ -8008,6 +8067,27 @@ ApiResult workspace_failure(const control::ZettaControlError& error,
                                   : error.message);
         warned.error.details = error.details.is_object() ? error.details : json::object();
         return warned;
+    }
+    // score or explain on a model that is not gradient-boosted trees, such as a clustering model
+    // (lake#1243): said in words, never as the weights' missing `objective` property.
+    if (unscorable_weights(error.message)) {
+        std::string model;
+        if (input.is_object()) {
+            for (const char* key : {"model_id", "model"}) {
+                if (input.contains(key) && input[key].is_string()) {
+                    model = input[key].get<std::string>();
+                    break;
+                }
+            }
+        }
+        if (model.empty()) {
+            static const std::regex quoted(R"(model '([^']+)')");
+            std::smatch match;
+            if (std::regex_search(error.message, match, quoted)) {
+                model = match[1].str();
+            }
+        }
+        return ApiResult::failure("not_supported", unscorable_model(model));
     }
     std::string message = engine_words_in_lake_terms(error.message);
     std::string field;
