@@ -61,11 +61,12 @@ def app_answers(url):
         return False
 
 
-def turn(agent, message, kind="api", context=None, budget=330):
+def turn(agent, message, kind="api", context=None, budget=330, extra=None):
     """One agent turn, followed on the bus. Returns (task, seconds, request seconds, event types)."""
     started = time.time()
     asked = api("POST", "agent_turn", {"customer_id": customer, "workspace_id": workspace, "agent": agent,
-                                       "message": message, "kind": kind, "context": context or {}})
+                                       "message": message, "kind": kind, "context": context or {},
+                                       **(extra or {})})
     request_seconds = time.time() - started
     if not asked.get("ok"):
         return {"status": "refused", "message": json.dumps(asked.get("error"))}, 0, request_seconds, []
@@ -80,12 +81,20 @@ def turn(agent, message, kind="api", context=None, budget=330):
         task = value.get("task") or task
         if task.get("status") in ("succeeded", "failed"):
             break
+    task.setdefault("task_id", task_id)
     return task, time.time() - started, request_seconds, events
 
 
 def reads(task):
     answer = task.get("answer") or {}
     return [(read.get("capability"), bool(read.get("ok"))) for read in answer.get("reads", [])]
+
+
+def confirming(task):
+    """What a confirm turn names (lake#561): the turn that proposed, and its proposal's digest."""
+    stored = api("GET", "get_agent_task", {"customer_id": customer, "workspace_id": workspace,
+                                           "task_id": task["task_id"]}).get("value") or {}
+    return {"proposal_task_id": task["task_id"], "proposal_sha256": stored.get("proposal_sha256", "")}
 
 
 def base_checks(task, request_seconds, limit):
@@ -257,7 +266,7 @@ def t11_application_agent():
         "Confirm and deploy the reviewed proposal.",
         "app",
         {"confirmed_proposal": proposal},
-        420)
+        420, confirming(task))
     seconds += confirm_seconds
     deployed = (confirmed.get("answer") or {}).get("result") or {}
     problems += base_checks(confirmed, confirm_request, 420)
@@ -294,7 +303,7 @@ def t12_experiments_agent():
         "Confirm and start the reviewed experiment proposal.",
         "experiment",
         {"confirmed_proposal": proposal},
-        420)
+        420, confirming(task))
     seconds += confirm_seconds
     running = (confirmed.get("answer") or {}).get("result") or {}
     problems += base_checks(confirmed, confirm_request, 420)
