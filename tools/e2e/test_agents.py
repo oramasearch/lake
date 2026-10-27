@@ -28,6 +28,7 @@ class Ranking(unittest.TestCase):
         lists `tables`."""
         listed = [{"database": "datasets", "dataset": "ux_review_churn", "columns": "account, churned"},
                   {"database": "datasets", "dataset": "ux_review_at_risk", "columns": "account, risk"},
+                  {"database": "datasets", "dataset": "ux_review_churn_study", "columns": "account_id, churned"},
                   *tables]
 
         def sql_rows(statement):
