@@ -9,6 +9,8 @@ lists (orama-operator#936): a lake release becomes only the `image:` in a set fi
 v0.6.1 predate the commands; the operator keeps its vendored path for them. See
 [`../deployment/operator-interface.md`](../deployment/operator-interface.md).
 
+- [v0.8.1](v0.8.1.md) — 2026-10-27. A patch: fixes from the customer-insights demo (exact file text, clustering on
+  real columns, Change App reloads onto the new version, e2e T3 and T12, the test sweep).
 - [v0.8.0](v0.8.0.md) — 2026-10-26. Agents on gpt-6.1-sol again (gpt-6.x tool calls through the Responses API;
   lake#1245); edit repository files, a change-App conversation and the Change App split screen (lake#1239–#1241).
 - [v0.7.3](v0.7.3.md) — 2026-10-26. A hotfix: agents default to gpt-5.5 again (gpt-6.x refuses tools with
