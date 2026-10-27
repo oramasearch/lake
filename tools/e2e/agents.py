@@ -13,7 +13,9 @@ workspace call names the workspace (`workspace_id`, required since lake v0.5). T
 `churned` and `tenure_months`) and `datasets.ux_review_at_risk` (each account's risk); T12 reads
 `datasets.ux_review_churn_study`, the same rows keyed by `account_id`. When the workspace does not
 have them, the suite uploads them first (`upload_dataset`) and says so. T3 ranks
-by a `churn_results.at_risk_*` table when a run wrote one, else by `ux_review_at_risk`.
+by every `churn_results.at_risk_*` table whose columns include `account` and `risk` (a run over the
+churn data; any one's riskiest account is right), else by `ux_review_at_risk`; an at_risk table from
+other data, such as the Quickstart's films (title, genre, rating), is named and skipped (lake#1258).
 Scenarios that only propose change nothing. T11 confirms its exact Application Agent proposal,
 deploys that App, and requests its URL. T12 confirms an Experiments Agent experiment, observes its
 trials, and asks for the explanation. Prints one line per scenario and exits 1 when any failed.
@@ -26,12 +28,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-if len(sys.argv) < 5 or sys.argv[4].upper().startswith("T") and sys.argv[4][1:].isdigit():
-    sys.exit(__doc__)
-base, token_file, customer, workspace, *only = sys.argv[1:]
-token = open(token_file).read().strip()
-if not token.lower().startswith("bearer "):
-    token = "Bearer " + token
+# Set by main() from the command line; tools/e2e/test_agents.py imports the module without them.
+base = token = customer = workspace = ""
+only = []
+RANKING = []
 
 
 def api(method, capability, body=None):
@@ -134,19 +134,23 @@ def t2_columns():
 
 
 def t3_ranked():
-    top = api("GET", "workspace_sql", {"customer_id": customer, "workspace_id": workspace,
-                                       "statement": RANKING})
-    if not top.get("ok") or not (top.get("value") or {}).get("rows"):
-        return [f"the workspace cannot rank: {top.get('error')}"], 0
-    expected = str(top["value"]["rows"][0]["account"])
+    expected = set()
+    for statement in RANKING:
+        top = api("GET", "workspace_sql", {"customer_id": customer, "workspace_id": workspace,
+                                           "statement": statement})
+        if not top.get("ok") or not (top.get("value") or {}).get("rows"):
+            return [f"the workspace cannot rank ({statement}): {top.get('error')}"], 0
+        expected.add(str(top["value"]["rows"][0]["account"]))
+    if not expected:
+        return ["no table to rank accounts by"], 0
     task, seconds, request, _ = turn("agent-ask-orama",
                                      "Which of my accounts are most at risk of churning?")
     reply = (task.get("answer") or {}).get("reply") or ""
     problems = base_checks(task, request, 90) + failed_reads(task, 1)
     if "limit of tool rounds" in reply:
         problems.append("it ran out of tool rounds")
-    if expected not in reply:
-        problems.append(f"the reply does not name the riskiest account ({expected})")
+    if not any(account in reply for account in expected):
+        problems.append(f"the reply does not name the riskiest account ({' or '.join(sorted(expected))})")
     return problems, seconds
 
 
@@ -404,9 +408,9 @@ def risk_csv():
 
 def prepare():
     """The data the scenarios read: uploads datasets.ux_review_churn, datasets.ux_review_at_risk and
-    datasets.ux_review_churn_study when they are missing, and answers the SQL that ranks accounts by risk (a run's
-    churn_results.at_risk_* table when there is one)."""
-    rows = sql_rows("SELECT database, dataset FROM system.datasets")
+    datasets.ux_review_churn_study when they are missing, and answers the SQL statements T3 ranks
+    accounts by (ranking)."""
+    rows = sql_rows("SELECT database, dataset, columns FROM system.datasets")
     if rows is None:
         sys.exit("the workspace cannot list its datasets (workspace_sql); is the workspace ready?")
     names = {(r.get("database"), r.get("dataset")) for r in rows}
@@ -420,19 +424,59 @@ def prepare():
         if not uploaded.get("ok"):
             sys.exit(f"could not upload datasets.{table}: {json.dumps(uploaded.get('error'))}")
         print(f"prepared: uploaded datasets.{table} (200 rows)", flush=True)
-    at_risk = sorted(d for db, d in names if db == "churn_results" and str(d).startswith("at_risk_"))
-    table = f"churn_results.{at_risk[-1]}" if at_risk else "datasets.ux_review_at_risk"
-    return f"SELECT account, risk FROM {table} ORDER BY risk DESC LIMIT 3"
+    return ranking(rows)
 
 
-RANKING = prepare() if not only or set(only) & {"T1", "T2", "T3", "T5", "T6", "T7", "T11", "T12"} else ""
+def columns_of(row):
+    """A system.datasets row's columns: the engine lists them as one comma-separated string."""
+    value = row.get("columns")
+    if isinstance(value, list):
+        return {str(column).strip() for column in value}
+    return {column.strip() for column in str(value or "").split(",") if column.strip()}
 
-failed = 0
-for key, (title, run) in SCENARIOS.items():
-    if only and key not in only:
-        continue
-    problems, seconds = run()
-    failed += bool(problems)
-    print(f"{key} {'PASS' if not problems else 'FAIL'} {seconds:6.1f}s  {title}"
-          + ("" if not problems else "\n      - " + "\n      - ".join(problems)), flush=True)
-sys.exit(1 if failed else 0)
+
+def ranking(rows):
+    """The statements whose top account T3 accepts (lake#1258). A run's churn_results.at_risk_* table
+    counts only when its real columns include `account` and `risk`, that is a run over the suite's
+    churn data: a run over other data writes that data's own columns (the Quickstart's films have
+    title, genre=… and rating, and no account), and such a table is named and skipped. The tables'
+    names end in a digest, not a sequence, so no one of them is the newest: Ask Orama may read any,
+    and each one's top account is a right answer. With none, the uploaded
+    datasets.ux_review_at_risk (ACME-0042 is its riskiest)."""
+    statements = []
+    for row in sorted(rows, key=lambda r: str(r.get("dataset"))):
+        if row.get("database") != "churn_results" or not str(row.get("dataset")).startswith("at_risk_"):
+            continue
+        table = f"churn_results.{row.get('dataset')}"
+        columns = columns_of(row)
+        if {"account", "risk"} <= columns:
+            statements.append(f"SELECT account, risk FROM {table} ORDER BY risk DESC LIMIT 3")
+        else:
+            print(f"prepared: {table} is not ranked by T3: its columns are "
+                  f"{', '.join(sorted(columns)) or '(none listed)'}, not account and risk", flush=True)
+    return statements or ["SELECT account, risk FROM datasets.ux_review_at_risk ORDER BY risk DESC LIMIT 3"]
+
+
+def main():
+    global base, token, customer, workspace, only, RANKING
+    if len(sys.argv) < 5 or sys.argv[4].upper().startswith("T") and sys.argv[4][1:].isdigit():
+        sys.exit(__doc__)
+    base, token_file, customer, workspace, *only = sys.argv[1:]
+    token = open(token_file).read().strip()
+    if not token.lower().startswith("bearer "):
+        token = "Bearer " + token
+    RANKING = prepare() if not only or set(only) & {"T1", "T2", "T3", "T5", "T6", "T7", "T11", "T12"} else []
+
+    failed = 0
+    for key, (title, run) in SCENARIOS.items():
+        if only and key not in only:
+            continue
+        problems, seconds = run()
+        failed += bool(problems)
+        print(f"{key} {'PASS' if not problems else 'FAIL'} {seconds:6.1f}s  {title}"
+              + ("" if not problems else "\n      - " + "\n      - ".join(problems)), flush=True)
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()
