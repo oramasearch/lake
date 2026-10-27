@@ -81,7 +81,9 @@ clean up their own copies; see [testing.md](../docs/build/testing.md).
 `test_main.cpp` is the shared GoogleTest runner. `lake::test::postgres_uri()` gives each
 Postgres-backed test a private database copied from a `lake_fixture_template_<digest>` template
 loaded once per `db/schema.sql` version, and drops it afterwards; a start-up sweep removes only
-stale `lake_fixture_*` databases. Fixtures use that database directly, with no nested schema. See
+stale `lake_fixture_*` databases, each on a connection of its own so that a concurrent sweep's
+`FATAL` never fails a test (lake#1254, `test_fixture_sweep.cpp`). Fixtures use that database
+directly, with no nested schema. See
 [testing.md](../docs/build/testing.md#databases-the-runner-owns).
 
 A test's own socket clients (`liquid::http1::request`, liquid sync pushes and pulls) run on one
