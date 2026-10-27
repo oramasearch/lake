@@ -23,6 +23,16 @@ test("the thread keeps every turn, the person's and the agent's, in order", () =
   assert.ok(shown.role === "agent" && shown.current === false, "a proposal the person moved past is history");
 });
 
+test("a proposal the person confirmed says so, not that a later message replaced it (lake#1259)", () => {
+  const confirmedThread = entries([asked, proposed, applied]);
+  const confirmedProposal = confirmedThread[3];
+  assert.ok(confirmedProposal.role === "agent" && confirmedProposal.state === "proposal" && confirmedProposal.confirmed === true && confirmedProposal.current === false);
+  const replaced = entries([asked, proposed, { task_id: "t4", status: "succeeded", request: "No, by plan.", conversation_id: "c", answer: { ok: true, reply: "By plan, then?", result: { kind: "question" } } }])[3];
+  assert.ok(replaced.role === "agent" && replaced.confirmed === false, "a message that is not a confirmation replaces the proposal");
+  const view = readFileSync(new URL("../src/pages/apps/AppConversation.tsx", import.meta.url), "utf8");
+  assert.match(view, /entry\.confirmed \? " You confirmed it; what happened is below\." : " A later message replaced this proposal\."/);
+});
+
 test("only the newest proposal can be confirmed, and never twice", () => {
   assert.equal(confirmable([asked, proposed])?.task_id, "t2");
   assert.equal(confirmable([asked, proposed, applying]), null);

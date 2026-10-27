@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { clampSplit, deployedAndReady, deployFailed, frameUrl, SPLIT_DEFAULT, SPLIT_MAX, SPLIT_MIN, splitAt, splitByKey, storedSplit } from "../src/pages/apps/changeSplit.ts";
+import { clampSplit, deployedAndReady, deployFailed, frameUrl, SETTLE_RELOADS_MS, SPLIT_DEFAULT, SPLIT_MAX, SPLIT_MIN, splitAt, splitByKey, storedSplit } from "../src/pages/apps/changeSplit.ts";
 
 const page = readFileSync(new URL("../src/pages/apps/AppPage.tsx", import.meta.url), "utf8");
 const split = readFileSync(new URL("../src/pages/apps/ChangeAppSplit.tsx", import.meta.url), "utf8");
@@ -40,6 +40,20 @@ test("the frame reloads after a confirmed change once the App's newest generatio
   assert.equal(deployedAndReady({ generation: 4, observed_generation: 4, phase: "Ready" }), true);
   assert.equal(deployFailed({ generation: 4, observed_generation: 4, phase: "Degraded" }), true);
   assert.equal(deployFailed({ generation: 4, observed_generation: 3, phase: "Failed" }), false, "an older failure is not this change's");
+});
+
+test("after Ready the frame reloads again over the next minute, since Ready can come before the new version answers (lake#1259)", () => {
+  // On lake-dev the operator read Ready 2 s after a deploy; the old version answered until 7 s, a
+  // 502 at 7 s, the new one from 8 s (orama-operator#1049). One reload at Ready showed the old App.
+  assert.ok(SETTLE_RELOADS_MS.length >= 3);
+  assert.ok(SETTLE_RELOADS_MS[0] <= 5000, "the first reload again comes within seconds");
+  assert.ok(SETTLE_RELOADS_MS.at(-1)! >= 60000, "and the last a minute after Ready");
+  assert.deepEqual([...SETTLE_RELOADS_MS].sort((a, b) => a - b), [...SETTLE_RELOADS_MS], "in order");
+  // Ready starts the settling reloads; each step reloads, the last ends it, and the page says so.
+  assert.match(split, /if \(deployedAndReady\(next\)\) \{\s*setWaiting\(false\);\s*reload\(\);\s*setSettling\(true\);/);
+  assert.match(split, /SETTLE_RELOADS_MS\.map\(\(delay, index\) =>\s*window\.setTimeout\(\(\) => \{\s*reload\(\);\s*if \(index === SETTLE_RELOADS_MS\.length - 1\) setSettling\(false\);/);
+  assert.match(split, /timers\.forEach\(\(timer\) => window\.clearTimeout\(timer\)\)/);
+  assert.match(split, /the App reloads a few times while the new version takes over\. Reload if it still shows the old one\./);
 });
 
 test("the divider resizes between a quarter and three quarters, and is remembered", () => {
