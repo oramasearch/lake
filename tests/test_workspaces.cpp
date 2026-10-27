@@ -41,6 +41,7 @@
 #include "lake/control/memory_store.hpp"
 #include "lake/control/methodologies.hpp"
 #include "lake/control/platform.hpp"
+#include "lake/control/resource_repairs.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
@@ -4482,6 +4483,130 @@ TEST(AgentRuns, AChangeTurnTurnsInstructionsIntoAProposalAndContinuesTheConversa
     ASSERT_TRUE(third);
     EXPECT_NE(std::ranges::find(third->scopes, "commit_repository_files"), third->scopes.end());
     EXPECT_NE(std::ranges::find(third->scopes, "deploy_app"), third->scopes.end());
+}
+
+// lake#1240: a change conversation is a thread. Each later turn hands the Application Agent every
+// earlier turn (`history`, oldest first), and get_app_conversation lists the thread for the app
+// page.
+TEST(AgentRuns, AChangeConversationKeepsItsTurnsAndHandsThemToTheAgent) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-application", "http://application:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+    const std::string app_id = repairable_app(r, "reports");
+
+    const auto empty = r.call("get_app_conversation", {{"app_id", app_id}});
+    ASSERT_TRUE(empty.ok) << empty.error.message;
+    EXPECT_EQ(empty.value["conversation_id"], "");
+    EXPECT_TRUE(empty.value["turns"].empty());
+    EXPECT_EQ(r.call("get_app_conversation", {{"app_id", "no-such-app"}}).error.code, "not_found");
+
+    const auto started =
+        r.call("change_app", {{"app_id", app_id}, {"message", "Add a chart by region."}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const auto first = r.task(started.value["task_id"]);
+    ASSERT_TRUE(first);
+    EXPECT_FALSE(first->body.contains("history")) << "a first turn has no earlier turns";
+    // The agent asks back.
+    ASSERT_TRUE(r.set_task_status(
+        first->id,
+        "Succeeded",
+        "",
+        "",
+        {{"ok", true}, {"reply", "By region or by country?"}, {"result", {{"kind", "question"}}}}));
+
+    const auto answered = r.call("change_app", {{"app_id", app_id}, {"message", "By region."}});
+    ASSERT_TRUE(answered.ok) << answered.error.message;
+    const auto second = r.task(answered.value["task_id"]);
+    ASSERT_TRUE(second);
+    EXPECT_EQ(second->conversation_id, first->conversation_id);
+    ASSERT_EQ(second->body["history"].size(), 1U) << second->body.dump();
+    EXPECT_EQ(second->body["history"][0]["message"], "Add a chart by region.");
+    EXPECT_EQ(second->body["history"][0]["reply"], "By region or by country?");
+    EXPECT_EQ(second->body["history"][0]["outcome"], "question");
+    const json proposal{{"kind", "proposal"},
+                        {"confirm", true},
+                        {"turn", "change"},
+                        {"diff", "+chart by region"},
+                        {"files", json::array({{{"path", "app.py"}, {"contents", "chart\n"}}})},
+                        {"app", {{"id", app_id}, {"name", "reports"}}}};
+    ASSERT_TRUE(r.set_task_status(second->id,
+                                  "Succeeded",
+                                  "",
+                                  "",
+                                  {{"ok", true}, {"reply", "Here it is."}, {"result", proposal}}));
+
+    // Confirmed through the existing agent_turn path, in the same conversation.
+    const auto confirmed =
+        r.call("agent_turn",
+               {{"agent", "agent-application"},
+                {"kind", "change"},
+                {"message", "Apply the reviewed change."},
+                {"conversation_id", second->conversation_id},
+                {"proposal_task_id", second->id},
+                {"proposal_sha256", lake::api::agent_proposal_digest(proposal)},
+                {"context", {{"app_id", app_id}, {"confirmed_proposal", proposal}}}});
+    ASSERT_TRUE(confirmed.ok) << confirmed.error.message;
+    const auto third = r.task(confirmed.value["task_id"]);
+    ASSERT_TRUE(third);
+    ASSERT_EQ(third->body["history"].size(), 2U) << third->body.dump();
+    EXPECT_EQ(third->body["history"][0]["task_id"], first->id) << "oldest first";
+    EXPECT_EQ(third->body["history"][1]["outcome"], "proposal");
+    EXPECT_EQ(third->body["history"][1]["diff"], "+chart by region");
+    EXPECT_NE(std::ranges::find(third->scopes, "deploy_app"), third->scopes.end());
+    ASSERT_TRUE(r.set_task_status(
+        third->id, "Succeeded", "", "", {{"ok", true}, {"reply", "Committed and redeployed."}}));
+
+    // The thread continues after the confirmation, with all three turns behind it.
+    const auto more = r.call("change_app", {{"app_id", app_id}, {"message", "Now by plan too."}});
+    ASSERT_TRUE(more.ok) << more.error.message;
+    const auto fourth = r.task(more.value["task_id"]);
+    ASSERT_TRUE(fourth);
+    EXPECT_EQ(fourth->conversation_id, first->conversation_id);
+    ASSERT_EQ(fourth->body["history"].size(), 3U);
+    EXPECT_EQ(fourth->body["history"][2]["confirmed"], true);
+
+    const auto thread = r.call("get_app_conversation", {{"app_id", app_id}});
+    ASSERT_TRUE(thread.ok) << thread.error.message;
+    EXPECT_EQ(thread.value["conversation_id"], first->conversation_id);
+    const json& turns = thread.value["turns"];
+    ASSERT_EQ(turns.size(), 4U) << thread.value.dump();
+    EXPECT_EQ(turns[0]["request"], "Add a chart by region.");
+    EXPECT_EQ(turns[1]["request"], "By region.");
+    EXPECT_EQ(turns[1]["proposal_sha256"], lake::api::agent_proposal_digest(proposal))
+        << "the thread carries what Confirm needs";
+    EXPECT_EQ(turns[2]["confirmation"], true);
+    EXPECT_EQ(turns[3]["status"], "pending");
+    EXPECT_EQ(thread.value["truncated"], false);
+}
+
+// lake#1240: each person continues their own change conversation about an app.
+TEST(ResourceRepairs, EachPersonContinuesTheirOwnChangeConversation) {
+    lake::control::ResourceRepair repair;
+    const auto never = [](const std::string&) { return false; };
+    const auto always = [](const std::string&) { return true; };
+    EXPECT_EQ(lake::control::person_change_conversation(repair, "ann", always), "");
+    // A record from before per-person conversations: its one conversation, only for its owner.
+    repair.change_conversation_id = "c-old";
+    EXPECT_EQ(lake::control::person_change_conversation(repair, "ann", always), "c-old");
+    EXPECT_EQ(lake::control::person_change_conversation(repair, "bob", never), "");
+    repair.change_conversations = {{"ann", "c-ann"}, {"bob", "c-bob"}};
+    EXPECT_EQ(lake::control::person_change_conversation(repair, "ann", never), "c-ann");
+    EXPECT_EQ(lake::control::person_change_conversation(repair, "bob", never), "c-bob");
+    EXPECT_EQ(lake::control::person_change_conversation(repair, "cat", always), "")
+        << "once people have their own, the newest is nobody else's";
+    // The record keeps them.
+    lake::control::ResourceRepair stored = repair;
+    stored.customer_id = "c";
+    stored.resource_kind = "app";
+    stored.resource_id = "a";
+    const lake::control::StoredRecord record{
+        .id = lake::control::resource_repair_key("app", "a"),
+        .schema_version = 1,
+        .body = lake::control::ResourceRepairCodec::encode(stored)};
+    const auto decoded = lake::control::ResourceRepairCodec::decode(record);
+    ASSERT_TRUE(decoded);
+    EXPECT_EQ(decoded->change_conversations, repair.change_conversations);
 }
 
 TEST(AgentRuns, AConversationFollowUpCarriesThePriorTurn) {

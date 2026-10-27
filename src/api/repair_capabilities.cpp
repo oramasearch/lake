@@ -151,6 +151,26 @@ std::string first_open_reason(const std::vector<control::ResourceNotification>& 
     return {};
 }
 
+// Whether `conversation`'s newest change turn on this resource was asked by `user`.
+bool change_conversation_is(const ApiContext& context,
+                            const Resource& resource,
+                            const std::string& conversation,
+                            const std::string& user) {
+    if (context.store == nullptr || user.empty()) {
+        return false;
+    }
+    const auto repairer = repairer_of(resource.kind);
+    if (!repairer) {
+        return false;
+    }
+    const auto latest = context.store->latest_agent_conversation_task(resource.customer_id,
+                                                                      conversation,
+                                                                      std::string(repairer->agent),
+                                                                      "change",
+                                                                      resource.workspace_id);
+    return latest && latest->requested_by_user_id == user;
+}
+
 // Starts a repair or change turn for one resource and remembers its conversation on it.
 liquid::runtime::task<ApiResult> start_resource_turn(const json& input,
                                                      ApiContext& context,
@@ -176,9 +196,18 @@ liquid::runtime::task<ApiResult> start_resource_turn(const json& input,
     }
     std::string conversation_id = input.value("conversation_id", std::string());
     if (conversation_id.empty()) {
-        // Later instructions continue the same conversation (lake#1207).
-        conversation_id = turn_kind == "change" ? repair->change_conversation_id
-                                                : repair->repair_conversation_id;
+        // Later instructions continue the same conversation (lake#1207): for a change, the
+        // person's own (lake#1240).
+        conversation_id =
+            turn_kind == "change"
+                ? control::person_change_conversation(
+                      *repair,
+                      context.acting_user_id,
+                      [&](const std::string& conversation) {
+                          return change_conversation_is(
+                              context, *resource, conversation, context.acting_user_id);
+                      })
+                : repair->repair_conversation_id;
     }
     std::string message = input.value("message", std::string());
     if (message.empty() && turn_kind == "repair") {
@@ -216,6 +245,9 @@ liquid::runtime::task<ApiResult> start_resource_turn(const json& input,
             [&](control::ResourceRepair& value) {
                 (turn_kind == "change" ? value.change_conversation_id
                                        : value.repair_conversation_id) = conversation;
+                if (turn_kind == "change" && !context.acting_user_id.empty()) {
+                    value.change_conversations[context.acting_user_id] = conversation;
+                }
             })));
     }
     resource_audit(context,

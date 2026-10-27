@@ -121,8 +121,8 @@ lake#1207, [the API](../api/notifications.md). What the person sees:
   the reason in plain words and the operator's message, *for you* when they deployed it, with
   *Fix with the Application Agent*, *Open* and Dismiss.
 - **App page.** A side card, *Fix or Change This App*: the app's open notifications with the same
-  actions (or *Fix with the Application Agent* on its own when nothing is open); *Change this app
-  with the Application Agent*, a box for more instructions; and **Auto-fix**: off, on with its
+  actions (or *Fix with the Application Agent* on its own when nothing is open); *Change This
+  App*, the conversation below; and **Auto-fix**: off, on with its
   attempts (`1 of 3`), or stopped with the reason, turned on with a number of attempts (1 to 10,
   default 3) or off.
 - **The turn, on the app page** (`?task=`): working, then the proposal (the diagnosis, how many
@@ -132,6 +132,26 @@ lake#1207, [the API](../api/notifications.md). What the person sees:
   confirmation does.
 - **Account → Notifications** (`/settings?tab=notifications`): every notification of the current
   workspace, resolved ones included, with the same actions.
+
+## Changing an app in a conversation
+
+lake#1240, [the API](../api/notifications.md#a-change-is-a-conversation-lake1240). *Change This App*
+on the app page is a thread with the Application Agent, not one instruction and one diff:
+
+- The person writes; the agent answers, asks back, or proposes a diff (how many files change and the
+  diff). Only the newest proposal has *Confirm and apply the change*; a proposal the person moved past
+  stays in the thread as history.
+- Confirm re-reads the stored proposal and refuses one that changed, then sends the existing
+  `agent_turn` confirmation (kind `change`) in the same conversation: the agent commits the change to
+  the app's repository as the person and redeploys. The thread shows *Committing the change and
+  redeploying…*, then the result with *What changed*.
+- The thread goes on after it ("now make the chart by region"). While a turn works the page reads the
+  thread again every 2 seconds and Send waits; the agent keeps working if the person leaves.
+- The thread is `get_app_conversation`: each person's own conversation about the app, kept in the
+  workspace. Ctrl or Cmd + Enter sends.
+
+The component is `frontend/src/pages/apps/AppConversation.tsx`, its rules `conversation.ts`
+(`tests/app-conversation.test.ts`). Repairs keep their turn panel (`?task=`).
 
 The components are `frontend/src/pages/apps/repair.tsx`: `AppNotifications`, `AppRepairCard`,
 `AppTurnPanel`, `NotificationsList` and `NotificationBanner`, which take any resource kind, so the

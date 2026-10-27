@@ -364,6 +364,7 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "finish_drive_upload",
     "get_agent_task",
     "get_app",
+    "get_app_conversation",
     "get_application",
     "get_artifact",
     "get_ask_conversation",
