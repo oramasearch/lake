@@ -1,4 +1,4 @@
-/** Editing a repository file in the console (lake#1239, docs/ui/repositories.md#editing-a-file): which
+/** Editing a repository file in the console (lake#1239, docs/ui/drive.md#editing-a-file): which
  * files the editor may open, the exact bytes it commits, the conflict it refuses, and the Apps a
  * file belongs to. Pure, so `npm test` covers it (tests/repository-edit.test.ts). */
 
