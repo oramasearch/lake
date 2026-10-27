@@ -6,7 +6,7 @@
  * capability directly. */
 import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
 import { Link, Navigate, useSearchParams } from "react-router-dom";
-import { ExternalLink, Hammer, Play, Plus, RotateCcw, Square, Undo2 } from "lucide-react";
+import { Bot, ExternalLink, Hammer, Play, Plus, RotateCcw, Square, Undo2 } from "lucide-react";
 import { act, read, useList, useRead, type Row } from "@/lib/api";
 import { relative } from "@/lib/format";
 import { ConfirmButton } from "@/lib/overlay";
@@ -17,6 +17,8 @@ import { envInput, secretEnvLabel } from "./secretEnv";
 import { AppPhase, AppUrl, decimal, formValues } from "./AppsPage";
 import { PageError, pause, qs, QueryTabs, storedNumber, storeNumber, streamHref, Terminal, useAgentDeployed, useQueryTab, useRunner, useWorkspaceLink } from "./shared";
 import { AppRepairCard, AppTurnPanel } from "./repair";
+import { ChangeAppSplit } from "./ChangeAppSplit";
+import { frameUrl } from "./changeSplit";
 import { stopsPolling } from "@/lib/errors";
 import { UsageThisMonth } from "../usage/UsageThisMonth";
 import { StorePicker } from "../drives/StorePicker";
@@ -80,8 +82,16 @@ function useAppEvents(customerId: string, workspaceId: string | null, appId: str
 export default function AppPage() {
   const { space, workspaceId } = useSession();
   const ws = useWorkspaceLink();
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const customerId = space?.id ?? "";
+  // Change App (lake#1241): the conversation beside the running App, `&change=1`.
+  const changing = params.get("change") === "1";
+  const setChanging = (on: boolean) => {
+    const next = new URLSearchParams(params);
+    if (on) next.set("change", "1");
+    else next.delete("change");
+    setParams(next);
+  };
   const appId = params.get("app_id") ?? "";
   const tab = useQueryTab<Tab>(TABS);
   const runner = useRunner();
@@ -162,6 +172,14 @@ export default function AppPage() {
       sub={<AppUrl url={app.url} />}
       actions={
         <>
+          <Button
+            variant="primary"
+            onClick={() => setChanging(true)}
+            disabled={!applicationAgent.deployed || !frameUrl(app.url)}
+            title={!applicationAgent.deployed ? "The Application Agent is not running on this Lake" : !frameUrl(app.url) ? "This App has no address yet" : "Change this App in a conversation, beside the running App"}
+          >
+            <Bot size={14} aria-hidden /> Change App
+          </Button>
           {url && (
             <Button href={url}>
               <ExternalLink size={14} aria-hidden /> Open app
@@ -172,6 +190,7 @@ export default function AppPage() {
       }
     >
       <PageError error={runner.error} />
+      {changing && <ChangeAppSplit app={app} customerId={customerId} workspaceId={workspaceId} agentDeployed={applicationAgent.deployed} onClose={() => setChanging(false)} />}
       {turnId && (
         <div className="mb-5">
           <AppTurnPanel taskId={turnId} appId={appId} customerId={customerId} workspaceId={workspaceId} />
