@@ -5252,17 +5252,13 @@ private:
         return find_file(repository, *child, path.substr(slash + 1));
     }
 
+    // A file's text is its exact bytes when they are UTF-8, and empty for a binary file, whose
+    // bytes only `raw_contents` carries (lake#1238).
     static std::string display_contents(const std::vector<std::byte>& bytes) {
-        std::string output;
-        for (const std::byte value : bytes) {
-            const unsigned char byte = static_cast<unsigned char>(value);
-            if (byte == '\n' || byte == '\r' || byte == '\t' || std::isprint(byte)) {
-                output += static_cast<char>(byte);
-            } else {
-                output += std::format("\\\\x{:02X}", byte);
-            }
+        if (!is_utf8(std::span<const std::byte>(bytes))) {
+            return {};
         }
-        return output;
+        return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
     }
 
     static SyncStoreResult<std::vector<liquid::change>>
@@ -11481,10 +11477,20 @@ struct ApiServer::Impl {
         if (download) {
             route.res.set("content-disposition", "attachment; filename=download");
         }
+        // The file's exact bytes: text as UTF-8 text, a binary file as bytes (lake#1238).
+        const bool binary = result.value.value("binary", false);
+        auto bytes = base64_decode(json_string(result.value, "content_base64"));
+        if (!bytes) {
+            return send_text(route,
+                             boost::http::status::internal_server_error,
+                             "the file's bytes could not be read",
+                             "text/plain; charset=utf-8",
+                             "no-store");
+        }
         return send_text(route,
                          boost::http::status::ok,
-                         json_string(result.value, "contents"),
-                         "text/plain; charset=utf-8",
+                         std::string(reinterpret_cast<const char*>(bytes->data()), bytes->size()),
+                         binary ? "application/octet-stream" : "text/plain; charset=utf-8",
                          "no-store");
     }
 

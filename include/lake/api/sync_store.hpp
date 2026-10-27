@@ -9,6 +9,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -77,6 +78,9 @@ struct RepositoryTreeEntry {
 using RepositoryWriteAuthorizer =
     std::function<SyncStoreResult<void>(const std::vector<RepositoryTreeEntry>&)>;
 
+// One file of a repository. `raw_contents` is its exact bytes. `contents` is the same bytes as
+// text when they are UTF-8, and empty for a binary file (lake#1238); a store that holds only text
+// may leave `raw_contents` empty and give `contents` alone.
 struct RepositoryFile {
     std::string path;
     std::string blob;
@@ -84,6 +88,63 @@ struct RepositoryFile {
     std::uint64_t size = 0;
     std::vector<std::byte> raw_contents;
 };
+
+// Whether `bytes` are well-formed UTF-8 (RFC 3629): no overlong forms, no surrogates, nothing past
+// U+10FFFF. A byte-order mark, CR and every other code point are text.
+[[nodiscard]] inline bool is_utf8(std::span<const std::byte> bytes) {
+    std::size_t index = 0;
+    while (index < bytes.size()) {
+        const auto lead = std::to_integer<unsigned>(bytes[index]);
+        if (lead < 0x80U) {
+            ++index;
+            continue;
+        }
+        std::size_t length = 0;
+        unsigned low = 0x80U;
+        unsigned high = 0xBFU;
+        if (lead >= 0xC2U && lead <= 0xDFU) {
+            length = 2;
+        } else if (lead >= 0xE0U && lead <= 0xEFU) {
+            length = 3;
+            low = lead == 0xE0U ? 0xA0U : 0x80U;
+            high = lead == 0xEDU ? 0x9FU : 0xBFU;
+        } else if (lead >= 0xF0U && lead <= 0xF4U) {
+            length = 4;
+            low = lead == 0xF0U ? 0x90U : 0x80U;
+            high = lead == 0xF4U ? 0x8FU : 0xBFU;
+        } else {
+            return false;
+        }
+        if (bytes.size() - index < length) {
+            return false;
+        }
+        for (std::size_t offset = 1; offset < length; ++offset) {
+            const auto next = std::to_integer<unsigned>(bytes[index + offset]);
+            if (next < (offset == 1 ? low : 0x80U) || next > (offset == 1 ? high : 0xBFU)) {
+                return false;
+            }
+        }
+        index += length;
+    }
+    return true;
+}
+
+[[nodiscard]] inline bool is_utf8(std::string_view text) {
+    return is_utf8(std::as_bytes(std::span<const char>(text.data(), text.size())));
+}
+
+// A file's text: exactly its bytes when they are UTF-8, and nothing for a binary file (lake#1238).
+// Every capability that answers a repository file's `contents` reads it from here.
+[[nodiscard]] inline std::optional<std::string> repository_file_text(const RepositoryFile& file) {
+    if (file.raw_contents.empty()) {
+        return is_utf8(file.contents) ? std::optional<std::string>(file.contents) : std::nullopt;
+    }
+    if (!is_utf8(std::span<const std::byte>(file.raw_contents))) {
+        return std::nullopt;
+    }
+    return std::string(reinterpret_cast<const char*>(file.raw_contents.data()),
+                       file.raw_contents.size());
+}
 
 struct RepositoryChange {
     std::string id;

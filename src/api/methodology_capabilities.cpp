@@ -380,11 +380,9 @@ source_files(ApiContext& context,
         if (!file) {
             return std::unexpected(sync_failed(file.error()));
         }
-        files.emplace(relative,
-                      file->contents.empty() && !file->raw_contents.empty()
-                          ? std::string(reinterpret_cast<const char*>(file->raw_contents.data()),
-                                        file->raw_contents.size())
-                          : file->contents);
+        // Source is text: a file that is not UTF-8 is listed empty, as an oversized one is
+        // (lake#1238).
+        files.emplace(relative, repository_file_text(*file).value_or(std::string()));
     }
     return files;
 }

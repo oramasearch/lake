@@ -385,11 +385,19 @@ json repository_file_json(const RepositoryFile& file) {
                         reinterpret_cast<const unsigned char*>(bytes.data()),
                         static_cast<int>(bytes.size()));
     }
-    return {{"path", file.path},
-            {"blob", file.blob},
-            {"contents", file.contents},
-            {"content_base64", std::move(encoded)},
-            {"size", file.size}};
+    // `contents` is the file's text exactly when its bytes are UTF-8; a binary file has none and
+    // says so, and `content_base64` carries every file's exact bytes (lake#1238).
+    json output{{"path", file.path},
+                {"blob", file.blob},
+                {"content_base64", std::move(encoded)},
+                {"size", file.size}};
+    if (auto text = repository_file_text(file)) {
+        output["contents"] = std::move(*text);
+        output["binary"] = false;
+    } else {
+        output["binary"] = true;
+    }
+    return output;
 }
 
 json repository_change_json(const RepositoryChange& change) {
@@ -5148,6 +5156,8 @@ void register_repository_capabilities(Registry& registry) {
         .title = "Read a repository file",
         .description =
             "Read one file of a repository at a branch, tag or change, with its contents and size. "
+            "`content_base64` is the file's exact bytes. `contents` is its text, exactly, when the "
+            "file is UTF-8; a file that is not has no `contents` and `binary: true`. "
             "With `units: true`, also the file's syntax units (`start_line`, `end_line`, `kind`) "
             "for the formats Lake parses (C and C++); `units` is absent for any other format.",
         .input_schema = {{"type", "object"},
@@ -5167,6 +5177,7 @@ void register_repository_capabilities(Registry& registry) {
                             {"blob", {{"type", "string"}}},
                             {"contents", {{"type", "string"}}},
                             {"content_base64", {{"type", "string"}}},
+                            {"binary", {{"type", "boolean"}}},
                             {"size", {{"type", "integer"}}},
                             {"units",
                              {{"type", "array"},

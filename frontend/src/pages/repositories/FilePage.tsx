@@ -29,8 +29,11 @@ import {
 type RepositoryFile = {
   path: string;
   blob: string;
-  contents: string;
+  /** The file's text, exactly, when it is UTF-8; absent for a binary file (lake#1238). */
+  contents?: string;
   content_base64: string;
+  /** True when the file is not UTF-8 text: it has no `contents` and is downloaded instead. */
+  binary?: boolean;
   size: number;
   /** Parsed syntax units (`repository_file {units: true}`), absent when the format has none. */
   units?: { start_line: number; end_line: number; kind: string }[];
@@ -283,7 +286,7 @@ function SourceFile({ id, refName, path }: { id: string; refName: string; path: 
             {lines.length === 0 && (
               <tr>
                 <td colSpan={3} className="empty">
-                  This file is empty.
+                  {f.binary ? "This file is not UTF-8 text, so it is not shown here. Download it to see it." : "This file is empty."}
                 </td>
               </tr>
             )}

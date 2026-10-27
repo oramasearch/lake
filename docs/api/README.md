@@ -1,5 +1,10 @@
 # The `/v1` API and MCP
 
+lake#1238: [repositories.md](repositories.md#file-contents) documents `repository_file`'s
+`contents`: the file's text exactly when it is UTF-8, absent with `binary: true` when it is not;
+`content_base64` is unchanged. `resolve_model_file`, `resolve_dataset_file`, `drive_preview` and
+`GET /file/raw` follow the same rule.
+
 lake#1152: [browser-keys.md](browser-keys.md) documents browser keys, `create_browser_key`,
 `list_browser_keys` and `revoke_browser_key`: the key a website's page holds, bound to one index
 (and optionally one model) of one workspace, callable only for `search_index` and `predict` on them

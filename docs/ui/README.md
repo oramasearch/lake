@@ -185,7 +185,7 @@ Files are under `frontend/src/pages/`.
 | `/repositories` | `repositories/RepositoriesPage.tsx` | readable repositories (public ones for a visitor) and Create a Repository | `list_repositories`, `create_repository` |
 | `/repository?id=` | `repositories/RepositoryPage.tsx` | the repository home | `get_repository`, `repository_tree`, `repository_refs`, `repository_file`, `list_changes`, `get_customer`, `get_workspace`, `list_releases`, `entity_effective_access`, `build_image` |
 | `/repository/tree?id=&ref=` | `repositories/TreePage.tsx` | every path with its newest change | `get_repository`, `repository_tree`, `list_changes` |
-| `/file?repository_id=&ref=&path=` | `repositories/FilePage.tsx` | one file, line anchors, blame | `get_repository`, `repository_file`, `list_changes`, `change_diff` |
+| `/file?repository_id=&ref=&path=` | `repositories/FilePage.tsx` | one file, line anchors, blame; a file that is not UTF-8 is said to be binary, with Raw and Download (lake#1238) | `get_repository`, `repository_file`, `list_changes`, `change_diff` |
 | `/changes`, `/change` | `repositories/ChangesPage.tsx`, `ChangePage.tsx` | the change log; one change under review | `list_changes`, `get_change`, `change_diff`, `list_reviews`, `list_review_comments`, `list_artifacts` |
 | `/issues`, `/issue` | `repositories/IssuesPage.tsx`, `IssuePage.tsx`, `NewIssue.tsx`, `IssueParts.tsx` | issues and New issue; one issue, its conversation and its changes | `list_issues`, `list_issue_comments`, `issue_assignees`, `my_permissions`, `create_issue`, `update_issue`, `create_issue_comment` |
 | `/releases` | `repositories/ReleasesPage.tsx` | releases with notes and attested artifacts | `list_releases` |
