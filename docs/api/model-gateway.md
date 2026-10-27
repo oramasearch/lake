@@ -152,6 +152,98 @@ tokens as they come gets them as the provider sends them, not all at once at the
 `POST /v1/model_completion` and the MCP tool answer the whole stream at once, as `events`, after the
 provider has finished it. None of the agents stream today.
 
+### Tools on the gpt-6 models
+
+**Issue:** [lake#1245](https://github.com/oramasearch/lake/issues/1245) · **Code:**
+`responses_for_tools_models`, `chat_goes_to_responses`, `chat_request_as_responses`,
+`responses_answer_as_chat` and `ResponsesChatStream` in `src/api/model_gateway.cpp`; the call in
+`model_completion` (`src/api/usage_capabilities.cpp`).
+
+OpenAI refuses a Chat Completions request that carries function tools for the gpt-6.x models:
+*"Function tools with reasoning_effort are not supported for gpt-6.1-sol in /v1/chat/completions. To
+use function tools, use /v1/responses or set reasoning_effort to 'none'."* The refusal comes whether
+or not the request names `reasoning_effort`, because these models reason by default. The library
+agents call Chat Completions with tools (the OpenAI SDK pointed at Lake), so every agent turn with
+tools failed on gpt-6.1-sol in lake v0.7.2, and v0.7.3 made gpt-5.5 the default as a hotfix. The
+gateway now sends such a call to the provider's Responses API and answers it as a chat completion,
+so the agents work on the gpt-6 models without a change of their own, and gpt-6.1-sol is the
+default again.
+
+**When.** A `chat/completions` request, from any caller (an agent turn, `model_completion` over REST
+or MCP, either OpenAI route), whose model (after the [workspace's choice](#the-workspaces-model)) is
+in `responses_for_tools_models` and which carries at least one tool. A request that asks for
+`reasoning_effort: "none"` stays on Chat Completions, which accepts tools then on the models that
+offer `none` (gpt-6.1-terra, gpt-6-luna; gpt-6.1-sol and gpt-6-astra refuse `none` and the provider
+says so). The table, one line per model, is:
+
+| Model | Why |
+|---|---|
+| `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, `gpt-6-luna` | each refuses tools on Chat Completions (checked against the live API, 2026-10-26) |
+
+A dated snapshot of a listed model (`gpt-6.1-sol-2026-...`) is included. **gpt-5.5 is not listed**: it
+accepts tools on Chat Completions, with and without `reasoning_effort` (checked live the same day),
+so it stays there. A call without tools, a Responses request and an embedding are never touched.
+
+**The request** sent to `POST /v1/responses`:
+
+| Chat Completions | Responses |
+|---|---|
+| `messages`: `system`, `developer`, `user`, `assistant` text | `input` message items, in order, with the same role (text parts become `input_text`, or `output_text` for the assistant) |
+| an assistant message's `tool_calls` | one `function_call` item each (`call_id`, `name`, `arguments`), after the message's text if it has any |
+| a `role: tool` message | a `function_call_output` item (`call_id` from `tool_call_id`, `output` the content's text) |
+| `tools[].function` | `{type: "function", name, description, parameters, strict}`; **`strict` is false unless the tool says otherwise**, because Responses makes a function strict by default and rewrites its schema (every property required), which Chat Completions does not; a tool without `parameters` gets an empty object schema |
+| `tool_choice` | the same string, or `{type: "function", name}` |
+| `reasoning_effort` | `reasoning: {effort}` |
+| `max_completion_tokens`, else `max_tokens` | `max_output_tokens` |
+| `response_format` | `text.format` (`json_schema`'s name, description, schema and strict moved up a level) |
+| `verbosity` | `text.verbosity` |
+| `parallel_tool_calls`, `temperature`, `top_p`, `user`, `stream` | the same |
+| `store`, `service_tier` | `false` and `default`, [as always](#the-processing-tier) |
+
+Fields Responses has no equivalent for are `invalid_input` at their path before the provider is
+called: `n` other than 1, `logprobs: true`, `top_logprobs`, `logit_bias`, `stop`, `seed`, a non-zero
+`frequency_penalty` or `presence_penalty`, and the deprecated `functions`, `function_call` and
+`role: function`. Null values are ignored. `temperature` and `top_p` are passed on as asked: the
+gpt-6 models (and gpt-5.5) refuse them on Responses, and the provider's own message says so.
+
+**The answer** is a chat completion: `id` and `model` the provider's, `created` its `created_at`,
+`choices[0].message` with the answer's text as `content` (null when the answer is only tool calls)
+and its `tool_calls` (`id` the `call_id`, `function.name`, `function.arguments`), and
+`finish_reason` `tool_calls` when it called a tool, `length` when it stopped at `max_output_tokens`,
+`content_filter` when it was filtered, else `stop`. `usage` is `prompt_tokens` (input tokens),
+`completion_tokens` (output tokens, reasoning included), `total_tokens`, and
+`prompt_tokens_details.cached_tokens` and `completion_tokens_details.reasoning_tokens` when the
+provider reports them. Reasoning items are not shown, as Chat Completions never shows them. An answer
+whose `status` is `failed` is `engine_error` with the provider's message, after its tokens are counted.
+
+**Streaming.** A streamed call is sent as a Responses stream and rewritten, as it arrives, into Chat
+Completions chunks: the role chunk on `response.created`, a `content` delta per
+`response.output_text.delta`, a `tool_calls` delta (`index`, `id`, `name`) per function call added and
+an `arguments` delta per `response.function_call_arguments.delta`, the finishing chunk and the usage
+chunk (`choices: []`) on `response.completed` or `response.incomplete`, then `data: [DONE]`. A
+`response.failed` or `error` event becomes `data: {"error": {...}}`, which the OpenAI SDK raises, then
+`[DONE]`. The usage is read from the provider's own events, as for any stream. No library agent
+streams today (checked across every `agent-*` repo's `dev` on 2026-10-26).
+
+**Counting and audit.** The tokens are the provider's `usage`, counted exactly as for a chat
+completion under the model called, long prompts included ([What is counted](#what-is-counted)). The
+audit keeps `endpoint: chat/completions` and adds `provider_endpoint: responses`.
+
+**Verify** with `ModelGateway.AToolCallingTurnOnGpt6RoundTripsThroughTheResponsesAPI` (request, tool
+call, tool result and final answer, both ways, byte for byte),
+`ModelGateway.TranslatesEveryChatFieldResponsesHasAndRefusesTheRest`,
+`ModelGateway.OnlyToolCallsOnTheListedModelsGoToTheResponsesAPI`,
+`ModelGateway.RewritesAResponsesStreamAsChatChunksHoweverItsPiecesFall`,
+`ModelCompletion.AnAgentTurnWithToolsOnGpt61SolIsSentToResponsesAndCounted`,
+`ModelCompletion.Gpt55AndCallsWithoutToolsStayOnChatCompletions`,
+`ModelCompletion.PassesOnTheResponsesAPIsRefusalAndCountsNothing`,
+`ModelCompletion.RelaysATranslatedStreamAsChatChunksAndCountsItsUsage`, and the tools call at the end
+of `ModelGatewayRoute.AnswersTheOpenAIShapeForATaskCredential`. On a Lake with a provider key, an
+agent turn with tools on a workspace that chose no model answers instead of failing in under a second.
+
+**To add a model** that refuses tools on Chat Completions, add its line to
+`responses_for_tools_models` (`include/lake/api/model_gateway.hpp`) and to the table above.
+
 ### Errors
 
 A refusal is OpenAI's error shape, with Lake's documented code ([errors.md](errors.md)) as `type`
@@ -352,15 +444,10 @@ agents use the gateway ([deployment/aks.md](../deployment/aks.md#speech-to-text-
 People choose the model their agents use (lake#1230; Steve, 2026-10-26: *"let's the users choose"*,
 *"default to sol"*). Each workspace has a setting `agent_model`, one of the chat models this Lake
 serves (the configured list without embedding models), read with `get_workspace_settings` and set with
-`set_workspace_settings` ([workspaces.md](workspaces.md#settings)). **Unset means `gpt-5.5`**
-(`default_agent_model`).
-
-> **Why the default is gpt-5.5, not gpt-6.1-sol (lake#1245, 2026-10-26).** OpenAI refuses `/v1/chat/completions`
-> requests to the gpt-6.x models that carry both function tools and `reasoning_effort` ("use /v1/responses or set
-> reasoning_effort to 'none'"). The library agents call Chat Completions with both, so every agent turn with tools
-> failed on gpt-6.1-sol. A workspace may still choose a gpt-6.x model, but its agents' tool calls fail until the
-> gateway sends such calls to `/v1/responses` (lake v0.8.0). gpt-6.1-sol becomes the default again then.
-
+`set_workspace_settings` ([workspaces.md](workspaces.md#settings)). **Unset means `gpt-6.1-sol`**
+(`default_agent_model`). Its tool calls go through the provider's Responses API
+([Tools on the gpt-6 models](#tools-on-the-gpt-6-models)); v0.7.3 defaulted to gpt-5.5 for a day
+until that was built (lake#1245, [v0.7.3](../releases/v0.7.3.md)).
 
 When an agent turn's task credential calls `chat/completions` or `responses`, the gateway first checks
 that the model the agent asked for is a served one (an unlisted name is still `invalid_input`), then

@@ -432,6 +432,11 @@ priced at OpenAI's 2x input and 1.5x output plus 30%; a `service_tier` other tha
 and `default` is always sent. Ship → Workspaces → Settings is the picker, with prices. Not deployed;
 the operator must vendor the schema and select `agent_model_prices_guard` before the image rolls. See
 [`docs/api/model-gateway.md#the-workspaces-model`](docs/api/model-gateway.md#the-workspaces-model).
+A chat completion with tools to a gpt-6.x model (`responses_for_tools_models`) is sent to OpenAI's
+Responses API and answered as a chat completion, streams included (lake#1245, no migration), because
+OpenAI refuses tools on Chat Completions for those models; gpt-5.5 and calls without tools stay on
+Chat Completions. See
+[`docs/api/model-gateway.md#tools-on-the-gpt-6-models`](docs/api/model-gateway.md#tools-on-the-gpt-6-models).
 
 The quickstart process is the console's home (lake#1128, no migration): `start_quickstart`,
 `quickstart_status`, `train_quickstart` and `quickstart_snippets` take a dropped dataset to a

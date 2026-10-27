@@ -347,7 +347,7 @@ function RenameWorkspace({ customerId, workspace, onDone, onClose }: { customerI
 
 /** A workspace's settings: the model its agents call through Lake (lake#1230), one of the chat
  * models this Lake serves, each with its price per million tokens from the price list in force.
- * Unset means the default, gpt-5.5; choosing the default sends null. Those who may only read
+ * Unset means the default, gpt-6.1-sol; choosing the default sends null. Those who may only read
  * the workspace see the choice and cannot save it (the save answers why). */
 function WorkspaceSettingsDialog({ customerId, workspace, onClose }: { customerId: string; workspace: Workspace; onClose: () => void }) {
   const toast = useToast();
