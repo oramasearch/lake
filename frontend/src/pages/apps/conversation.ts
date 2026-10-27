@@ -93,13 +93,13 @@ export function confirmInput(turn: Turn, appId: string, customerId: string, work
 /** One bubble of the thread. */
 export type Entry =
   | { id: string; role: "you"; text: string; confirmation: boolean }
-  | { id: string; role: "agent"; state: "working" | "failed" | "question" | "proposal" | "applied" | "reply"; text: string; diff?: string; files?: number; current?: boolean };
+  | { id: string; role: "agent"; state: "working" | "failed" | "question" | "proposal" | "applied" | "reply"; text: string; diff?: string; files?: number; current?: boolean; confirmed?: boolean };
 
 /** The thread as bubbles, oldest first: what the person wrote, then what the agent answered. */
 export function entries(turns: Turn[]): Entry[] {
   const out: Entry[] = [];
   const current = confirmable(turns);
-  for (const turn of turns) {
+  turns.forEach((turn, index) => {
     out.push({ id: `${turn.task_id}:you`, role: "you", text: turn.confirmation ? "Confirmed the proposed change." : (turn.request ?? ""), confirmation: !!turn.confirmation });
     const result = turnResult(turn);
     const text = turnReply(turn);
@@ -110,13 +110,16 @@ export function entries(turns: Turn[]): Entry[] {
       out.push({ id, role: "agent", state: "failed", text: text || "The Application Agent could not finish this turn." });
     } else if (isProposal(turn)) {
       const files = Array.isArray(result.files) ? result.files.length : 0;
-      out.push({ id, role: "agent", state: "proposal", text, diff: typeof result.diff === "string" ? result.diff : "", files, current: current?.task_id === turn.task_id });
+      // The turn after it confirmed it (the conversation's confirmation always follows its proposal),
+      // so it is applied below rather than replaced (lake#1259).
+      const confirmed = !!turns[index + 1]?.confirmation;
+      out.push({ id, role: "agent", state: "proposal", text, diff: typeof result.diff === "string" ? result.diff : "", files, current: current?.task_id === turn.task_id, confirmed });
     } else if (turn.confirmation) {
       out.push({ id, role: "agent", state: "applied", text: text || "Committed and redeployed.", diff: typeof result.diff === "string" ? result.diff : undefined });
     } else {
       out.push({ id, role: "agent", state: result.kind === "question" ? "question" : "reply", text: text || "The Application Agent did not answer." });
     }
-  }
+  });
   return out;
 }
 

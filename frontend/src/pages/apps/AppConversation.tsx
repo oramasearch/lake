@@ -106,7 +106,7 @@ export function AppConversation({
                 {entry.state === "proposal" ? (
                   <>
                     <p className="muted mb-1 mt-2 text-[12.5px]">
-                      {entry.files} file{entry.files === 1 ? "" : "s"} change.{entry.current ? " Confirmed, the agent commits them to the app's repository and redeploys." : " A later message replaced this proposal."}
+                      {entry.files} file{entry.files === 1 ? "" : "s"} change.{entry.current ? " Confirmed, the agent commits them to the app's repository and redeploys." : entry.confirmed ? " You confirmed it; what happened is below." : " A later message replaced this proposal."}
                     </p>
                     <Terminal title="Diff" empty="No diff.">
                       {entry.diff ?? ""}

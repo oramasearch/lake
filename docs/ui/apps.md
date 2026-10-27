@@ -165,8 +165,19 @@ the page (`&change=1` in the address, so Back and a reload keep it):
   (`lake-change-app-split`).
 - **Reload after a change.** When a confirmation turn of the conversation finishes (the agent
   committed and redeployed), the page reads `get_app` every 2 seconds until the operator has observed
-  the App's newest generation and it is Ready, then reloads the frame. A Failed or Degraded App is
-  reported above the frame instead. **Reload** and **Open in a new tab** are always in the header.
+  the App's newest generation and it is Ready, then reloads the frame, and again 5, 15, 30 and 60
+  seconds later (`SETTLE_RELOADS_MS`), saying so in the header. Ready can come before the new version
+  answers (lake#1259): walked on lake-dev on 2026-10-27, the operator read Ready 2 seconds after the
+  deploy, while the old replica still answered until 7 seconds, then a 502, then the new version from
+  8 seconds. The operator counts the old replica as ready while the new one starts
+  ([orama-operator#1049](https://github.com/oramasearch/orama-operator/issues/1049)), so one reload at
+  Ready showed the old App. A Failed or Degraded App is reported above the frame instead. **Reload** and
+  **Open in a new tab** are always in the header.
+- **A confirmed proposal** stays in the thread with *You confirmed it; what happened is below*, not
+  *A later message replaced this proposal*.
+- **Checked in a browser** by `tools/e2e/change-app.mjs` (lake#1259,
+  [browser testing](../deployment/browser-testing.md#3g-change-app)): ask, propose, confirm, deploy,
+  the frame reloads onto the change, and text outside ASCII survives the change.
 - **Close**, or Escape, returns to the app page.
 
 Change App is disabled, with the reason, when the Application Agent is not running or the App has
@@ -175,7 +186,8 @@ no address yet. The component is `ChangeAppSplit.tsx`, its rules `changeSplit.ts
 
 ### Can the console frame the App
 
-Yes, today (checked 2026-10-26 in the code; not yet on a live cluster):
+Yes, today (checked 2026-10-26 in the code, and on lake-dev on 2026-10-27, lake#1259: the frame
+shows the signed-in App):
 
 - **No framing header is set on an App's responses.** The operator's App ingress
   (orama-operator `internal/controller/lakeapp_controller.go`, `lakeAppIngressAnnotations`) sets the
