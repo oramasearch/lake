@@ -9,6 +9,11 @@ lists (orama-operator#936): a lake release becomes only the `image:` in a set fi
 v0.6.1 predate the commands; the operator keeps its vendored path for them. See
 [`../deployment/operator-interface.md`](../deployment/operator-interface.md).
 
+- [v0.7.2](v0.7.2.md) — 2026-10-26. A patch: an App's `workspace.sql` at its binding's access, read-only and
+  capped at 5,000 rows (`too_many_rows`); auto-fix sees a healthy App whose script keeps failing, and Restart is
+  recorded (pods replaced with orama-operator#1033); people choose the agents' model per workspace (default
+  gpt-6.1-sol), the gpt-6.x models served and priced, long prompts billed at cost. Migrations 0104 and 0105, no
+  new settings.
 - [v0.7.1](v0.7.1.md) — 2026-10-25. A patch: the Quickstart's model step as an Ask Orama conversation, training
   on any column types, clustering that trains and one next step in every state, and a copy-ready agent prompt; a
   failed app as a notification, fixed or changed with the Application Agent, with opt-in auto-fix, and Degraded
