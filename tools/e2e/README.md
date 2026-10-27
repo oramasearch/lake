@@ -12,6 +12,7 @@ How to get a Clerk test user and ticket, and what each browser script checks, is
 | `mcp.mjs` | Developer → MCP: a read-only key, every client's setup, the skill, a fresh Claude Code session |
 | `storage.mjs` | Data → Drives → Storage: each provider Lake can create |
 | `services.mjs` | Ship → Services: every service kind |
+| `change-app.mjs` | An App's Change App split screen: ask, propose, confirm, deploy, and the frame reloads onto the change (lake#1259) |
 | `agents.py` | The Agent Library over the agent bus (below) |
 | `start-times.py` | How long each service kind takes to start |
 
