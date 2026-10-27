@@ -37,6 +37,11 @@ import {
   trafficOf,
   trainingOf,
   versionNumber,
+  assignmentRows,
+  clusteringInputs,
+  isClustering,
+  segmentTables,
+  segmentsOf,
 } from "../src/pages/train/models.ts";
 
 const churn = (id: string, created: string, auc: number | null, extra: Record<string, unknown> = {}) => ({
@@ -289,4 +294,54 @@ test("the Try it table numbers rows from 1, as people count (lake#819)", () => {
   assert.equal(rowNumber({ entity: "no row" }), "", "an entry without a row number shows none");
   assert.equal(rowNumber({ row: "2" }), "");
   assert.equal(rowNumber({ row: -1 }), "");
+});
+
+// lake#1243: a clustering model predicts no column. Its page shows its segments and tables, and
+// the try-it row is keyed by the columns it groups by, never by its encoded features.
+test("a clustering model is told apart, and its row, segments and answer read", () => {
+  const segmentation = {
+    id: "287e0008",
+    kind: "segmentation",
+    run_id: "run-1",
+    feature_schema: {
+      kind: "segmentation",
+      features: [
+        { source: "Spend", encoded_name: "Spend", kind: "numeric" },
+        { source: "Plan", encoded_name: "Plan=free", kind: "categorical", level: "free" },
+        { source: "Plan", encoded_name: "Plan=pro", kind: "categorical", level: "pro" },
+      ],
+    },
+  };
+  assert.equal(isClustering(segmentation), true);
+  assert.equal(isClustering({ kind: "classifier" }), false);
+  assert.equal(isClustering({ kind: "x", feature_schema: { kind: "segmentation" } }), true, "the weights' kind");
+  assert.deepEqual(clusteringInputs(segmentation), [
+    { name: "Spend", categorical: false },
+    { name: "Plan", categorical: true },
+  ]);
+  assert.deepEqual(sampleRow(segmentation), { entity: "example-1", Spend: 0, Plan: "" });
+
+  const report = {
+    segments: [
+      { segment_id: 0, size: 60, share: 0.6, label: "low Spend", distinguishing_features: ["Spend", "Plan=free"] },
+      { segment_id: 1, size: 40, share: 0.4, label: "", distinguishing_features: [] },
+    ],
+    output_tables: [
+      { name: "segment assignments", ref: "datasets.segments_ab", available: true, rows: 100 },
+      { name: "segment profiles", ref: "datasets.profiles_ab", available: false },
+    ],
+  };
+  assert.deepEqual(segmentsOf(report), [
+    { id: "0", label: "low Spend", size: 60, share: 0.6, apart: ["Spend", "Plan=free"] },
+    { id: "1", label: "", size: 40, share: 0.4, apart: [] },
+  ]);
+  assert.deepEqual(segmentsOf(null), []);
+  assert.deepEqual(segmentTables(report), [
+    { name: "segment assignments", ref: "datasets.segments_ab", rows: 100, available: true },
+    { name: "segment profiles", ref: "datasets.profiles_ab", rows: null, available: false },
+  ]);
+
+  const answer = { assignments: [{ row: 0, entity: "acct-a", segment_id: 1, distance: 0.2, label: "high Spend" }], ranked: [] };
+  assert.equal(assignmentRows(answer).length, 1);
+  assert.deepEqual(assignmentRows({ ranked: [] }), []);
 });

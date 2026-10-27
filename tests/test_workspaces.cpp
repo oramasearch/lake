@@ -5906,6 +5906,72 @@ TEST(Workspaces, NamingPredictAnswersEachRowsOwnKey) {
     EXPECT_EQ(unkeyed_refusal.error.path, "/rows/1/tenure");
 }
 
+// lake#1243: Predict on a clustering model failed with the engine's schema words ("weights
+// unavailable: /: required property 'objective' not found in object"). An engine that cannot
+// place a new row in a segment is said in words; one that can (zetta#1497) answers each row's
+// segment, named by the row's own key.
+TEST(Workspaces, PredictOnAClusteringModelSaysWhatItCanDoOrAnswersEachRowsSegment) {
+    ReadyWorkspace r;
+    r.w.caller->answers["get_model"] = {{"id", "seg-1"}, {"exposed", true}, {"kind", "segmentation"}};
+    const json rows = json::array(
+        {{{"entity", "acct-a"}, {"spend", 4}}, {{"entity", "acct-b"}, {"spend", 400}}});
+    const std::string schema_words =
+        "score: model 'seg-1' weights unavailable: /: required property 'objective' not found in "
+        "object";
+    r.w.caller->before_reply = [&] {
+        if (r.w.caller->capability != "score") {
+            r.w.caller->failure.reset();
+        } else {
+            r.w.caller->failure = lake::control::ZettaControlError{"engine_error", schema_words};
+        }
+    };
+    const auto refused = r.call("predict", {{"model_id", "seg-1"}, {"rows", rows}});
+    EXPECT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "not_supported") << refused.error.message;
+    EXPECT_EQ(refused.error.path, "/model_id");
+    EXPECT_NE(refused.error.message.find("is a clustering model"), std::string::npos)
+        << refused.error.message;
+    for (const char* hidden : {"objective", "weights unavailable", "required property"}) {
+        EXPECT_EQ(refused.error.message.find(hidden), std::string::npos) << hidden;
+    }
+
+    // The engine's score and explain, called by name, say it in words too.
+    for (const char* capability : {"score", "explain"}) {
+        const std::string words = std::string(capability) +
+                                  ": model 'seg-1' weights unavailable: /: required property "
+                                  "'objective' not found in object";
+        r.w.caller->before_reply = [&] {
+            r.w.caller->failure = lake::control::ZettaControlError{"engine_error", words};
+        };
+        const json input = std::string(capability) == "score"
+                               ? json{{"model_id", "seg-1"}, {"rows", rows}}
+                               : json{{"model_id", "seg-1"}, {"row", rows[0]}};
+        const auto engine = r.call(capability, input);
+        EXPECT_EQ(engine.error.code, "not_supported") << capability << ": " << engine.error.message;
+        EXPECT_EQ(engine.error.message.find("objective"), std::string::npos) << engine.error.message;
+        EXPECT_NE(engine.error.path, "/objective");
+    }
+
+    // An engine that places a row in a segment (zetta#1497).
+    r.w.caller->before_reply = [&] { r.w.caller->failure.reset(); };
+    r.w.caller->answers["score"] = {
+        {"kind", "segmentation"},
+        {"ranked", json::array()},
+        {"feature_columns", json::array({"spend"})},
+        {"assignments",
+         json::array({{{"entity", 0}, {"segment_id", 0}, {"distance", 0.4}, {"label", "low spend"}},
+                      {{"entity", 1}, {"segment_id", 1}, {"distance", 0.1}, {"label", "high spend"}}})}};
+    const auto placed = r.call("predict", {{"model_id", "seg-1"}, {"rows", rows}, {"top_k", 1}});
+    ASSERT_TRUE(placed.ok) << placed.error.message;
+    EXPECT_FALSE(r.sent("score").contains("top_k")) << "segments are not ranked";
+    ASSERT_EQ(placed.value["assignments"].size(), 2U);
+    EXPECT_EQ(placed.value["assignments"][0]["entity"], "acct-a");
+    EXPECT_EQ(placed.value["assignments"][0]["row"], 0);
+    EXPECT_EQ(placed.value["assignments"][1]["entity"], "acct-b");
+    EXPECT_EQ(placed.value["assignments"][1]["segment_id"], 1);
+    EXPECT_EQ(placed.value["assignments"][1]["label"], "high spend");
+}
+
 TEST(Workspaces, NamingCompareRunsWithoutNamesComparesEverySharedMetric) {
     ReadyWorkspace r;
     r.w.caller->answers["get_run_metrics"] = {
