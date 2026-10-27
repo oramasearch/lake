@@ -12,6 +12,7 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -30,6 +31,7 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/server.hpp"
+#include "lake/api/sync_store.hpp"
 #include "lake/api/usage_recorder.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/drive_files.hpp"
@@ -1318,6 +1320,104 @@ TEST(DrivesHttp, AnEditCommitsTheExactBytesAndAStaleEditIsAConflict) {
     // A path expected absent that exists is a conflict too, and expected_blob must be a string.
     EXPECT_EQ(commit("x", "").value("error", json::object()).value("code", ""), "conflict");
     EXPECT_EQ(commit("x", 7).value("error", json::object()).value("code", ""), "invalid_input");
+}
+
+// lake#1238: `contents` is a file's text exactly when it is UTF-8 (emoji, `·`, CRLF and a
+// byte-order mark kept), and absent with `binary: true` when it is not; `content_base64` is the
+// exact bytes either way. The drive preview and the raw route follow the same rule.
+TEST(DrivesHttp, RepositoryFileContentsAreTheExactUtf8TextOrAbsentForBinary) {
+    Lake lake;
+    const json created = lake.call("create_repository", {{"name", "texts"}});
+    ASSERT_TRUE(created.value("ok", false)) << created.dump();
+    const std::string repository_id = created["value"]["id"];
+    const std::map<std::string, std::string> files{
+        {"app.py", "st.title(\"\xF0\x9F\x91\xA5 Customers \xC2\xB7 insights\")\n"},
+        {"crlf.txt", "first \xC2\xB7 line\r\nsecond line\r\n"},
+        {"bom.md", "\xEF\xBB\xBF# Title \xF0\x9F\x91\xA5\n"},
+        {"latin1.txt", "caf\xE9 \xB7 na\xEFve\n"},
+    };
+    json operations = json::array();
+    for (const auto& [path, bytes] : files) {
+        operations.push_back({{"type", "file"}, {"path", path}, {"content", base64(bytes)}});
+    }
+    const json committed = lake.call("commit_repository_files",
+                                     {{"id", repository_id},
+                                      {"revision", "main"},
+                                      {"message", "Texts"},
+                                      {"operations", std::move(operations)}},
+                                     false);
+    ASSERT_TRUE(committed.value("ok", false)) << committed.dump();
+
+    for (const auto& [path, bytes] : files) {
+        SCOPED_TRACE(path);
+        const json read =
+            lake.read("repository_file", {{"id", repository_id}, {"ref", "main"}, {"path", path}});
+        ASSERT_TRUE(read.value("ok", false)) << read.dump();
+        const json& file = read["value"];
+        EXPECT_EQ(file["content_base64"], base64(bytes));
+        EXPECT_EQ(file["size"], bytes.size());
+        if (path == "latin1.txt") {
+            EXPECT_FALSE(file.contains("contents")) << file.dump();
+            EXPECT_EQ(file["binary"], true);
+        } else {
+            EXPECT_EQ(file.value("contents", std::string("<absent>")), bytes);
+            EXPECT_EQ(file["binary"], false);
+            EXPECT_EQ(file.dump().find("\\\\x"), std::string::npos) << file.dump();
+        }
+    }
+
+    // The drive preview shows the text exactly, and has none for a file that is not UTF-8.
+    const auto preview = [&](const std::string& path) {
+        return lake.read("drive_preview",
+                         {{"repository_id", repository_id}, {"ref", "main"}, {"path", path}});
+    };
+    const json text_preview = preview("crlf.txt");
+    ASSERT_TRUE(text_preview.value("ok", false)) << text_preview.dump();
+    EXPECT_EQ(text_preview["value"]["format"], "text");
+    const std::string html = text_preview["value"]["html"];
+    EXPECT_NE(html.find("first \xC2\xB7 line\r\nsecond"), std::string::npos) << html;
+    const json binary_preview = preview("latin1.txt");
+    ASSERT_TRUE(binary_preview.value("ok", false)) << binary_preview.dump();
+    EXPECT_EQ(binary_preview["value"]["format"], "download");
+
+    // The raw route sends the exact bytes: text as UTF-8 text, the other as bytes.
+    const auto raw_body = [](const std::string& response) {
+        const std::size_t end = response.find("\r\n\r\n");
+        return end == std::string::npos ? std::string() : response.substr(end + 4);
+    };
+    const std::string text_raw =
+        lake.raw("/file/raw?repository_id=" + repository_id + "&ref=main&path=app.py");
+    EXPECT_NE(lowercase_headers(text_raw).find("content-type: text/plain; charset=utf-8"),
+              std::string::npos)
+        << text_raw;
+    EXPECT_EQ(raw_body(text_raw), files.at("app.py"));
+    const std::string binary_raw =
+        lake.raw("/file/raw?repository_id=" + repository_id + "&ref=main&path=latin1.txt");
+    EXPECT_NE(lowercase_headers(binary_raw).find("content-type: application/octet-stream"),
+              std::string::npos)
+        << binary_raw;
+    EXPECT_EQ(raw_body(binary_raw), files.at("latin1.txt"));
+}
+
+// RFC 3629's edges: what is UTF-8 and what is not (lake#1238).
+TEST(RepositoryFileText, Utf8IsWellFormedUtf8Only) {
+    using lake::api::is_utf8;
+    EXPECT_TRUE(is_utf8(std::string_view("")));
+    EXPECT_TRUE(is_utf8(std::string_view("plain\r\n\ttext")));
+    EXPECT_TRUE(is_utf8(std::string_view("\xEF\xBB\xBF\xC2\xB7\xF0\x9F\x91\xA5")));
+    EXPECT_TRUE(is_utf8(std::string_view("\xF4\x8F\xBF\xBF")));      // U+10FFFF
+    EXPECT_TRUE(is_utf8(std::string_view("\xED\x9F\xBF")));          // U+D7FF
+    EXPECT_FALSE(is_utf8(std::string_view("\xF4\x90\x80\x80")));     // past U+10FFFF
+    EXPECT_FALSE(is_utf8(std::string_view("\xED\xA0\x80")));         // a surrogate
+    EXPECT_FALSE(is_utf8(std::string_view("\xC0\xAF")));             // overlong
+    EXPECT_FALSE(is_utf8(std::string_view("\xE0\x80\xAF")));         // overlong
+    EXPECT_FALSE(is_utf8(std::string_view("\xF0\x9F\x91")));         // cut short
+    EXPECT_FALSE(is_utf8(std::string_view("caf\xE9")));              // Latin-1
+    EXPECT_FALSE(is_utf8(std::string_view("\x80")));                 // a lone continuation
+    lake::api::RepositoryFile binary{.path = "x", .raw_contents = {std::byte{0xFF}}};
+    EXPECT_FALSE(lake::api::repository_file_text(binary).has_value());
+    lake::api::RepositoryFile text{.path = "x", .contents = "\xC2\xB7"};
+    EXPECT_EQ(lake::api::repository_file_text(text), std::optional<std::string>("\xC2\xB7"));
 }
 
 // A writable parent must not authorize nested writes or recursive changes to a policy cut.

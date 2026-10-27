@@ -415,12 +415,19 @@ ApiResult resolve_file(const json& input, ApiContext& context, std::string_view 
                         reinterpret_cast<const unsigned char*>(raw.data()),
                         static_cast<int>(raw.size()));
     }
-    return ApiResult::success({{"path", file->path},
-                               {"blob", file->blob},
-                               {"size", file->size},
-                               {"revision", resolved_revision},
-                               {"contents", file->contents},
-                               {"content_base64", std::move(encoded)}});
+    json output{{"path", file->path},
+                {"blob", file->blob},
+                {"size", file->size},
+                {"revision", resolved_revision},
+                {"content_base64", std::move(encoded)}};
+    // Text exactly when the file is UTF-8; a binary file has no `contents` (lake#1238).
+    if (auto text = repository_file_text(*file)) {
+        output["contents"] = std::move(*text);
+        output["binary"] = false;
+    } else {
+        output["binary"] = true;
+    }
+    return ApiResult::success(std::move(output));
 }
 
 Capability read_capability(
@@ -719,14 +726,18 @@ void register_model_capabilities(Registry& registry) {
     registry.add(dataset_capability());
     registry.add(read_capability("resolve_model_file",
                                  "Resolve model file",
-                                 "Resolve one model file at a named or immutable revision: `contents` as text and "
-                                 "`content_base64`, the exact bytes of any file, binary included.",
+                                 "Resolve one model file at a named or immutable revision: "
+                                 "`content_base64`, the exact bytes of any file, and `contents`, "
+                                 "its text, when the file is UTF-8 (a file that is not has "
+                                 "`binary: true` and no `contents`).",
                                  true,
                                  "model"));
     registry.add(read_capability("resolve_dataset_file",
                                  "Resolve dataset file",
-                                 "Resolve one dataset file at a named or immutable revision: `contents` as text and "
-                                 "`content_base64`, the exact bytes of any file, binary included.",
+                                 "Resolve one dataset file at a named or immutable revision: "
+                                 "`content_base64`, the exact bytes of any file, and `contents`, "
+                                 "its text, when the file is UTF-8 (a file that is not has "
+                                 "`binary: true` and no `contents`).",
                                  true,
                                  "dataset"));
 

@@ -38,7 +38,8 @@ import {
 
 type Customer = { id: string; name: string; user_id: string | null };
 type Workspace = { id: string; name: string; customer_id: string };
-type RepositoryFile = { path: string; contents: string };
+/** `contents` is absent when the file is not UTF-8 text (lake#1238). */
+type RepositoryFile = { path: string; contents?: string };
 
 /** `shell_argument`: single quotes, a quote written as '\''. */
 function shellArgument(value: string): string {
@@ -334,7 +335,7 @@ function RepositoryHome({ id }: { id: string }) {
         <Card label="README" title={readme.data ? "README.md" : undefined}>
           {readme.data ? (
             <div className="readme-panel">
-              <Markdown>{readme.data.contents}</Markdown>
+              <Markdown>{readme.data.contents ?? ""}</Markdown>
             </div>
           ) : (
             <Empty compact icon={BookOpen} title="No README">

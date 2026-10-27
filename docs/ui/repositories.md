@@ -70,6 +70,11 @@ The file and tree pages resolve each path's newest change from those structural 
 `change_diff` per change, a few at a time. File pages map text-hunk ranges onto numbered lines for
 blame.
 
+A File page shows `repository_file`'s `contents`, the file's UTF-8 text exactly (emoji, `·` and a
+byte-order mark included). A file that is not UTF-8 has no `contents` and `binary: true`; its page
+says it is not UTF-8 text and offers Raw and Download, which send the exact bytes (lake#1238,
+[docs/api/repositories.md](../api/repositories.md#file-contents)).
+
 ## Artifact results
 
 `list_artifacts` maps the action, output path, content digest, cursor and page-size filters to

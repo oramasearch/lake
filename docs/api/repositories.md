@@ -39,7 +39,7 @@ with lake#341, and its content moves with lake#380.
 | `delete_repository` | action | `id` | `404 not_found`, `409 conflict` (already tombstoned) |
 | `repository_refs` | read | `id` | `{items: [{name, change}]}`, from the liquid repository |
 | `repository_tree` | read | `id`, `ref` | `{items: [{path, kind, blob, mode, node_id, size, stored_size}]}` |
-| `repository_file` | read | `id`, `ref`, `path`, `units?` | `{path, blob, contents, size, units?}` |
+| `repository_file` | read | `id`, `ref`, `path`, `units?` | `{path, blob, contents?, content_base64, binary, size, units?}`: see [File contents](#file-contents) |
 | `list_changes` | read | `id` | `{items: [{id, parents, author, message, occurred_at}]}` |
 | `get_change` | read | `id`, `change_id` | change identity and metadata |
 | `change_diff` | read | `id`, `change_id` | `{items: [{path, old_path, kind, changes, old_mode, new_mode, old_blob, new_blob, line_hunks, old_conflicts, new_conflicts}]}` |
@@ -66,7 +66,22 @@ every successful or denied call.
 `repository_refs`, `repository_tree`, `repository_file`, `list_changes`, and `list_conflicts`
 read libliquid directly through the lake repository-store adapter. Tree output is recursive;
 every entry retains its stable node identity plus logical and stored sizes, and every file links
-to its backing blob identity and rendered contents.
+to its backing blob identity and its contents ([File contents](#file-contents)).
+
+### File contents
+
+`repository_file` answers every file's exact bytes as standard padded base64 in `content_base64`.
+`contents` is the file's text, and it is exactly those bytes, when they are well-formed UTF-8
+(RFC 3629): emoji, `·`, a byte-order mark, CR and CRLF line endings are all kept as they are, and
+`binary` is `false`. A file whose bytes are not UTF-8 has no `contents` field and `binary: true`;
+read it from `content_base64`. Before lake#1238, `contents` wrote every byte outside printable
+ASCII as the literal text `\xNN` (👥 became `\xF0\x9F\x91\xA5`), so a client that reads text should
+read `contents` from a release with this fix, or decode `content_base64` itself.
+`resolve_model_file` and `resolve_dataset_file` ([models.md](models.md)) answer `contents` and
+`binary` the same way, the console's File page shows a binary file as such, and
+`GET /file/raw` and `GET /file/download` send the file's exact bytes (`text/plain; charset=utf-8`
+for text, `application/octet-stream` for a binary file).
+`DrivesHttp.RepositoryFileContentsAreTheExactUtf8TextOrAbsentForBinary` checks every case.
 
 `repository_file` with `units: true` also answers the file's **syntax units** (lake#561), the
 shading the File page draws: `units: [{start_line, end_line, kind}]` from libliquid's
