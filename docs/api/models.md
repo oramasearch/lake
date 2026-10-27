@@ -41,9 +41,15 @@ dispatch. All capabilities are registered once for `/v1/openapi.json` and `POST 
 | `resolve_model_file`, `resolve_dataset_file` | `id`, `revision`, `path` | Exact bytes plus blob, size, and immutable revision metadata; `contents` as text and `content_base64`, the exact bytes of any file (binary included, lake#681) |
 | `prepare_repository_upload` | `id`, `files[{path,size}]` | `regular` for files through 5 MiB, otherwise `lfs` |
 | `stage_repository_file` | `id`, SHA-256 `oid`, `size`, binary body or base64 `content` | Unique stored bytes after digest and size verification |
-| `commit_repository_files` | `id`, `revision?`, `message?`, `operations[]` | New immutable `commitOid`; operations are `file`, `lfsFile`, `deletedFile`, or `deletedFolder` |
+| `commit_repository_files` | `id`, `revision?`, `message?`, `operations[]` | New immutable `commitOid`; operations are `file`, `lfsFile`, `deletedFile`, or `deletedFolder`, each with an optional `expected_blob` (below) |
 | `attach_model_provenance` | model `id` and `revision`, dataset repository/revision, base64 liquid model and run attestations | Verified immutable dataset-to-model chain |
 | `verify_model_provenance` | model `id`, `revision` | Chain fields, `verified`, and a refusal reason when verification fails |
+
+An operation's `expected_blob` is the blob its path held when the caller read it (`repository_file`
+`blob`), or `""` for a path that did not exist. Lake compares it with the tree the commit replaces,
+under the repository's mutation lock; any difference refuses the whole commit with `conflict` (the
+message names the path) and nothing changes. The console's file editor sends it so an edit never
+overwrites a change made since the file was opened (lake#1239, [drive.md](../ui/drive.md#editing-a-file)).
 
 The commit action writes regular bytes directly, consumes each staged LFS object once, applies
 deletions, cuts one liquid change, and updates `main`. Read revisions may be named refs or

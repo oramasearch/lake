@@ -50,6 +50,39 @@ The extension table is deliberately local. When liquid #29's format registry lan
 metadata plugs into `DriveFormatRegistry::defaults()` as the renderer selection source; the page
 and capability contracts do not change.
 
+## Editing a file
+
+A text file previewed on `main` (text, Markdown, CSV or JSON, at most 1 MiB) has **Edit** for someone
+with `write` on the repository (`my_permissions`, the check `commit_repository_files` makes; a Drive
+path policy can still refuse the commit, and the refusal is shown). Otherwise the button is disabled
+and its reason is shown: sign in, write access, open the file on `main`, not a text file, too large.
+`&edit=1` on the preview address opens the editor directly (lake#1239).
+
+- **Editor.** `FileEditor.tsx`, a monospace textarea: the console ships no code editor component, so
+  there is no syntax highlighting yet. The file is read from `repository_file`'s `content_base64`,
+  never `contents`, which writes bytes outside ASCII as `\xNN` text (lake#1238). It opens only what
+  it can commit back byte for byte: strict UTF-8 (a byte-order mark is kept), no NUL byte, and one
+  line ending throughout. A browser's textarea answers LF only, so a CRLF file is written back with
+  CRLF; a file mixing line endings is not opened (download it instead). The pure rules are in
+  `edit.ts`.
+- **Commit.** `commit_repository_files` on `main` as the person, with a message (default
+  `Edit <name>`), the file's exact bytes, and the blob it held when it was opened as
+  `expected_blob` ([models.md](../api/models.md)).
+- **Conflict.** A file changed on `main` since it was opened makes Lake refuse the whole commit with
+  `conflict`; nothing is written. The editor shows the line diff from the version on `main` to the
+  person's text, and offers *Use the version on main* (discarding their text) or *Keep my text*
+  (their text, committed over the version they have now seen). Nothing is ever overwritten
+  silently.
+- **Commit and redeploy.** When the file is inside the source folder of a runtime App of the
+  repository's workspace (`list_apps`: `source.repository` is this repository and `source.path`
+  holds the file), the editor also offers *Commit and redeploy*: after the commit it calls
+  `deploy_app` for each of those Apps with `source.revision` the new `commitOid`, and follows each
+  rollout (`get_app` every 2 seconds) until the deployed generation is Ready or Failed.
+
+To verify: `npm test` (`tests/repository-edit.test.ts`) and the native test
+`DrivesHttp.AnEditCommitsTheExactBytesAndAStaleEditIsAConflict`; in a browser, open a `.py` file of an
+App's repository, edit it, *Commit and redeploy*, and watch the App become ready.
+
 ## History and conflicts
 
 `/drive/history` (`DriveHistoryPage.tsx`, `drive_history`) lists only changes whose structural diff

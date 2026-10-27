@@ -24,6 +24,10 @@ authorization and audit recording have one path. Their presentation rules are in
 | Repository access | `/repository/access?id=<id>` | `../organizations/AccessPage.tsx` | `entity_effective_access` | direct and inherited effective access |
 | Environments, Environment, Logs, Export | `/environments`, `/environment`, `/logs`, `/exports` | `../apps/EnvironmentsPage.tsx`, `EnvironmentPage.tsx`, `LogsPage.tsx`, `ExportsPage.tsx` | `list_environments`, `get_environment`, `list_deployments`, `create_domain`, `delete_domain`, `environment_logs`, `list_exports` | the repository's environments, one environment's deployments and domains, its logs, its signed exports |
 
+A repository file is edited from its Drive preview (`/drive/preview`): **Edit**, a monospace editor,
+**Commit** (and **Commit and redeploy** for a file in an App's source), with a stale file refused as a
+conflict. See [drive.md](drive.md#editing-a-file) (lake#1239).
+
 ## Anonymous public read
 
 A signed-out visitor sees only repositories whose visibility is `public`, in the list and by
