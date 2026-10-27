@@ -153,6 +153,47 @@ on the app page is a thread with the Application Agent, not one instruction and 
 The component is `frontend/src/pages/apps/AppConversation.tsx`, its rules `conversation.ts`
 (`tests/app-conversation.test.ts`). Repairs keep their turn panel (`?task=`).
 
+## Change App split screen
+
+lake#1241. **Change App**, at the top of the app page beside *Open app*, opens a split screen over
+the page (`&change=1` in the address, so Back and a reload keep it):
+
+- **Left:** the conversation with the Application Agent ([above](#changing-an-app-in-a-conversation)).
+- **Right:** the running App in a frame, at its own address (`<app>.<lake host>`).
+- **The divider** drags, or moves with the arrow keys (Shift for bigger steps, Home and End), between
+  a quarter and three quarters of the width; its place is remembered in this browser
+  (`lake-change-app-split`).
+- **Reload after a change.** When a confirmation turn of the conversation finishes (the agent
+  committed and redeployed), the page reads `get_app` every 2 seconds until the operator has observed
+  the App's newest generation and it is Ready, then reloads the frame. A Failed or Degraded App is
+  reported above the frame instead. **Reload** and **Open in a new tab** are always in the header.
+- **Close**, or Escape, returns to the app page.
+
+Change App is disabled, with the reason, when the Application Agent is not running or the App has
+no address yet. The component is `ChangeAppSplit.tsx`, its rules `changeSplit.ts`
+(`tests/change-app-split.test.ts`).
+
+### Can the console frame the App
+
+Yes, today (checked 2026-10-26 in the code; not yet on a live cluster):
+
+- **No framing header is set on an App's responses.** The operator's App ingress
+  (orama-operator `internal/controller/lakeapp_controller.go`, `lakeAppIngressAnnotations`) sets the
+  forward-auth annotations only; the platform's ingress-nginx values set no `add-headers`, CSP or
+  `X-Frame-Options`, and snippets are off. Lake's forward-auth answer (`serve_app_forward_auth`) is
+  `text/plain` and nginx copies only `X-Orama-User`, `X-Orama-Space` and `Set-Cookie` from it.
+  app-runtime starts Streamlit without header settings and its proxy passes the App's headers
+  through. Not checked: Cloudflare zone rules in front of the App host.
+- **The sign-in cookie works in the frame.** `lake_app_session` is host-only on the App host,
+  `SameSite=Lax`; the App host and the console are the same site, so it is sent in the frame, and the
+  sign-in hand-off (`/apps/authorize`) also runs inside it (the console's own pages allow framing by
+  `'self'`).
+- **What is missing is a restriction:** any site can frame an App now. Allowing only the Lake's own
+  origin (`Content-Security-Policy: frame-ancestors 'self' https://<lake host>`, never `*`) belongs in
+  **orama-operator**, which covers every App mode: a `custom-headers` ConfigMap per App referenced from
+  the ingress annotations, and `global-allowed-response-headers: Content-Security-Policy` in every
+  cluster's ingress-nginx values (helmfile and `platform.yaml` together). Lake needs no change.
+
 The components are `frontend/src/pages/apps/repair.tsx`: `AppNotifications`, `AppRepairCard`,
 `AppTurnPanel`, `NotificationsList` and `NotificationBanner`, which take any resource kind, so the
 agent page (lake#1209) reuses them.
