@@ -119,6 +119,7 @@ nlohmann::json web_app_json(const WebApp& app) {
             {"ready", app.ready},
             {"message", app.message},
             {"observed_generation", app.observed_generation},
+            {"restart_generation", app.restart_generation},
             {"updated_at", app.updated_at}};
 }
 

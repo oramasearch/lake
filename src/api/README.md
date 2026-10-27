@@ -212,7 +212,10 @@ GPU memory from the operator's `workload_resources` (lake#643), new build result
 every `usage_sample_interval`. `usage_capabilities.cpp` registers `usage_over_time`, `usage_limits`,
 `set_usage_limit`, `record_model_usage` and `model_completion`, the model gateway (lake#248): an
 agent's model call, sent through `ApiContext::model_provider` on the blocking pool, its tokens added
-to the run's workspace usage and refused past the monthly `model_tokens` limit. `model_gateway.cpp`
+to the run's workspace usage and refused past the monthly `model_tokens` limit; an agent turn's chat
+call is sent with its workspace's model (lake#1230), read through `workspace_agent_model` from
+`workspace_settings_capabilities.cpp`, which also registers `get_workspace_settings` and
+`set_workspace_settings`. `model_gateway.cpp`
 holds the closed per-endpoint text/function request schemas (lake#960), forces generation storage
 off and refuses hosted tools, media, references and unknown fields before any provider work. It also
 holds the gateway's pure parts (the request as forwarded, the usage of every answer shape, the

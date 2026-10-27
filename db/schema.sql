@@ -5113,3 +5113,102 @@ CREATE TABLE IF NOT EXISTS clerk_session_binding_guard (
 );
 INSERT INTO schema_migrations (version) VALUES ('0103_clerk_session_binding')
     ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0104_app_restarts (lake#1228, docs/control-plane/web-apps.md#restart): restart_app records the
+-- generation it wrote. The operator writes it on the app's pod template, so a restart replaces the
+-- pods even when nothing else about the app changed; before, a restart bumped only `generation`,
+-- the pod template stayed the same, and no pod was replaced. 0: never restarted. Additive.
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS restart_generation bigint NOT NULL DEFAULT 0
+    CHECK (restart_generation >= 0);
+CREATE TABLE IF NOT EXISTS app_restarts_guard (applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0104_app_restarts') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0105_agent_model_prices (lake#1230, docs/api/billing.md#rates, docs/api/model-gateway.md): the
+-- gpt-6.x models the gateway now serves, and long-context rates. A request whose prompt is longer
+-- than 272,000 input tokens is priced by OpenAI at 2x input and 1.5x output for the whole request
+-- (gpt-6.x, and gpt-5.5 the same way), so the gateway records it under `<model>@long/input` and
+-- `<model>@long/output`, which billing_plan_prices_class_check (0095) already allows. Additive.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS agent_model_prices_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+-- Steve, 2026-10-26: OpenAI's published standard price per million tokens,
+-- https://developers.openai.com/api/docs/pricing and the model pages, read 2026-10-26, plus 30%,
+-- in millionths of a US dollar per 1,000,000 tokens:
+--   gpt-6.1-sol    $2.00 in, $10.00 out  ->  2600000 / 13000000;  long  5200000 / 19500000
+--   gpt-6.1-terra  $1.00 in,  $5.00 out  ->  1300000 /  6500000;  long  2600000 /  9750000
+--   gpt-6-astra   $10.00 in, $50.00 out  -> 13000000 / 65000000;  long 26000000 / 97500000
+--   gpt-6-luna     $0.10 in,  $0.50 out  ->   130000 /   650000;  long   260000 /   975000
+--   gpt-5.5        (0095's rates)                                ;  long 13000000 / 58500000
+-- Cached input is billed as input (OpenAI charges 5% of it) and cache writes (1.25x input) as input
+-- at 1.3x, so both are covered. The same rules as 0095: applied once, the first time this migration
+-- runs, on a fresh and an existing control plane alike; a new publication for this UTC month with
+-- the rates of the list in force plus these; a list for a later month gets them too; a rate an
+-- operator already published for one of these classes is never replaced; a list in another currency
+-- is left for the operator.
+DO $agent_model_prices$
+DECLARE
+    this_month        text := to_char(now() AT TIME ZONE 'UTC', 'YYYYMM');
+    seeded_id         text := 'usage-' || to_char(now() AT TIME ZONE 'UTC', 'YYYYMM') || '-' ||
+                              lpad(floor(extract(epoch FROM clock_timestamp()) * 1000000)
+                                       ::bigint::text, 17, '0');
+    in_force_id       text;
+    in_force_currency text;
+    seed_classes      text[] := ARRAY['gpt-6.1-sol/input', 'gpt-6.1-sol/output',
+                                      'gpt-6.1-sol@long/input', 'gpt-6.1-sol@long/output',
+                                      'gpt-6.1-terra/input', 'gpt-6.1-terra/output',
+                                      'gpt-6.1-terra@long/input', 'gpt-6.1-terra@long/output',
+                                      'gpt-6-astra/input', 'gpt-6-astra/output',
+                                      'gpt-6-astra@long/input', 'gpt-6-astra@long/output',
+                                      'gpt-6-luna/input', 'gpt-6-luna/output',
+                                      'gpt-6-luna@long/input', 'gpt-6-luna@long/output',
+                                      'gpt-5.5@long/input', 'gpt-5.5@long/output'];
+    seed_micros       bigint[] := ARRAY[2600000, 13000000,
+                                        5200000, 19500000,
+                                        1300000, 6500000,
+                                        2600000, 9750000,
+                                        13000000, 65000000,
+                                        26000000, 97500000,
+                                        130000, 650000,
+                                        260000, 975000,
+                                        13000000, 58500000];
+BEGIN
+    IF EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0105_agent_model_prices') THEN
+        RETURN;
+    END IF;
+    SELECT p.id, p.currency INTO in_force_id, in_force_currency FROM billing_plans p
+     WHERE p.id ~ '^usage-[0-9]{6}-[0-9]{17}$' AND substr(p.id, 7, 6) <= this_month
+     ORDER BY p.id DESC LIMIT 1;
+    IF in_force_currency IS NULL OR in_force_currency = 'USD' THEN
+        -- One microsecond later than the list in force when both were written in the same
+        -- microsecond (0095 and this block in one transaction on a fresh instance).
+        IF in_force_id IS NOT NULL AND seeded_id <= in_force_id THEN
+            seeded_id := 'usage-' || this_month || '-' ||
+                         lpad((substr(in_force_id, 14)::bigint + 1)::text, 17, '0');
+        END IF;
+        INSERT INTO billing_plans (id, name, description, currency)
+        VALUES (seeded_id, 'Usage',
+                'Usage price list from ' || substr(this_month, 1, 4) || '-' ||
+                    substr(this_month, 5, 2),
+                'USD');
+        INSERT INTO billing_plan_prices (plan_id, dimension, class, unit_micros, per, included)
+        SELECT seeded_id, pp.dimension, pp.class, pp.unit_micros, pp.per, pp.included
+          FROM billing_plan_prices pp WHERE pp.plan_id = in_force_id;
+        INSERT INTO billing_plan_prices (plan_id, dimension, class, unit_micros, per)
+        SELECT seeded_id, 'model_tokens', s.class, s.unit_micros, 1000000
+          FROM unnest(seed_classes, seed_micros) AS s(class, unit_micros)
+            ON CONFLICT DO NOTHING;
+    END IF;
+    INSERT INTO billing_plan_prices (plan_id, dimension, class, unit_micros, per)
+    SELECT p.id, 'model_tokens', s.class, s.unit_micros, 1000000
+      FROM billing_plans p
+     CROSS JOIN unnest(seed_classes, seed_micros) AS s(class, unit_micros)
+     WHERE p.id ~ '^usage-[0-9]{6}-[0-9]{17}$' AND substr(p.id, 7, 6) > this_month
+       AND p.currency = 'USD'
+        ON CONFLICT DO NOTHING;
+END
+$agent_model_prices$;
+INSERT INTO schema_migrations (version) VALUES ('0105_agent_model_prices') ON CONFLICT DO NOTHING;

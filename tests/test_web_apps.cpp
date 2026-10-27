@@ -237,7 +237,19 @@ TEST(WebApps, DesiredStateStatusAndQuotasFollowTheContract) {
     ASSERT_TRUE(stopped.ok) << stopped.error.message;
     EXPECT_EQ(stopped.value["desired"], "stopped");
     EXPECT_EQ(apps.call("start_app", {{"app_id", id}}).value["desired"], "running");
-    EXPECT_TRUE(apps.call("restart_app", {{"app_id", id}}).ok);
+    // A restart records its generation, which the operator writes on the pod template, so the
+    // pods are replaced although nothing else changed (lake#1228). Other changes keep it.
+    const auto before = apps.call("get_app", {{"app_id", id}});
+    EXPECT_EQ(before.value["restart_generation"], 0);
+    const auto restarted = apps.call("restart_app", {{"app_id", id}});
+    ASSERT_TRUE(restarted.ok) << restarted.error.message;
+    EXPECT_EQ(restarted.value["generation"], before.value["generation"].get<int>() + 1);
+    EXPECT_EQ(restarted.value["restart_generation"], restarted.value["generation"]);
+    const auto again = apps.call("restart_app", {{"app_id", id}});
+    EXPECT_EQ(again.value["restart_generation"], restarted.value["generation"].get<int>() + 1)
+        << "each restart is a new value";
+    const auto rescaled = apps.call("scale_app", {{"app_id", id}, {"replicas", 1}});
+    EXPECT_EQ(rescaled.value["restart_generation"], again.value["restart_generation"]);
 }
 
 TEST(WebApps, ReservedNamesAreRefusedAndOrdinaryNamesUseTheZone) {

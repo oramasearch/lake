@@ -36,6 +36,7 @@ Workspace assignment and event-client cutover are tracked in
 | `source_repository, source_revision, source_path, source_entrypoint, image` | Lake |
 | `framework, port, replicas, host, auth` | Lake |
 | `bindings_json, env_json, secret_env_refs, desired, generation` | Lake |
+| `restart_generation` | Lake ([restart](#restart)) |
 | `token_hashes_json` | operator; Lake may only clear it for rotation |
 | `phase, url, ready, message, observed_generation` | operator |
 | `updated_at` | both |
@@ -56,6 +57,21 @@ or spent rows cannot authenticate. The owner loop sweeps expired and spent rows 
 customer. Source tokens additionally require the exact `source_revision`. Generation increases
 on each desired-state edit. Create and update enforce per-customer app and replica quotas under a
 customer lock. Hosts are unique and must be one label beneath `LAKE_APPS_WILDCARD`.
+
+### Restart
+
+`restart_app` bumps `generation` like every edit and also sets `restart_generation` to that new
+generation (migration `0104_app_restarts`, lake#1228). Before, a restart changed only `generation`:
+the operator rendered the same pod template, Kubernetes replaced nothing, and the App kept serving
+the old process (Steve pressed Restart on production on 2026-10-26 and had to delete the pod by
+hand). The operator reads `restart_generation` and, when it is above 0, writes it on the pod
+template as the annotation `orama.cloud/lake-app-restart`, so each restart is a new template and
+the Deployment rolls its pods. No other edit changes it, so scaling or changing access never
+restarts pods. An app never restarted keeps 0 and no annotation, so an operator upgrade rolls
+nothing. The operator reads the column tolerantly (absent before the migration reads as 0); the
+operator side is orama-operator's LakeApp `spec.sync.restartGeneration`.
+
+`get_app` answers `restart_generation`. A stopped app's Restart starts it, as before.
 
 The binding contract is:
 

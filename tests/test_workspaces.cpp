@@ -40,6 +40,7 @@
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/methodologies.hpp"
+#include "lake/control/platform.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
@@ -4024,8 +4025,10 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
 
 // When an app fails (lake#1207): the pass that the store root's owner runs, with the context it
 // builds (the registry, the bus and the agents, no person).
-lake::api::ResourceRepairPass repair_pass(AgentRuns& r) {
+lake::api::ResourceRepairPass repair_pass(AgentRuns& r,
+                                          lake::control::PlatformService* platform = nullptr) {
     lake::api::ApiContext context;
+    context.platform = platform;
     context.store = &r.store;
     context.workspaces = r.w.service.get();
     context.agent_caller = &r.agents;
@@ -4280,6 +4283,153 @@ TEST(AgentRuns, AutoFixRepairsWithoutAConfirmAndStopsAfterItsAttempts) {
                        {{"resource_kind", "app"}, {"resource_id", app_id}, {"enabled", true}})
                     .ok);
     EXPECT_EQ(repair_pass(r).auto_fix_started, 1U);
+}
+
+// An app's runtime log as the configured Loki-compatible source answers it, and how often it was
+// read.
+class ScriptedLoki final : public lake::control::LokiSource {
+public:
+    json items = json::array();
+    std::size_t reads = 0;
+    std::string since;
+    int limit = 0;
+    std::string direction;
+
+    liquid::runtime::task<lake::control::PlatformResult<json>>
+    query(std::string, std::string start, int lines, std::string order) override {
+        ++reads;
+        since = std::move(start);
+        limit = lines;
+        direction = std::move(order);
+        co_return lake::control::PlatformResult<json>(json{{"items", items}, {"next_since", ""}});
+    }
+};
+
+// Streamlit's output for one page whose script raised (app-runtime runs `streamlit run`).
+json streamlit_failure(const std::string& ts, const std::string& exception) {
+    return json::array(
+        {{{"ts", ts + "1"}, {"line", "2026-10-26 14:02:11.120 Uncaught app execution"}},
+         {{"ts", ts + "2"}, {"line", "Traceback (most recent call last):"}},
+         {{"ts", ts + "3"},
+          {"line", "  File \"/app/app.py\", line 42, in <module>\n    df.plan.value_counts()"}},
+         {{"ts", ts + "4"}, {"line", exception}}});
+}
+
+TEST(AppErrors, RepeatedScriptFailuresAreCountedAndTheNewestExceptionIsNamed) {
+    json items = streamlit_failure("100", "KeyError: 'region'");
+    for (const json& line : streamlit_failure("200",
+                                              "AttributeError: 'DataFrame' object has no "
+                                              "attribute 'plan'")) {
+        items.push_back(line);
+    }
+    items.push_back({{"ts", "300"}, {"line", "INFO:     10.0.0.1 - \"GET / HTTP/1.1\" 200 OK"}});
+    std::ranges::reverse(items); // a backward read answers newest first
+    const auto errors = lake::api::app_errors_in_logs(items);
+    EXPECT_EQ(errors.count, 2U);
+    EXPECT_EQ(errors.last, "AttributeError: 'DataFrame' object has no attribute 'plan'");
+    EXPECT_NE(errors.traceback.find("line 42"), std::string::npos) << errors.traceback;
+
+    // Uvicorn's, for a FastAPI app; a chained traceback names the exception it ends with.
+    const json asgi = json::array(
+        {{{"ts", "1"}, {"line", "ERROR:    Exception in ASGI application"}},
+         {{"ts", "2"}, {"line", "Traceback (most recent call last):\n  File \"main.py\", line 9"}},
+         {{"ts", "3"}, {"line", "ValueError: no rows"}},
+         {{"ts", "4"},
+          {"line", "\nDuring handling of the above exception, another exception occurred:\n"}},
+         {{"ts", "5"}, {"line", "pandas.errors.EmptyDataError: No columns to parse from file"}},
+         {{"ts", "6"}, {"line", "INFO:     10.0.0.1 - \"GET /api HTTP/1.1\" 500"}}});
+    const auto one = lake::api::app_errors_in_logs(asgi);
+    EXPECT_EQ(one.count, 1U) << "one failure alone is below the threshold";
+    EXPECT_LT(one.count, lake::api::app_errors_threshold);
+    EXPECT_EQ(one.last, "pandas.errors.EmptyDataError: No columns to parse from file");
+
+    EXPECT_EQ(lake::api::app_errors_in_logs(json::array({{{"ts", "1"}, {"line", "ready"}}})).count,
+              0U);
+    EXPECT_EQ(lake::api::app_errors_in_logs(json::object()).count, 0U);
+}
+
+// lake#1228: a Streamlit app whose script raises on every page stays Running and Ready. With
+// auto-fix on, the pass reads its log, records `app_errors` and starts one repair; with auto-fix
+// off it reads nothing; once the errors stop, the notification is resolved.
+TEST(AgentRuns, AHealthyAppWhoseScriptKeepsFailingIsRepairedWhenAutoFixIsOn) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-application", "http://application:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+    auto loki = std::make_shared<ScriptedLoki>();
+    lake::control::PlatformService platform(
+        std::shared_ptr<lake::control::Store>(&r.store, [](lake::control::Store*) {}),
+        nullptr,
+        loki,
+        lake::control::PlatformConfig{"test", std::chrono::seconds(15), "", ""});
+    const std::string app_id = repairable_app(r, "customer-insights-dashboard");
+    const std::int64_t generation = r.store.get_web_app(app_id)->generation;
+    ASSERT_TRUE(r.store.set_web_app_status(
+        app_id, "Ready", "https://insights.example", true, "", generation));
+    json failing = streamlit_failure("100",
+                                     "AttributeError: 'NoneType' object has no attribute "
+                                     "'sort_values'");
+    for (const json& line : streamlit_failure("200",
+                                              "AttributeError: 'NoneType' object has no "
+                                              "attribute 'sort_values'")) {
+        failing.push_back(line);
+    }
+    loki->items = failing;
+
+    // Auto-fix off: the log is not read, nothing is told.
+    auto pass = repair_pass(r, &platform);
+    EXPECT_EQ(pass.log_reads, 0U);
+    EXPECT_EQ(loki->reads, 0U);
+    EXPECT_EQ(pass.notified, 0U);
+    EXPECT_EQ(pass.auto_fix_started, 0U);
+
+    ASSERT_TRUE(r.call("set_auto_fix",
+                       {{"resource_kind", "app"}, {"resource_id", app_id}, {"enabled", true}})
+                    .ok);
+
+    // One traceback alone starts nothing.
+    loki->items = streamlit_failure("100", "KeyError: 'plan'");
+    pass = repair_pass(r, &platform);
+    EXPECT_EQ(pass.log_reads, 1U);
+    EXPECT_EQ(pass.notified, 0U);
+    EXPECT_EQ(pass.auto_fix_started, 0U);
+    EXPECT_EQ(loki->direction, "backward") << "the newest lines";
+    EXPECT_EQ(loki->limit, lake::api::app_errors_line_limit);
+    EXPECT_FALSE(loki->since.empty()) << "a bounded window, not the whole log";
+
+    // Two: one notification with the exception line, and one repair attempt.
+    loki->items = failing;
+    pass = repair_pass(r, &platform);
+    EXPECT_EQ(pass.notified, 1U) << (pass.problems.empty() ? "" : pass.problems.front());
+    ASSERT_EQ(pass.auto_fix_started, 1U) << (pass.problems.empty() ? "" : pass.problems.front());
+    const auto listed = r.call("list_notifications", {{"resource_id", app_id}});
+    ASSERT_EQ(listed.value["notifications"].size(), 1U) << listed.value.dump();
+    const json notification = listed.value["notifications"][0];
+    EXPECT_EQ(notification["event"], "app_errors");
+    EXPECT_EQ(notification["reason"],
+              "AttributeError: 'NoneType' object has no attribute "
+              "'sort_values'");
+    EXPECT_NE(notification["detail"].get<std::string>().find("Uncaught app execution"),
+              std::string::npos);
+    const auto tasks = repair_tasks(r);
+    ASSERT_EQ(tasks.size(), 1U);
+    EXPECT_EQ(tasks[0].body["context"]["notification_id"], notification["id"]);
+    EXPECT_NE(tasks[0].body["message"].get<std::string>().find("AttributeError"),
+              std::string::npos);
+    EXPECT_NE(std::ranges::find(tasks[0].scopes, "app_logs"), tasks[0].scopes.end())
+        << "the repair turn reads the traceback itself";
+
+    // The same failing generation: told once, one attempt.
+    pass = repair_pass(r, &platform);
+    EXPECT_EQ(pass.notified, 0U);
+    EXPECT_EQ(pass.auto_fix_started, 0U);
+
+    // The errors stop: resolved.
+    ASSERT_TRUE(r.set_task_status(tasks[0].id, "Succeeded", "", "", {{"ok", true}}));
+    loki->items = json::array({{{"ts", "300"}, {"line", "You can now view your Streamlit app"}}});
+    pass = repair_pass(r, &platform);
+    EXPECT_EQ(pass.resolved, 1U);
+    EXPECT_EQ(r.call("list_notifications", {{"resource_id", app_id}}).value["open"], 0);
 }
 
 TEST(AgentRuns, AChangeTurnTurnsInstructionsIntoAProposalAndContinuesTheConversation) {
@@ -5665,6 +5815,118 @@ TEST(Workspaces, SqlNamesTheWordAMisspeltStatementStartsWith) {
     const auto write = r.call("workspace_sql", {{"statement", "DROP TABLE datasets.accounts"}});
     EXPECT_NE(write.error.message.find("it starts with 'DROP'"), std::string::npos);
     EXPECT_EQ(r.w.caller->calls.size(), before) << "the read-only guard still holds";
+}
+
+// lake#1229: the workspace Zetta route's `sql` (an App's binding) answers at most
+// gateway_sql_row_cap rows, and never cuts an answer silently.
+TEST(WorkspaceSql, GatewayRowCapRewritesOnlyAStatementWithoutItsOwnLimit) {
+    using lake::api::cap_sql_statement;
+    constexpr std::size_t cap = lake::api::gateway_sql_row_cap;
+    ASSERT_EQ(cap, 5000U);
+    EXPECT_EQ(cap_sql_statement("SELECT * FROM datasets.accounts", cap).value(),
+              "SELECT * FROM datasets.accounts LIMIT 5001");
+    EXPECT_EQ(cap_sql_statement("  select plan from datasets.accounts;  ", cap).value(),
+              "  select plan from datasets.accounts LIMIT 5001");
+    EXPECT_EQ(cap_sql_statement("SELECT * FROM datasets.accounts OFFSET 10", cap).value(),
+              "SELECT * FROM datasets.accounts LIMIT 5001 OFFSET 10")
+        << "LIMIT goes before OFFSET, as the grammar has them";
+    EXPECT_EQ(
+        cap_sql_statement("SELECT * FROM datasets.accounts WHERE note = 'limit 9'", cap).value(),
+        "SELECT * FROM datasets.accounts WHERE note = 'limit 9' LIMIT 5001")
+        << "a word in a quoted value is not the statement's LIMIT";
+    for (const char* unchanged : {"SELECT * FROM datasets.accounts LIMIT 20",
+                                  "SELECT * FROM datasets.accounts limit 5000",
+                                  "SELECT * FROM datasets.accounts LIMIT 5000 OFFSET 5000;",
+                                  "SELECT * FROM datasets.accounts LIMIT n"}) {
+        EXPECT_EQ(cap_sql_statement(unchanged, cap).value(), unchanged) << unchanged;
+    }
+    for (const char* over : {"SELECT * FROM datasets.accounts LIMIT 5001",
+                             "SELECT * FROM datasets.accounts LIMIT 100000 OFFSET 2",
+                             "SELECT * FROM datasets.accounts LIMIT 99999999999999999999999"}) {
+        const auto refused = cap_sql_statement(over, cap);
+        ASSERT_FALSE(refused) << over;
+        EXPECT_NE(refused.error().find("more than 5,000 rows"), std::string::npos)
+            << refused.error();
+        EXPECT_NE(refused.error().find("GROUP BY"), std::string::npos);
+        EXPECT_NE(refused.error().find("LIMIT and OFFSET"), std::string::npos);
+    }
+}
+
+TEST(WorkspaceSql, GatewayRowCapAppliesOnlyWhereTheRouteSetsIt) {
+    ReadyWorkspace r;
+    std::string audit_kind;
+    json audit_details;
+    const auto call = [&](json input, std::size_t cap) {
+        lake::api::ApiContext context;
+        context.store = r.w.store.get();
+        context.workspaces = r.w.service.get();
+        context.authorized = true;
+        context.acting_identity = "admin";
+        context.operator_credential = true;
+        context.request_id = lake::control::new_uuid_v4();
+        context.sql_row_cap = cap;
+        input["customer_id"] = r.w.customer_id;
+        input["workspace_id"] = r.w.workspace_id();
+        auto completed =
+            liquid::runtime::block_on(r.registry.call_async("workspace_sql", input, context));
+        EXPECT_TRUE(completed);
+        audit_kind = context.audit_kind;
+        audit_details = context.audit_details;
+        return std::move(*completed);
+    };
+    const auto rows = [](std::size_t count) {
+        json answer{
+            {"messages", json::array()}, {"columns", json::array({"id"})}, {"rows", json::array()}};
+        for (std::size_t index = 0; index < count; ++index) {
+            answer["rows"].push_back({{"id", index}});
+        }
+        return answer;
+    };
+    constexpr std::size_t cap = lake::api::gateway_sql_row_cap;
+
+    // Fewer rows than the cap: the answer passes unchanged, rows keyed by column.
+    r.w.caller->answers["sql"] = rows(3);
+    const auto few = call({{"statement", "SELECT id FROM datasets.accounts"}}, cap);
+    ASSERT_TRUE(few.ok) << few.error.message;
+    EXPECT_EQ(few.value, rows(3));
+    EXPECT_EQ(r.sent("sql")["statement"], "SELECT id FROM datasets.accounts LIMIT 5001");
+    EXPECT_EQ(audit_kind, "workspace.sql");
+    EXPECT_EQ(audit_details["row_cap"], cap);
+
+    // More than the cap: too_many_rows, never the first 5,000.
+    r.w.caller->answers["sql"] = rows(cap + 1);
+    const auto many = call({{"statement", "SELECT id FROM datasets.accounts"}}, cap);
+    ASSERT_FALSE(many.ok);
+    EXPECT_EQ(many.error.code, "too_many_rows");
+    EXPECT_EQ(lake::api::rest_status(many), 422);
+    EXPECT_NE(many.error.message.find("more than 5,000 rows"), std::string::npos);
+
+    // A LIMIT over the cap is refused before it runs.
+    const std::size_t before = r.w.caller->calls.size();
+    const auto over = call({{"statement", "SELECT id FROM datasets.accounts LIMIT 10000"}}, cap);
+    ASSERT_FALSE(over.ok);
+    EXPECT_EQ(over.error.code, "too_many_rows");
+    EXPECT_EQ(r.w.caller->calls.size(), before) << "nothing reached the workspace";
+
+    // Paging with LIMIT and OFFSET runs as written.
+    r.w.caller->answers["sql"] = rows(cap);
+    const auto page =
+        call({{"statement", "SELECT id FROM datasets.accounts LIMIT 5000 OFFSET 5000"}}, cap);
+    ASSERT_TRUE(page.ok) << page.error.message;
+    EXPECT_EQ(page.value["rows"].size(), cap);
+    EXPECT_EQ(r.sent("sql")["statement"],
+              "SELECT id FROM datasets.accounts LIMIT 5000 OFFSET 5000");
+
+    // Called directly (no cap), workspace_sql is unchanged.
+    r.w.caller->answers["sql"] = rows(cap + 1);
+    const auto direct = call({{"statement", "SELECT id FROM datasets.accounts"},
+                              {"intent", "the dashboard's first chart"}},
+                             0);
+    ASSERT_TRUE(direct.ok) << direct.error.message;
+    EXPECT_EQ(direct.value["rows"].size(), cap + 1);
+    EXPECT_EQ(r.sent("sql")["statement"], "SELECT id FROM datasets.accounts");
+    EXPECT_EQ(r.sent("sql")["intent"], "the dashboard's first chart");
+    EXPECT_FALSE(audit_details.contains("row_cap"));
 }
 
 TEST(Workspaces, SqlDescriptionSaysWhatTheWorkspaceSqlNowAnswers) {

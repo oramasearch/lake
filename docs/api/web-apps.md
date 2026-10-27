@@ -23,7 +23,7 @@ REST and MCP expose the same registry, customer policy and signed audit records.
 | `delete_app` | `app_id`, `confirm` equal to name | `desired = deleted` |
 | `set_app_env`, `unset_app_env` | `app_id`, key; set takes `value`, `secret` (`{mount_id, name, field}`) or `secret_ref` (`lake-secret://…`) | scanned environment update; a secret is checked, never read back |
 | `set_app_auth` | `app_id`, auth; public also requires `confirm_public` | lake sign-in or public access |
-| `restart_app`, `stop_app`, `start_app` | `app_id` | lifecycle intent |
+| `restart_app`, `stop_app`, `start_app` | `app_id` | lifecycle intent; a restart sets `restart_generation`, which the operator puts on the pod template so the pods are replaced ([restart](../control-plane/web-apps.md#restart), lake#1228) |
 | `scale_app` | `app_id`, replicas | desired count within customer quota |
 | `set_app_zetta_binding` | `app_id`, attached | attach or detach read-only workspace access |
 | `bind_service_to_app` | `app_id`, service_id | bind a service from the same customer |
@@ -176,7 +176,9 @@ rate-limited denials, but does not audit each successful cookie check.
 
 The operator holds tokens in Secret `app-tokens` and writes SHA-256 hex hashes to
 `token_hashes_json`. Lake issues and returns no app tokens. Source calls must also name the app's
-exact revision. Zetta calls retain the workspace read allow-list and read-only SQL checks. Every
+exact revision. Zetta calls retain the workspace read allow-list and read-only SQL checks; app-runtime's
+`workspace.sql()` (`/zetta/v1/sql`) runs as `workspace_sql`, read-only and at most 5,000 rows a query
+([SQL on the Zetta route](workspaces.md#sql-on-this-route), lake#1229). Every
 other capability or target is refused. The registry accepts the pull token only as HTTP Basic user
 `app`, with the token as the password. It cannot read another app or `<space>/cache/...`, and it
 cannot start uploads or publish manifests. New hashes invalidate prior tokens; unbinding or

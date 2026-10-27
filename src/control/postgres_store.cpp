@@ -5006,7 +5006,10 @@ public:
         "a.auth, a.bindings_json::text, a.env_json::text, a.secret_env_refs::text, a.desired, "
         "a.generation, a.phase, a.url, a.ready, a.message, a.observed_generation, "
         "to_char(a.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
-        "a.source_entrypoint, a.token_hashes_json::text, COALESCE(a.workspace_id::text, '')";
+        "a.source_entrypoint, a.token_hashes_json::text, COALESCE(a.workspace_id::text, ''), "
+        "a.restart_generation";
+    // The number of web_app_columns: a query that selects more after them reads its own from here.
+    static constexpr int web_app_column_count = 28;
 
     static WebApp web_app_from(const pqxx::row& row) {
         WebApp app;
@@ -5037,6 +5040,7 @@ public:
         app.source_entrypoint = row[24].as<std::string>();
         app.token_hashes = nlohmann::json::parse(row[25].as<std::string>());
         app.workspace_id = row[26].as<std::string>();
+        app.restart_generation = row[27].as<std::int64_t>();
         return app;
     }
 
@@ -5106,7 +5110,7 @@ public:
             if (rows.empty()) {
                 return std::unexpected(StoreError{"not_found", "no protected app " + app_id});
             }
-            if (!rows[0][27].as<bool>()) {
+            if (!rows[0][web_app_column_count].as<bool>()) {
                 return std::unexpected(
                     StoreError{"unauthorized", "user is not a member of this account"});
             }
@@ -5184,7 +5188,8 @@ public:
                 return std::unexpected(
                     StoreError{"unauthorized", "app authorization code is invalid or expired"});
             }
-            return WebAppAuthorization{web_app_from(rows[0]), rows[0][27].as<std::string>()};
+            return WebAppAuthorization{web_app_from(rows[0]),
+                                       rows[0][web_app_column_count].as<std::string>()};
         });
     }
 
@@ -5322,7 +5327,8 @@ public:
                 "source_path = $5, image = $6, replicas = $7, bindings_json = $8::jsonb, "
                 "env_json = $9::jsonb, secret_env_refs = $10::jsonb, desired = $11, "
                 "source_entrypoint = $12, auth = $13, generation = generation + 1, "
-                "updated_at = now() "
+                "restart_generation = CASE WHEN $14::boolean THEN generation + 1 "
+                "ELSE restart_generation END, updated_at = now() "
                 "WHERE id = $1::uuid",
                 id,
                 current->mode,
@@ -5336,7 +5342,8 @@ public:
                 current->secret_env_refs.dump(),
                 current->desired,
                 current->source_entrypoint,
-                current->auth);
+                current->auth,
+                patch.restart);
             if (patch.rotate_tokens) {
                 tx.exec_params(
                     "UPDATE apps SET token_hashes_json = '{}'::jsonb WHERE id = $1::uuid", id);

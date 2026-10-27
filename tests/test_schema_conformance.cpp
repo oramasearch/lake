@@ -572,8 +572,16 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     gateway_prices.id = "usage-200001-00000000000000001";
     gateway_prices.name = "Usage";
     gateway_prices.currency = "USD";
+    // An agent turn calls its workspace's model, gpt-6.1-sol when none is chosen (lake#1230); a
+    // model with long-context rates is served only with them published.
     gateway_prices.prices = {{"model_tokens", 6, 1, 0, "gpt-5.5/input"},
-                             {"model_tokens", 36, 1, 0, "gpt-5.5/output"}};
+                             {"model_tokens", 36, 1, 0, "gpt-5.5/output"},
+                             {"model_tokens", 12, 1, 0, "gpt-5.5@long/input"},
+                             {"model_tokens", 54, 1, 0, "gpt-5.5@long/output"},
+                             {"model_tokens", 3, 1, 0, "gpt-6.1-sol/input"},
+                             {"model_tokens", 13, 1, 0, "gpt-6.1-sol/output"},
+                             {"model_tokens", 6, 1, 0, "gpt-6.1-sol@long/input"},
+                             {"model_tokens", 20, 1, 0, "gpt-6.1-sol@long/output"}};
     checked(store->put_billing_plan(gateway_prices));
     lake::api::ApiServer server(
         {.port = 0,
@@ -991,7 +999,11 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
                {{"dimension", "model_tokens"}, {"class", "gpt-5.5/input"}, {"unit_micros", 6}},
                {{"dimension", "model_tokens"},
                 {"class", "gpt-5.5/output"},
-                {"unit_micros", 36}}})}});
+                {"unit_micros", 36}},
+               {{"dimension", "model_tokens"}, {"class", "gpt-6.1-sol/input"}, {"unit_micros", 3}},
+               {{"dimension", "model_tokens"},
+                {"class", "gpt-6.1-sol/output"},
+                {"unit_micros", 13}}})}});
     http.call("price_list");
     http.read("price_list", "");
     http.call("price_list", {{"include_history", true}});

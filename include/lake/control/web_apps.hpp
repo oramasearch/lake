@@ -44,6 +44,9 @@ struct WebApp {
     std::string message;
     std::int64_t observed_generation = 0;
     std::string updated_at;
+    // The generation the last restart_app wrote, 0 if never (lake#1228). The operator writes it on
+    // the pod template, so a restart rolls the pods even when nothing else changed.
+    std::int64_t restart_generation = 0;
 };
 
 struct NewWebApp {
@@ -90,6 +93,8 @@ struct WebAppPatch {
     std::optional<std::vector<StoreMountRequest>> stores;
     std::size_t max_replicas = 0;
     bool rotate_tokens = false;
+    // restart_app: restart_generation becomes the new generation (lake#1228).
+    bool restart = false;
 };
 
 struct WebAppSessionClaims {

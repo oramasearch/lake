@@ -232,6 +232,18 @@ bool workspace_action_allowed(std::string_view capability);
 // Whether Zetta takes the capability with GET: every read, and `chat`, which lake authorizes as
 // an action because it loads a model.
 bool workspace_uses_get(std::string_view capability);
+// The most rows the workspace Zetta route's `sql` answers (lake#1229, docs/api/workspaces.md):
+// an App aggregates in SQL or pages with LIMIT and OFFSET rather than reading a whole table.
+// workspace_sql called directly by people and agents has no cap.
+inline constexpr std::size_t gateway_sql_row_cap = 5000;
+// `statement` (one read-only query) with a row cap applied, or why it is refused. A statement
+// without its own LIMIT gets `LIMIT cap+1` (before any OFFSET), so a cap+1-th row shows the answer
+// was too large and nothing is cut silently; a LIMIT above the cap is refused; a LIMIT at or under
+// it runs unchanged. The refusal is the message for too_many_rows.
+std::expected<std::string, std::string> cap_sql_statement(std::string_view statement,
+                                                          std::size_t cap);
+// too_many_rows' message when a capped query answered more than `cap` rows.
+std::string too_many_rows_message(std::size_t cap);
 // The allow-lists themselves, in the order the source lists them (a name may be in both).
 std::span<const std::string_view> workspace_read_names();
 std::span<const std::string_view> workspace_action_names();

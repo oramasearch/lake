@@ -65,8 +65,12 @@ Json token_request_schema(std::string_view endpoint) {
         properties["user"] = string;
         return closed_object(std::move(properties));
     }
+    // Only the standard tier is ever asked for (lake#1230): Fast, Ultrafast, priority and the rest
+    // cost a multiple of the price list's rates. Absent or null is the default as well; the gateway
+    // writes `default` either way, so the account's own provider setting never chooses for it.
     properties.update({{"background", disabled},
                        {"store", disabled},
+                       {"service_tier", {{"enum", {"default", nullptr}}}},
                        {"temperature", number},
                        {"top_p", number},
                        {"parallel_tool_calls", boolean}});
@@ -343,7 +347,32 @@ std::string provider_message(std::string_view body) {
 } // namespace
 
 std::vector<GatewayModel> default_gateway_models() {
-    return {{"gpt-5.5"}, {"gpt-5"}, {"gpt-4o"}, {"text-embedding-3-small"}};
+    return {{"gpt-6.1-sol"},
+            {"gpt-6.1-terra"},
+            {"gpt-6-astra"},
+            {"gpt-6-luna"},
+            {"gpt-5.5"},
+            {"gpt-5"},
+            {"gpt-4o"},
+            {"text-embedding-3-small"}};
+}
+
+bool is_chat_model(std::string_view name) {
+    return !name.empty() && !name.starts_with("text-embedding");
+}
+
+std::vector<std::string> gateway_chat_models(const std::vector<GatewayModel>& models) {
+    std::vector<std::string> out;
+    for (const GatewayModel& model : models) {
+        if (model.provider == "openai" && is_chat_model(model.name)) {
+            out.push_back(model.name);
+        }
+    }
+    return out;
+}
+
+bool has_long_context_rate(std::string_view model) {
+    return model.starts_with("gpt-6") || model == "gpt-5.5" || model.starts_with("gpt-5.5-");
 }
 
 std::expected<std::vector<GatewayModel>, std::string> parse_gateway_models(std::string_view text) {
@@ -385,6 +414,14 @@ std::string model_token_class(std::string_view model, std::string_view kind) {
     return std::format("{}/{}", model, kind);
 }
 
+std::string
+model_token_class(std::string_view model, std::string_view kind, std::uint64_t prompt_tokens) {
+    if (prompt_tokens > long_context_prompt_tokens && has_long_context_rate(model)) {
+        return std::format("{}@long/{}", model, kind);
+    }
+    return model_token_class(model, kind);
+}
+
 std::expected<void, ApiError>
 validate_model_prices(std::string_view model, ApiContext& context, std::string_view path) {
     const auto refused = [path] {
@@ -411,8 +448,15 @@ validate_model_prices(std::string_view model, ApiContext& context, std::string_v
     if (!list) {
         return refused();
     }
-    for (const auto kind : {"input", "output"}) {
-        const std::string key = model_token_class(model, kind);
+    // A model whose long prompts cost more needs its long-context rates too: the gateway learns a
+    // prompt's length only from the provider's answer, after the call is made.
+    std::vector<std::string> keys{model_token_class(model, "input"),
+                                  model_token_class(model, "output")};
+    if (has_long_context_rate(model)) {
+        keys.push_back(model_token_class(model, "input", long_context_prompt_tokens + 1));
+        keys.push_back(model_token_class(model, "output", long_context_prompt_tokens + 1));
+    }
+    for (const std::string& key : keys) {
         std::size_t matches = 0;
         for (const auto& price : list->prices) {
             if (price.dimension == "model_tokens" && price.class_name == key) {
@@ -473,6 +517,14 @@ std::expected<nlohmann::json, ApiError> prepare_model_request(std::string_view e
             "background: the gateway counts an answer's tokens as it is made; leave it out",
             "/request/background"});
     }
+    const auto tier = request.find("service_tier");
+    if (tier != request.end() && !tier->is_null() && *tier != "default") {
+        return std::unexpected(
+            ApiError{"invalid_input",
+                     "service_tier: Lake asks only for the standard tier (default); faster or "
+                     "priority processing costs more than its price list covers",
+                     "/request/service_tier"});
+    }
     if (streamed && endpoint == "embeddings") {
         return std::unexpected(
             ApiError{"invalid_input", "stream: embeddings do not stream", "/request/stream"});
@@ -486,6 +538,8 @@ std::expected<nlohmann::json, ApiError> prepare_model_request(std::string_view e
     if (endpoint != "embeddings") {
         // Responses otherwise stores answers by default under the shared platform account.
         request["store"] = false;
+        // The standard tier, never the account's own default (which could be a costlier one).
+        request["service_tier"] = "default";
     }
     if (streamed && endpoint == "chat/completions") {
         nlohmann::json options = request.value("stream_options", nlohmann::json::object());

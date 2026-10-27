@@ -210,6 +210,27 @@ export const LIST_RATES: { dimension: string; class?: string; unit_micros: numbe
   { dimension: "model_tokens", class: "gpt-4o/output", unit_micros: 13_000_000, per: 1_000_000 },
   { dimension: "model_tokens", class: "text-embedding-3-small/input", unit_micros: 26_000, per: 1_000_000 },
   { dimension: "model_tokens", class: "text-embedding-3-small/output", unit_micros: 26_000, per: 1_000_000 },
+  // The gpt-6.x models and long-context rates (migration 0105_agent_model_prices, lake#1230, Steve
+  // 2026-10-26): the same page read 2026-10-26, plus 30%. A prompt over 272,000 input tokens is
+  // priced by OpenAI at 2x input and 1.5x output, so it is billed at `<model>@long/...`.
+  { dimension: "model_tokens", class: "gpt-6.1-sol/input", unit_micros: 2_600_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-6.1-sol/output", unit_micros: 13_000_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-6.1-sol@long/input", unit_micros: 5_200_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-6.1-sol@long/output", unit_micros: 19_500_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-6.1-terra/input", unit_micros: 1_300_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-6.1-terra/output", unit_micros: 6_500_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-6.1-terra@long/input", unit_micros: 2_600_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-6.1-terra@long/output", unit_micros: 9_750_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-6-astra/input", unit_micros: 13_000_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-6-astra/output", unit_micros: 65_000_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-6-astra@long/input", unit_micros: 26_000_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-6-astra@long/output", unit_micros: 97_500_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-6-luna/input", unit_micros: 130_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-6-luna/output", unit_micros: 650_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-6-luna@long/input", unit_micros: 260_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-6-luna@long/output", unit_micros: 975_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-5.5@long/input", unit_micros: 13_000_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-5.5@long/output", unit_micros: 58_500_000, per: 1_000_000 },
   { dimension: "volumes", unit_micros: 200_000, per: 2_628_000 },
 ];
 

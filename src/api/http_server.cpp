@@ -14583,7 +14583,13 @@ struct ApiServer::Impl {
         context.audit_recorder = audit_recorder.get();
         context.balance = balance_runtime;
         context.external_origin = options.external_origin;
+        // A healthy app with auto-fix on is read for repeated script errors (lake#1228).
+        context.platform = options.platform.get();
         const ResourceRepairPass done = run_resource_repair_pass(context);
+        if (done.log_reads > 0) {
+            metrics.increment_counter(
+                "lake_repair_log_reads_total", {}, static_cast<double>(done.log_reads));
+        }
         metrics.increment_counter("lake_repair_passes_total");
         if (done.notified > 0) {
             metrics.increment_counter(
@@ -15059,14 +15065,22 @@ struct ApiServer::Impl {
             body = result.ok ? result.value.dump() : rest_envelope(result).dump();
         } else {
             const std::string capability = route_value(route, "capability");
-            const bool read = workspace_read_allowed(capability);
-            const bool action = workspace_action_allowed(capability);
+            // The engine's `sql` is served as Lake's read-only `workspace_sql` (lake#1229): the
+            // same read authorization (an App's binding needs `read`), the same read-only guard,
+            // safe mode and audit, never the workspace's administrative SQL, and at most
+            // gateway_sql_row_cap rows. GET takes the statement in the query string (what
+            // app-runtime sends), POST a JSON body.
+            const bool sql = capability == "sql";
+            const bool read = sql || workspace_read_allowed(capability);
+            const bool action = !sql && workspace_action_allowed(capability);
+            const std::string target_name =
+                sql ? "workspace_sql" : (read ? "workspace_query" : "workspace_act");
             nlohmann::json input = nlohmann::json::object();
             if (!read && !action) {
                 status = http::status::not_found;
                 body =
                     error_body("unknown_capability", capability + " is not available through Lake");
-            } else if (workspace_uses_get(capability) != get) {
+            } else if (!sql && workspace_uses_get(capability) != get) {
                 status = http::status::method_not_allowed;
                 allow = workspace_uses_get(capability) ? "GET" : "POST";
                 body = error_body("method_not_allowed",
@@ -15078,14 +15092,12 @@ struct ApiServer::Impl {
                     input[std::string(parameter.key)] = std::string(parameter.value);
                 }
             } else {
-                const ApiResult admitted =
-                    registry.authenticate(read ? "workspace_query" : "workspace_act", context);
+                const ApiResult admitted = registry.authenticate(target_name, context);
                 if (!admitted.ok) {
                     co_return co_await send_authentication_failure(route, admitted);
                 }
-                const auto named = registry.find(capability);
-                const auto target =
-                    named ? named : registry.find(read ? "workspace_query" : "workspace_act");
+                const auto named = sql ? nullptr : registry.find(capability);
+                const auto target = named ? named : registry.find(target_name);
                 JsonBodySink sink(capability_body_limit(*target, context));
                 auto [read_error, bytes_read] = co_await read_json_body(route, sink);
                 std::string reason;
@@ -15110,7 +15122,7 @@ struct ApiServer::Impl {
                     const std::string code =
                         body_is_too_large(read_error) ? "size_invalid" : "invalid_input";
                     const ApiResult refused =
-                        registry.refuse(read ? "workspace_query" : "workspace_act",
+                        registry.refuse(target_name,
                                         ApiResult::failure(code, message),
                                         {{"capability", capability},
                                          {"input", reason},
@@ -15126,10 +15138,20 @@ struct ApiServer::Impl {
                 if (!get) {
                     context = context_for(route);
                 }
-                scoped_input["capability"] = capability;
-                scoped_input["input"] = input;
-                auto completed = co_await registry.call_async(
-                    read ? "workspace_query" : "workspace_act", scoped_input, context);
+                if (sql) {
+                    // workspace_sql's own input (statement, database, safe_mode_confirmation,
+                    // intent); its schema refuses anything else. The path names the customer.
+                    for (auto& [name, value] : input.items()) {
+                        if (name != "customer_id") {
+                            scoped_input[name] = std::move(value);
+                        }
+                    }
+                    context.sql_row_cap = gateway_sql_row_cap;
+                } else {
+                    scoped_input["capability"] = capability;
+                    scoped_input["input"] = input;
+                }
+                auto completed = co_await registry.call_async(target_name, scoped_input, context);
                 const ApiResult result =
                     completed ? std::move(*completed)
                               : ApiResult::failure("store_error", completed.error().message);

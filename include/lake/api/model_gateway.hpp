@@ -38,9 +38,30 @@ inline constexpr std::string_view default_model_provider_url = "https://api.open
 // Malformed lists, duplicate names and unsupported providers are configuration errors.
 std::expected<std::vector<GatewayModel>, std::string> parse_gateway_models(std::string_view text);
 bool gateway_model_allowed(const std::vector<GatewayModel>& models, std::string_view name);
+
+// The model an agent turn calls when its workspace has chosen none (lake#1230,
+// docs/api/model-gateway.md#the-workspaces-model).
+inline constexpr std::string_view default_agent_model = "gpt-6.1-sol";
+// A chat model, as opposed to an embedding model: what a workspace may choose for its agents.
+bool is_chat_model(std::string_view name);
+// The served chat models, in the configured order.
+std::vector<std::string> gateway_chat_models(const std::vector<GatewayModel>& models);
+
+// A request whose prompt is longer than this many input tokens is priced by OpenAI at 2x input and
+// 1.5x output for the whole request (gpt-6.x and gpt-5.5), so Lake records it under the model's
+// long-context classes (`<model>@long/input`, `<model>@long/output`), priced the same way plus 30%.
+inline constexpr std::uint64_t long_context_prompt_tokens = 272'000;
+// Whether the model has long-context rates: gpt-6.x and gpt-5.5.
+bool has_long_context_rate(std::string_view model);
+
 // A token billing class binds the exact requested model to its input or output tokens.
 std::string model_token_class(std::string_view model, std::string_view kind);
-// Reject unpriced model usage before it can enter a billed account's ledger. Billing off: no check.
+// The class for a request with `prompt_tokens` input tokens: the long-context class past
+// long_context_prompt_tokens for a model that has one, else the plain one.
+std::string
+model_token_class(std::string_view model, std::string_view kind, std::uint64_t prompt_tokens);
+// Reject unpriced model usage before it can enter a billed account's ledger: both directions, and
+// the long-context pair for a model that has one. Billing off: no check.
 std::expected<void, ApiError> validate_model_prices(std::string_view model,
                                                     ApiContext& context,
                                                     std::string_view path = "/request/model");
@@ -51,7 +72,9 @@ std::expected<void, ApiError> validate_gateway_model(std::string_view model, Api
 // streamed chat completion is asked to report its usage in its last event
 // (`stream_options.include_usage`), so a stream is counted like any other answer. A request with
 // `background` set (the Responses API's) is refused: the provider would go on generating after its
-// answer, which reports no usage, and the gateway has no route to read the result (lake#939).
+// answer, which reports no usage, and the gateway has no route to read the result (lake#939). A
+// `service_tier` other than `default` is refused, and a chat or responses request is always sent
+// with `service_tier: default`, so the provider never processes it in a costlier mode (lake#1230).
 std::expected<nlohmann::json, ApiError> prepare_model_request(std::string_view endpoint,
                                                               nlohmann::json request);
 

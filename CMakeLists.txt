@@ -27,7 +27,7 @@ if(NOT DEFINED CMAKE_CXX_COMPILER AND NOT LAKE_USE_SYSTEM_COMPILER)
   endif()
 endif()
 
-project(lake VERSION 0.7.1 LANGUAGES C CXX)
+project(lake VERSION 0.7.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -263,6 +263,7 @@ add_library(lake-core STATIC
   src/control/mcp_connections.cpp
   src/control/agent_revisions.cpp
   src/control/agent_stream_triggers.cpp
+  src/control/workspace_settings.cpp
   src/control/project_decisions.cpp
   src/control/drives.cpp
   src/control/drive_files.cpp
@@ -311,6 +312,7 @@ add_library(lake-core STATIC
   src/api/mcp_connection_capabilities.cpp
   src/api/mcp_connection_streams.cpp
   src/api/agent_stream_triggers.cpp
+  src/api/workspace_settings_capabilities.cpp
   src/api/audio_duration.cpp
   src/api/workspace_store_capabilities.cpp
   src/api/datasets.cpp

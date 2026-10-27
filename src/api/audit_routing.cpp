@@ -389,6 +389,8 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "get_solution",
     "get_stream",
     "get_transcript",
+    // The workspace's own settings, kept in its Zetta (lake#1230).
+    "get_workspace_settings",
     "grant_network_tunnel",
     "hmac",
     "import_github_repository",
@@ -537,6 +539,7 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "set_mcp_tool_auto_approve",
     "set_repository_visibility",
     "set_service_stores",
+    "set_workspace_settings",
     "settle_ask_turn",
     "share_drive_folder",
     "sign",
