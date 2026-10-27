@@ -291,11 +291,72 @@ export function modelSteps(graph: Row | null | undefined, modelName: string): { 
 
 /* ------------------------------------------------------------------ calling it */
 
-/** One example row for a model: its key in `entity` and each feature at 0. */
+/** Whether a model groups rows into segments instead of predicting a column (lake#1243): the
+ * engine's model kind `segmentation` (or its weights' kind). Such a model has no score per row; its
+ * page shows its segments, and `predict` answers each row's nearest segment once the engine can. */
+export function isClustering(model: Row | null | undefined): boolean {
+  const kinds = [text(model ?? {}, "kind"), text((model?.feature_schema ?? {}) as Row, "kind")].map((kind) => kind.toLowerCase());
+  return kinds.some((kind) => kind === "segmentation" || kind === "clustering" || kind === "cluster");
+}
+
+/** The columns a clustering model reads, as a row sends them: each encoded feature's `source`
+ * (a category's levels share one), numeric or categorical, in order. */
+export function clusteringInputs(model: Row | null | undefined): { name: string; categorical: boolean }[] {
+  const schema = (model?.feature_schema ?? {}) as Row;
+  const features = Array.isArray(schema.features) ? (schema.features as unknown[]) : [];
+  const out: { name: string; categorical: boolean }[] = [];
+  for (const feature of features) {
+    if (!feature || typeof feature !== "object") continue;
+    const name = text(feature as Row, "source") || text(feature as Row, "name") || text(feature as Row, "column");
+    if (!name || out.some((input) => input.name === name)) continue;
+    out.push({ name, categorical: text(feature as Row, "kind") === "categorical" });
+  }
+  return out;
+}
+
+/** One example row for a model: its key in `entity` and each feature at 0 (a clustering model's
+ * categories as an empty text to fill in). */
 export function sampleRow(model: Row | null | undefined): Row {
   const row: Row = { entity: "example-1" };
+  if (isClustering(model) && clusteringInputs(model).length) {
+    for (const input of clusteringInputs(model)) row[input.name] = input.categorical ? "" : 0;
+    return row;
+  }
   for (const feature of featuresOf(model)) row[feature] = 0;
   return row;
+}
+
+/** Each row's segment from `predict` on a clustering model (zetta#1497): {row, entity,
+ * segment_id, distance, label}, in the rows' order. */
+export function assignmentRows(answer: Row | null | undefined): Row[] {
+  return answer && Array.isArray(answer.assignments) ? (answer.assignments as Row[]) : [];
+}
+
+export type Segment = { id: string; label: string; size: number | null; share: number | null; apart: string[] };
+
+/** A clustering run's segments from its report (`get_run_report`'s `segments`, the segment
+ * profiles table's rows): each one's id, label, size, share of the rows, and the features that set
+ * it apart, largest first as the engine lists them. */
+export function segmentsOf(report: Row | null | undefined): Segment[] {
+  const rows = Array.isArray(report?.segments) ? (report!.segments as Row[]) : [];
+  return rows
+    .filter((row) => row && typeof row === "object")
+    .map((row) => ({
+      id: row.segment_id === undefined || row.segment_id === null ? "" : String(row.segment_id),
+      label: text(row, "label"),
+      size: typeof row.size === "number" ? row.size : null,
+      share: typeof row.share === "number" ? row.share : null,
+      apart: Array.isArray(row.distinguishing_features) ? (row.distinguishing_features as unknown[]).map((feature) => (typeof feature === "string" ? feature : "")).filter(Boolean) : [],
+    }));
+}
+
+/** The tables a clustering run wrote (`get_run_report`'s `output_tables`): the segment
+ * assignments (one row per row trained on) and the segment profiles, with their dataset path. */
+export function segmentTables(report: Row | null | undefined): { name: string; ref: string; rows: number | null; available: boolean }[] {
+  const rows = Array.isArray(report?.output_tables) ? (report!.output_tables as Row[]) : [];
+  return rows
+    .filter((row) => row && typeof row === "object" && text(row, "ref"))
+    .map((row) => ({ name: text(row, "name") || text(row, "ref"), ref: text(row, "ref"), rows: typeof row.rows === "number" ? row.rows : null, available: row.available !== false }));
 }
 
 /** The `predict` call as `curl`, the account, workspace and model filled in. */

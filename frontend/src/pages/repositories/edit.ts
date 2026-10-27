@@ -27,7 +27,8 @@ export function bytesToBase64(bytes: Uint8Array): string {
 }
 
 /** Whether a file read through `repository_file` can be edited as text, and its text. Read from
- * `content_base64`, never `contents` (which writes bytes outside ASCII as `\xNN`, lake#1238). The
+ * `content_base64`, which every file has (`contents` is absent for a file that is not UTF-8,
+ * lake#1238, and before that fix wrote bytes outside ASCII as `\xNN`). The
  * text is exactly the file: strict UTF-8 (no replacement characters), its byte-order mark kept,
  * and one line ending throughout. */
 export function editableFile(contentBase64: string | undefined, size: number): EditableFile {

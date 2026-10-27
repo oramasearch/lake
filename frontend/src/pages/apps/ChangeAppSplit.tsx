@@ -2,7 +2,8 @@
  * the conversation with the Application Agent (lake#1240) on the left and the running App in a frame
  * on the right. The divider drags (or moves with the arrow keys) and its place is remembered. Once a
  * confirmed change is applied, the page reads the App until its newest generation is Ready and then
- * reloads the frame; Reload and *Open in a new tab* are always there. Close (or Escape) returns to the
+ * reloads the frame, and again over the next minute (SETTLE_RELOADS_MS: Ready can come before the new
+ * version answers, lake#1259); Reload and *Open in a new tab* are always there. Close (or Escape) returns to the
  * app page. The App host is a subdomain of the Lake's host, so its sign-in cookie works in the frame. */
 import { type PointerEvent as ReactPointerEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ExternalLink, Loader2, RefreshCw, X } from "lucide-react";
@@ -10,7 +11,7 @@ import { read, type Row } from "@/lib/api";
 import { Button, Notice } from "@/lib/ui";
 import { AppPhase } from "./AppsPage";
 import { AppConversation } from "./AppConversation";
-import { deployedAndReady, deployFailed, frameUrl, SPLIT_KEY, splitAt, splitByKey, storedSplit } from "./changeSplit";
+import { deployedAndReady, deployFailed, frameUrl, SETTLE_RELOADS_MS, SPLIT_KEY, splitAt, splitByKey, storedSplit } from "./changeSplit";
 
 function initialSplit(): number {
   try {
@@ -38,6 +39,8 @@ export function ChangeAppSplit({
   const [split, setSplit] = useState(initialSplit);
   const [frameKey, setFrameKey] = useState(0);
   const [waiting, setWaiting] = useState(false);
+  // Ready was read on the change; the frame reloads again at each SETTLE_RELOADS_MS step.
+  const [settling, setSettling] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
   const [view, setView] = useState<Row>(app);
   const container = useRef<HTMLDivElement | null>(null);
@@ -75,6 +78,7 @@ export function ChangeAppSplit({
         if (deployedAndReady(next)) {
           setWaiting(false);
           reload();
+          setSettling(true);
           return;
         }
         if (deployFailed(next)) {
@@ -94,8 +98,21 @@ export function ChangeAppSplit({
     };
   }, [waiting, customerId, workspaceId, appId, reload]);
 
+  // Ready was read: reload again at each step, since the old version may still be answering.
+  useEffect(() => {
+    if (!settling) return;
+    const timers = SETTLE_RELOADS_MS.map((delay, index) =>
+      window.setTimeout(() => {
+        reload();
+        if (index === SETTLE_RELOADS_MS.length - 1) setSettling(false);
+      }, delay),
+    );
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [settling, reload]);
+
   const onApplied = useCallback(() => {
     setFailed(null);
+    setSettling(false);
     setWaiting(true);
   }, []);
 
@@ -122,6 +139,10 @@ export function ChangeAppSplit({
         {waiting ? (
           <span className="muted inline-flex items-center gap-1.5 text-[12.5px]" role="status">
             <Loader2 size={13} className="animate-spin" aria-hidden /> Deploying the change; the App reloads when it is ready
+          </span>
+        ) : settling ? (
+          <span className="muted inline-flex items-center gap-1.5 text-[12.5px]" role="status">
+            <Loader2 size={13} className="animate-spin" aria-hidden /> The change is deployed; the App reloads a few times while the new version takes over. Reload if it still shows the old one.
           </span>
         ) : null}
         <span className="ml-auto inline-flex flex-wrap gap-2">

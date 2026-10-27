@@ -310,7 +310,16 @@ DrivePreviewResult DriveFormatRegistry::preview(const RepositoryFile& file) cons
         return DrivePreview{
             "download", "application/octet-stream", "<p>No preview is available.</p>"};
     }
-    return renderers_.at(extension)(file);
+    DrivePreviewResult rendered = renderers_.at(extension)(file);
+    // A text format shows the file's text exactly, so a file that is not UTF-8 has no preview
+    // rather than an altered one (lake#1238); it is downloaded instead.
+    if (rendered && drive_preview_is_text(*rendered) && !repository_file_text(file)) {
+        return DrivePreview{"download",
+                            "application/octet-stream",
+                            "<p>This file is not UTF-8 text, so it has no preview. Download it "
+                            "to see it.</p>"};
+    }
+    return rendered;
 }
 
 std::vector<std::string> DriveFormatRegistry::extensions() const {

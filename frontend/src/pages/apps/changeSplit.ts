@@ -53,6 +53,13 @@ export function deployedAndReady(app: AppView | undefined): boolean {
   return app.ready === true || phase === "Running" || phase === "Ready";
 }
 
+/** When the frame reloads again after the App first reads Ready on the change, in milliseconds from
+ * then (lake#1259). Ready can come before the new version answers: the operator counts the old
+ * replica, still serving, as ready while the new one starts (orama-operator#1049), and the router
+ * keeps sending to the old replica for a moment after it goes. So the frame reloads at Ready and
+ * again at each of these, and the page says so until the last; Reload is there throughout. */
+export const SETTLE_RELOADS_MS: readonly number[] = [5000, 15000, 30000, 60000];
+
 /** Whether the App failed to come up after the change (the frame is not reloaded onto it; the page
  * says so and the person can still reload by hand). */
 export function deployFailed(app: AppView | undefined): boolean {

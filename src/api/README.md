@@ -31,7 +31,7 @@ with each conversation turn says where the Quickstart is (`quickstart_state`). A
 `quickstart_columns.cpp` (lake#1181) holds its pure column rules: each column's kind from the
 engine's `analyze_dataset`, what is offered first, the training copy's rows and the engine's
 `transform_required` refusals in plain words, a derived target (`parse_derived`, `derive_target`) and
-the label-free copy for clustering (`prepare_unlabeled`), failures in plain words with the clustering
+the label-free copy for clustering (`prepare_unlabeled`: never a row number, identifier, free text, name or contact details; a date as its month and days before the latest, lake#1242), failures in plain words with the clustering
 reasons (`explain_run_failure`, `clustering_problem`) and a confirm's words (`confirm_outcome`); `train_quickstart` reads rows through `call_workspace`
 `sql` and loads the copy with a nested `upload_dataset`.
 See [quickstart.md](../../docs/api/quickstart.md).

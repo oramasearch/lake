@@ -939,11 +939,29 @@ TEST(Quickstart, AClusteringModelTrainsWithoutATargetAndIsNotPublishedForTheWebs
     EXPECT_FALSE(trains[0].contains("target"));
     EXPECT_EQ(trains[0]["methodology"], "M-3");
     EXPECT_EQ(trains[0]["entity_column"], "customer_id") << "the detected identifier";
-    EXPECT_EQ(trains[0]["dataset_path"], "datasets.people") << "unique names: as it is";
+    // lake#1242: the engine groups by every column it is given, so the columns Lake leaves out
+    // (a first name, free text, an empty and a constant column) and a date's parts make a copy,
+    // even though customer_id names every row.
+    EXPECT_EQ(trains[0]["dataset_path"], "datasets.people_training");
     // lake#1203: segmentation has no held-out share, and the engine chooses the segments itself.
     EXPECT_FALSE(trains[0].contains("holdout_fraction"));
     EXPECT_EQ(training.value["training"]["holdout_fraction"], nullptr);
-    EXPECT_TRUE(copies(q).empty());
+    const auto uploaded = copies(q);
+    ASSERT_EQ(uploaded.size(), 1U);
+    ASSERT_EQ(uploaded[0].size(), 12U);
+    const json& first = uploaded[0][0];
+    EXPECT_EQ(first["customer_id"], "c-0");
+    EXPECT_EQ(first["Country"], "Canada");
+    EXPECT_EQ(first["Spend"], 10.5);
+    EXPECT_EQ(first["Signup Date month"], 1);
+    EXPECT_EQ(first["Signup Date days before latest"], 334) << "2025-01-15 to 2025-12-15";
+    EXPECT_EQ(first["Renewed month"], 1) << "dates the profile read as text";
+    for (const char* left : {"First Name", "Bio", "Notes", "Region", "Signup Date", "Renewed"}) {
+        EXPECT_FALSE(first.contains(left)) << left;
+    }
+    const json preparation = training.value["training"]["preparation"];
+    EXPECT_EQ(preparation["copy"], true);
+    EXPECT_EQ(preparation["derived"].size(), 4U) << preparation.dump(2);
     // What a confirm in the conversation says, and what Ask Orama's page says, while it trains
     // (lake#1204).
     const auto started = lake::api::quickstart_columns::confirm_outcome(training.value);

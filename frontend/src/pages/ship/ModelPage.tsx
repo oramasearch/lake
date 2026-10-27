@@ -1,6 +1,9 @@
 /** Ship → Model (`/ship/model?id=`, lake#599): serving one model version.
  * - Inference: publish or unpublish, the endpoint, the call to paste, and a try-it panel that
- *   calls `predict` with a row. A model a workspace methodology trained (`python:W-…`) is served
+ *   calls `predict` with a row. A clustering model (lake#1243) predicts no column: the page shows
+ *   its segments and the tables its training wrote, and the try-it panel asks for each row's
+ *   nearest segment, which the workspace engine answers once it can (zetta#1497) and otherwise
+ *   refuses in words. A model a workspace methodology trained (`python:W-…`) is served
  *   by its own code (lake#690): publishing starts its server, whose state the side card follows
  *   (`get_methodology_deployment`), and `predict` answers one prediction per row.
  * - Access: the keys that may call it (tokens scoped to `predict`, and a new one), and origins.
@@ -21,8 +24,8 @@ import { entityCrumb, useTrail } from "@/lib/trail";
 import { Banner, Button, Card, Chip, CopyBlock, DataTable, Empty, ErrorBlock, Field, FormError, KeyValue, Notice, Skeleton, Split, Stat, StatRow, StateTabs, Status, fieldError, Form } from "@/lib/ui";
 import { NO_WORKSPACE } from "@/pages/account/signIn";
 import { Chart } from "../experiments/Chart";
-import { WorkspaceFrame, cellText, qs, text, useSpaceRead, useWorkspace, useWsPath, wa } from "../train/workspace";
-import { errorRate, featuresOf, filledSteps, groupOf, methodologyOf, parseRows, predictCurl, predictionRows, predictKeys, rowNumber, sampleRow, serverState, trafficOf, versionNumber, type ModelGroup } from "../train/models";
+import { WorkspaceFrame, cellText, qs, text, useSpaceRead, useWorkspace, useWq, useWsPath, wa } from "../train/workspace";
+import { assignmentRows, errorRate, featuresOf, filledSteps, groupOf, isClustering, methodologyOf, parseRows, predictCurl, predictionRows, predictKeys, rowNumber, sampleRow, segmentTables, segmentsOf, serverState, trafficOf, versionNumber, type ModelGroup } from "../train/models";
 import { SourceText, VersionChip, useModelGroups, useModelLinks } from "../train/modelParts";
 import { CopyMono, useOrigin } from "./parts";
 import { UsageThisMonth } from "../usage/UsageThisMonth";
@@ -242,11 +245,14 @@ function Inference({ version }: { version: Row }) {
   };
   const ranked = Array.isArray(answer?.ranked) ? (answer!.ranked as Row[]) : [];
   const predictions = predictionRows(answer);
+  const assignments = assignmentRows(answer);
+  const clustering = isClustering(version);
   const methodology = methodologyOf(version);
   const server = useServer(id, methodology !== "");
   const callable = on && (!methodology || server.state.ready);
   return (
     <div className="space-y-4">
+      {clustering && <Segments version={version} />}
       <Card label="Endpoint">
         <KeyValue
           rows={[
@@ -269,14 +275,50 @@ function Inference({ version }: { version: Row }) {
         )}
       </Card>
       <CopyBlock label="Call it from your code" value={predictCurl(origin, customerId, workspaceId, version)} />
-      <Card label="Try it" title="Score a Row" actions={<Button variant="primary" loading={busy} disabled={!callable} onClick={() => void run()}><Play size={14} aria-hidden /> Predict</Button>}>
-        <Field label="Rows, as JSON" help="One object or a list of them, keyed by the model's features; `entity` is each row's own key.">
+      <Card
+        label="Try it"
+        title={clustering ? "Place a Row in a Segment" : "Score a Row"}
+        actions={
+          <Button variant="primary" loading={busy} disabled={!callable} onClick={() => void run()}>
+            <Play size={14} aria-hidden /> {clustering ? "Find its segment" : "Predict"}
+          </Button>
+        }
+      >
+        {clustering && (
+          <p className="muted m-0 mb-2 text-[12.5px]" data-testid="clustering-try-it">
+            A clustering model predicts no column: it places each row in its nearest segment. The workspace engine answers this once it can place a new row; until then Lake says so here.
+          </p>
+        )}
+        <Field label="Rows, as JSON" help={clustering ? "One object or a list of them, keyed by the columns the model groups by; `entity` is each row's own key." : "One object or a list of them, keyed by the model's features; `entity` is each row's own key."}>
           <textarea className="font-mono text-[12.5px]" rows={8} value={rows} onChange={(e) => setRows(e.target.value)} spellCheck={false} />
         </Field>
         <FormError error={error} />
         {answer && (
           <div className="mt-3">
-            {predictions.length ? (
+            {assignments.length ? (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Row</th>
+                      <th scope="col">Entity</th>
+                      <th scope="col">Segment</th>
+                      <th scope="col" className="text-right">Distance</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {assignments.map((entry, i) => (
+                      <tr key={i}>
+                        <td className="font-mono">{rowNumber(entry)}</td>
+                        <td className="font-mono">{cellText(entry.entity)}</td>
+                        <td>{text(entry, "label") || `Segment ${cellText(entry.segment_id)}`}</td>
+                        <td className="text-right font-mono">{typeof entry.distance === "number" ? entry.distance.toFixed(3) : cellText(entry.distance)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : predictions.length ? (
               <div className="table-wrap">
                 <table>
                   <thead>
@@ -329,6 +371,77 @@ function Inference({ version }: { version: Row }) {
         )}
       </Card>
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ a clustering model's segments (lake#1243) */
+
+/** What a clustering model made: its segments (the run report's segment profiles) and the tables
+ * its training wrote, the assignment of every row trained on and the profiles, each opened in
+ * Data. */
+function Segments({ version }: { version: Row }) {
+  const wsPath = useWsPath();
+  const { customerId } = useWorkspace();
+  const runId = text(version, "run_id") || text(version, "run");
+  const report = useWq<Row>(runId ? "get_run_report" : null, { run_id: runId }, { retry: false, enabled: !!runId });
+  const segments = segmentsOf(report.data);
+  const tables = segmentTables(report.data);
+  const share = (value: number | null) => (value === null ? "—" : `${(100 * value).toFixed(value < 0.1 ? 1 : 0)}%`);
+  const datasetLink = (ref: string) => {
+    const dot = ref.indexOf(".");
+    const database = dot > 0 ? ref.slice(0, dot) : "datasets";
+    const name = dot > 0 ? ref.slice(dot + 1) : ref;
+    return wsPath(`/train/dataset?${qs({ customer_id: customerId, database, name })}`);
+  };
+  return (
+    <Card label="Segments" title="What This Model Does">
+      <p className="m-0 text-[13px]" data-testid="clustering-model">
+        A clustering model groups rows into segments; it predicts no column. Each row it was trained on is assigned to one segment, and each segment has a profile of what sets it apart.
+      </p>
+      {!runId && <p className="muted m-0 mt-2 text-[12.5px]">This model names no training run, so its segments cannot be read here.</p>}
+      {report.isLoading && runId ? <Skeleton lines={3} /> : null}
+      {report.isError ? <ErrorBlock error={report.error} retry={() => void report.refetch()} what="its segments" /> : null}
+      {segments.length > 0 && (
+        <div className="table-wrap mt-3">
+          <table data-testid="clustering-segments">
+            <thead>
+              <tr>
+                <th scope="col">Segment</th>
+                <th scope="col" className="text-right">Rows</th>
+                <th scope="col" className="text-right">Share</th>
+                <th scope="col">What sets it apart</th>
+              </tr>
+            </thead>
+            <tbody>
+              {segments.map((segment) => (
+                <tr key={segment.id || segment.label}>
+                  <td>{segment.label || `Segment ${segment.id}`}</td>
+                  <td className="text-right font-mono">{segment.size ?? "—"}</td>
+                  <td className="text-right font-mono">{share(segment.share)}</td>
+                  <td>{segment.apart.join(", ") || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {report.data && !segments.length && <p className="muted m-0 mt-2 text-[12.5px]">The training run's report lists no segments.</p>}
+      {tables.length > 0 && (
+        <KeyValue
+          rows={tables.map((table) => [
+            table.name.charAt(0).toUpperCase() + table.name.slice(1),
+            table.available ? (
+              <Link key={table.ref} to={datasetLink(table.ref)}>
+                {table.ref}
+                {table.rows !== null ? ` (${table.rows} rows)` : ""}
+              </Link>
+            ) : (
+              <span key={table.ref} className="muted">{table.ref}, not on this member</span>
+            ),
+          ])}
+        />
+      )}
+    </Card>
   );
 }
 

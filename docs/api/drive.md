@@ -9,7 +9,7 @@ deduplication remain liquid repository values.
 | Capability | Authorization | Result |
 |---|---|---|
 | `drive_browse` | `read` on the nearest path object, falling back to the repository | Immediate children, size, last structural change, and requested ordering |
-| `drive_preview` | `read` on the path | A server-rendered preview selected by extension |
+| `drive_preview` | `read` on the path | A server-rendered preview selected by extension. A text format (text, Markdown, CSV, JSON) shows the file's UTF-8 text exactly; a file in one of them that is not UTF-8 gets the `download` format instead of an altered preview (lake#1238), and `diff_drive_versions` refuses it as not text |
 | `download_drive_file` | `read` on the path | `{path, blob, size, media_type, content_base64, download_url}`: the exact bytes as base64 for a file of at most 16 MiB (`null` above), the media type from the name, and the `GET /drive/download` address that streams any size (lake#587) |
 | `drive_share_people` | `share` on the folder | The people a folder can be shared with by email or handle ([sharing.md](sharing.md#live-grants-and-effective-access)) |
 | `create_drive_folder` | `write` on the containing folder | A new liquid change containing an empty-folder marker |

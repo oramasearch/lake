@@ -82,6 +82,7 @@ export LAKE_E2E_STATE=/tmp/lake-session.json
 node tools/e2e/mcp.mjs         https://lake-dev.oramadev.net /tmp/lake-ticket /tmp/lake-mcp
 node tools/e2e/storage.mjs     https://lake-dev.oramadev.net /tmp/lake-ticket /tmp/lake-storage
 node tools/e2e/services.mjs    https://lake-dev.oramadev.net /tmp/lake-ticket /tmp/lake-services
+node tools/e2e/change-app.mjs  https://lake-dev.oramadev.net /tmp/lake-ticket /tmp/lake-change-app
 node tools/e2e/walkthrough.mjs https://lake-dev.oramadev.net /tmp/lake-ticket /tmp/lake-e2e   # after the scripts sharing LAKE_E2E_STATE: it signs out
 rm "$LAKE_E2E_STATE"
 ```
@@ -203,6 +204,38 @@ the page, serves the plain web page code from a local origin and searches there 
 made, trains and publishes the model, and checks its answers on the page and on that website. It
 stops with the top-up link named when the account's balance is blocked. It leaves the dataset,
 index, model and key in the account's workspace.
+
+### 3g. Change App
+
+```sh
+node tools/e2e/change-app.mjs https://lake-dev.oramadev.net /tmp/lake-ticket /tmp/lake-change-app [app-id]
+```
+
+The app page's **Change App** split screen and its conversation with the Application Agent
+(lake#1240, lake#1241, [../ui/apps.md](../ui/apps.md#change-app-split-screen)), walked as a person
+does them (lake#1259). Without an app id it first makes a small App through the Application Agent's
+own propose and confirm turns: a page that says a word made for the run and a line outside ASCII
+(`Café — déjà vu`).
+
+| Step | What it checks |
+|---|---|
+| App ready | The App is Ready with an address |
+| Split screen | **Change App** opens the split (`&change=1`), and the frame shows the App |
+| Agent proposes | A message asking to change the word gets a proposal with its diff and **Confirm and apply the change** |
+| Change applied | Confirm: the confirmation turn finishes as *applied* (committed and deployed) |
+| Frame reloads onto the change | Without a click, the frame reloads and shows the new word within 10 minutes |
+| Text outside ASCII | After the change the accented line is exactly as it was, with no `\xNN` (lake#1238) |
+
+Every `/v1` answer that is not ok and every console error is in `log.json` (addresses without their
+query, so the ticket never is). It leaves the App (`e2e-change-…`) in the workspace. Run it after
+anything that changes the conversation, the split screen, `change_app`, `agent_turn`'s confirmation
+or `deploy_app`, and in the gate: it is the only check that a change reaches the running App.
+
+Walked on lake-dev on 2026-10-27 (lake v0.8.0, agent-application v0.2.6), it found that the frame
+reloaded once at Ready and kept the old App (Ready came before the new version answered,
+orama-operator#1049; the page now reloads again over the next minute), and that a change committed
+`\xNN` in place of each byte outside ASCII (agent-application#63, fixed in agent-application after
+v0.2.6).
 
 ## What a failure usually means
 
