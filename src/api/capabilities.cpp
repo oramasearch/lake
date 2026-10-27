@@ -5,6 +5,7 @@
 #include "lake/api/brand.hpp"
 #include "lake/api/mcp_connections.hpp"
 #include "lake/api/stripe.hpp"
+#include "lake/api/workspace_settings.hpp"
 
 #include "audit_logs.hpp"
 #include "lake/api/audit_routing.hpp"
@@ -7266,6 +7267,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_network_capabilities(registry);
     register_tunnel_client_capabilities(registry);
     register_workspace_capabilities(registry);
+    register_workspace_settings_capabilities(registry);
     register_workspace_record_capabilities(registry);
     register_workspace_store_capabilities(registry);
     register_transcript_capabilities(registry);

@@ -285,6 +285,7 @@ constexpr std::array group_rules{
                          n == "predict" || n == "model_traffic" || n == "list_runs" ||
                          n.ends_with("_workspace") || n.ends_with("_workspaces") ||
                          n == "set_workspace_storage" || n == "copy_workspace_records" ||
+                         n == "get_workspace_settings" || n == "set_workspace_settings" ||
                          n == "delete_dataset" || n == "delete_model" || n == "delete_run" ||
                          n == "delete_index";
               }},

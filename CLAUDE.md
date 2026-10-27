@@ -423,6 +423,15 @@ and seeds the default models' rates once (OpenAI's published price plus 30%, Ste
 new publication for the current month on a fresh and an existing instance.
 Not deployed; the operator must vendor the schema and select `model_token_prices_guard`.
 See [`docs/api/model-gateway.md`](docs/api/model-gateway.md).
+People choose their agents' model (lake#1230, migration `0105_agent_model_prices`): the gateway also
+serves gpt-6.1-sol, gpt-6.1-terra, gpt-6-astra and gpt-6-luna; a workspace's `agent_model`
+(`get_workspace_settings`, `set_workspace_settings`; a sealed `lake_workspace_settings` record in its
+Zetta; unset means gpt-6.1-sol) replaces the model of every agent turn's chat call, and usage is
+billed under the model called; a prompt over 272,000 input tokens is counted under `<model>@long/*`,
+priced at OpenAI's 2x input and 1.5x output plus 30%; a `service_tier` other than `default` is refused
+and `default` is always sent. Ship → Workspaces → Settings is the picker, with prices. Not deployed;
+the operator must vendor the schema and select `agent_model_prices_guard` before the image rolls. See
+[`docs/api/model-gateway.md#the-workspaces-model`](docs/api/model-gateway.md#the-workspaces-model).
 
 The quickstart process is the console's home (lake#1128, no migration): `start_quickstart`,
 `quickstart_status`, `train_quickstart` and `quickstart_snippets` take a dropped dataset to a
@@ -1033,7 +1042,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `browser_keys_guard` in the source tree, versioned by content hash).
+  `agent_model_prices_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

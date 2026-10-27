@@ -22,6 +22,17 @@ A new migration still follows the rules below: idempotent SQL, its row in `schem
 new `*_guard` table created by the newest migration (`LakeManifest.TheGuardTableIsTheNewestMigrations`
 fails otherwise).
 
+`0105_agent_model_prices` (lake#1230) seeds the `model_tokens` rates of the gpt-6.x models the
+gateway now serves (`gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, `gpt-6-luna`) and the
+long-context classes `<model>@long/input` and `<model>@long/output` of those and `gpt-5.5`, at
+OpenAI's standard price plus 30% (read 2026-10-26). No table or column changes: `0095`'s class check
+already allows `@long`. It follows `0095`'s rules: once, while unrecorded; a new publication for this
+UTC month carrying the list in force; an operator's own rate kept; later USD lists given the rates;
+another currency left alone. Additive; guard `agent_model_prices_guard`; the operator must vendor this
+schema and select the guard before the binary rolls, or a Lake with billing on refuses the gpt-6.x
+models and gpt-5.5. See [billing](../api/billing.md#rates) and
+[the model gateway](../api/model-gateway.md#long-prompts).
+
 `0104_app_restarts` (lake#1228) adds `apps.restart_generation` (bigint, default 0, never
 negative): the generation `restart_app` wrote. The operator writes it on the app's pod template, so a
 restart replaces the pods even when nothing else changed. Additive; guard `app_restarts_guard`. See

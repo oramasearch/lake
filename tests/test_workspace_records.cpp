@@ -40,6 +40,7 @@
 #include "lake/api/rest.hpp"
 #include "lake/api/transcription.hpp"
 #include "lake/api/usage_recorder.hpp"
+#include "lake/api/workspace_settings.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/agent_runs.hpp"
 #include "lake/control/agent_stream_triggers.hpp"
@@ -5635,6 +5636,121 @@ TEST_P(WorkspaceRecordStores, McpStdioConnectionsRunAsAWorkspaceApp) {
                        {{"mount_id", mount_id}, {"name", "mcp-everything-runner"}})
                     .ok);
     EXPECT_EQ(t.call(first, "get_mcp_connection", in({{"id", id}})).error.code, "not_found");
+}
+
+// lake#1230: a workspace's settings are one sealed record in its Zetta. `agent_model` unset means
+// gpt-6.1-sol; only a served chat model can be chosen; whoever may change the workspace's account
+// sets it, a member who may only read it reads it, and another account's person neither.
+TEST_P(WorkspaceRecordStores, AWorkspaceChoosesItsAgentModelAmongTheServedChatModels) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const auto& second = t.spaces[1];
+    const std::string home = first.workspaces[0];
+    const json at{{"customer_id", first.customer_id}, {"workspace_id", home}};
+    const auto with = [&](json more) {
+        more.update(at);
+        return more;
+    };
+
+    const auto unset = t.call(first, "get_workspace_settings", at);
+    ASSERT_TRUE(unset.ok) << unset.error.message;
+    EXPECT_EQ(unset.value["agent_model"], "gpt-6.1-sol");
+    EXPECT_TRUE(unset.value["agent_model_chosen"].is_null());
+    EXPECT_EQ(unset.value["default_agent_model"], "gpt-6.1-sol");
+    std::vector<std::string> offered;
+    for (const json& model : unset.value["agent_models"]) {
+        offered.push_back(model["model"]);
+        EXPECT_EQ(model["default"], model["model"] == "gpt-6.1-sol");
+        EXPECT_TRUE(model["input_micros_per_million"].is_null()) << "billing is off here";
+    }
+    EXPECT_EQ(offered,
+              (std::vector<std::string>{"gpt-6.1-sol",
+                                        "gpt-6.1-terra",
+                                        "gpt-6-astra",
+                                        "gpt-6-luna",
+                                        "gpt-5.5",
+                                        "gpt-5",
+                                        "gpt-4o"}))
+        << "the served chat models, never an embedding model";
+
+    for (const std::string refused : {"text-embedding-3-small", "gpt-7", "GPT-6.1-SOL"}) {
+        const auto set = t.call(first, "set_workspace_settings", with({{"agent_model", refused}}));
+        EXPECT_FALSE(set.ok) << refused;
+        EXPECT_EQ(set.error.code, "invalid_input") << refused;
+        EXPECT_EQ(set.error.path, "/agent_model") << refused;
+    }
+    const auto chosen =
+        t.call(first, "set_workspace_settings", with({{"agent_model", "gpt-6.1-terra"}}));
+    ASSERT_TRUE(chosen.ok) << chosen.error.message;
+    EXPECT_EQ(chosen.value["agent_model"], "gpt-6.1-terra");
+    EXPECT_EQ(chosen.value["agent_model_chosen"], "gpt-6.1-terra");
+    EXPECT_EQ(chosen.value["set_by"], first.principal.user_id);
+    EXPECT_TRUE(chosen.value["updated_at"].is_string());
+    // Left out, unchanged.
+    const auto kept = t.call(first, "set_workspace_settings", at);
+    ASSERT_TRUE(kept.ok) << kept.error.message;
+    EXPECT_EQ(kept.value["agent_model"], "gpt-6.1-terra");
+    // The other workspace of the account keeps its own.
+    const auto lab =
+        t.call(first,
+               "get_workspace_settings",
+               {{"customer_id", first.customer_id}, {"workspace_id", first.workspaces[1]}});
+    ASSERT_TRUE(lab.ok) << lab.error.message;
+    EXPECT_EQ(lab.value["agent_model"], "gpt-6.1-sol");
+    // What the gateway reads.
+    {
+        auto context = t.context(first);
+        const auto model = lake::control::settled(liquid::runtime::block_on(
+            lake::api::workspace_agent_model(context, first.customer_id, home)));
+        ASSERT_TRUE(model) << model.error().message;
+        EXPECT_EQ(*model, "gpt-6.1-terra");
+    }
+
+    // Sealed in the workspace Zetta: the model's name is not on the record at rest.
+    bool stored = false;
+    for (auto& [url, tables] : t.zetta->records) {
+        if (const auto found = tables.collections.find("lake_workspace_settings");
+            found != tables.collections.end()) {
+            for (const auto& [key, row] : found->second.records) {
+                stored = true;
+                EXPECT_EQ(row.dump().find("gpt-6.1-terra"), std::string::npos);
+            }
+        }
+    }
+    EXPECT_TRUE(stored) << "the settings are a record in the workspace Zetta";
+
+    // Another account's person can neither read nor change them.
+    EXPECT_FALSE(t.call(second, "get_workspace_settings", at).ok);
+    EXPECT_FALSE(
+        t.call(second, "set_workspace_settings", with({{"agent_model", "gpt-6-luna"}})).ok);
+    // A member who may read the account (an organization member's grant) reads them and cannot
+    // change them.
+    const auto object = store->find_policy_object("customer", first.customer_id);
+    ASSERT_TRUE(object) << object.error().message;
+    ASSERT_TRUE(store->create_grant(
+        {second.principal.taap_id,
+         object->id,
+         "read",
+         lake::control::identity_crypto::sha256_hex(second.principal.taap_id + object->id),
+         first.principal.taap_id,
+         lake::control::new_uuid_v4()}));
+    const auto read = t.call(second, "get_workspace_settings", at);
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["agent_model"], "gpt-6.1-terra");
+    const auto denied =
+        t.call(second, "set_workspace_settings", with({{"agent_model", "gpt-6-luna"}}));
+    EXPECT_FALSE(denied.ok);
+    EXPECT_EQ(denied.error.code, "unauthorized");
+
+    // Null goes back to the default.
+    const auto reset = t.call(first, "set_workspace_settings", with({{"agent_model", nullptr}}));
+    ASSERT_TRUE(reset.ok) << reset.error.message;
+    EXPECT_EQ(reset.value["agent_model"], "gpt-6.1-sol");
+    EXPECT_TRUE(reset.value["agent_model_chosen"].is_null());
 }
 
 INSTANTIATE_TEST_SUITE_P(Stores, WorkspaceRecordStores, testing::Values(false, true),

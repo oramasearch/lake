@@ -3,7 +3,9 @@
 **Issue:** [lake#248](https://github.com/oramasearch/lake/issues/248), part of the metering epic
 [lake#658](https://github.com/oramasearch/lake/issues/658) · **Code:** `include/lake/api/model_gateway.hpp`,
 `src/api/model_gateway.cpp`, `model_completion` in `src/api/usage_capabilities.cpp`, the
-`/openai/v1/*` routes in `src/api/http_server.cpp` · **Tests:** `tests/test_model_gateway.cpp`
+`/openai/v1/*` routes in `src/api/http_server.cpp`; the workspace's model in
+`src/api/workspace_settings_capabilities.cpp` ([lake#1230](https://github.com/oramasearch/lake/issues/1230))
+· **Tests:** `tests/test_model_gateway.cpp`
 
 Every model call an agent makes for a workspace goes through Lake. Lake sends it to the model
 provider with Orama's own key, counts the tokens the provider reports as the workspace's
@@ -32,8 +34,11 @@ The gateway speaks the OpenAI API, so an agent uses the OpenAI SDK unchanged, wi
 from openai import OpenAI
 
 client = OpenAI(base_url=f"{lake_url}/openai/v1", api_key=lake_token)
-client.chat.completions.create(model="gpt-5.5", messages=[...])
+client.chat.completions.create(model="gpt-6.1-sol", messages=[...])
 ```
+
+For an agent turn (a task credential) the `model` asked for is replaced by the
+[workspace's model](#the-workspaces-model).
 
 | Route | Body | Answer |
 |---|---|---|
@@ -75,8 +80,8 @@ tools executed by the caller. Embeddings accept text or token arrays. Function p
 and structured-output schemas remain application data; their property names are unrestricted.
 
 Provider-hosted tools (search, file search, code execution, image generation and remote MCP),
-audio/image/file inputs or outputs, priority service tiers, saved prompts, conversations and
-stored-response references are refused. `store` must be false or null and is sent as false on
+audio/image/file inputs or outputs, saved prompts, conversations and stored-response references are
+refused. See [The processing tier](#the-processing-tier) for `service_tier`. `store` must be false or null and is sent as false on
 generation endpoints, including when omitted. Background generation remains refused; false and
 null are accepted for SDK compatibility. There is no stored-response retrieval route and no
 customer ownership registry for provider objects, so their identifiers cannot be reused here.
@@ -99,6 +104,26 @@ Verify with `ModelCompletion.RefusesUnmeteredFeaturesBeforeCallingTheProvider` a
 `ModelGateway.AcceptsTextAndCallerExecutedFunctions`, plus the OpenAI route rejection checks in
 `ModelGatewayRoute.AnswersTheOpenAIShapeForATaskCredential`. REST, MCP and both OpenAI route
 forms call the same preparation function before any provider work.
+
+### The processing tier
+
+The gateway never asks the provider for a costlier processing mode (lake#1230). OpenAI's Fast mode
+costs 2x, Ultrafast 6x, priority more again, and regional processing adds 10%; none of them is
+covered by the [price list](billing.md#rates). So:
+
+- `service_tier` may only be `default` or null on `chat/completions` and `responses`. Any other
+  value (`priority`, `flex`, `auto`, `scale`, a Fast or Ultrafast tier) is `invalid_input` at
+  `/request/service_tier` before the provider is called. `auto` is refused too, because it lets the
+  account's provider setting choose.
+- Every chat or responses request is sent with `service_tier: "default"`, also when the caller left
+  it out, so the account's own default can never choose a costlier tier.
+- Lake never asks for regional processing. That matters for cache writes: they cost 1.25x input and
+  are billed as input at 1.3x, which covers them, but with the 10% regional surcharge
+  (1.25 x 1.1 = 1.375) they would not be covered.
+- Batch and Flex (half price) are not used either.
+
+Verify with `ModelGateway.RefusesACostlierServiceTierAndAlwaysAsksForTheStandardOne` and the
+`service_tier: priority` case of `ModelCompletion.RefusesUnmeteredFeaturesBeforeCallingTheProvider`.
 
 ### Streaming
 
@@ -139,7 +164,7 @@ and `code`, and the JSON pointer of the field at fault as `param`:
 
 | Code | Status | When |
 |---|---|---|
-| `invalid_input` | 400 | an unsupported field, content or tool; no allowed/priced `model`; streamed embeddings; background work or stored references |
+| `invalid_input` | 400 | an unsupported field, content or tool; no allowed/priced `model`; a `service_tier` other than `default`; a workspace model this Lake no longer serves; streamed embeddings; background work or stored references |
 | `unauthenticated`, `unauthorized` | 401, 403 | no credential, or one that is not a run's (above), or a `/w/<workspace>/` path naming another workspace than the run's |
 | `not_found` | 404 | a `/w/<workspace>/` path naming a workspace that does not exist |
 | `usage_limit_reached` | 429 | the account's monthly `model_tokens` limit is used up ([Limits](#limits)) |
@@ -160,7 +185,7 @@ The routes are a rendering of one registry capability, as `/workspaces/<customer
 | `endpoint` (input) | `chat/completions`, `responses` or `embeddings` | the OpenAI API path |
 | `request` (input) | object | the OpenAI request body |
 | `workspace_id`, `agent`, `launch_id` | string | the run the call was counted for |
-| `model` | string | the model the provider says answered (else the one asked for) |
+| `model` | string | the model the provider says answered (else the one called) |
 | `input_tokens`, `output_tokens` | integer | the provider's `usage` |
 | `usage_reported` | boolean | false when the provider's answer carried no `usage`: the tokens are an [estimate](#an-answer-without-usage), and audited so |
 | `recorded` | boolean | the tokens were added to the workspace's usage |
@@ -177,10 +202,29 @@ Each answered call adds two values to the run's workspace's `lake_usage` counter
 ([metering.md](metering.md#usage-over-time)): `model_tokens` with `kind: input` and with
 `kind: output`, each labelled `agent`, `launch_id` (the task, launch or schedule id) and `model`. Those
 are the labels `usage_over_time` breaks `model_tokens` down by (`by_agent`, `by_launch`, `by_model`),
-which the Usage dashboard and an agent's page show. `model` is the exact requested name;
-provider snapshot names are audit detail (`answered_model`). Each value also carries a billing
+which the Usage dashboard and an agent's page show. `model` is the exact name of the model called:
+for an agent turn, the [workspace's model](#the-workspaces-model), not the one the agent asked for.
+Provider snapshot names are audit detail (`answered_model`). Each value also carries a billing
 `class`: `<model>/input` or `<model>/output`, exposed in `by_class` and priced separately
-([billing.md](billing.md#price-list)). Raw token counts and monthly token limits are unchanged.
+([billing.md](billing.md#price-list)).
+
+### Long prompts
+
+OpenAI prices a request whose prompt is longer than 272,000 input tokens at 2x input and 1.5x output
+**for the whole request**, on the gpt-6.x models and gpt-5.5. Billing such a request at the short
+rate (1.3x) would not cover it. So when the provider reports more than 272,000 input tokens
+(`long_context_prompt_tokens` in `model_gateway.hpp`), both values of the call are recorded under the
+long-context classes `<model>@long/input` and `<model>@long/output`, priced at 2x input and 1.5x
+output plus 30% ([billing.md](billing.md#rates)). At exactly 272,000 the plain classes apply. A model
+without long-context rates (gpt-5, gpt-4o, the embedding model) keeps its one pair of classes
+(`has_long_context_rate`: names starting `gpt-6`, and `gpt-5.5`). With billing on, a model that has
+long-context rates needs them published as well as its plain ones before it is served, because the
+prompt's length is known only from the provider's answer. `record_model_usage` classes a report the
+same way, by its `input_tokens`.
+
+Verify with `ModelCompletion.ALongPromptIsCountedUnderTheLongContextClasses` (272,000 and 272,001
+prompt tokens) and the long-context cases of
+`ModelCompletion.BillingRequiresBothPositiveExactModelPricesBeforeDispatch`. Raw token counts and monthly token limits are unchanged.
 A refused call, by Lake or by the provider, counts nothing.
 A call the provider answered counts even when its answer did not arrive whole (lake#939).
 A transport failure without an HTTP status is also counted by estimate against the originating
@@ -222,8 +266,9 @@ call's own count replaces it when it ends.
 ## Audit
 
 Each call is one event in the run's workspace audit ([audit.md](audit.md#workspace-audit)), object
-`agent_usage/<launch_id>`, action `model_completion`, with `endpoint`, the model asked for and the one
-that answered, `streamed`, `provider_status`, `input_tokens`, `output_tokens` and `usage_reported`.
+`agent_usage/<launch_id>`, action `model_completion`, with `endpoint`, the model called (`model`), the
+one the agent asked for when the workspace's model replaced it (`agent_asked_model`), the one that
+answered (`answered_model`), `streamed`, `provider_status`, `input_tokens`, `output_tokens` and `usage_reported`.
 The prompt and the answer are never in the audit.
 
 ## Configuration
@@ -232,7 +277,7 @@ The prompt and the answer are never in the audit.
 |---|---|
 | `LAKE_OPENAI_API_KEY` | Orama's provider key, a platform environment variable of the Lake pod (on the dev cluster, `spec.env` from Secret `lake-prod-openai`). Unset, the gateway answers `not_supported` |
 | `LAKE_MODEL_PROVIDER_URL` | an OpenAI-compatible base URL; default `https://api.openai.com/v1` |
-| `LAKE_MODEL_GATEWAY_MODELS` | JSON array of exact model/provider objects, such as `[{"model":"gpt-5.5","provider":"openai"}]`; absent defaults to `gpt-5.5`, `gpt-5`, `gpt-4o`, and `text-embedding-3-small`; `[]` disables all model calls |
+| `LAKE_MODEL_GATEWAY_MODELS` | JSON array of exact model/provider objects, such as `[{"model":"gpt-5.5","provider":"openai"}]`; absent defaults to `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, `gpt-6-luna`, `gpt-5.5`, `gpt-5`, `gpt-4o` and `text-embedding-3-small`; `[]` disables all model calls |
 
 Only the `openai` provider protocol is supported, using the configured base URL and key.
 Malformed configuration, duplicate model names and unsupported providers stop startup. Names are
@@ -242,7 +287,9 @@ OpenAI routes (including workspace paths), REST and MCP alike (LSR-095, lake#961
 
 With billing off, the configured allowlist is sufficient. With billing on, the current UTC month's
 published price list must also have exactly one positive `model_tokens` price for each of
-`<model>/input` and `<model>/output`, with positive `per`. A missing list, blended rate alone,
+`<model>/input` and `<model>/output`, with positive `per`, and for a model with
+[long-context rates](#long-prompts) also `<model>@long/input` and `<model>@long/output`. A model with
+no price in force is never served. A missing list, blended rate alone,
 missing direction or zero rate refuses the model with `invalid_input`; a failed price read refuses
 with `store_unavailable`. Even an embedding model needs both rates, although it normally reports no
 output tokens. Publish approved rates with `set_price_list` before enabling a model. Choose rates
@@ -260,13 +307,28 @@ OpenAI's published standard price ([pricing](https://developers.openai.com/api/d
 | `gpt-4o` | $2.50 / $10.00 | $3.25 / $13.00 | 3250000 / 13000000 |
 | `text-embedding-3-small` | $0.02 / none | $0.026 / $0.026 | 26000 / 26000 |
 
+Migration `0105_agent_model_prices` (lake#1230, Steve 2026-10-26: *"let's use the latest and ensure
+the price is covered properly"*) adds the gpt-6.x models and the long-context rates the same way, from
+the same page and the model pages, read 2026-10-26:
+
+| Model | OpenAI input / output (per 1M) | Lake input / output (per 1M) | `unit_micros` input / output | `@long` input / output |
+|---|---|---|---|---|
+| `gpt-6.1-sol` | $2.00 / $10.00 | $2.60 / $13.00 | 2600000 / 13000000 | 5200000 / 19500000 |
+| `gpt-6.1-terra` | $1.00 / $5.00 | $1.30 / $6.50 | 1300000 / 6500000 | 2600000 / 9750000 |
+| `gpt-6-astra` | $10.00 / $50.00 | $13.00 / $65.00 | 13000000 / 65000000 | 26000000 / 97500000 |
+| `gpt-6-luna` | $0.10 / $0.50 | $0.13 / $0.65 | 130000 / 650000 | 260000 / 975000 |
+| `gpt-5.5` | (0095's rates above) | | | 13000000 / 58500000 |
+
 An embedding reports no output tokens, so its output rate bills nothing; it exists because the
-gateway needs both. Cached input is billed at the input rate. `gpt-5.5` above 272K tokens of context
-costs the provider $10.00 / $45.00 and is still billed at the rates above. The seed writes a new
+gateway needs both. Cached input (5% of input at OpenAI) is billed at the full input rate, and a cache
+write (1.25x input) as input at 1.3x, so both are covered; see [The processing tier](#the-processing-tier)
+for why regional processing would break that. Before 0105, a `gpt-5.5` prompt over 272K tokens was
+billed at the short rate, which did not cover it; it is now billed at its `@long` rates. The seed writes a new
 publication for the UTC month it runs in, holding the rates of the list then in force (none on a
 fresh instance) plus these, and adds them to any list published for a later month; a rate already
-published for one of these classes is kept, and a list in another currency is left alone. It runs
-only while `0095_model_token_prices` is not recorded, so re-applying the schema never re-adds a
+published for one of these classes is kept, and a list in another currency is left alone. 0105 follows the same rules (a
+fresh instance therefore has two publications for its first month, 0095's and 0105's). Each runs
+only while its own migration is not recorded, so re-applying the schema never re-adds a
 rate an operator later removed. Change a rate with `set_price_list`; when OpenAI's prices move,
 publish the new rates (provider price × 1.3) and update this table.
 
@@ -275,12 +337,46 @@ Publish model/direction rates through `set_price_list`; the gateway reads the ef
 every call. Migration `0095_model_token_prices` extends the price and invoice class checks for
 model/direction names while retaining GPU restrictions. Before deployment the operator must
 vendor `db/schema.sql` and select `model_token_prices_guard`; this change does not edit the operator.
+For 0105 the operator must vendor `db/schema.sql` again and select `agent_model_prices_guard` before
+an image with lake#1230 rolls: without the 0105 rates, a Lake with billing on refuses the gpt-6.x
+models and gpt-5.5 (its long-context rates are missing).
 The default list deliberately restricts previously
 accepted arbitrary names; add other approved models explicitly.
 
 Agent pods need neither: they reach the model through Lake. The operator's
 `spec.agents.openaiSecretName`, which used to put the key into every agent pod, is left unset once the
 agents use the gateway ([deployment/aks.md](../deployment/aks.md#speech-to-text-key)).
+
+## The workspace's model
+
+People choose the model their agents use (lake#1230; Steve, 2026-10-26: *"let's the users choose"*,
+*"default to sol"*). Each workspace has a setting `agent_model`, one of the chat models this Lake
+serves (the configured list without embedding models), read with `get_workspace_settings` and set with
+`set_workspace_settings` ([workspaces.md](workspaces.md#settings)). **Unset means `gpt-6.1-sol`**
+(`default_agent_model`).
+
+When an agent turn's task credential calls `chat/completions` or `responses`, the gateway first checks
+that the model the agent asked for is a served one (an unlisted name is still `invalid_input`), then
+reads the workspace's setting from its Zetta and sends the call with **that** model, whatever the agent
+asked for. Every library agent therefore follows the choice without a change of its own, and the
+operator's `spec.agents.model` (the `AGENT_MODEL` each agent pod is given) only says what the agents
+ask for. The call is then checked, priced, counted and audited under the model called.
+
+What the setting does not touch:
+
+- `embeddings` keep the model asked for;
+- a launched or scheduled agent (a launch or schedule credential) runs the workspace's own code, which
+  names its model itself, and calls what it names;
+- `record_model_usage` reports, which name the model that was used.
+
+A chosen model this Lake no longer serves (the operator narrowed `LAKE_MODEL_GATEWAY_MODELS`) is
+refused with `invalid_input`, naming the model and saying to choose another; Lake never swaps in a
+different, differently priced model. A workspace whose settings cannot be read refuses the call with
+that error rather than guess.
+
+Verify with `ModelCompletion.AnAgentTurnCallsItsWorkspacesModelAndUnsetMeansGpt61Sol` (the default,
+a choice, the Responses API, embeddings and a launched agent left alone, usage under the model called,
+a model no longer served) and `Stores/WorkspaceRecordStores.AWorkspaceChoosesItsAgentModelAmongTheServedChatModels`.
 
 ## Lake's own model calls
 
@@ -319,6 +415,10 @@ carries its rates plus the seeded ones (an operator's own model rate kept), a la
 and a second run adds nothing. `ModelCompletion.ASeededInstanceCallsTheDefaultModelsWithBillingOnAtTheSeededPrices`
 makes a model call with billing on against a freshly seeded PostgreSQL control plane and checks
 the bill prices its input and output at the seeded rates.
+
+`PostgresBilling.AgentModelPricesAreSeededOnceOnFreshAndExistingInstances` checks 0105 the same
+way, with an operator's own `gpt-6.1-sol/input` rate kept and a list in another currency left alone.
+`ModelGateway.ServesTheGpt6ModelsAndOnlyChatModelsAreChoosable` checks the default list.
 
 `RecordModelUsage.UnpricedReportsCannotPoisonABilledAccountsLedger` verifies that rejected reports
 record no model tokens, priced outside reports grant no gateway access, and billing-off reports

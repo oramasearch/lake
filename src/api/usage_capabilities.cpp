@@ -27,6 +27,7 @@
 #include "lake/api/model_gateway.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/api/usage_recorder.hpp"
+#include "lake/api/workspace_settings.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/builds.hpp"
 #include "lake/control/drive_files.hpp"
@@ -1748,7 +1749,37 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
         co_return ApiResult::failure(
             prepared.error().code, prepared.error().message, prepared.error().path);
     }
-    const std::string requested = prepared->at("model");
+    const std::string asked = prepared->at("model");
+    if (!gateway_model_allowed(context.model_gateway_models, asked)) {
+        co_return ApiResult::failure(
+            "invalid_input", "model: not in this Lake's configured model list", "/request/model");
+    }
+    // An agent turn calls the model its workspace chose, whatever it asked for (lake#1230,
+    // docs/api/model-gateway.md#the-workspaces-model): every library agent follows the choice
+    // without a change of its own. Embeddings and a workspace's own launched or scheduled code,
+    // which names its model itself, are left as they asked.
+    std::string requested = asked;
+    if (context.credential_kind == "agent_task" && endpoint != "embeddings") {
+        auto chosen = control::settled(
+            co_await workspace_agent_model(context, caller->customer_id, caller->workspace_id));
+        if (!chosen) {
+            co_return ApiResult::failure(chosen.error().code,
+                                         "the workspace's agent model could not be read: " +
+                                             chosen.error().message);
+        }
+        if (!gateway_model_allowed(context.model_gateway_models, *chosen)) {
+            co_return ApiResult::failure(
+                "invalid_input",
+                "model: this workspace's agent model, " + *chosen +
+                    ", is no longer served here; choose another in the workspace's settings",
+                "/request/model");
+        }
+        requested = *chosen;
+        (*prepared)["model"] = requested;
+        if (requested != asked) {
+            context.audit_details["agent_asked_model"] = asked;
+        }
+    }
     if (const auto allowed = validate_gateway_model(requested, context); !allowed) {
         co_return ApiResult::failure(
             allowed.error().code, allowed.error().message, allowed.error().path);
@@ -1826,9 +1857,9 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
             {"agent", caller->agent}, {"launch_id", caller->launch_id}, {"model", model}};
         Labels in = labels, out = labels;
         in["kind"] = "input";
-        in["class"] = model_token_class(model, "input");
+        in["class"] = model_token_class(model, "input", usage.input_tokens);
         out["kind"] = "output";
-        out["class"] = model_token_class(model, "output");
+        out["class"] = model_token_class(model, "output", usage.input_tokens);
         std::vector<UsageRecorder::Increment> increments;
         increments.push_back({"model_tokens", usage.input_tokens, std::move(in)});
         increments.push_back({"model_tokens", usage.output_tokens, std::move(out)});
@@ -2588,9 +2619,9 @@ void register_usage_capabilities(Registry& registry) {
                 std::vector<UsageRecorder::Increment> increments;
                 Labels in = labels, out = labels;
                 in["kind"] = "input";
-                in["class"] = model_token_class(model, "input");
+                in["class"] = model_token_class(model, "input", input_tokens);
                 out["kind"] = "output";
-                out["class"] = model_token_class(model, "output");
+                out["class"] = model_token_class(model, "output", input_tokens);
                 increments.push_back({"model_tokens", input_tokens, std::move(in)});
                 increments.push_back({"model_tokens", output_tokens, std::move(out)});
                 context.usage_recorder->add_together(reporter->workspace_id, std::move(increments));

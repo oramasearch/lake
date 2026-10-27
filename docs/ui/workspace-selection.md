@@ -140,6 +140,22 @@ by name". It says the deletion cannot be undone and asks for the workspace's nam
 refused by the capability and shown on the field ([deletion](../api/workspaces.md#deletion),
 lake#514). Cancel or Escape closes it and drops `delete=`.
 
+### Settings
+
+**Settings** on a row opens the workspace's settings dialog (lake#1230). Today it holds one choice,
+**Agent model**: the model every agent working in the workspace uses. It reads
+`get_workspace_settings` and lists each chat model this Lake serves as a choice, with its price per
+million tokens from the price list in force ("$2.60 in, $13.00 out per million tokens") and, for a
+model with long-context rates, a second line with the price of a prompt over 272,000 tokens. The
+default is labelled "gpt-6.1-sol (default)" and is the one selected while the workspace has chosen
+none. Where billing is off or no rate is published, the line says "No price published on this Lake",
+never $0. **Save** (enabled once the choice differs from the model in effect) calls
+`set_workspace_settings`; choosing the default sends `agent_model: null`, so the workspace keeps
+following the default. A person who may only read the workspace sees the choice, and the save answers
+the refusal on the dialog. The labels, prices and what is sent are pure functions in
+`src/lib/agentModels.ts`, tested by `tests/agent-models.test.ts`
+([../api/workspaces.md](../api/workspaces.md#settings)).
+
 ## How to verify
 
 - Open `/design/projects` signed in with one workspace: the address becomes
@@ -150,6 +166,9 @@ lake#514). Cancel or Escape closes it and drops `delete=`.
 - Clear `localStorage` and reload a `/w/<id>/` page: it opens the same workspace.
 - `HttpServer/HttpResponseIsolation.TheViewerSaysWhoIsSignedInAndWhereTheyAre` checks the `viewer`
   read's workspace validation.
+- On `/workspaces`, open **Settings** on a workspace: every served chat model is listed with its
+  prices, gpt-6.1-sol selected and marked default; choose another and Save, reopen it, and it is
+  selected (`npm test` runs `tests/agent-models.test.ts`).
 
 ## How to change
 

@@ -52,9 +52,12 @@ its private address, and nothing else private (`mcp_cluster_service_host`).
 `mcp_connections.hpp` registers a workspace's MCP connection capabilities and answers what Lake's
 own MCP endpoint re-exports (`exported_mcp_tools`, `call_exported_mcp_tool`).
 `agent_stream_triggers.hpp` (lake#677) registers the capabilities that start an agent from a
-workspace stream, removes an agent's triggers, and declares `AgentStreamWorker`. `registry.hpp`'s
+workspace stream, removes an agent's triggers, and declares `AgentStreamWorker`.
+`workspace_settings.hpp` (lake#1230) registers `get_workspace_settings` and `set_workspace_settings`
+and declares `workspace_agent_model`, the model the gateway calls for a workspace's agent turns. `registry.hpp`'s
 `acting_agent` names the agent whose credential made a call.
-`model_gateway.hpp` declares the model gateway's pure helpers (`prepare_model_request`,
+`model_gateway.hpp` declares the model gateway's pure helpers (the served and chat models,
+`default_agent_model`, the long-context classes, `prepare_model_request`,
 `model_usage`, `ModelStreamUsage` for a stream read as it arrives, `model_provider_failure`) and
 `openai_model_provider`. `registry.hpp` declares the `ModelProvider` injected dependency on
 `ApiContext`, the `ModelBodySink` a streamed answer goes to as it arrives, and the caller's

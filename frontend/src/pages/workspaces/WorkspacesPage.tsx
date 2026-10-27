@@ -1,6 +1,7 @@
 /** Ship → Workspaces: every workspace the person can reach, grouped by owner as the top bar's
  * picker groups them (lake#638), with their phase and storage, New Workspace in a dialog that asks
- * the owner, Rename, and the typed-name deletion (`?delete=<id>`, a dialog) that first lists what
+ * the owner, Rename, Settings (the model the workspace's agents call, lake#1230), and the typed-name
+ * deletion (`?delete=<id>`, a dialog) that first lists what
  * goes with counts from `delete_workspace {dry_run: true}`. Where Lake runs in regions, each
  * workspace shows its region: the region of this Lake, where it was created (lake#757). Not a
  * workspace page: it is never under
@@ -8,7 +9,7 @@
 import { type ReactNode, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQueries, useQuery } from "@tanstack/react-query";
-import { Boxes, HardDrive, Pencil, Plus, SearchX, Trash2 } from "lucide-react";
+import { Boxes, HardDrive, Pencil, Plus, SearchX, Settings2, Trash2 } from "lucide-react";
 import { act, read, type Row } from "@/lib/api";
 import { Modal } from "@/lib/overlay";
 import { useSession } from "@/lib/session";
@@ -20,6 +21,7 @@ import { dateTime, relative } from "@/lib/format";
 import { postRead } from "@/pages/design/api";
 import { FormError } from "@/pages/design/parts";
 import { OrderSheetLinks, useServerRegions } from "@/components/Region";
+import { agentModelInput, agentModelLabel, agentModelPrice, currentAgentModel, defaultAgentModel, longPromptPrice, type WorkspaceSettings } from "@/lib/agentModels";
 import { workspaceRegionLabel } from "@/lib/regions";
 import "@/styles/design.css";
 
@@ -66,6 +68,7 @@ export default function WorkspacesPage() {
     }
   };
   const [renaming, setRenaming] = useState<{ owner: string; row: Workspace } | null>(null);
+  const [configuring, setConfiguring] = useState<{ owner: string; row: Workspace } | null>(null);
   const [search, setSearch] = useState("");
   const [phase, setPhase] = useState<string | null>(null);
   // The region every workspace here belongs to; null on a Lake without regions (lake#757).
@@ -159,6 +162,9 @@ export default function WorkspacesPage() {
                     <span className="inline-flex flex-wrap justify-end gap-1">
                       <Button variant="ghost" onClick={() => setRenaming({ owner, row })} aria-label={`Rename ${row.name}`}>
                         <Pencil size={14} aria-hidden /> Rename
+                      </Button>
+                      <Button variant="ghost" onClick={() => setConfiguring({ owner, row })} aria-label={`Settings of ${row.name}`}>
+                        <Settings2 size={14} aria-hidden /> Settings
                       </Button>
                       {/* The confirmation lists what the deletion destroys before it asks for the name. */}
                       <a
@@ -256,6 +262,7 @@ export default function WorkspacesPage() {
           </div>
           {doomed && <DeleteConfirmation key={doomed} customerId={ownerOf(doomed)} workspaceId={doomed} back={back} onDone={refresh} />}
           {renaming && <RenameWorkspace customerId={renaming.owner} workspace={renaming.row} onDone={refresh} onClose={() => setRenaming(null)} />}
+          {configuring && <WorkspaceSettingsDialog customerId={configuring.owner} workspace={configuring.row} onClose={() => setConfiguring(null)} />}
           {creating && (
             <NewWorkspace
               customerId={creating}
@@ -334,6 +341,88 @@ function RenameWorkspace({ customerId, workspace, onDone, onClose }: { customerI
           <input name="name" maxLength={128} value={name} autoFocus onChange={(e) => setName(e.target.value)} />
         </Field>
       </Form>
+    </Modal>
+  );
+}
+
+/** A workspace's settings: the model its agents call through Lake (lake#1230), one of the chat
+ * models this Lake serves, each with its price per million tokens from the price list in force.
+ * Unset means the default, gpt-6.1-sol; choosing the default sends null. Those who may only read
+ * the workspace see the choice and cannot save it (the save answers why). */
+function WorkspaceSettingsDialog({ customerId, workspace, onClose }: { customerId: string; workspace: Workspace; onClose: () => void }) {
+  const toast = useToast();
+  const settings = useQuery<WorkspaceSettings>({
+    queryKey: ["get_workspace_settings", customerId, workspace.id],
+    queryFn: ({ signal }) => read<WorkspaceSettings>("get_workspace_settings", { customer_id: customerId, workspace_id: workspace.id }, { workspace: null, signal }),
+  });
+  const [choice, setChoice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const current = currentAgentModel(settings.data);
+  const selected = choice ?? current;
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await act("set_workspace_settings", { customer_id: customerId, workspace_id: workspace.id, ...agentModelInput(selected, settings.data) }, { workspace: null });
+      void settings.refetch();
+      toast(`Agents in ${workspace.name} now use ${selected}`);
+      onClose();
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const models = settings.data?.agent_models ?? [];
+  let body;
+  if (settings.isPending) body = <Skeleton />;
+  else if (settings.isError) body = <ErrorBlock error={settings.error} retry={() => void settings.refetch()} what="this workspace's settings" />;
+  else
+    body = (
+      <Form id="workspace-settings" onSubmit={submit}>
+        <FormError error={error && !fieldError(error, "agent_model") ? error : null} />
+        <fieldset className="m-0 border-0 p-0">
+          <legend className="label mb-2">Agent model</legend>
+          <p className="mt-0 mb-2 text-[12.5px] text-ink-2">Every agent working in this workspace uses this model, and its tokens are billed at its price.</p>
+          <div className="grid gap-2" data-agent-models>
+            {models.map((option) => {
+              const long = longPromptPrice(option, settings.data?.currency);
+              return (
+                <label
+                  key={option.model}
+                  className={cx("flex cursor-pointer gap-3 rounded-[6px] border p-3", selected === option.model ? "border-action bg-action-soft" : "border-hairline bg-surface hover:border-rule")}
+                >
+                  <input type="radio" name="agent_model" value={option.model} checked={selected === option.model} onChange={() => setChoice(option.model)} className="mt-1" />
+                  <span className="min-w-0">
+                    <span className="block font-mono text-[13px] font-semibold text-ink">{agentModelLabel(option, defaultAgentModel(settings.data))}</span>
+                    <span className="block text-[12.5px] text-ink-2">{agentModelPrice(option, settings.data?.currency)}</span>
+                    {long && <span className="block text-[12px] text-ink-3">{long}</span>}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+          {fieldError(error, "agent_model") && <p className="mt-2 text-[12.5px] text-bad">{fieldError(error, "agent_model")}</p>}
+        </fieldset>
+      </Form>
+    );
+  return (
+    <Modal
+      title={`${workspace.name} Settings`}
+      subtitle="Choose the model this workspace's agents use."
+      onClose={onClose}
+      width={520}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button type="submit" form="workspace-settings" variant="primary" loading={busy} disabled={!settings.data || selected === current}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      {body}
     </Modal>
   );
 }
