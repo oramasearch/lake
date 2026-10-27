@@ -1434,6 +1434,37 @@ TEST(ModelGatewayRoute, AnswersTheOpenAIShapeForATaskCredential) {
              chat()["request"]);
     EXPECT_EQ(missing_status, 404U);
     EXPECT_EQ(fake.calls(), 2U) << "neither refused call reached the provider";
+
+    // lake#1245: the workspace chose no model, so its agent turns call gpt-6.1-sol. A chat
+    // completion with tools goes to the provider's Responses API and is answered as a chat
+    // completion on the OpenAI route.
+    fake.answer = {200,
+                   json{{"id", "resp_route"},
+                        {"object", "response"},
+                        {"created_at", 7},
+                        {"status", "completed"},
+                        {"model", "gpt-6.1-sol"},
+                        {"output",
+                         json::array({{{"type", "function_call"},
+                                       {"call_id", "call_route"},
+                                       {"name", "query_metric"},
+                                       {"arguments", "{}"}}})},
+                        {"usage", {{"input_tokens", 30}, {"output_tokens", 5}}}}
+                       .dump(),
+                   {}};
+    json with_tools = chat()["request"];
+    with_tools["tools"] =
+        json::array({{{"type", "function"}, {"function", {{"name", "query_metric"}}}}});
+    const auto [tools_status, tools_answer] =
+        post("/openai/v1/chat/completions", credential, with_tools);
+    EXPECT_EQ(tools_status, 200U) << tools_answer.dump();
+    EXPECT_EQ(tools_answer["object"], "chat.completion");
+    EXPECT_EQ(tools_answer["choices"][0]["finish_reason"], "tool_calls");
+    EXPECT_EQ(tools_answer["choices"][0]["message"]["tool_calls"][0]["id"], "call_route");
+    EXPECT_EQ(tools_answer["usage"]["prompt_tokens"], 30);
+    ASSERT_EQ(fake.calls(), 3U);
+    EXPECT_EQ(fake.requests[2].endpoint, "responses");
+    EXPECT_EQ(json::parse(fake.requests[2].body)["model"], "gpt-6.1-sol");
     server.stop();
 }
 
@@ -1755,9 +1786,9 @@ TEST(ModelGatewayRoute, CountsAStreamItsCallerAbandoned) {
 }
 
 // lake#1230: an agent turn calls the model its workspace chose, whatever model the agent asked
-// for, and its tokens are counted under that model; a workspace that chose none calls gpt-5.5 (lake#1245).
+// for, and its tokens are counted under that model; a workspace that chose none calls gpt-6.1-sol.
 // Embeddings, and a workspace's own launched code, which names its model itself, are left alone.
-TEST(ModelCompletion, AnAgentTurnCallsItsWorkspacesModelAndUnsetMeansGpt55) {
+TEST(ModelCompletion, AnAgentTurnCallsItsWorkspacesModelAndUnsetMeansGpt61Sol) {
     GatewayRig rig;
     const std::string fresh = rig.workspaces.create(rig.customer, "fresh");
     const auto task = rig.task(fresh, "agent-ask-orama");
@@ -1765,8 +1796,9 @@ TEST(ModelCompletion, AnAgentTurnCallsItsWorkspacesModelAndUnsetMeansGpt55) {
     const auto called = rig.call(chat(), context);
     ASSERT_TRUE(called.ok) << called.error.code << ": " << called.error.message;
     ASSERT_EQ(rig.fake.calls(), 1U);
-    EXPECT_EQ(json::parse(rig.fake.requests[0].body)["model"], "gpt-5.5");
-    EXPECT_EQ(context.audit_details["model"], "gpt-5.5");
+    EXPECT_EQ(json::parse(rig.fake.requests[0].body)["model"], "gpt-6.1-sol");
+    EXPECT_EQ(context.audit_details["model"], "gpt-6.1-sol");
+    EXPECT_EQ(context.audit_details["agent_asked_model"], "gpt-5.5");
 
     const auto chosen = rig.choose(fresh, "gpt-6-luna");
     EXPECT_EQ(chosen.value["agent_model"], "gpt-6-luna");
@@ -1809,17 +1841,17 @@ TEST(ModelCompletion, AnAgentTurnCallsItsWorkspacesModelAndUnsetMeansGpt55) {
     // the model the agent asked for.
     static_cast<void>(liquid::runtime::block_on(rig.recorder.flush()));
     auto& records = rig.workspaces.records(fresh);
-    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-6.1-sol/input"}}), 0);
+    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-6.1-sol/input"}}), 1200);
     EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-6-luna/input"}}), 2400);
     EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-6-luna/output"}}), 600);
-    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-5.5/input"}}), 1200);
+    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-5.5/input"}}), 0);
     EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-5/input"}}), 1200);
 
     // Back to the default.
     rig.choose(fresh, nullptr);
     auto reset = rig.task_context(task);
     ASSERT_TRUE(rig.call(chat(), reset).ok);
-    EXPECT_EQ(json::parse(rig.fake.requests.back().body)["model"], "gpt-5.5");
+    EXPECT_EQ(json::parse(rig.fake.requests.back().body)["model"], "gpt-6.1-sol");
 
     // A chosen model this Lake no longer serves is refused, never swapped for another.
     rig.choose(fresh, "gpt-6-astra");
@@ -1898,10 +1930,454 @@ TEST(ModelGateway, ServesTheGpt6ModelsAndOnlyChatModelsAreChoosable) {
         EXPECT_TRUE(lake::api::gateway_model_allowed(models, name)) << name;
     }
     const auto chat_models = lake::api::gateway_chat_models(models);
-    EXPECT_NE(std::ranges::find(chat_models, lake::api::default_agent_model), chat_models.end());
+    EXPECT_EQ(chat_models.front(), lake::api::default_agent_model);
     EXPECT_EQ(std::ranges::find(chat_models, "text-embedding-3-small"), chat_models.end());
     EXPECT_NE(std::ranges::find(chat_models, "gpt-5.5"), chat_models.end());
-    EXPECT_EQ(lake::api::default_agent_model, "gpt-5.5");
+    EXPECT_EQ(lake::api::default_agent_model, "gpt-6.1-sol");
+}
+
+// lake#1245: OpenAI refuses function tools on Chat Completions for the gpt-6.x models ("use
+// /v1/responses"). Shapes below were checked against the live API on 2026-10-26.
+const json tool_turn_request = json::parse(R"({
+  "model": "gpt-6.1-sol",
+  "messages": [{"role": "system", "content": "You are Ask Orama."},
+               {"role": "user", "content": "What is churn this month?"}],
+  "tools": [{"type": "function",
+             "function": {"name": "query_metric", "description": "Read a metric",
+                          "parameters": {"type": "object",
+                                         "properties": {"metric": {"type": "string"}},
+                                         "required": ["metric"]}}}],
+  "tool_choice": "auto", "parallel_tool_calls": true, "reasoning_effort": "low",
+  "max_completion_tokens": 2000, "user": "workspace-1"})");
+
+const json responses_tool_call = json::parse(R"({
+  "id": "resp_1", "object": "response", "created_at": 1793071494, "status": "completed",
+  "model": "gpt-6.1-sol", "service_tier": "default", "store": false,
+  "output": [{"id": "rs_1", "type": "reasoning", "summary": []},
+             {"id": "fc_1", "type": "function_call", "status": "completed",
+              "arguments": "{\"metric\":\"churn\"}", "call_id": "call_1", "name": "query_metric"}],
+  "usage": {"input_tokens": 1200, "input_tokens_details": {"cached_tokens": 200},
+            "output_tokens": 300, "output_tokens_details": {"reasoning_tokens": 250},
+            "total_tokens": 1500}})");
+
+const json responses_final = json::parse(R"({
+  "id": "resp_2", "object": "response", "created_at": 1793071496, "status": "completed",
+  "model": "gpt-6.1-sol", "service_tier": "default",
+  "output": [{"id": "msg_2", "type": "message", "status": "completed", "role": "assistant",
+              "content": [{"type": "output_text", "annotations": [],
+                           "text": "Churn is 4.2% this month."}]}],
+  "usage": {"input_tokens": 1300, "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 20, "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 1320}})");
+
+// The whole round trip, both ways, byte for byte: the request with tools, the provider's
+// function call, the tool's result sent back as history, and the final answer.
+TEST(ModelGateway, AToolCallingTurnOnGpt6RoundTripsThroughTheResponsesAPI) {
+    using lake::api::chat_request_as_responses;
+    using lake::api::prepare_model_request;
+    using lake::api::responses_answer_as_chat;
+    const auto first = prepare_model_request("chat/completions", tool_turn_request);
+    ASSERT_TRUE(first) << first.error().message;
+    ASSERT_TRUE(lake::api::chat_goes_to_responses(*first));
+    const auto sent = chat_request_as_responses(*first);
+    ASSERT_TRUE(sent) << sent.error().message;
+    EXPECT_EQ(sent->dump(),
+              json::parse(R"({
+      "model": "gpt-6.1-sol",
+      "input": [{"role": "system", "content": "You are Ask Orama."},
+                {"role": "user", "content": "What is churn this month?"}],
+      "tools": [{"type": "function", "name": "query_metric", "description": "Read a metric",
+                 "parameters": {"type": "object", "properties": {"metric": {"type": "string"}},
+                                "required": ["metric"]},
+                 "strict": false}],
+      "tool_choice": "auto", "parallel_tool_calls": true, "reasoning": {"effort": "low"},
+      "max_output_tokens": 2000, "user": "workspace-1", "store": false,
+      "service_tier": "default"})")
+                  .dump());
+
+    const auto called = responses_answer_as_chat(responses_tool_call);
+    ASSERT_TRUE(called) << called.error().message;
+    const json call_message = json::parse(R"({"role": "assistant", "content": null,
+      "tool_calls": [{"id": "call_1", "type": "function",
+                      "function": {"name": "query_metric",
+                                   "arguments": "{\"metric\":\"churn\"}"}}]})");
+    EXPECT_EQ(called->dump(),
+              json::parse(R"({
+      "id": "resp_1", "object": "chat.completion", "created": 1793071494, "model": "gpt-6.1-sol",
+      "service_tier": "default",
+      "choices": [{"index": 0, "logprobs": null, "finish_reason": "tool_calls",
+                   "message": )" +
+                          call_message.dump() + R"(}],
+      "usage": {"prompt_tokens": 1200, "completion_tokens": 300, "total_tokens": 1500,
+                "prompt_tokens_details": {"cached_tokens": 200},
+                "completion_tokens_details": {"reasoning_tokens": 250}}})")
+                  .dump());
+
+    // The agent sends the assistant message back as the SDK dumps it (no null content), then
+    // the tool's result.
+    json next = tool_turn_request;
+    json dumped = call_message;
+    dumped.erase("content");
+    next["messages"].push_back(dumped);
+    next["messages"].push_back({{"role", "tool"}, {"tool_call_id", "call_1"}, {"content", "4.2%"}});
+    const auto second = prepare_model_request("chat/completions", next);
+    ASSERT_TRUE(second) << second.error().message;
+    const auto resent = chat_request_as_responses(*second);
+    ASSERT_TRUE(resent) << resent.error().message;
+    EXPECT_EQ(resent->at("input").dump(),
+              json::parse(R"([
+      {"role": "system", "content": "You are Ask Orama."},
+      {"role": "user", "content": "What is churn this month?"},
+      {"type": "function_call", "call_id": "call_1", "name": "query_metric",
+       "arguments": "{\"metric\":\"churn\"}"},
+      {"type": "function_call_output", "call_id": "call_1", "output": "4.2%"}])")
+                  .dump());
+
+    const auto answered = responses_answer_as_chat(responses_final);
+    ASSERT_TRUE(answered) << answered.error().message;
+    EXPECT_EQ(answered->dump(),
+              json::parse(R"({
+      "id": "resp_2", "object": "chat.completion", "created": 1793071496, "model": "gpt-6.1-sol",
+      "service_tier": "default",
+      "choices": [{"index": 0, "logprobs": null, "finish_reason": "stop",
+                   "message": {"role": "assistant", "content": "Churn is 4.2% this month."}}],
+      "usage": {"prompt_tokens": 1300, "completion_tokens": 20, "total_tokens": 1320,
+                "prompt_tokens_details": {"cached_tokens": 0},
+                "completion_tokens_details": {"reasoning_tokens": 0}}})")
+                  .dump());
+}
+
+TEST(ModelGateway, TranslatesEveryChatFieldResponsesHasAndRefusesTheRest) {
+    using lake::api::chat_request_as_responses;
+    json chat_request = tool_turn_request;
+    chat_request.erase("reasoning_effort");
+    chat_request.erase("max_completion_tokens");
+    chat_request["max_tokens"] = 64;
+    chat_request["tool_choice"] = {{"type", "function"}, {"function", {{"name", "query_metric"}}}};
+    chat_request["tools"][0]["function"]["strict"] = true;
+    chat_request["response_format"] = {
+        {"type", "json_schema"},
+        {"json_schema", {{"name", "answer"}, {"schema", {{"type", "object"}}}, {"strict", true}}}};
+    chat_request["verbosity"] = "low";
+    chat_request["temperature"] = 0.5;
+    chat_request["messages"].push_back(
+        {{"role", "assistant"}, {"content", json::array({{{"type", "text"}, {"text", "Hi"}}})}});
+    chat_request["messages"].push_back(
+        {{"role", "developer"}, {"content", json::array({{{"type", "text"}, {"text", "Terse"}}})}});
+    const auto sent = chat_request_as_responses(chat_request);
+    ASSERT_TRUE(sent) << sent.error().message;
+    EXPECT_EQ((*sent)["tool_choice"].dump(), R"({"name":"query_metric","type":"function"})");
+    EXPECT_EQ((*sent)["tools"][0]["strict"], true);
+    EXPECT_EQ((*sent)["max_output_tokens"], 64);
+    EXPECT_FALSE(sent->contains("reasoning"));
+    EXPECT_EQ((*sent)["text"].dump(),
+              json::parse(R"({"format": {"type": "json_schema", "name": "answer",
+                                         "schema": {"type": "object"}, "strict": true},
+                              "verbosity": "low"})")
+                  .dump());
+    EXPECT_EQ((*sent)["temperature"], 0.5) << "the provider says whether the model takes it";
+    EXPECT_EQ((*sent)["input"][2].dump(),
+              R"({"content":[{"text":"Hi","type":"output_text"}],"role":"assistant"})");
+    EXPECT_EQ((*sent)["input"][3].dump(),
+              R"({"content":[{"text":"Terse","type":"input_text"}],"role":"developer"})");
+
+    // A tool with no parameters takes none.
+    json bare = tool_turn_request;
+    bare["tools"][0]["function"] = {{"name", "ping"}};
+    EXPECT_EQ((*chat_request_as_responses(bare))["tools"][0].dump(),
+              R"({"name":"ping","parameters":{"properties":{},"type":"object"},)"
+              R"("strict":false,"type":"function"})");
+
+    for (const auto& [field, value] :
+         std::vector<std::pair<std::string, json>>{{"stop", "\n"},
+                                                   {"n", 2},
+                                                   {"logprobs", true},
+                                                   {"top_logprobs", 2},
+                                                   {"seed", 1},
+                                                   {"logit_bias", {{"50256", -100}}},
+                                                   {"frequency_penalty", 0.5},
+                                                   {"presence_penalty", 0.5}}) {
+        json refused = tool_turn_request;
+        refused[field] = value;
+        const auto translated = chat_request_as_responses(refused);
+        ASSERT_FALSE(translated) << field;
+        EXPECT_EQ(translated.error().code, "invalid_input");
+        EXPECT_EQ(translated.error().path, "/request/" + field);
+        EXPECT_NE(translated.error().message.find("Responses API"), std::string::npos);
+    }
+    for (const auto& [field, value] : std::vector<std::pair<std::string, json>>{
+             {"n", 1}, {"logprobs", false}, {"stop", nullptr}, {"frequency_penalty", 0}}) {
+        json accepted = tool_turn_request;
+        accepted[field] = value;
+        EXPECT_TRUE(chat_request_as_responses(accepted)) << field;
+    }
+}
+
+TEST(ModelGateway, OnlyToolCallsOnTheListedModelsGoToTheResponsesAPI) {
+    using lake::api::chat_goes_to_responses;
+    for (const std::string model :
+         {"gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-luna", "gpt-6.1-sol-2026-10-01"}) {
+        json request = tool_turn_request;
+        request["model"] = model;
+        EXPECT_TRUE(chat_goes_to_responses(request)) << model;
+        request.erase("tools");
+        EXPECT_FALSE(chat_goes_to_responses(request)) << model << " without tools";
+        request["tools"] = json::array();
+        EXPECT_FALSE(chat_goes_to_responses(request)) << model << " with no tools";
+    }
+    for (const std::string model : {"gpt-5.5", "gpt-5", "gpt-4o", "gpt-6.1-solar"}) {
+        json request = tool_turn_request;
+        request["model"] = model;
+        EXPECT_FALSE(chat_goes_to_responses(request)) << model;
+    }
+    // Chat Completions takes tools when the caller asks for no reasoning.
+    json none = tool_turn_request;
+    none["reasoning_effort"] = "none";
+    EXPECT_FALSE(chat_goes_to_responses(none));
+}
+
+TEST(ModelCompletion, AnAgentTurnWithToolsOnGpt61SolIsSentToResponsesAndCounted) {
+    GatewayRig rig;
+    rig.choose(rig.home, nullptr); // the default: gpt-6.1-sol
+    rig.fake.answer = {200, responses_tool_call.dump(), {}};
+    const auto task = rig.task(rig.home, "agent-ask-orama");
+    auto context = rig.task_context(task);
+    json request = tool_turn_request;
+    request["model"] = "gpt-5.5"; // what the agent asks for; the workspace's model is called
+    const auto answered =
+        rig.call({{"endpoint", "chat/completions"}, {"request", request}}, context);
+    ASSERT_TRUE(answered.ok) << answered.error.code << ": " << answered.error.message;
+    ASSERT_EQ(rig.fake.calls(), 1U);
+    EXPECT_EQ(rig.fake.requests[0].endpoint, "responses");
+    const json sent = json::parse(rig.fake.requests[0].body);
+    EXPECT_EQ(sent["model"], "gpt-6.1-sol");
+    EXPECT_EQ(sent["tools"][0]["name"], "query_metric");
+    EXPECT_EQ(sent["store"], false);
+    EXPECT_EQ(sent["service_tier"], "default");
+    EXPECT_FALSE(sent.contains("messages"));
+    EXPECT_EQ(answered.value["response"]["object"], "chat.completion");
+    EXPECT_EQ(answered.value["response"]["choices"][0]["message"]["tool_calls"][0]["id"], "call_1");
+    EXPECT_EQ(answered.value["input_tokens"], 1200);
+    EXPECT_EQ(answered.value["output_tokens"], 300);
+    EXPECT_EQ(context.audit_details["endpoint"], "chat/completions");
+    EXPECT_EQ(context.audit_details["provider_endpoint"], "responses");
+    EXPECT_EQ(context.audit_details["model"], "gpt-6.1-sol");
+    static_cast<void>(liquid::runtime::block_on(rig.recorder.flush()));
+    auto& records = rig.workspaces.records(rig.home);
+    EXPECT_EQ(records.metric_total("lake_usage",
+                                   {{"dimension", "model_tokens"},
+                                    {"kind", "input"},
+                                    {"model", "gpt-6.1-sol"},
+                                    {"class", "gpt-6.1-sol/input"}}),
+              1200);
+    EXPECT_EQ(
+        records.metric_total("lake_usage", {{"kind", "output"}, {"class", "gpt-6.1-sol/output"}}),
+        300)
+        << "reasoning tokens are output tokens";
+
+    // A long prompt is counted under the long-context classes, as on Chat Completions.
+    json long_prompt = responses_tool_call;
+    long_prompt["usage"]["input_tokens"] = 272'001;
+    rig.fake.answer = {200, long_prompt.dump(), {}};
+    auto again = rig.task_context(task);
+    ASSERT_TRUE(rig.call({{"endpoint", "chat/completions"}, {"request", request}}, again).ok);
+    static_cast<void>(liquid::runtime::block_on(rig.recorder.flush()));
+    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-6.1-sol@long/input"}}), 272'001);
+}
+
+TEST(ModelCompletion, Gpt55AndCallsWithoutToolsStayOnChatCompletions) {
+    GatewayRig rig; // home and lab chose gpt-5.5
+    const auto task = rig.task(rig.home, "agent-ask-orama");
+    auto with_tools = rig.task_context(task);
+    ASSERT_TRUE(
+        rig.call({{"endpoint", "chat/completions"}, {"request", tool_turn_request}}, with_tools)
+            .ok);
+    ASSERT_EQ(rig.fake.calls(), 1U);
+    EXPECT_EQ(rig.fake.requests[0].endpoint, "chat/completions");
+    EXPECT_EQ(json::parse(rig.fake.requests[0].body)["model"], "gpt-5.5");
+    EXPECT_FALSE(with_tools.audit_details.contains("provider_endpoint"));
+
+    rig.choose(rig.home, "gpt-6.1-sol");
+    auto without_tools = rig.task_context(task);
+    const auto answered = rig.call(chat(), without_tools);
+    ASSERT_TRUE(answered.ok) << answered.error.message;
+    ASSERT_EQ(rig.fake.calls(), 2U);
+    EXPECT_EQ(rig.fake.requests[1].endpoint, "chat/completions");
+    EXPECT_EQ(json::parse(rig.fake.requests[1].body)["model"], "gpt-6.1-sol");
+    EXPECT_EQ(answered.value["response"].dump(), chat_answer.dump()) << "passed through untouched";
+}
+
+TEST(ModelCompletion, PassesOnTheResponsesAPIsRefusalAndCountsNothing) {
+    GatewayRig rig;
+    rig.choose(rig.home, "gpt-6.1-sol");
+    rig.fake.answer = {400,
+                       R"({"error":{"message":"Unsupported parameter: 'temperature' is not )"
+                       R"(supported with this model.","type":"invalid_request_error",)"
+                       R"("param":"temperature","code":null}})",
+                       {}};
+    const auto task = rig.task(rig.home, "agent-ask-orama");
+    auto context = rig.task_context(task);
+    json request = tool_turn_request;
+    request["temperature"] = 0.2;
+    const auto refused =
+        rig.call({{"endpoint", "chat/completions"}, {"request", request}}, context);
+    EXPECT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "engine_error");
+    EXPECT_EQ(refused.error.message,
+              "the model provider refused the request: Unsupported parameter: 'temperature' is "
+              "not supported with this model.");
+    EXPECT_EQ(context.audit_details["provider_status"], 400);
+    EXPECT_EQ(context.audit_details["provider_endpoint"], "responses");
+
+    // A field Responses has no equivalent for is refused before the provider is called.
+    request.erase("temperature");
+    request["stop"] = "END";
+    auto stopped = rig.task_context(task);
+    const auto before = rig.fake.calls();
+    const auto unsent = rig.call({{"endpoint", "chat/completions"}, {"request", request}}, stopped);
+    EXPECT_EQ(unsent.error.code, "invalid_input");
+    EXPECT_EQ(unsent.error.path, "/request/stop");
+    EXPECT_EQ(rig.fake.calls(), before);
+
+    // A failed answer is the provider's failure, after its tokens are counted.
+    json failed = responses_tool_call;
+    failed["status"] = "failed";
+    failed["error"] = {{"code", "server_error"}, {"message", "The model crashed."}};
+    rig.fake.answer = {200, failed.dump(), {}};
+    request.erase("stop");
+    auto crashed = rig.task_context(task);
+    const auto failure =
+        rig.call({{"endpoint", "chat/completions"}, {"request", request}}, crashed);
+    EXPECT_EQ(failure.error.code, "engine_error");
+    EXPECT_NE(failure.error.message.find("The model crashed."), std::string::npos);
+    static_cast<void>(liquid::runtime::block_on(rig.recorder.flush()));
+    EXPECT_EQ(rig.workspaces.records(rig.home).metric_total("lake_usage",
+                                                            {{"dimension", "model_tokens"}}),
+              1500)
+        << "only the answered call is counted";
+}
+
+// The Responses stream of a tool call, as OpenAI sends it (trimmed of fields nobody reads).
+const std::string responses_stream =
+    "event: response.created\n"
+    "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_s\",\"created_at\":5,"
+    "\"model\":\"gpt-6.1-sol\",\"status\":\"in_progress\",\"usage\":null},\"sequence_number\":0}"
+    "\n\n"
+    "event: response.output_item.added\n"
+    "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"rs_s\",\"type\":"
+    "\"reasoning\"},\"output_index\":0}\n\n"
+    "event: response.output_item.added\n"
+    "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_s\",\"type\":"
+    "\"function_call\",\"arguments\":\"\",\"call_id\":\"call_s\",\"name\":\"query_metric\"},"
+    "\"output_index\":1}\n\n"
+    "event: response.function_call_arguments.delta\n"
+    "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"metric\\\":\","
+    "\"item_id\":\"fc_s\",\"output_index\":1}\n\n"
+    "event: response.function_call_arguments.delta\n"
+    "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"\\\"churn\\\"}\","
+    "\"item_id\":\"fc_s\",\"output_index\":1}\n\n"
+    "event: response.completed\n"
+    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_s\",\"created_at\":5,"
+    "\"model\":\"gpt-6.1-sol\",\"status\":\"completed\",\"usage\":{\"input_tokens\":40,"
+    "\"output_tokens\":12,\"output_tokens_details\":{\"reasoning_tokens\":8},"
+    "\"total_tokens\":52}}}\n\n";
+
+std::string chat_stream_of_responses_stream() {
+    const auto event = [](json delta, json finish = nullptr) {
+        return "data: " +
+               json{{"id", "resp_s"},
+                    {"object", "chat.completion.chunk"},
+                    {"created", 5},
+                    {"model", "gpt-6.1-sol"},
+                    {"choices",
+                     json::array({{{"index", 0}, {"delta", delta}, {"finish_reason", finish}}})}}
+                   .dump() +
+               "\n\n";
+    };
+    return event({{"role", "assistant"}, {"content", ""}}) +
+           event({{"tool_calls",
+                   json::array({{{"index", 0},
+                                 {"id", "call_s"},
+                                 {"type", "function"},
+                                 {"function", {{"name", "query_metric"}, {"arguments", ""}}}}})}}) +
+           event({{"tool_calls",
+                   json::array({{{"index", 0}, {"function", {{"arguments", "{\"metric\":"}}}}})}}) +
+           event({{"tool_calls",
+                   json::array({{{"index", 0}, {"function", {{"arguments", "\"churn\"}"}}}}})}}) +
+           event(json::object(), "tool_calls") + "data: " +
+           json{{"id", "resp_s"},
+                {"object", "chat.completion.chunk"},
+                {"created", 5},
+                {"model", "gpt-6.1-sol"},
+                {"choices", json::array()},
+                {"usage",
+                 {{"prompt_tokens", 40},
+                  {"completion_tokens", 12},
+                  {"total_tokens", 52},
+                  {"completion_tokens_details", {{"reasoning_tokens", 8}}}}}}
+               .dump() +
+           "\n\ndata: [DONE]\n\n";
+}
+
+TEST(ModelGateway, RewritesAResponsesStreamAsChatChunksHoweverItsPiecesFall) {
+    const std::string expected = chat_stream_of_responses_stream();
+    for (const std::size_t size :
+         {std::size_t{1}, std::size_t{7}, std::size_t{64}, responses_stream.size()}) {
+        lake::api::ResponsesChatStream stream;
+        std::string out;
+        for (std::size_t at = 0; at < responses_stream.size(); at += size) {
+            out += stream.feed(std::string_view(responses_stream).substr(at, size));
+        }
+        out += stream.finish();
+        EXPECT_EQ(out, expected) << size;
+    }
+    // A stream that fails says so in the error shape OpenAI's SDK raises, then ends.
+    lake::api::ResponsesChatStream failing;
+    const std::string failed =
+        failing.feed("data: {\"type\":\"response.failed\",\"response\":{\"id\":\"r\",\"error\":"
+                     "{\"code\":\"server_error\",\"message\":\"The model crashed.\"}}}\n\n");
+    EXPECT_NE(failed.find("\"error\":{"), std::string::npos) << failed;
+    EXPECT_NE(failed.find("The model crashed."), std::string::npos) << failed;
+    EXPECT_TRUE(failed.ends_with("data: [DONE]\n\n")) << failed;
+}
+
+TEST(ModelCompletion, RelaysATranslatedStreamAsChatChunksAndCountsItsUsage) {
+    GatewayRig rig;
+    rig.choose(rig.home, "gpt-6.1-sol");
+    rig.fake.answer = {200, responses_stream, {}};
+    const auto task = rig.task(rig.home, "agent-project");
+    json request = tool_turn_request;
+    request["stream"] = true;
+
+    auto relayed_context = rig.task_context(task);
+    std::string relayed;
+    relayed_context.model_stream = [&](std::string_view piece) {
+        relayed += piece;
+        return true;
+    };
+    const auto answered =
+        rig.call({{"endpoint", "chat/completions"}, {"request", request}}, relayed_context);
+    ASSERT_TRUE(answered.ok) << answered.error.message;
+    EXPECT_EQ(relayed, chat_stream_of_responses_stream());
+    EXPECT_EQ(answered.value["input_tokens"], 40);
+    EXPECT_EQ(answered.value["output_tokens"], 12);
+    ASSERT_EQ(rig.fake.calls(), 1U);
+    EXPECT_EQ(rig.fake.requests[0].endpoint, "responses");
+    EXPECT_TRUE(rig.fake.requests[0].stream);
+    const json sent = json::parse(rig.fake.requests[0].body);
+    EXPECT_EQ(sent["stream"], true);
+    EXPECT_FALSE(sent.contains("stream_options")) << "a Responses stream reports its usage anyway";
+
+    // Through the capability without a relay, the whole stream is answered rewritten.
+    auto whole_context = rig.task_context(task);
+    const auto whole =
+        rig.call({{"endpoint", "chat/completions"}, {"request", request}}, whole_context);
+    ASSERT_TRUE(whole.ok) << whole.error.message;
+    EXPECT_EQ(whole.value["events"], chat_stream_of_responses_stream());
+    static_cast<void>(liquid::runtime::block_on(rig.recorder.flush()));
+    EXPECT_EQ(rig.workspaces.records(rig.home).metric_total("lake_usage",
+                                                            {{"dimension", "model_tokens"}}),
+              104);
 }
 
 } // namespace

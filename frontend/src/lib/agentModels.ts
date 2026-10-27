@@ -1,6 +1,6 @@
 /** The model a workspace's agents call (lake#1230, docs/ui/workspace-selection.md#settings): one of the
  * chat models this Lake serves, read with `get_workspace_settings` and chosen with
- * `set_workspace_settings`; unset means the default, gpt-5.5. Each model shows its price per
+ * `set_workspace_settings`; unset means the default, gpt-6.1-sol. Each model shows its price per
  * million tokens from the price list in force. Pure, so `tests/agent-models.test.ts` runs it under
  * Node. */
 import { money } from "../pages/billing/billing.ts";
@@ -25,7 +25,7 @@ export type WorkspaceSettings = {
 };
 
 /** The default when the answer does not say (an older Lake). */
-export const DEFAULT_AGENT_MODEL = "gpt-5.5";
+export const DEFAULT_AGENT_MODEL = "gpt-6.1-sol";
 
 /** The prompt length past which a request is billed at the long-context prices. */
 export const LONG_PROMPT_TOKENS = 272_000;

@@ -147,7 +147,7 @@ lake#514). Cancel or Escape closes it and drops `delete=`.
 `get_workspace_settings` and lists each chat model this Lake serves as a choice, with its price per
 million tokens from the price list in force ("$2.60 in, $13.00 out per million tokens") and, for a
 model with long-context rates, a second line with the price of a prompt over 272,000 tokens. The
-default is labelled "gpt-5.5 (default)" and is the one selected while the workspace has chosen
+default is labelled "gpt-6.1-sol (default)" and is the one selected while the workspace has chosen
 none. Where billing is off or no rate is published, the line says "No price published on this Lake",
 never $0. **Save** (enabled once the choice differs from the model in effect) calls
 `set_workspace_settings`; choosing the default sends `agent_model: null`, so the workspace keeps
@@ -167,7 +167,7 @@ the refusal on the dialog. The labels, prices and what is sent are pure function
 - `HttpServer/HttpResponseIsolation.TheViewerSaysWhoIsSignedInAndWhereTheyAre` checks the `viewer`
   read's workspace validation.
 - On `/workspaces`, open **Settings** on a workspace: every served chat model is listed with its
-  prices, gpt-5.5 selected and marked default; choose another and Save, reopen it, and it is
+  prices, gpt-6.1-sol selected and marked default; choose another and Save, reopen it, and it is
   selected (`npm test` runs `tests/agent-models.test.ts`).
 
 ## How to change

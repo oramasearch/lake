@@ -24,10 +24,10 @@ const sol = {
 const luna = { model: "gpt-6-luna", default: false, input_micros_per_million: 130_000, output_micros_per_million: 650_000, long_input_micros_per_million: 260_000, long_output_micros_per_million: 975_000 };
 const gpt4o = { model: "gpt-4o", input_micros_per_million: 3_250_000, output_micros_per_million: 13_000_000, long_input_micros_per_million: null, long_output_micros_per_million: null };
 
-test("unset means gpt-5.5 (lake#1245)", () => {
-  assert.equal(DEFAULT_AGENT_MODEL, "gpt-5.5");
-  assert.equal(currentAgentModel(null), "gpt-5.5");
-  assert.equal(currentAgentModel({ agent_model: "gpt-5.5", agent_model_chosen: null }), "gpt-5.5");
+test("unset means gpt-6.1-sol", () => {
+  assert.equal(DEFAULT_AGENT_MODEL, "gpt-6.1-sol");
+  assert.equal(currentAgentModel(null), "gpt-6.1-sol");
+  assert.equal(currentAgentModel({ agent_model: "gpt-6.1-sol", agent_model_chosen: null }), "gpt-6.1-sol");
   assert.equal(currentAgentModel({ agent_model: "gpt-6-luna", agent_model_chosen: "gpt-6-luna" }), "gpt-6-luna");
   assert.equal(defaultAgentModel({ default_agent_model: "gpt-6.1-terra" }), "gpt-6.1-terra");
 });
@@ -54,5 +54,5 @@ test("choosing the default goes back to unset; any other model is sent by name",
   const settings: WorkspaceSettings = { default_agent_model: "gpt-6.1-sol" };
   assert.deepEqual(agentModelInput("gpt-6.1-sol", settings), { agent_model: null });
   assert.deepEqual(agentModelInput("gpt-6-luna", settings), { agent_model: "gpt-6-luna" });
-  assert.deepEqual(agentModelInput("gpt-5.5", null), { agent_model: null });
+  assert.deepEqual(agentModelInput("gpt-6.1-sol", null), { agent_model: null });
 });

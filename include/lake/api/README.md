@@ -58,7 +58,10 @@ and declares `workspace_agent_model`, the model the gateway calls for a workspac
 `acting_agent` names the agent whose credential made a call.
 `model_gateway.hpp` declares the model gateway's pure helpers (the served and chat models,
 `default_agent_model`, the long-context classes, `prepare_model_request`,
-`model_usage`, `ModelStreamUsage` for a stream read as it arrives, `model_provider_failure`) and
+`model_usage`, `ModelStreamUsage` for a stream read as it arrives, `model_provider_failure`, and
+for lake#1245 `responses_for_tools_models`, `chat_request_as_responses`,
+`responses_answer_as_chat` and `ResponsesChatStream`, which carry a gpt-6.x chat call with tools
+through the Responses API) and
 `openai_model_provider`. `registry.hpp` declares the `ModelProvider` injected dependency on
 `ApiContext`, the `ModelBodySink` a streamed answer goes to as it arrives, and the caller's
 `model_stream` (lake#665); `server.hpp` the provider and its URL on `ServerOptions` (lake#248,

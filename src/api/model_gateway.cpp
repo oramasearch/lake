@@ -660,4 +660,437 @@ ModelProvider openai_model_provider(std::string api_key, std::string base_url, M
     };
 }
 
+// lake#1245: tool calls on the gpt-6.x models go through OpenAI's Responses API.
+
+bool needs_responses_for_tools(std::string_view model) {
+    return std::ranges::any_of(responses_for_tools_models, [model](std::string_view listed) {
+        return model == listed || (model.starts_with(listed) && model.size() > listed.size() &&
+                                   model[listed.size()] == '-');
+    });
+}
+
+bool chat_goes_to_responses(const nlohmann::json& chat) {
+    if (!chat.is_object() || !chat.contains("model") || !chat.at("model").is_string() ||
+        !needs_responses_for_tools(chat.at("model").get<std::string>())) {
+        return false;
+    }
+    const auto tools = chat.find("tools");
+    if (tools == chat.end() || !tools->is_array() || tools->empty()) {
+        return false;
+    }
+    const auto effort = chat.find("reasoning_effort");
+    return effort == chat.end() || *effort != "none";
+}
+
+namespace {
+
+// A field Chat Completions has and the Responses API does not.
+ApiError no_responses_equivalent(std::string_view field, std::string_view model) {
+    return ApiError{
+        "invalid_input",
+        std::format("{}: {} answers calls with tools through OpenAI's Responses API, which has no "
+                    "such field; leave it out",
+                    field,
+                    model),
+        std::format("/request/{}", field)};
+}
+
+// A chat message's content as Responses content: a string stays a string; text parts become
+// `input_text` parts, or `output_text` for the assistant's own earlier answer.
+Json responses_content(const Json& content, std::string_view part_type) {
+    if (!content.is_array()) {
+        return content;
+    }
+    Json parts = Json::array();
+    for (const Json& part : content) {
+        parts.push_back({{"type", part_type}, {"text", part.value("text", std::string())}});
+    }
+    return parts;
+}
+
+// A tool result's content as the text of a `function_call_output`.
+std::string content_text(const Json& content) {
+    if (content.is_string()) {
+        return content.get<std::string>();
+    }
+    std::string text;
+    if (content.is_array()) {
+        for (const Json& part : content) {
+            text += part.value("text", std::string());
+        }
+    }
+    return text;
+}
+
+bool is_unset(const Json& request, const char* field) {
+    const auto found = request.find(field);
+    return found == request.end() || found->is_null();
+}
+
+Json chat_usage(const Json& usage) {
+    if (!usage.is_object()) {
+        return nullptr;
+    }
+    const std::uint64_t input = count(usage, "input_tokens").value_or(0);
+    const std::uint64_t output = count(usage, "output_tokens").value_or(0);
+    Json out{{"prompt_tokens", input},
+             {"completion_tokens", output},
+             {"total_tokens", count(usage, "total_tokens").value_or(input + output)}};
+    if (const auto details = usage.find("input_tokens_details");
+        details != usage.end() && details->is_object()) {
+        if (const auto cached = count(*details, "cached_tokens")) {
+            out["prompt_tokens_details"] = {{"cached_tokens", *cached}};
+        }
+    }
+    if (const auto details = usage.find("output_tokens_details");
+        details != usage.end() && details->is_object()) {
+        if (const auto reasoning = count(*details, "reasoning_tokens")) {
+            out["completion_tokens_details"] = {{"reasoning_tokens", *reasoning}};
+        }
+    }
+    return out;
+}
+
+// Why a Responses answer stopped, as Chat Completions says it.
+std::string chat_finish_reason(const Json& answer, bool called_tools) {
+    if (called_tools) {
+        return "tool_calls";
+    }
+    if (answer.value("status", std::string()) == "incomplete") {
+        const Json details = answer.value("incomplete_details", Json());
+        const std::string reason =
+            details.is_object() ? details.value("reason", std::string()) : std::string();
+        return reason == "content_filter" ? "content_filter" : "length";
+    }
+    return "stop";
+}
+
+std::string provider_failure_message(const Json& error) {
+    if (error.is_object() && error.contains("message") && error.at("message").is_string()) {
+        return error.at("message").get<std::string>();
+    }
+    return "no reason given";
+}
+
+} // namespace
+
+std::expected<nlohmann::json, ApiError> chat_request_as_responses(const nlohmann::json& chat) {
+    const std::string model = chat.value("model", std::string());
+    for (const char* field :
+         {"logit_bias", "stop", "seed", "top_logprobs", "functions", "function_call"}) {
+        if (!is_unset(chat, field)) {
+            return std::unexpected(no_responses_equivalent(field, model));
+        }
+    }
+    if (const auto n = chat.find("n"); n != chat.end() && !n->is_null() && *n != 1) {
+        return std::unexpected(no_responses_equivalent("n", model));
+    }
+    if (const auto logprobs = chat.find("logprobs");
+        logprobs != chat.end() && !logprobs->is_null() && *logprobs != false) {
+        return std::unexpected(no_responses_equivalent("logprobs", model));
+    }
+    for (const char* field : {"frequency_penalty", "presence_penalty"}) {
+        if (const auto penalty = chat.find(field);
+            penalty != chat.end() && !penalty->is_null() && *penalty != 0) {
+            return std::unexpected(no_responses_equivalent(field, model));
+        }
+    }
+
+    Json input = Json::array();
+    const Json& messages = chat.at("messages");
+    for (std::size_t i = 0; i < messages.size(); ++i) {
+        const Json& message = messages[i];
+        const std::string role = message.at("role");
+        const std::string path = "/request/messages/" + std::to_string(i);
+        if (role == "function" || message.contains("function_call")) {
+            return std::unexpected(ApiError{
+                "invalid_input",
+                std::format("messages: {} answers calls with tools through OpenAI's Responses "
+                            "API; send tool calls as tool_calls and their results as role tool, "
+                            "not the deprecated function call fields",
+                            model),
+                path});
+        }
+        if (role == "tool") {
+            const auto call_id = message.find("tool_call_id");
+            if (call_id == message.end() || !call_id->is_string()) {
+                return std::unexpected(ApiError{
+                    "invalid_input", "messages: a tool message needs its tool_call_id", path});
+            }
+            input.push_back({{"type", "function_call_output"},
+                             {"call_id", *call_id},
+                             {"output", content_text(message.value("content", Json()))}});
+            continue;
+        }
+        const Json content = message.value("content", Json());
+        const bool has_text = content.is_string() ? !content.get<std::string>().empty()
+                                                  : content.is_array() && !content.empty();
+        const bool has_calls = role == "assistant" && message.contains("tool_calls") &&
+                               message.at("tool_calls").is_array() &&
+                               !message.at("tool_calls").empty();
+        if (has_text || !has_calls) {
+            input.push_back(
+                {{"role", role},
+                 {"content",
+                  content.is_null()
+                      ? Json("")
+                      : responses_content(content,
+                                          role == "assistant" ? "output_text" : "input_text")}});
+        }
+        if (has_calls) {
+            for (const Json& call : message.at("tool_calls")) {
+                input.push_back({{"type", "function_call"},
+                                 {"call_id", call.at("id")},
+                                 {"name", call.at("function").at("name")},
+                                 {"arguments", call.at("function").at("arguments")}});
+            }
+        }
+    }
+
+    Json tools = Json::array();
+    for (const Json& tool : chat.at("tools")) {
+        const Json& function = tool.at("function");
+        Json out{{"type", "function"},
+                 {"name", function.at("name")},
+                 // Responses makes a function strict unless told otherwise; Chat Completions does
+                 // not, and a schema written for it may not satisfy strict mode.
+                 {"strict",
+                  function.contains("strict") && function.at("strict").is_boolean()
+                      ? function.at("strict")
+                      : Json(false)}};
+        if (function.contains("description") && function.at("description").is_string()) {
+            out["description"] = function.at("description");
+        }
+        out["parameters"] = function.contains("parameters")
+                                ? function.at("parameters")
+                                : Json{{"type", "object"}, {"properties", Json::object()}};
+        tools.push_back(std::move(out));
+    }
+
+    Json request{{"model", model},
+                 {"input", std::move(input)},
+                 {"tools", std::move(tools)},
+                 {"store", false},
+                 {"service_tier", "default"}};
+    if (const auto choice = chat.find("tool_choice"); choice != chat.end() && !choice->is_null()) {
+        request["tool_choice"] =
+            choice->is_object()
+                ? Json{{"type", "function"}, {"name", choice->at("function").at("name")}}
+                : *choice;
+    }
+    for (const char* field : {"parallel_tool_calls", "temperature", "top_p", "user", "stream"}) {
+        if (!is_unset(chat, field)) {
+            request[field] = chat.at(field);
+        }
+    }
+    if (!is_unset(chat, "reasoning_effort")) {
+        request["reasoning"] = {{"effort", chat.at("reasoning_effort")}};
+    }
+    if (!is_unset(chat, "max_completion_tokens")) {
+        request["max_output_tokens"] = chat.at("max_completion_tokens");
+    } else if (!is_unset(chat, "max_tokens")) {
+        request["max_output_tokens"] = chat.at("max_tokens");
+    }
+    Json text = Json::object();
+    if (const auto format = chat.find("response_format");
+        format != chat.end() && format->is_object()) {
+        Json out{{"type", format->at("type")}};
+        if (format->contains("json_schema")) {
+            out.update(format->at("json_schema"));
+        }
+        text["format"] = std::move(out);
+    }
+    if (!is_unset(chat, "verbosity")) {
+        text["verbosity"] = chat.at("verbosity");
+    }
+    if (!text.empty()) {
+        request["text"] = std::move(text);
+    }
+    return request;
+}
+
+std::expected<nlohmann::json, ApiError> responses_answer_as_chat(const nlohmann::json& answer) {
+    if (!answer.is_object()) {
+        return std::unexpected(
+            ApiError{"engine_error", "the model provider answered without a JSON object"});
+    }
+    if (answer.value("status", std::string()) == "failed") {
+        return std::unexpected(
+            ApiError{"engine_error",
+                     "the model provider could not answer: " +
+                         provider_failure_message(answer.value("error", Json()))});
+    }
+    std::string text;
+    std::string refusal;
+    Json calls = Json::array();
+    const Json output = answer.value("output", Json::array());
+    for (const Json& item : output.is_array() ? output : Json::array()) {
+        const std::string type = item.value("type", std::string());
+        if (type == "function_call") {
+            calls.push_back({{"id", item.value("call_id", std::string())},
+                             {"type", "function"},
+                             {"function",
+                              {{"name", item.value("name", std::string())},
+                               {"arguments", item.value("arguments", std::string())}}}});
+        } else if (type == "message") {
+            const Json content = item.value("content", Json::array());
+            for (const Json& part : content.is_array() ? content : Json::array()) {
+                if (part.value("type", std::string()) == "output_text") {
+                    text += part.value("text", std::string());
+                } else if (part.value("type", std::string()) == "refusal") {
+                    refusal += part.value("refusal", std::string());
+                }
+            }
+        }
+        // Reasoning items are the model's own; Chat Completions never shows them.
+    }
+    Json message{
+        {"role", "assistant"},
+        {"content",
+         text.empty() && (!calls.empty() || !refusal.empty()) ? Json(nullptr) : Json(text)}};
+    if (!refusal.empty()) {
+        message["refusal"] = refusal;
+    }
+    if (!calls.empty()) {
+        message["tool_calls"] = calls;
+    }
+    Json out{{"id", answer.value("id", std::string())},
+             {"object", "chat.completion"},
+             {"created", answer.value("created_at", std::int64_t{0})},
+             {"model", answer.value("model", std::string())},
+             {"choices",
+              Json::array({{{"index", 0},
+                            {"message", std::move(message)},
+                            {"logprobs", nullptr},
+                            {"finish_reason", chat_finish_reason(answer, !calls.empty())}}})}};
+    if (const Json usage = chat_usage(answer.value("usage", Json())); !usage.is_null()) {
+        out["usage"] = usage;
+    }
+    if (answer.contains("service_tier") && answer.at("service_tier").is_string()) {
+        out["service_tier"] = answer.at("service_tier");
+    }
+    return out;
+}
+
+std::string ResponsesChatStream::feed(std::string_view piece) {
+    std::string out;
+    std::size_t start = 0;
+    for (;;) {
+        const std::size_t end = piece.find('\n', start);
+        if (end == std::string_view::npos) {
+            partial_.append(piece.substr(start));
+            return out;
+        }
+        if (partial_.empty()) {
+            out += line(piece.substr(start, end - start));
+        } else {
+            partial_.append(piece.substr(start, end - start));
+            const std::string whole = std::exchange(partial_, std::string());
+            out += line(whole);
+        }
+        start = end + 1;
+    }
+}
+
+std::string ResponsesChatStream::finish() {
+    if (partial_.empty()) {
+        return {};
+    }
+    const std::string last = std::exchange(partial_, std::string());
+    return line(last);
+}
+
+std::string ResponsesChatStream::chunk(nlohmann::json delta, nlohmann::json finish_reason) const {
+    const Json event{{"id", id_},
+                     {"object", "chat.completion.chunk"},
+                     {"created", created_},
+                     {"model", model_},
+                     {"choices",
+                      Json::array({{{"index", 0},
+                                    {"delta", std::move(delta)},
+                                    {"finish_reason", std::move(finish_reason)}}})}};
+    return "data: " + event.dump() + "\n\n";
+}
+
+std::string ResponsesChatStream::line(std::string_view text) {
+    text = trim(text);
+    if (done_ || !text.starts_with("data:")) {
+        return {};
+    }
+    text = trim(text.substr(5));
+    const Json event = Json::parse(text, nullptr, false);
+    if (!event.is_object()) {
+        return {};
+    }
+    const std::string type = event.value("type", std::string());
+    const Json response = event.value("response", Json());
+    if (response.is_object()) {
+        id_ = response.value("id", id_);
+        created_ = response.value("created_at", created_);
+        model_ = response.value("model", model_);
+    }
+    if (type == "response.created") {
+        return chunk({{"role", "assistant"}, {"content", ""}});
+    }
+    if (type == "response.output_text.delta") {
+        return chunk({{"content", event.value("delta", std::string())}});
+    }
+    if (type == "response.refusal.delta") {
+        return chunk({{"refusal", event.value("delta", std::string())}});
+    }
+    if (type == "response.output_item.added") {
+        const Json item = event.value("item", Json());
+        if (!item.is_object() || item.value("type", std::string()) != "function_call") {
+            return {};
+        }
+        tool_outputs_.push_back(event.value("output_index", std::int64_t{-1}));
+        return chunk({{"tool_calls",
+                       Json::array({{{"index", tool_outputs_.size() - 1},
+                                     {"id", item.value("call_id", std::string())},
+                                     {"type", "function"},
+                                     {"function",
+                                      {{"name", item.value("name", std::string())},
+                                       {"arguments", ""}}}}})}});
+    }
+    if (type == "response.function_call_arguments.delta") {
+        const auto at =
+            std::ranges::find(tool_outputs_, event.value("output_index", std::int64_t{-1}));
+        if (at == tool_outputs_.end()) {
+            return {};
+        }
+        return chunk({{"tool_calls",
+                       Json::array({{{"index", at - tool_outputs_.begin()},
+                                     {"function",
+                                      {{"arguments", event.value("delta", std::string())}}}}})}});
+    }
+    if (type == "response.completed" || type == "response.incomplete") {
+        done_ = true;
+        std::string out =
+            chunk(Json::object(), chat_finish_reason(response, !tool_outputs_.empty()));
+        if (const Json usage = chat_usage(response.value("usage", Json())); !usage.is_null()) {
+            const Json last{{"id", id_},
+                            {"object", "chat.completion.chunk"},
+                            {"created", created_},
+                            {"model", model_},
+                            {"choices", Json::array()},
+                            {"usage", usage}};
+            out += "data: " + last.dump() + "\n\n";
+        }
+        return out + "data: [DONE]\n\n";
+    }
+    if (type == "response.failed" || type == "error") {
+        done_ = true;
+        const Json error = type == "error" ? event : response.value("error", Json());
+        const Json failure{
+            {"error",
+             {{"message",
+               "the model provider could not answer: " + provider_failure_message(error)},
+              {"type", "engine_error"},
+              {"code", "engine_error"},
+              {"param", nullptr}}}};
+        return "data: " + failure.dump() + "\n\ndata: [DONE]\n\n";
+    }
+    return {};
+}
+
 } // namespace lake::api
