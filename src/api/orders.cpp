@@ -28,7 +28,8 @@ using nlohmann::json;
 // Azure regions it can reach (orama-operator#635, cloudRegionLocations): the Asia regions are
 // listed but ordered with the order form. Private Warehouse and every offer above it list their
 // own domain, white-labelled (lake#1129); the shared option does not. It is on request until the
-// white-labelled warehouse is delivered (the gaps linked from lake#1129).
+// white-labelled warehouse is delivered (the gaps linked from lake#1129). The film is the Metis film,
+// served by orama.com at the stable /film/ paths the website publishes for it.
 constexpr std::string_view default_sheet = R"json({
   "enabled": true,
   "url": "",
@@ -134,6 +135,21 @@ constexpr std::string_view default_sheet = R"json({
     {"text": "SOC 2 compliant: ask for the report", "url": "mailto:support@orama.com?subject=SOC%202%20report"},
     {"text": "Source available, with access to the source code", "url": "mailto:support@orama.com?subject=Source%20access"}
   ],
+  "film": {
+    "label": "Metis: private AI, by Orama",
+    "play": "How Metis Works: Video",
+    "length": "three minutes",
+    "close": "Close the film",
+    "page": "https://orama.com/metis-video",
+    "light": {
+      "webm": "https://orama.com/film/metis-private-ai-1080.webm",
+      "mp4": "https://orama.com/film/metis-private-ai-1080.mp4"
+    },
+    "dark": {
+      "webm": "https://orama.com/film/metis-private-ai-dark-1080.webm",
+      "mp4": "https://orama.com/film/metis-private-ai-dark-1080.mp4"
+    }
+  },
   "limits": {"orders_per_client_per_hour": 5, "orders_per_hour": 60}
 })json";
 
@@ -501,6 +517,48 @@ std::expected<OrderSheet, std::string> order_sheet_from_environment(std::string_
             return std::unexpected(field + ".url must be an https or mailto URL that backs it");
         }
         sheet.trust.push_back(std::move(claim));
+    }
+
+    // The header's film (the Metis film on orama.com); null or absent: no film.
+    if (const auto found = merged.find("film"); found != merged.end() && !found->is_null()) {
+        const json& film = *found;
+        if (!film.is_object()) {
+            return std::unexpected(at + ".film must be an object");
+        }
+        OrderFilm out;
+        for (auto [key, target] : {std::pair{"label", &out.label},
+                                   std::pair{"play", &out.play},
+                                   std::pair{"length", &out.length},
+                                   std::pair{"close", &out.close},
+                                   std::pair{"page", &out.page}}) {
+            auto value = text_at(film, key, at + ".film." + key);
+            if (!value) {
+                return std::unexpected(value.error());
+            }
+            *target = std::move(*value);
+        }
+        if (!https_url(out.page)) {
+            return std::unexpected(at + ".film.page must be an https URL");
+        }
+        for (auto [theme, cut] : {std::pair{"light", &out.light}, std::pair{"dark", &out.dark}}) {
+            const std::string field = at + ".film." + theme;
+            const json files = film.value(theme, json());
+            if (!files.is_object()) {
+                return std::unexpected(field + " must be an object with webm and mp4 URLs");
+            }
+            for (auto [format, target] :
+                 {std::pair{"webm", &cut->webm}, std::pair{"mp4", &cut->mp4}}) {
+                auto value = text_at(files, format, field + "." + format);
+                if (!value) {
+                    return std::unexpected(value.error());
+                }
+                if (!https_url(*value)) {
+                    return std::unexpected(field + "." + format + " must be an https URL");
+                }
+                *target = std::move(*value);
+            }
+        }
+        sheet.film = std::move(out);
     }
 
     const json limits = merged.value("limits", json::object());

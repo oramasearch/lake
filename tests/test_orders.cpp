@@ -340,12 +340,30 @@ TEST(OrdersConfig, InvalidValuesNameTheField) {
         {R"({"url":"http://lake.live/"})", "url must be an https URL"},
         {R"({"shared":{"price_list_url":"ftp://x"}})", "price_list_url must be an https URL"},
         {R"({"limits":{"orders_per_hour":0}})", "orders_per_hour must be between"},
+        {R"({"film":"yes"})", "film must be an object"},
+        {R"({"film":{"play":""}})", "film.play must be a non-empty string"},
+        {R"({"film":{"page":"http://orama.com/metis-video"}})", "film.page must be an https URL"},
+        {R"({"film":{"dark":null}})", "film.dark must be an object"},
+        {R"({"film":{"light":{"mp4":"javascript:void"}}})",
+         "film.light.mp4 must be an https URL"},
     };
     for (const auto& [value, message] : cases) {
         const auto sheet = order_sheet_from_environment(value);
         ASSERT_FALSE(sheet) << "accepted " << value;
         EXPECT_NE(sheet.error().find(message), std::string::npos) << value << ": " << sheet.error();
     }
+}
+
+TEST(OrdersConfig, TheFilmIsTheMetisFilmUnlessRemoved) {
+    const OrderSheet sheet = default_sheet();
+    ASSERT_TRUE(sheet.film);
+    EXPECT_EQ(sheet.film->label, "Metis: private AI, by Orama");
+    EXPECT_EQ(sheet.film->page, "https://orama.com/metis-video");
+    EXPECT_EQ(sheet.film->light.webm, "https://orama.com/film/metis-private-ai-1080.webm");
+    EXPECT_EQ(sheet.film->dark.mp4, "https://orama.com/film/metis-private-ai-dark-1080.mp4");
+    const auto removed = order_sheet_from_environment(R"({"film":null})");
+    ASSERT_TRUE(removed) << removed.error();
+    EXPECT_FALSE(removed->film);
 }
 
 TEST(OrdersConfig, MoneyAndSlugs) {
@@ -2225,6 +2243,41 @@ TEST(OrdersEntitlement, CancellationWinsEvenWhenALaterInvoiceArrivedFirst) {
                                                                130,
                                                                500}));
     EXPECT_EQ(entitlement.access_until, 110);
+}
+
+TEST(OrdersApex, TheHeaderOffersTheFilmInAModalPlayer) {
+    const Regions regions = production();
+    const std::string html =
+        web_ui_order_sheet(default_sheet(), regions, regions.list[0], "/", "");
+    // A link to the film's page, so it works without JavaScript, between the sub line and the
+    // trust line.
+    const auto link = html.find("<a class=\"button\" href=\"https://orama.com/metis-video\" "
+                                "data-film-open>");
+    ASSERT_NE(link, std::string::npos) << html;
+    EXPECT_LT(html.find("<p class=\"sub\">"), link);
+    EXPECT_LT(link, html.find("class=\"order-trust\""));
+    EXPECT_NE(html.find("How Metis Works: Video <small>three minutes</small>"), std::string::npos);
+    // The player: both cuts named, nothing loaded until the button is pressed, no poster (the
+    // page's CSP allows images from lake only).
+    EXPECT_NE(html.find("<dialog class=\"film-dialog\" aria-label=\"Metis: private AI, by "
+                        "Orama\" data-film"),
+              std::string::npos);
+    EXPECT_NE(html.find("data-light-webm=\"https://orama.com/film/metis-private-ai-1080.webm\""),
+              std::string::npos);
+    EXPECT_NE(html.find("data-dark-mp4=\"https://orama.com/film/metis-private-ai-dark-1080.mp4\""),
+              std::string::npos);
+    EXPECT_NE(html.find("preload=\"none\""), std::string::npos);
+    EXPECT_EQ(html.find("poster="), std::string::npos);
+    EXPECT_NE(html.find("aria-label=\"Close the film\" data-film-close"), std::string::npos);
+    EXPECT_NE(html.find("<script id=\"film-script\">"), std::string::npos);
+
+    // Removed: no button, no player and no script.
+    const auto removed = order_sheet_from_environment(R"({"film":null})");
+    ASSERT_TRUE(removed);
+    const std::string plain = web_ui_order_sheet(*removed, regions, regions.list[0], "/", "");
+    EXPECT_EQ(plain.find("data-film"), std::string::npos);
+    EXPECT_EQ(plain.find("<dialog"), std::string::npos);
+    EXPECT_EQ(plain.find("film-script"), std::string::npos);
 }
 
 TEST(OrdersApex, TheOrderSheetCarriesACouponCodeToTheRegion) {

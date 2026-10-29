@@ -631,6 +631,53 @@ order_summary(const OrderSheet& sheet, const Regions& regions, const control::Cl
     return "<dl class=\"order-summary\">" + rows + "</dl>";
 }
 
+// The order sheet's film (OrderFilm): a link to the film's page that the script below turns into
+// a modal player, the way orama.com's film buttons work. Opening loads the cut for the page's
+// theme and plays it inside the click, so the browser lets it run with sound; closing (the close
+// button, Escape, or a click on the backdrop) pauses it, and the next open resumes. Nothing
+// downloads until the button is pressed. Without JavaScript the link opens the film's page.
+constexpr std::string_view film_script =
+    R"(<script id="film-script">(()=>{const d=document.querySelector('[data-film]');)"
+    R"(const o=document.querySelector('[data-film-open]');)"
+    R"(if(!d||!o||typeof d.showModal!=='function')return;const v=d.querySelector('video');)"
+    R"(let cut='';const theme=()=>document.documentElement.dataset.theme||)"
+    R"((matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');)"
+    R"(o.addEventListener('click',e=>{e.preventDefault();const t=theme();if(t!==cut){)"
+    R"(const at=cut?v.currentTime:0;cut=t;v.replaceChildren(...['webm','mp4'].map(f=>{)"
+    R"(const s=document.createElement('source');s.src=d.dataset[t+f[0].toUpperCase()+f.slice(1)];)"
+    R"(s.type='video/'+f;return s;}));v.load();)"
+    R"(if(at)v.addEventListener('loadedmetadata',()=>{v.currentTime=at;},{once:true});})"
+    R"(d.showModal();v.play().catch(()=>{});});d.addEventListener('close',()=>v.pause());)"
+    R"(d.addEventListener('click',e=>{if(e.target===d)d.close();});)"
+    R"(d.querySelector('[data-film-close]').addEventListener('click',()=>d.close());})();</script>)";
+
+std::string film_markup(const std::optional<OrderFilm>& film) {
+    if (!film) {
+        return {};
+    }
+    return std::format(
+        "<p class=\"order-film\"><a class=\"button\" href=\"{0}\" data-film-open>"
+        "<svg class=\"icon\" viewBox=\"0 0 16 16\" aria-hidden=\"true\" focusable=\"false\">"
+        "<path d=\"M4 2.5v11l9.5-5.5z\"/></svg>{1} <small>{2}</small></a></p>"
+        "<dialog class=\"film-dialog\" aria-label=\"{3}\" data-film data-light-webm=\"{4}\" "
+        "data-light-mp4=\"{5}\" data-dark-webm=\"{6}\" data-dark-mp4=\"{7}\">"
+        "<div class=\"film-bar\"><p>{3}</p><button type=\"button\" class=\"film-close\" "
+        "aria-label=\"{8}\" data-film-close><svg class=\"icon\" viewBox=\"0 0 16 16\" "
+        "aria-hidden=\"true\" focusable=\"false\"><path d=\"M3.7 2.3 8 6.6l4.3-4.3 1.4 1.4L9.4 "
+        "8l4.3 4.3-1.4 1.4L8 9.4l-4.3 4.3-1.4-1.4L6.6 8 2.3 3.7z\"/></svg></button></div>"
+        "<video controls playsinline preload=\"none\" aria-label=\"{3}\"></video></dialog>{9}",
+        web_ui_escape(film->page),
+        web_ui_escape(film->play),
+        web_ui_escape(film->length),
+        web_ui_escape(film->label),
+        web_ui_escape(film->light.webm),
+        web_ui_escape(film->light.mp4),
+        web_ui_escape(film->dark.webm),
+        web_ui_escape(film->dark.mp4),
+        web_ui_escape(film->close),
+        film_script);
+}
+
 } // namespace
 
 std::string web_ui_order_sheet(const OrderSheet& sheet,
@@ -692,7 +739,7 @@ std::string web_ui_order_sheet(const OrderSheet& sheet,
             offer.checkout ? "Order" : "Send an order form");
     }
     std::string content = std::format(
-        "{}{}{}<div class=\"order-sheet\">{}</div>"
+        "{}{}{}{}<div class=\"order-sheet\">{}</div>"
         "<p class=\"order-contact\">Need a cloud provider, hardware or region that is not listed, "
         "or a larger order? <a href=\"/order/dedicated-cluster?location=other\">Contact us</a> "
         "with the order form.</p>",
@@ -700,6 +747,7 @@ std::string web_ui_order_sheet(const OrderSheet& sheet,
                    "<p class=\"sub\">Every way to run Lake, with its price. Prices are in US "
                    "dollars (USD). Each region is a separate Lake with its own accounts; your "
                    "workspaces stay in the region you create them in.</p>"),
+        film_markup(sheet.film),
         trust,
         error_markup(error),
         cards);

@@ -756,6 +756,76 @@ a.hosted-brand {
   list-style: none;
   font-weight: var(--lake-weight-medium);
 }
+/* The header's film button and the modal player it opens (OrderFilm): a panel with a title bar
+   and the film at 16:9 below it, as wide as fits and never taller than the viewport. */
+.order-film {
+  margin: 0 0 var(--lake-space-4);
+}
+.order-film .button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--lake-space-2);
+  text-decoration: none;
+}
+.order-film small {
+  font-family: var(--lake-font-mono);
+  font-size: var(--lake-text-12);
+  opacity: 0.8;
+}
+.film-dialog {
+  width: min(72rem, calc(100vw - 2rem), calc((100dvh - 2.75rem - 2rem) * 16 / 9));
+  max-width: none;
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  border: var(--lake-border-width) solid var(--lake-border-subtle);
+  border-radius: var(--lake-overlay-radius);
+  color: var(--lake-text-primary);
+  background: var(--lake-overlay);
+  box-shadow: var(--lake-shadow-dialog);
+}
+.film-dialog::backdrop {
+  background: rgb(0 0 0 / 0.72);
+}
+.film-bar {
+  display: flex;
+  align-items: center;
+  padding-left: var(--lake-space-4);
+  border-bottom: var(--lake-border-width) solid var(--lake-border-subtle);
+}
+.film-bar p {
+  flex: 1;
+  min-width: 0;
+  margin: 0 var(--lake-space-4) 0 0;
+  overflow: hidden;
+  color: var(--lake-text-secondary);
+  font-size: var(--lake-text-14);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.film-dialog .film-close {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  padding: 0;
+  border: 0;
+  border-left: var(--lake-border-width) solid var(--lake-border-subtle);
+  border-radius: 0;
+  color: var(--lake-text-primary);
+}
+.film-dialog .film-close:hover {
+  color: var(--lake-text-primary);
+  background: var(--lake-selected);
+}
+.film-dialog video {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  background: #000;
+}
 .order-sheet {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));

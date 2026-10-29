@@ -151,6 +151,14 @@ outside it.
     {"text": "SOC 2 compliant: ask for the report", "url": "mailto:support@orama.com?subject=SOC%202%20report"},
     {"text": "Source available, with access to the source code", "url": "mailto:support@orama.com?subject=Source%20access"}
   ],
+  "film": {
+    "label": "Metis: private AI, by Orama", "play": "How Metis Works: Video",
+    "length": "three minutes", "close": "Close the film", "page": "https://orama.com/metis-video",
+    "light": {"webm": "https://orama.com/film/metis-private-ai-1080.webm",
+              "mp4": "https://orama.com/film/metis-private-ai-1080.mp4"},
+    "dark": {"webm": "https://orama.com/film/metis-private-ai-dark-1080.webm",
+             "mp4": "https://orama.com/film/metis-private-ai-dark-1080.mp4"}
+  },
   "limits": {"orders_per_client_per_hour": 5, "orders_per_hour": 60}
 }
 ```
@@ -181,6 +189,13 @@ outside it.
 - **`trust`**: each claim is shown only with a link (`https` or `mailto`) that backs it. Change the
   links to the published report and the source-access terms when they exist; only what is true at
   launch is claimed.
+- **`film`**: the film the header offers, the Metis film. The button is a link to `page` (the
+  film's page on orama.com), so it works without JavaScript; the page's script turns it into a
+  modal player that plays the `light` or `dark` cut for the page's theme. The files are served by
+  orama.com at the stable `/film/` paths the website publishes for this film. `null`
+  (`{"film":null}`) removes the button, the player and the script. Every text is required and every
+  URL must be `https`. There is no poster: the page's CSP allows images from lake only, and leaves
+  media unrestricted, so the video plays from orama.com.
 - Prices are whole dollars, USD only (the price list and Stripe bill USD). The prices and the 40%
   credit are the call's figures and are among the decisions still open in lake#831 (whether they
   become price-list plans first; the credit's percentage, expiry and on-prem meaning; the region
@@ -436,10 +451,10 @@ pre-Checkout delivery and invalid signatures. Stripe's field and event contracts
 
 ## How to change it
 
-- Prices, credit, offers' words, providers, regions, trust links and limits: `LAKE_ORDER_SHEET`
+- Prices, credit, offers' words, providers, regions, trust links, the film and limits: `LAKE_ORDER_SHEET`
   on the Lake, or the default in `src/api/orders.cpp` with this page.
 - The pages: `web_ui_order_sheet`, `web_ui_order_form`, `web_ui_order_received`,
   `web_ui_order_status` and `web_ui_price_list` in `src/api/web_ui.cpp`; styles `.order-*` in
-  `src/api/web_ui_styles.inc`.
+  `src/api/web_ui_styles.inc` (the film's player: `.order-film`, `.film-*`).
 - A new state or column is a new migration and a change to orama-operator#634's reader in the same
   release.

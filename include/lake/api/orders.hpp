@@ -17,6 +17,7 @@
 #include <expected>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -64,6 +65,25 @@ struct OrderTrustClaim {
     std::string url;
 };
 
+// One theme's cut of the sheet's film: VP9 for the browsers that take it, H.264 for the rest.
+struct OrderFilmCut {
+    std::string webm;
+    std::string mp4;
+};
+
+// The film the sheet's header offers (the Metis film): a link to `page` that the page's script
+// turns into a modal player. Its files are served by another site (orama.com); the page's CSP
+// leaves media unrestricted, and there is no poster because images are limited to lake itself.
+struct OrderFilm {
+    std::string label;  // the dialog's title and the video's accessible name
+    std::string play;   // the button
+    std::string length; // after the button's words, small ("three minutes")
+    std::string close;  // the close button's accessible name
+    std::string page;   // where the button goes without JavaScript
+    OrderFilmCut light;
+    OrderFilmCut dark;
+};
+
 struct OrderSheet {
     // Off: the apex is the plain region picker of lake#757.
     bool enabled = true;
@@ -82,6 +102,8 @@ struct OrderSheet {
     std::vector<OrderOffer> offers; // private_warehouse, dedicated_cluster, on_prem, in that order
     std::vector<OrderProvider> providers; // for a dedicated cluster, in order
     std::vector<OrderTrustClaim> trust;
+    // None: the header has no film button (`"film": null` in LAKE_ORDER_SHEET).
+    std::optional<OrderFilm> film;
     // Abuse limits on the anonymous form: orders a client address may send an hour, and in all.
     int orders_per_client_per_hour = 5;
     int orders_per_hour = 60;
@@ -98,7 +120,8 @@ std::string_view default_order_sheet_json();
 // merge patch, then validated. An error names the field and stops startup: invalid JSON, an
 // unknown or missing offer, a price that is not a positive whole number of dollars, a credit
 // outside 0-100, a provider or region without an id or label, two with one id, a URL that is not
-// https (or a site path for price_list_url), a limit below 1.
+// https (or a site path for price_list_url), a limit below 1, a film missing a text or with a URL
+// that is not https.
 std::expected<OrderSheet, std::string> order_sheet_from_environment(std::string_view overrides);
 
 // The usage credit `quantity` of `offer` include each month, in cents.
