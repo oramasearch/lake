@@ -244,7 +244,8 @@ lake's own keys are platform environment variables, never a user's secret store)
 `POST /billing/stripe/webhook` through `receive_payment_notice`. The apex order sheet (lake#831,
 [orders](../../docs/api/orders.md)): `orders.cpp` holds its configuration, checks, emails and rate
 limit, `resend.cpp` the Resend client, `web_ui.cpp` its pages (`web_ui_order_*`,
-`web_ui_price_list`, styles `.order-*` in `web_ui_styles.inc`), `stripe.cpp` the Checkout Session
+`web_ui_price_list`, styles `.order-*` in `web_ui_styles.inc`, and the header's Metis film in a
+modal player, `.film-*`), `stripe.cpp` the Checkout Session
 and the `checkout.session.*` events, and `http_server.cpp` its routes on the apex host and the order
 pass (email and audit) on the maintenance thread.
 

@@ -703,8 +703,9 @@ patch, every startup error), the order form's checks, the status token, the rate
 on a UTF-8 boundary, and the Resend client against a test double for HTTP, Stripe Checkout and its webhook events, the
 `cloud_orders` contract in both stores (on PostgreSQL, orama-operator#635's own list, claim and
 finish statements: an unpaid order is never claimed, a paid one is claimed once and finished only
-by its claimant), a paid order of more than one refused by both stores, and the pages and routes
-over HTTP with a fake Stripe and a fake Resend.
+by its claimant), a paid order of more than one refused by both stores, the pages and routes
+over HTTP with a fake Stripe and a fake Resend, and the header's film (`OrdersApex.TheHeaderOffersTheFilmInAModalPlayer`:
+a link to the film's page, the player with both cuts and no poster, and none of it with `"film": null`).
 
 The prepaid balance (lake#1114): `test_balance.cpp` covers the view and its math, top-ups credited
 once per payment from signed Stripe events, the first-top-up rule, charges equal to the month's bill

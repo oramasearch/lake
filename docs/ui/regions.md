@@ -45,8 +45,13 @@ lake#831. The apex host is the order sheet, server-rendered by `web_ui_order_she
 (`src/api/web_ui.cpp`) in the hosted pages' design tokens, working without JavaScript. The contract
 (routes, configuration, paths, email, audit) is [`../api/orders.md`](../api/orders.md).
 
-- **Header**: "Get Lake", that prices are in US dollars (USD), and the trust line: each claim from
-  the configuration (SOC 2, source available) as a link to what backs it.
+- **Header**: "Get Lake", that prices are in US dollars (USD), **How Metis Works: Video** (three
+  minutes), and the trust line: each claim from the configuration (SOC 2, source available) as a
+  link to what backs it. The film button opens a modal player, as orama.com's film buttons do:
+  pressing it opens the dialog and plays the cut for the page's theme with sound; the close button,
+  Escape or a click on the backdrop closes it and pauses, and the next press resumes. Nothing
+  downloads until it is pressed, and without JavaScript it is a link to the film's page on
+  orama.com. The film is the configuration's `film` ([orders.md](../api/orders.md#configuration)).
 - **Four cards**, side by side at 1440 px (`grid-template-columns: repeat(auto-fit, minmax(16rem,
   1fr))`), one column on a phone; nothing has a fixed width wider than 16rem:
   - **Shared**: "Usage-based, USD, by the minute", a link to the published price list

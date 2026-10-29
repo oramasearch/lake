@@ -149,7 +149,8 @@ about another app's or another Lake's object `PaymentNotice::foreign`; since lak
 kept customer first and answers a replacement for one Stripe no longer has
 (`ProviderCustomer::replaces`). `orders.hpp` declares the apex order sheet (lake#831,
 [orders](../../../docs/api/orders.md)): its configuration
-(`OrderSheet`, `order_sheet_from_environment`, `default_order_sheet_json`), the form's checks
+(`OrderSheet`, its optional `OrderFilm`, `order_sheet_from_environment`,
+`default_order_sheet_json`), the form's checks
 (`validate_order_form`), the status token, the emails (`order_email_recipients_due`,
 `order_email`), `price_list_rows` and `OrderRateLimiter`. `resend.hpp` declares lake's own Resend
 client (`send_resend_email` over an injected `ResendHttp`) and its settings
