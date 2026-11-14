@@ -8,6 +8,8 @@
 #include <print>
 #include <vector>
 
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <zetta/connect/http_transport.hpp>
 
 namespace lake::control {
@@ -364,6 +366,26 @@ AgentLaunchProgress agent_launch_progress(const AgentLaunch& launch,
             std::format("The Orama operator has not started this run after {} seconds. Lake "
                         "stops it with a reason at five minutes.",
                         waited)};
+}
+
+std::string agent_launch_service_token(std::string_view lake_token, std::string_view launch_id) {
+    const std::string message = "agent-launch:" + std::string(launch_id);
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned int length = 0;
+    if (lake_token.empty() ||
+        HMAC(EVP_sha256(), lake_token.data(), static_cast<int>(lake_token.size()),
+             reinterpret_cast<const unsigned char*>(message.data()), message.size(), digest.data(),
+             &length) == nullptr) {
+        return {};
+    }
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(length * 2);
+    for (unsigned int i = 0; i < length; ++i) {
+        out.push_back(hex[digest[i] >> 4]);
+        out.push_back(hex[digest[i] & 0x0f]);
+    }
+    return out;
 }
 
 liquid::runtime::task<ZettaControlResult<nlohmann::json>>

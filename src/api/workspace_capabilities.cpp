@@ -7626,9 +7626,10 @@ void register_agent_run_capabilities(Registry& registry) {
                           (live->phase.empty() ? std::string("pending") : live->phase) +
                           "). Send your message again in a moment."}});
             }
+            // The launch's own token, never the Lake's (agent-runtime#14).
             auto reply = co_await context.agent_caller->turn(
                 live->endpoint,
-                config.agent_service_token,
+                control::agent_launch_service_token(config.agent_service_token, live->id),
                 {{"conversation_id", body["conversation_id"]}, {"message", message}});
             if (!reply) {
                 co_return ApiResult::failure("store_error", reply.error().message);

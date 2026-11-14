@@ -110,8 +110,12 @@ analysis remain in the selected workspace Zetta, reached with the claimed task c
 initial proposal has no experiment write; a new task carrying the reviewed proposal receives only
 the engine's `create_study` and its backing `start_experiment` capability in addition to its reads.
 
-The service token (`LAKE_AGENT_SERVICE_TOKEN`) is never a bus credential: user-created agents on
-agent-runtime hold it too, and customer code must not be able to take another person's task. Long
+The service token (`LAKE_AGENT_SERVICE_TOKEN`) is never a bus credential, and no user-created agent
+holds it (agent-runtime#14). Lake presents it only to the library agents. To a person's service
+launch it presents that launch's own token, `agent_launch_service_token`: hex HMAC-SHA256 of
+`agent-launch:<launch id>` keyed by the service token, which the Orama operator gives the launch as
+its `AGENT_SERVICE_TOKEN`. The person's code in that pod therefore cannot call a library agent, and
+one launch's token does not open another. Lake and the operator roll together for it. Long
 polls accept up to 60 seconds (`wait_ms`), but the authorized upstream currently caps each receive
 at 30 seconds; Lake clamps accordingly and allows a 40-second transport timeout. Runtime idle
 backoff is required until [Zetta's longer poll](https://github.com/oramasearch/zetta/issues/1174)
