@@ -21,10 +21,10 @@ corosio (Orama's fork of cppalliance/corosio)                9f8e865a7b5728a4093
 http (Orama's fork of cppalliance/http)                      af0353a5b2868d5b8db7fb01ffb5c464f9deb8a4  BSL-1.0       submodule, linked                              https://github.com/cppalliance/http
 beast2 (a copy of cppalliance/beast2)                        fe1af5a9291f5a5a28f66fbc023b8659dd41f459  BSL-1.0       submodule, linked                              https://github.com/cppalliance/beast2
 libpqxx                                                      853bc0a48f0327d8670c1c0855f7abf731046319  BSD-3-Clause  submodule, linked                              https://github.com/jtv/libpqxx
-oramacore-cpp (Orama Search Inc., released with this stack)  9b74ce177f47d63024532ae6000c2cd62c73e0cd  MIT           submodule, linked                              https://github.com/oramasearch/oramacore-cpp
+oramacore-cpp (OramaSearch, Inc., released with this stack)  9b74ce177f47d63024532ae6000c2cd62c73e0cd  MIT           submodule, linked                              https://github.com/oramasearch/oramacore-cpp
 GoogleTest                                                   v1.17.0                                   BSD-3-Clause  fetched at build, tests only                   https://github.com/google/googletest
 IBM Plex Sans and IBM Plex Mono (assets/fonts)               as vendored                               OFL-1.1       vendored font files, embedded in the binary    https://github.com/IBM/plex
-Orama design tokens (vendor/orama-design)                    as vendored                               MIT           vendored design tokens                         vendored from a private Orama Search Inc. repository
+Orama design tokens (vendor/orama-design)                    as vendored                               MIT           vendored design tokens                         vendored from a private OramaSearch, Inc. repository
 @tanstack/query-core                                         5.104.1                                   MIT           bundled into the web UI (frontend/)            https://github.com/TanStack/query
 @tanstack/react-query                                        5.104.1                                   MIT           bundled into the web UI (frontend/)            https://github.com/TanStack/query
 @types/debug                                                 4.1.13                                    MIT           bundled into the web UI (frontend/)            https://github.com/DefinitelyTyped/DefinitelyTyped
@@ -312,12 +312,12 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
-oramacore-cpp (Orama Search Inc., released with this stack) 9b74ce177f47d63024532ae6000c2cd62c73e0cd — MIT
+oramacore-cpp (OramaSearch, Inc., released with this stack) 9b74ce177f47d63024532ae6000c2cd62c73e0cd — MIT
 https://github.com/oramasearch/oramacore-cpp
 --------------------------------------------------------------------------------
 MIT License
 
-Copyright (c) 2026 Orama Search Inc.
+Copyright (c) 2026 OramaSearch, Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -470,9 +470,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 
 ================================================================================
 Orama design tokens (vendor/orama-design) as vendored — MIT
-vendored from a private Orama Search Inc. repository
+vendored from a private OramaSearch, Inc. repository
 --------------------------------------------------------------------------------
-Copyright (c) 2026 Orama Search Inc. Released under the MIT License as part of this repository (see LICENSE); vendored from a private Orama Search Inc. repository.
+Copyright (c) 2026 OramaSearch, Inc. Released under the MIT License as part of this repository (see LICENSE); vendored from a private OramaSearch, Inc. repository.
 
 ================================================================================
 @tanstack/query-core 5.104.1 — MIT

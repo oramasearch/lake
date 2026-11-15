@@ -57,7 +57,7 @@ COMPONENTS: list[dict] = [
     {"name": "libpqxx", "submodule": "modules/libpqxx", "license": "BSD-3-Clause",
      "use": "submodule, linked", "url": "https://github.com/jtv/libpqxx",
      "text": {"github": "jtv/libpqxx", "path": "COPYING"}},
-    {"name": "oramacore-cpp (Orama Search Inc., released with this stack)",
+    {"name": "oramacore-cpp (OramaSearch, Inc., released with this stack)",
      "submodule": "modules/oramacore-cpp", "license": "MIT", "use": "submodule, linked",
      "url": "https://github.com/oramasearch/oramacore-cpp", "text": {"file": "LICENSE"}},
     {"name": "GoogleTest", "version": "v1.17.0", "license": "BSD-3-Clause",
@@ -69,8 +69,8 @@ COMPONENTS: list[dict] = [
      "text": {"github": "IBM/plex", "ref": None, "path": "LICENSE.txt"}},
     {"name": "Orama design tokens (vendor/orama-design)", "version": "as vendored",
      "license": "MIT", "use": "vendored design tokens",
-     "url": "vendored from a private Orama Search Inc. repository",
-     "text": {"inline": "Copyright (c) 2026 Orama Search Inc. Released under the MIT License as part of this repository (see LICENSE); vendored from a private Orama Search Inc. repository."}},
+     "url": "vendored from a private OramaSearch, Inc. repository",
+     "text": {"inline": "Copyright (c) 2026 OramaSearch, Inc. Released under the MIT License as part of this repository (see LICENSE); vendored from a private OramaSearch, Inc. repository."}},
 ]
 NPM_USE = {"frontend": "bundled into the web UI (frontend/)"}
 NOTES: list[str] = [
