@@ -118,9 +118,9 @@ and CMake 3.31, then ships it on a minimal Ubuntu runtime (OpenSSL 3 + libstdc++
 recipe minus the GUI and Postgres deps. Images go to the **private** Docker Hub repo
 `oramasearch/lake` from the tagged `image` workflow: an immutable
 Git-tag image plus `sha-<short-sha>`. `latest` and workstation-built deployment images are not used.
+recipe minus the GUI and Postgres deps. Images go to the Docker Hub repo
+`oramasearch/lake`: an immutable Git-tag image plus `sha-<short-sha>`. `latest` and workstation-built deployment images are not used.
 
-Once the Actions credentials are configured, publish a deployment image by pushing an immutable
-Docker-compatible Git tag:
 Without `LAKE_TEST_DB_URI` the Postgres-backed cases skip. To run them against a local Postgres,
 create a base database with a role that has `CREATEDB`, apply the schema, and set the two variables.
 The [test fixture](docs/build/testing.md) creates and removes a private database for each case:
@@ -152,12 +152,7 @@ For the full PostgreSQL-backed suite, local database setup, and every run option
 
 ## Releases
 
-The current release is **v0.8.1** (2026-10-27), a patch with the fixes from the customer-insights demo ([notes](docs/releases/v0.8.1.md)). Before it, v0.8.0 (2026-10-26): agents work on gpt-6.1-sol again (tool calls go through OpenAI's Responses API, lake#1245), and Apps are edited from the console: edit and commit a repository file, a conversation that changes an App and redeploys it, and the Change App split screen ([`docs/releases/v0.8.0.md`](docs/releases/v0.8.0.md)). Before it, **v0.7.3** (2026-10-26, not deployed), a hotfix (agents default to gpt-5.5 again, lake#1245) on v0.7.2, a patch: an App's `workspace.sql` at its binding's access, auto-fix for an App whose code keeps failing, and the agents' model chosen per workspace ([`docs/releases/v0.7.2.md`](docs/releases/v0.7.2.md)). Before it, **v0.7.1** (2026-10-25): the Quickstart's model step as an Ask Orama conversation, and a failed app as a notification fixed or changed with the Application Agent ([`docs/releases/v0.7.1.md`](docs/releases/v0.7.1.md)). Before that, **v0.7.0** (2026-10-24): the Quickstart, browser keys, credits and coupon codes, white label, and `lake migrate` and `lake manifest` ([`docs/releases/v0.7.0.md`](docs/releases/v0.7.0.md)). Before that, **v0.6.1** (2026-10-24), a patch so a blocked account can stop or rename its workspace ([`docs/releases/v0.6.1.md`](docs/releases/v0.6.1.md)). Before that, **v0.6.0** (2026-10-24): a prepaid account balance on lake.live, and sign-in for people with no name in Clerk ([`docs/releases/v0.6.0.md`](docs/releases/v0.6.0.md)). Before that, **v0.5.2** (2026-10-24), a patch so people can sign in with Google ([`docs/releases/v0.5.2.md`](docs/releases/v0.5.2.md)). Before that, **v0.5.1** (2026-10-24), a patch so lake reaches its Zettas ([`docs/releases/v0.5.1.md`](docs/releases/v0.5.1.md)). Before that, **v0.5.0** (2026-10-24): [`docs/releases/v0.5.0.md`](docs/releases/v0.5.0.md), the rest of the pre-launch security review, safe mode per database, model prices, and stricter sign-in and recovery limits, built against zetta v0.5.0. Before it, **v0.4.0** (2026-10-21), the security release from the multi-tenant audit with SAML sign-in, OpenID Connect discovery and `delete_account`.
-[`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md) lists what it adds (the lake.live order sheet
-and the 2026-10-18 UX review's fixes), what it does not include, and its known issues.
-[`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md) covers secure networking, regions, the managed
-key and own identity, Clerk webhooks, the agents' names and Ask Orama's home. [`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md), the
-first tagged release, lists every feature, capability, web app page and guide.
+The current release is **v0.8.1** (2026-10-27), a patch ([notes](docs/releases/v0.8.1.md)).
 [`docs/releases/README.md`](docs/releases/README.md) is the index, and [`CONTRIBUTING.md`](CONTRIBUTING.md) has the
 steps for cutting one.
 

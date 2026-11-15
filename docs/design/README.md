@@ -35,6 +35,8 @@ in [status.md](status.md); see its [API](../api/experiments.md) and [UI](../ui/e
 implemented, exercised locally, deployed, and exercised-in-deployment vocabulary. The dated
 2026-10-01 record of the dev deployment is the source for
 current deployment facts, and `tools/docs/check-status.py` fails when the page calls a
+implemented, exercised locally, deployed, and exercised-in-deployment vocabulary. The newest observed OpenAPI in
+[`../deployment/observed/`](../deployment/observed/) is the source for deployment facts, and `tools/docs/check-status.py` fails when the page calls a
 capability undeployed that the newest observed OpenAPI lists (lake#448). Token attenuation and ancestor revocation are part of the identity status and contract in
 [../api/identity.md](../api/identity.md).
 
