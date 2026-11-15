@@ -1011,8 +1011,8 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   (`tools/ui/build-tokens.mjs`, `docs/ui/design-system.md`).
 - Static visual-direction references live under `docs/design/ui/mocks/`;
   `tools/ui/screenshot.sh` renders them at 1440×900.
-- **One auth check.** The API bearer and the UI session cookie (`lake_session`, set by
-  `POST /session`) carry the same secret and are resolved by the same code (`context_for`);
+- **One auth check.** The API bearer and the UI session cookie (`__Host-lake_session` behind TLS,
+  `lake_session` over plain HTTP: `session_cookie_name`, set by `POST /session`) carry the same secret and are resolved by the same code (`context_for`);
   never add a second path. The web app guards its own pages from the `viewer` read; a protected
   server route that remains (a download) redirects to `/sign-in` without a valid credential;
   `/metrics` uses the same check. `/healthz` and `/readyz` are deliberately unauthenticated Kubernetes probes.

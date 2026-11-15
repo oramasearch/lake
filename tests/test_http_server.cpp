@@ -1128,6 +1128,33 @@ TEST_P(HttpResponseIsolation, FreshSignUpOwnsFirstRepositoryWithZeroInitialMeter
     ASSERT_TRUE(signup.starts_with("HTTP/1.1 200")) << signup;
     const std::string cookie = response_cookie_pair(signup);
     ASSERT_TRUE(cookie.starts_with("lake_session=")) << signup;
+    // Behind TLS the session is a __Host- cookie: Secure, Path=/, no Domain, so a sibling
+    // subdomain cannot set or shadow it, and the plain name is not read there (LSR-115).
+    {
+        auto tls = connect();
+        const std::string tls_signin = tls->request(
+            "POST",
+            "/v1/sign_in_password",
+            with_identity({{"email", email}, {"password", password_}, {"device_name", "browser"}}),
+            "",
+            "HTTP/1.1",
+            {},
+            "application/json",
+            {{"X-Forwarded-Proto", "https"}});
+        ASSERT_TRUE(tls_signin.starts_with("HTTP/1.1 200")) << tls_signin;
+        EXPECT_NE(tls_signin.find("Set-Cookie: __Host-lake_session="), std::string::npos) << tls_signin;
+        EXPECT_NE(tls_signin.find("; Secure"), std::string::npos) << tls_signin;
+        EXPECT_EQ(tls_signin.find("Domain="), std::string::npos) << tls_signin;
+        const std::string plain = tls->request("GET",
+                                               "/v1/list_customers",
+                                               {},
+                                               cookie,
+                                               "HTTP/1.1",
+                                               {},
+                                               "application/json",
+                                               {{"X-Forwarded-Proto", "https"}});
+        EXPECT_FALSE(plain.starts_with("HTTP/1.1 200")) << plain;
+    }
     const auto customers = get_v1(*client, cookie, "list_customers");
     ASSERT_TRUE(customers.at("ok"));
     ASSERT_EQ(customers.at("value").at("items").size(), 1U);
