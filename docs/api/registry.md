@@ -78,7 +78,7 @@ as a named exception: one instance-wide namespace with public reads.
   in place; it is deleted with its workspace, or by the operator (below).
 - **Creating a repository names its workspace.** A build's first push routes only its own target,
   `<image>` and `cache/<image>` of `<authority>/<space>/<image>:<tag>`, from the build row's
-  workspace; a build pushing any other unrouted name of its account is OCI `403 DENIED`. Anything
+  workspace. A build's push token writes **only** those two, whether or not another name is already routed to its workspace: any other write, such as a tag of an app's image in the same workspace, is OCI `403 DENIED` (lake#909), because code the build runs can read the token. Its reads stay within the workspace. Anything
   else (the administrator, a person) calls `create_image_repository` with `customer_id`,
   `workspace_id` and `name` first; a missing, malformed or unknown `workspace_id`, or one that is
   not a live workspace of the account, is `invalid_input` at `/workspace_id`, and an invalid name at

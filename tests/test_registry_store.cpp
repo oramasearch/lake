@@ -596,6 +596,45 @@ TEST(RegistryStore, AMultiLayerImageLivesInItsWorkspaceStoreAndPullsByteIdentica
 
 // A chunked upload (PATCH ranges, then an empty PUT) lands in the workspace store; bytes that do
 // not match the digest are refused and nothing is recorded.
+// lake#909: a build's push token writes only its own target and its cache, even to an image already
+// routed to the build's workspace. Code a build runs can read the token; it must not overwrite the
+// workspace's other images.
+TEST(RegistryStore, ABuildPushTokenWritesOnlyItsOwnTargetAndCache) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    rig.route(rig.one, rig.alpha, "app");
+    const std::string config = "{\"architecture\":\"amd64\"}";
+    rig.push_image("tenant-one/app", "v1", config, {"app layer"});
+
+    const auto build = rig.store->create_build({.customer_id = rig.one,
+                                                .workspace_id = rig.alpha,
+                                                .repository = "service-source",
+                                                .revision = "main",
+                                                .target = "lake.example.test/tenant-one/service:b1"});
+    ASSERT_TRUE(build) << build.error().message;
+    ASSERT_TRUE(rig.store->set_build_status(
+        build->id,
+        {.phase = "Running",
+         .message = "running",
+         .token_hashes = {{"push", lake::control::identity_crypto::sha256_hex("build-push-909")}}}));
+    const std::string token = "Basic bGFrZTpidWlsZC1wdXNoLTkwOQ=="; // lake:build-push-909
+
+    const auto upload = [&](const std::string& repository) {
+        return exchange(rig.port(), "POST", "/v2/" + repository + "/blobs/uploads/", {}, {}, token);
+    };
+    Reply other = upload("tenant-one/app");
+    EXPECT_EQ(other.status, 403U) << other.body;
+    Reply other_manifest = exchange(rig.port(),
+                                    "PUT",
+                                    "/v2/tenant-one/app/manifests/v1",
+                                    RegistryRig::manifest(config, {}).dump(),
+                                    {{"Content-Type", "application/vnd.oci.image.manifest.v1+json"}},
+                                    token);
+    EXPECT_EQ(other_manifest.status, 403U) << other_manifest.body;
+    EXPECT_EQ(upload("tenant-one/service").status, 202U);
+    EXPECT_EQ(upload("tenant-one/cache/service").status, 202U);
+}
+
 TEST(RegistryStore, AChunkedUploadLandsInTheStoreAndAWrongDigestIsRefused) {
     RegistryRig rig;
     ASSERT_NO_FATAL_FAILURE(rig.SetUp());

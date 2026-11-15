@@ -11976,6 +11976,15 @@ struct ApiServer::Impl {
         const bool own_target =
             !grant.build_image.empty() &&
             (tenant->name == grant.build_image || tenant->name == "cache/" + grant.build_image);
+        // A build's push token writes only its own target and cache, routed or not (lake#909):
+        // code a build runs can read the token, and must not overwrite the workspace's other
+        // images. Reads stay within the workspace, below.
+        if (write && !grant.build_image.empty() && !own_target) {
+            return std::unexpected(
+                RegistryRefusal{boost::http::status::forbidden,
+                                "a build writes only its own target image and its cache",
+                                "DENIED"});
+        }
         if (!routed && write && grant.may_route && own_target) {
             routed = options.store->create_oci_repository_route(
                 customer->id, tenant->name, grant.workspace_id);
