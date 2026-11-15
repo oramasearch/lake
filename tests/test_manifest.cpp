@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <regex>
 #include <set>
 #include <string>
@@ -178,6 +179,25 @@ TEST(LakeManifest, MarksWhatTheOperatorMustSupply) {
                              "LAKE_OPERATOR_ZETTA_TOKEN",
                              "LAKE_AGENT_SERVICE_TOKEN"}) {
         EXPECT_TRUE(secret.contains(name)) << name;
+    }
+}
+
+// The operator stops mounting every tenant's service connections into a Lake pod only for an image
+// whose manifest lists LAKE_SERVICE_CONNECTION_URL (orama-operator#773), and then renders the URL,
+// the credential file and the CA file: all three are declared, none of them required, so an image
+// on an older operator still starts from the mount.
+TEST(LakeManifest, ListsTheOnDemandServiceConnectionVariables) {
+    const auto manifest = lake::api::operator_manifest();
+    std::map<std::string, nlohmann::json> listed;
+    for (const auto& variable : manifest["environment"]) {
+        listed[variable["name"].get<std::string>()] = variable;
+    }
+    for (const char* name : {"LAKE_SERVICE_CONNECTION_URL",
+                             "LAKE_SERVICE_CONNECTION_TOKEN_FILE",
+                             "LAKE_SERVICE_CONNECTION_CA_FILE",
+                             "LAKE_SERVICE_DIR"}) {
+        ASSERT_TRUE(listed.contains(name)) << name;
+        EXPECT_EQ(listed[name]["required"], false) << name;
     }
 }
 

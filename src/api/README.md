@@ -1,5 +1,11 @@
 # API implementation
 
+`http_server.cpp` installs the on-demand service connection exchange
+(`WorkspaceService::set_connection_http`, orama-operator#773) over its outbound client:
+`OutboundRequest::ca_bundle` makes a request trust only the given roots (the operator control
+plane's CA) instead of the system bundle, and without that CA nothing is sent. See
+[connections on demand](../../docs/control-plane/services.md#connections-on-demand).
+
 A condition-variable wait releases its lock, so nothing it is given may point into a container
 another thread changes meanwhile: `run_search_jobs` copies the next job's deadline before
 `wait_until` and does not touch the job after it wakes (lake#1176, a container-overflow under

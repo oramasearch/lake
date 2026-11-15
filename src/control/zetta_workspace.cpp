@@ -387,8 +387,127 @@ Result<ManagedService> WorkspaceService::delete_service(const std::string& custo
     return store_->withdraw_service(service_id);
 }
 
+namespace {
+
+// A whole small file (the connection credential, the control plane's CA), or empty. Read on every
+// fetch, so a rotated file kubelet projects is used at once.
+std::string read_small_file(const std::string& path) {
+    if (path.empty()) {
+        return {};
+    }
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return {};
+    }
+    return std::string((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+}
+
+std::string trim_whitespace(std::string text) {
+    const auto space = [](unsigned char c) { return std::isspace(c) != 0; };
+    while (!text.empty() && space(static_cast<unsigned char>(text.back()))) {
+        text.pop_back();
+    }
+    std::size_t start = 0;
+    while (start < text.size() && space(static_cast<unsigned char>(text[start]))) {
+        ++start;
+    }
+    return text.substr(start);
+}
+
+} // namespace
+
+void WorkspaceService::set_connection_http(ServiceConnectionHttp http) {
+    std::lock_guard lock(connections_mutex_);
+    connection_http_ = std::move(http);
+    connections_.clear();
+}
+
+bool WorkspaceService::has_connection_http() const {
+    std::lock_guard lock(connections_mutex_);
+    return static_cast<bool>(connection_http_);
+}
+
+// POST /v1/service_connection for one slug (orama-operator#773). A connection is kept in memory
+// for connection_ttl (default service_connection_ttl) and an answer that there is none for
+// connection_missing_ttl (default service_connection_missing_ttl).
+// When the operator cannot be reached or fails (a transport error, a 5xx), a kept connection is
+// used for at most service_connection_stale_limit after it was fetched. A refused credential (401,
+// 403) drops it. Nothing here is logged, written to disk or put in an error message.
+std::optional<nlohmann::json> WorkspaceService::fetch_connection(const std::string& slug) const {
+    const auto now = std::chrono::steady_clock::now();
+    ServiceConnectionHttp http;
+    std::optional<CachedConnection> kept;
+    {
+        std::lock_guard lock(connections_mutex_);
+        if (const auto found = connections_.find(slug); found != connections_.end()) {
+            if (now < found->second.expires) {
+                return found->second.value;
+            }
+            kept = found->second;
+        }
+        http = connection_http_;
+    }
+    const auto stale = [&]() -> std::optional<nlohmann::json> {
+        if (kept && kept->value && now - kept->fetched < service_connection_stale_limit) {
+            return kept->value;
+        }
+        return std::nullopt;
+    };
+    const auto remember = [&](std::optional<nlohmann::json> value, std::chrono::seconds ttl) {
+        std::lock_guard lock(connections_mutex_);
+        connections_[slug] = CachedConnection{value, now, now + ttl};
+        return value;
+    };
+    const auto forget = [&] {
+        std::lock_guard lock(connections_mutex_);
+        connections_.erase(slug);
+    };
+    if (!http) {
+        return std::nullopt;
+    }
+    const std::string token =
+        trim_whitespace(read_small_file(config_.service_connection_token_file));
+    if (token.empty()) {
+        // No credential mounted yet: nothing can be asked, and nothing kept is used.
+        forget();
+        return std::nullopt;
+    }
+    ServiceConnectionRequest request;
+    request.url = config_.service_connection_url;
+    request.body = nlohmann::json{{"service", slug}}.dump();
+    request.headers = {{"Authorization", "Bearer " + token},
+                       {"Content-Type", "application/json"},
+                       {"Accept", "application/json"}};
+    request.ca_bundle = read_small_file(config_.service_connection_ca_file);
+    const ServiceConnectionResponse response = http(request);
+    if (!response.error.empty() || response.status == 0 || response.status >= 500) {
+        return stale();
+    }
+    if (response.status == 404) {
+        return remember(std::nullopt, config_.connection_missing_ttl);
+    }
+    if (response.status != 200) {
+        // 401 or 403: the credential is refused; 400: the slug is not one the operator serves.
+        forget();
+        return std::nullopt;
+    }
+    nlohmann::json parsed = nlohmann::json::parse(response.body, nullptr, false);
+    if (parsed.is_discarded() || !parsed.is_object() || !parsed.contains("service") ||
+        !parsed["service"].is_string() || parsed["service"].get<std::string>() != slug ||
+        !parsed.contains("connection") || !parsed["connection"].is_object()) {
+        return stale();
+    }
+    return remember(std::move(parsed["connection"]), config_.connection_ttl);
+}
+
 std::optional<nlohmann::json> WorkspaceService::connection(const ManagedService& service) const {
-    if (service.slug.empty() || config_.service_dir.empty()) {
+    if (service.slug.empty()) {
+        return std::nullopt;
+    }
+    if (config_.connections_on_demand()) {
+        return fetch_connection(service.slug);
+    }
+    if (config_.service_dir.empty()) {
         return std::nullopt;
     }
     std::ifstream input(std::filesystem::path(config_.service_dir) / (service.slug + ".json"));

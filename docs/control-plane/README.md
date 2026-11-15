@@ -1,5 +1,10 @@
 # Control-plane contracts
 
+[services.md](services.md) is the managed-services contract with the operator, including
+[connections on demand](services.md#connections-on-demand) (orama-operator#773): lake asks the
+operator for one service connection when it needs it, keeps it only in memory, and the operator
+mounts no aggregate of every tenant's connections into the lake pod.
+
 [network.md](network.md) defines migration `0084_network`, secure-networking desired and status
 rows, generation and revocation rules, scoped stores, atomic audit, notifications, rollout and the
 public capability handoff in [the API contract](../api/network.md).

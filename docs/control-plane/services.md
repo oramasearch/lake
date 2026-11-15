@@ -64,7 +64,11 @@ For each `Lake` with `spec.services.enabled` (or the deprecated `spec.workspaces
    - zetta: `{"kind":"zetta","endpoint":…,"token":<admin token>}`
    - postgres: `{"kind":"postgres","host":…,"port":5432,"database":"app","user":"app","password":…,"uri":…}`
      from CloudNativePG's `<cluster>-app` Secret.
-   The Secret is mounted in the lake pod at `/var/run/lake/services`, with
+   Each connection is also its own Secret, `lake-<lake>-<slug>-connection`, in its workspace
+   namespace, read only by the operator. How lake reads a connection depends on the image
+   ([Connections on demand](#connections-on-demand)): an image whose `lake manifest` lists
+   `LAKE_SERVICE_CONNECTION_URL` asks the operator for one connection at a time and gets no mount;
+   an older image gets the aggregate Secret mounted at `/var/run/lake/services`, with
    `LAKE_SERVICE_DIR=/var/run/lake/services`.
 4. **Status:** upsert `service_status` on every phase, message or endpoint change. Ready needs the
    resource Ready *and* the credential written.
@@ -139,11 +143,49 @@ labels, before writing `Deleted`. Only the Orama operator's own resources are ev
   `control::store_mounting_service_kinds`) may mount; lake refuses the others. The operator adds
   each to the StatefulSet's pod template ([storage.md](storage.md#mounts)).
 - Design, Train and Ship call the customer's default Zetta service at its `endpoint` with the token
-  from `$LAKE_SERVICE_DIR/<slug>.json`, read per call and never stored.
+  from its connection ([Connections on demand](#connections-on-demand)), asked of the operator and
+  kept in memory for 30 s, or, on an older operator, read per call from
+  `$LAKE_SERVICE_DIR/<slug>.json`. Never stored.
+
+## Connections on demand
+
+[orama-operator#773](https://github.com/oramasearch/orama-operator/issues/773). The aggregate
+Secret `lake-<lake>-services` put every tenant's database password in one file tree inside the
+lake process, so one path traversal or file read there read them all. lake now asks the operator
+for one connection when it needs one instead.
+
+| Variable | Set by | What it is |
+|---|---|---|
+| `LAKE_SERVICE_CONNECTION_URL` | operator | The control plane's `POST /v1/service_connection`, an https URL. Set, it enables managed services and workspaces and the mount is not read |
+| `LAKE_SERVICE_CONNECTION_TOKEN_FILE` | operator | The file holding this Lake's own credential (`lake-<lake>-connections`, prefix `lake_conn_`). It grants only this operation, for this Lake's services; it is neither the admin token nor the deploy token |
+| `LAKE_SERVICE_CONNECTION_CA_FILE` | operator | The control plane's CA certificate (PEM), the only root the call trusts |
+
+- **The call.** `POST <url>` with `{"service":"<slug>"}`, `Authorization: Bearer <token>` and the
+  CA as the only trusted root, within 10 s. The answer is `{"service":"<slug>","connection":{…}}`,
+  the same JSON as `<slug>.json`. An answer for another slug is not used. Both files are read on
+  every call, so a rotated credential or CA is used at once. Without the CA file nothing is sent:
+  the call never falls back to the system roots.
+- **Memory only.** A connection is kept in memory for 30 s (`service_connection_ttl`), and an
+  answer that there is none (`404`) for 5 s, so listing a page of services does not ask once per
+  row per request. Nothing is written to disk, logged, or put in an error message.
+- **Failures.** When the operator cannot be reached or fails (a transport error, a `5xx`), a
+  connection fetched in the last 5 minutes (`service_connection_stale_limit`) is still used, so a
+  roll of the operator does not take every workspace offline; otherwise there is none and the
+  service shows as not connected. A refused credential (`401`, `403`) drops what was kept.
+- **The switch.** The operator renders these variables, and stops mounting `lake-<lake>-services`,
+  only for an image whose `lake manifest` `environment` lists `LAKE_SERVICE_CONNECTION_URL`
+  (`status.imageManifest.serviceConnectionsOnDemand`). An image on an older operator still gets
+  `LAKE_SERVICE_DIR` and reads the mount as before. **Roll the operator first**
+  ([orama-operator#1164](https://github.com/oramasearch/orama-operator/pull/1164)), then the lake
+  image.
+- **Code.** `WorkspaceService::connection` (`src/control/zetta_workspace.cpp`) asks over the
+  exchange the server installs (`set_connection_http`, the outbound client with
+  `OutboundRequest::ca_bundle`, `src/api/http_server.cpp`); `src/main.cpp` reads the variables and
+  refuses to start with the URL but without the two files, or with a URL that is not https.
 
 ## Verify
 
-- lake: `ctest --test-dir build -R 'Services|Workspaces'`.
+- lake: `ctest --test-dir build -R 'Services|Workspaces|ServiceConnections'`.
 - operator: `go test ./internal/controller/ -run Services`.
 - On AKS: create a service on `/services`, then
   `kubectl -n lake get oramazettacluster,clusters.postgresql.cnpg.io -l orama.cloud/lake=prod`

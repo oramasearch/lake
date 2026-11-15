@@ -298,6 +298,11 @@ request-body limit. They stream to disk up to `LAKE_MAX_REGISTRY_BLOB_BYTES`, va
 ranges, and verify the digest from the completed file; [`builds.md`](builds.md) and
 [`../serving/http.md`](../serving/http.md) own the operational contract.
 
+[`services.md`](services.md), [`storage.md`](storage.md) and [`workspaces.md`](workspaces.md)
+list `LAKE_SERVICE_CONNECTION_URL`, with which lake asks the operator for one connection at a time
+instead of reading the mounted `LAKE_SERVICE_DIR` (orama-operator#773,
+[connections on demand](../control-plane/services.md#connections-on-demand)).
+
 [`services.md`](services.md) defines a customer's managed services, and [`storage.md`](storage.md)
 a customer's stores (buckets, filesystems, network filesystems and volumes; a cluster volume in
 phase 1, lake#196), with their capabilities and the Data → Drives → Storage tab (lake#656), and store drives that browse a bucket or filesystem in place:

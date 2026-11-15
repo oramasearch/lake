@@ -7004,6 +7004,9 @@ struct OutboundRequest {
     // connect time with mcp_public_address, as MCP connections are, so a webhook a tenant points at
     // a private, loopback or link-local address never reaches Lake's own network.
     bool public_only = false;
+    // When set, the only roots the TLS handshake trusts (PEM), instead of the system bundle: the
+    // operator's control plane, whose certificate its own CA signs (orama-operator#773).
+    std::string ca_bundle;
 };
 
 // An identity provider's discovery document, token endpoint and keys (lake#837) answer within this.
@@ -7233,11 +7236,14 @@ private:
     }
 
     std::shared_ptr<const boost::corosio::tls_context> tls_context_for(const std::string& host,
+                                                                       const std::string& roots,
                                                                        std::string& error) {
-        if (const auto found = tls_contexts_.find(host); found != tls_contexts_.end()) {
+        // A context trusting given roots is kept apart from the system one for the same host.
+        const std::string key = roots.empty() ? host : host + "\n" + roots;
+        if (const auto found = tls_contexts_.find(key); found != tls_contexts_.end()) {
             return found->second;
         }
-        const std::string bundle = system_ca_bundle();
+        const std::string bundle = roots.empty() ? system_ca_bundle() : roots;
         if (bundle.empty()) {
             error = "no system CA bundle is available";
             return {};
@@ -7245,7 +7251,8 @@ private:
         auto context = std::make_shared<boost::corosio::tls_context>();
         context->set_hostname(host);
         if (!add_ca_certificates(*context, bundle)) {
-            error = "the system CA bundle contained no usable certificates";
+            error = roots.empty() ? "the system CA bundle contained no usable certificates"
+                                  : "the given CA bundle contained no usable certificates";
             return {};
         }
         if (const std::error_code verify_error =
@@ -7253,7 +7260,7 @@ private:
             error = "could not enable TLS peer verification: " + verify_error.message();
             return {};
         }
-        tls_contexts_[host] = context;
+        tls_contexts_[key] = context;
         return context;
     }
 
@@ -7317,7 +7324,8 @@ private:
         std::string exchange_error;
         if (target.secure) {
             std::string context_error;
-            const auto context = tls_context_for(target.host, context_error);
+            const auto context =
+                tls_context_for(target.host, pending->request.ca_bundle, context_error);
             if (!context) {
                 pending->response.error = context_error;
                 finish(pending);
@@ -8739,6 +8747,29 @@ struct ApiServer::Impl {
           artifacts(options.store_root, options.node_name) {
         // The brand first: the OpenAPI document and the MCP tool list below are rendered with it.
         set_instance_brand(options.brand);
+        // On-demand service connections (orama-operator#773): POST /v1/service_connection to the
+        // operator over the outbound client, trusting only the control plane's CA, within 10 s.
+        // The lambda holds the client itself, so it outlives this server if the workspace
+        // service does.
+        if (options.workspaces && options.workspaces->config().connections_on_demand() &&
+            !options.workspaces->has_connection_http()) {
+            options.workspaces->set_connection_http(
+                [client = outbound_http](const control::ServiceConnectionRequest& asked) {
+                    if (asked.ca_bundle.empty()) {
+                        // Without the control plane's CA there is nothing to trust: a call that
+                        // carries the credential never falls back to the system roots.
+                        return control::ServiceConnectionResponse{
+                            0, {}, "the control plane CA certificate is not available"};
+                    }
+                    OutboundRequest request{
+                        "POST", asked.url, asked.body, asked.headers, std::chrono::seconds{10}};
+                    request.body_limit = 256 * 1024;
+                    request.ca_bundle = asked.ca_bundle;
+                    OutboundResponse response = client->request(std::move(request));
+                    return control::ServiceConnectionResponse{
+                        response.status, std::move(response.body), std::move(response.error)};
+                });
+        }
         sync_store.configure_replication(options.replication_allow_private_addresses,
                                          options.replication_timeout);
         configure_workspace_stores();

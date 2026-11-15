@@ -139,6 +139,9 @@ int usage() {
     std::println("  LAKE_PLATFORM_SYNC_SECONDS sets the platform poll interval (default 15)");
     std::println(
         "  LAKE_SERVICE_DIR enables managed services and workspaces (the operator's mount)");
+    std::println("  LAKE_SERVICE_CONNECTION_URL enables them with connections asked of the "
+                 "operator one at a time, with LAKE_SERVICE_CONNECTION_TOKEN_FILE and "
+                 "LAKE_SERVICE_CONNECTION_CA_FILE (orama-operator#773); it replaces the mount");
     std::println(
         "  LAKE_SERVICES_PER_CUSTOMER caps live services per customer (default 0: no limit)");
     std::println("  LAKE_APPS_WILDCARD is the required parent domain for Ship app hosts");
@@ -727,10 +730,29 @@ int main(int argc, char** argv) {
                                           opts.instance_kek});
     }
 
-    // Managed services and the workspace (docs/control-plane/services.md). The operator mounts
-    // service connections at LAKE_SERVICE_DIR when the Lake enables services; without it the
-    // Services, Design, Train and Ship pages say the feature is unavailable.
+    // Managed services and the workspace (docs/control-plane/services.md). When the Lake enables
+    // services, the operator either gives lake LAKE_SERVICE_CONNECTION_URL, where it asks for one
+    // connection when it needs it (orama-operator#773), or, an older operator, mounts every
+    // connection at LAKE_SERVICE_DIR. With neither, the Services, Design, Train and Ship pages say
+    // the feature is unavailable.
     lake::control::WorkspaceConfig workspace_config{env_or("LAKE_SERVICE_DIR", "")};
+    workspace_config.service_connection_url = env_or("LAKE_SERVICE_CONNECTION_URL", "");
+    workspace_config.service_connection_token_file =
+        env_or("LAKE_SERVICE_CONNECTION_TOKEN_FILE", "");
+    workspace_config.service_connection_ca_file = env_or("LAKE_SERVICE_CONNECTION_CA_FILE", "");
+    if (workspace_config.connections_on_demand()) {
+        if (!workspace_config.service_connection_url.starts_with("https://")) {
+            std::println(stderr, "lake: LAKE_SERVICE_CONNECTION_URL must be an https URL");
+            return 2;
+        }
+        if (workspace_config.service_connection_token_file.empty() ||
+            workspace_config.service_connection_ca_file.empty()) {
+            std::println(stderr,
+                         "lake: LAKE_SERVICE_CONNECTION_URL needs "
+                         "LAKE_SERVICE_CONNECTION_TOKEN_FILE and LAKE_SERVICE_CONNECTION_CA_FILE");
+            return 2;
+        }
+    }
     workspace_config.agent_endpoints =
         lake::control::parse_agent_endpoints(env_or("LAKE_AGENT_ENDPOINTS", ""));
     auto leases = lake::control::parse_agent_leases(env_or("LAKE_AGENT_LEASE_SECONDS", ""));

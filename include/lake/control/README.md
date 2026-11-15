@@ -1,5 +1,11 @@
 # Public control types
 
+`zetta_workspace.hpp`'s `ServiceConnectionRequest`, `ServiceConnectionResponse` and
+`ServiceConnectionHttp` are the operator's `POST /v1/service_connection` exchange, and
+`WorkspaceConfig::service_connection_*` its three variables (orama-operator#773); `configured()`
+is true with either the URL or the mount. See
+[connections on demand](../../../docs/control-plane/services.md#connections-on-demand).
+
 `User::disabled_at` retains offboarding state for administrative reads and the stream workers.
 Person-owned agent creation, claims, renewal and credential resolution require an active account;
 offboarding withdraws its launches/schedules and invalidates its tasks in the same store operation

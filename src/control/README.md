@@ -1,5 +1,14 @@
 # Control stores
 
+`WorkspaceService::connection` (`zetta_workspace.cpp`) reads a service's or store's connection
+in one of two ways (orama-operator#773): with `LAKE_SERVICE_CONNECTION_URL` set it asks the
+operator's `POST /v1/service_connection` for that one slug over the injected
+`ServiceConnectionHttp`, with the Lake's credential file and the control plane's CA (both read on
+every call), keeps the answer in memory only (30 s, 5 s for none, a fetched one used up to 5 minutes
+while the operator is unreachable, dropped on a refused credential) and never logs it; without the
+URL it reads the mounted `<service_dir>/<slug>.json` as before. See
+[connections on demand](../../docs/control-plane/services.md#connections-on-demand).
+
 `InMemoryStore` keeps its records in `std::vector`s: never hold an iterator, pointer or reference
 into one across a `push_back`, `emplace_back` or `erase` on the same vector; copy the id first.
 `upsert_scim_group` read the team's policy object through an iterator after pushing member objects
