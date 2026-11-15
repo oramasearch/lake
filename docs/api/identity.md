@@ -475,6 +475,11 @@ hex alone); `nonce` and `expires_at` are returned unchanged from `begin_identity
    signature with the document's key (`own_identity::verify_challenge_signature`). A signature by
    another key, over a challenge for another pool or document, or after the expiry is
    `unauthorized`.
+**A TAAP sign-in is used once.** Its replay key is SHA-256 of the TAAP id, pool, nonce and time, the
+fields its signature covers, never the transport form of the request; and its `signature` object
+carries only `algorithm`, `signing_key_identifier`, `signing_key_label`, `signature_purpose`,
+`signed_at` and `bytes`, any other member being refused (LSR-198, lake#1004).
+
 4. A proof is used once: sign-up records `identity_proof:<challenge>` in `identity_taap_assertions`
    with the new user; an OAuth start records it as a spent row in `identity_oauth_flows` (state hash
    `sha256(identity_proof:<challenge>)`, already used, so it can never be consumed), since there is no
