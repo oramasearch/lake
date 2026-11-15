@@ -45,9 +45,11 @@ public:
     Result<NetworkEgressRule> get_network_egress_rule(const NetworkScope&,
                                                       const std::string& id) override;
     Result<std::vector<NetworkEgressRule>> list_network_egress_rules(const NetworkScope&) override;
-    Result<NetworkTunnelGrant> create_network_tunnel_grant(const NetworkScope&,
-                                                           const NetworkTunnelGrantSpec&,
-                                                           const NetworkActor&) override;
+    Result<NetworkTunnelGrant>
+    create_network_tunnel_grant(const NetworkScope&,
+                                const NetworkTunnelGrantSpec&,
+                                const NetworkActor&,
+                                const NetworkTunnelGrantLimits&) override;
     Result<NetworkTunnelGrant> update_network_tunnel_grant(const NetworkScope&,
                                                            const std::string& id,
                                                            const NetworkTunnelGrantSpec&,
@@ -679,13 +681,15 @@ private:
     Result<void> check_network_target_locked(const NetworkScope&,
                                              const std::string& kind,
                                              const std::string& id) const;
+    // `grant_limits` applies to a tunnel grant's create only (lake#983).
     template <class Row>
     Result<Row> change_network(const NetworkScope&,
                                const std::string& id,
                                const nlohmann::json& spec,
                                const NetworkActor&,
                                const std::string& operation,
-                               std::vector<Row>& rows);
+                               std::vector<Row>& rows,
+                               const NetworkTunnelGrantLimits* grant_limits = nullptr);
     template <class Row>
     Result<Row>
     get_network(const NetworkScope&, const std::string& id, const std::vector<Row>& rows);

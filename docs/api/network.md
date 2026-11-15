@@ -21,7 +21,7 @@ inputs.
 | `remove_network_connection` | action | Sets one connection to `desired: absent`. |
 | `create_network_egress_rule` | action | Declares CIDR or DNS egress for one workload or the workspace. |
 | `list_network_egress_rules` | read | Returns present and withdrawn egress history. |
-| `grant_network_tunnel` | action | Grants one account member access to one target port until `expires_at`. |
+| `grant_network_tunnel` | action | Grants one account member access to one target port until `expires_at`; `quota_exceeded` past the active grant caps ([tunnel-grants.md](tunnel-grants.md#how-many-grants-lake983-lsr-116)). |
 | `issue_network_tunnel_certificate` | action | Signs the recipient's CSR for a live grant; returns client certificate, chain, relay endpoint and relay CA. |
 | `list_network_tunnel_grants` | read | Returns active, expired and revoked grant history. |
 | `revoke_network_tunnel` | action | Sets `revoked_at` on an active grant. |

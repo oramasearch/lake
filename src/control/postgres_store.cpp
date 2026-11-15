@@ -4572,12 +4572,14 @@ public:
         return {};
     }
 
+    // `grant_limits` applies to a tunnel grant's create only (lake#983).
     template <class Row>
     Result<Row> change_network(const NetworkScope& scope,
                                const std::string& supplied_id,
                                const nlohmann::json& spec,
                                const NetworkActor& actor,
-                               const std::string& operation) {
+                               const std::string& operation,
+                               const NetworkTunnelGrantLimits* grant_limits = nullptr) {
         if (auto checked = network_detail::validate_scope(scope); !checked) {
             return std::unexpected(checked.error());
         }
@@ -4626,6 +4628,25 @@ public:
                                                    spec.at("user_id").get<std::string>())
                                         .empty()) {
                     return std::unexpected(StoreError{"invalid_input", "no tunnel user"});
+                }
+                // lake#983 (LSR-116): the account's row lock serializes its grant creates, so two
+                // concurrent creates cannot both pass the count.
+                if (table.tunnel && create && grant_limits != nullptr &&
+                    (grant_limits->per_workspace != 0 || grant_limits->per_customer != 0)) {
+                    tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid FOR UPDATE",
+                                   scope.customer_id);
+                    const auto active = tx.exec_params(
+                        "SELECT count(*) FILTER (WHERE workspace_id = $2::uuid), count(*) "
+                        "FROM network_tunnel_grants WHERE customer_id = $1::uuid "
+                        "AND revoked_at IS NULL AND expires_at > now()",
+                        scope.customer_id,
+                        scope.workspace_id);
+                    if (auto refused = network_detail::tunnel_grant_limit_refusal(
+                            *grant_limits,
+                            active[0][0].as<std::size_t>(),
+                            active[0][1].as<std::size_t>())) {
+                        return std::unexpected(*refused);
+                    }
                 }
                 write_network_spec(tx, table, scope, id, spec, actor, create);
             } else {
@@ -4725,11 +4746,13 @@ public:
         return list_network<NetworkEgressRule>(scope);
     }
 
-    Result<NetworkTunnelGrant> create_network_tunnel_grant(const NetworkScope& scope,
-                                                           const NetworkTunnelGrantSpec& spec,
-                                                           const NetworkActor& actor) override {
+    Result<NetworkTunnelGrant>
+    create_network_tunnel_grant(const NetworkScope& scope,
+                                const NetworkTunnelGrantSpec& spec,
+                                const NetworkActor& actor,
+                                const NetworkTunnelGrantLimits& limits) override {
         return change_network<NetworkTunnelGrant>(
-            scope, "", network_detail::encode(spec), actor, "create");
+            scope, "", network_detail::encode(spec), actor, "create", &limits);
     }
 
     Result<NetworkTunnelGrant> update_network_tunnel_grant(const NetworkScope& scope,

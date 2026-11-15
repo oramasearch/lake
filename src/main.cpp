@@ -568,6 +568,9 @@ int main(int argc, char** argv) {
     opts.apps_reserved_names = env_or("LAKE_APPS_RESERVED_NAMES", "");
     opts.apps_per_customer = env_u64("LAKE_APPS_PER_CUSTOMER");
     opts.app_replicas_per_customer = env_u64("LAKE_APP_REPLICAS_PER_CUSTOMER");
+    // lake#983: every active grant is projected into the cluster's one relay grants document.
+    opts.tunnel_grants_per_workspace = env_u64("LAKE_TUNNEL_GRANTS_PER_WORKSPACE", 100);
+    opts.tunnel_grants_per_customer = env_u64("LAKE_TUNNEL_GRANTS_PER_CUSTOMER", 500);
     opts.internal_url = env_or("LAKE_INTERNAL_URL", "");
     const std::string operator_zetta_url = env_or("LAKE_OPERATOR_ZETTA_URL", "");
     const std::string operator_zetta_token = env_or("LAKE_OPERATOR_ZETTA_TOKEN", "");

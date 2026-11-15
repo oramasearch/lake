@@ -107,6 +107,22 @@ bool uuid(std::string_view value) {
     return true;
 }
 
+std::optional<StoreError> tunnel_grant_limit_refusal(const NetworkTunnelGrantLimits& limits,
+                                                     std::size_t in_workspace,
+                                                     std::size_t in_account) {
+    if (limits.per_workspace != 0 && in_workspace >= limits.per_workspace) {
+        return StoreError{"quota_exceeded",
+                          "this workspace already has " + std::to_string(limits.per_workspace) +
+                              " active tunnel grants, the most it may have; revoke one first"};
+    }
+    if (limits.per_customer != 0 && in_account >= limits.per_customer) {
+        return StoreError{"quota_exceeded",
+                          "this account already has " + std::to_string(limits.per_customer) +
+                              " active tunnel grants, the most it may have; revoke one first"};
+    }
+    return std::nullopt;
+}
+
 Result<void> validate_scope(const NetworkScope& scope) {
     if (!uuid(scope.customer_id) || !uuid(scope.workspace_id)) {
         return invalid("network customer_id and workspace_id must be UUIDs");

@@ -190,6 +190,11 @@ struct ServerOptions {
     std::string apps_reserved_names;
     std::size_t apps_per_customer = 0;
     std::size_t app_replicas_per_customer = 0;
+    // The most active tunnel grants per workspace and per account (lake#983,
+    // LAKE_TUNNEL_GRANTS_PER_WORKSPACE and LAKE_TUNNEL_GRANTS_PER_CUSTOMER); 0 means no limit.
+    // `lake` defaults them to 100 and 500; an embedded server sets none.
+    std::size_t tunnel_grants_per_workspace = 0;
+    std::size_t tunnel_grants_per_customer = 0;
     // In-cluster Service URL used in build registry targets (LAKE_INTERNAL_URL).
     std::string internal_url;
     // The admin bearer token (LAKE_ADMIN_TOKEN). Empty = every capability except

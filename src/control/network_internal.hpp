@@ -48,5 +48,10 @@ Result<audit::Event> sign_change(Store&,
                                  const std::string& previous,
                                  const audit::IdentityOptions&);
 nlohmann::json metadata_json(const NetworkMetadata&);
+// lake#983: the quota_exceeded refusal for a new tunnel grant when the workspace already holds
+// `in_workspace` active grants or its account `in_account`; nothing when the grant fits.
+std::optional<StoreError> tunnel_grant_limit_refusal(const NetworkTunnelGrantLimits&,
+                                                     std::size_t in_workspace,
+                                                     std::size_t in_account);
 
 } // namespace lake::control::network_detail

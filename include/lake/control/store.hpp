@@ -2122,9 +2122,13 @@ public:
                                                               const std::string& id) = 0;
     virtual Result<std::vector<NetworkEgressRule>>
     list_network_egress_rules(const NetworkScope&) = 0;
-    virtual Result<NetworkTunnelGrant> create_network_tunnel_grant(const NetworkScope&,
-                                                                   const NetworkTunnelGrantSpec&,
-                                                                   const NetworkActor&) = 0;
+    // Refused with quota_exceeded when the workspace or its account already holds the most active
+    // grants `limits` allows (lake#983), counted in the same transaction as the insert.
+    virtual Result<NetworkTunnelGrant>
+    create_network_tunnel_grant(const NetworkScope&,
+                                const NetworkTunnelGrantSpec&,
+                                const NetworkActor&,
+                                const NetworkTunnelGrantLimits&) = 0;
     virtual Result<NetworkTunnelGrant> update_network_tunnel_grant(const NetworkScope&,
                                                                    const std::string& id,
                                                                    const NetworkTunnelGrantSpec&,

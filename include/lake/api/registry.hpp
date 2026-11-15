@@ -490,6 +490,9 @@ struct ApiContext {
     std::string apps_reserved_names;
     std::size_t apps_per_customer = 0;
     std::size_t app_replicas_per_customer = 0;
+    // lake#983: the active tunnel grant caps grant_network_tunnel passes to the store.
+    std::size_t tunnel_grants_per_workspace = 0;
+    std::size_t tunnel_grants_per_customer = 0;
     // Lake's in-cluster Service URL. Build targets use its authority so pushes bypass the public
     // Ingress request-body limit.
     std::string internal_url;

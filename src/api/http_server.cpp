@@ -9562,6 +9562,8 @@ struct ApiServer::Impl {
         ctx.apps_reserved_names = options.apps_reserved_names;
         ctx.apps_per_customer = options.apps_per_customer;
         ctx.app_replicas_per_customer = options.app_replicas_per_customer;
+        ctx.tunnel_grants_per_workspace = options.tunnel_grants_per_workspace;
+        ctx.tunnel_grants_per_customer = options.tunnel_grants_per_customer;
         ctx.callers = callers.get();
         ctx.transparency = transparency.get();
         ctx.checkpoints = checkpoints.get();
