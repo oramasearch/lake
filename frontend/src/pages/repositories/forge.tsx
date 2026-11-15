@@ -13,6 +13,7 @@ import "@/styles/repositories.css";
 import { entityCrumb, useTrail } from "@/lib/trail";
 import { FileText, Folder, FolderGit2, Globe, HardDrive, Lock, MoreHorizontal } from "lucide-react";
 import { Button, Chip, cx, Field, Skeleton, Status, toneOf, type Tone } from "@/lib/ui";
+import { signerLabel, type People } from "./signers";
 
 /* ------------------------------------------------------------------ calls */
 
@@ -50,6 +51,8 @@ export type Repository = {
   description_unavailable?: string;
 };
 export type Items<T> = { items: T[] };
+/** A read whose answer names its signers' accounts (lake#1326). */
+export type WithPeople = { people?: People };
 export type Ref = { name: string; change: string };
 export type TreeEntry = { path: string; kind: string; blob: string; mode: number; node_id: string; size: number; stored_size: number; modified_at?: string };
 export type Change = { id: string; parents: string[]; author: string; message: string; occurred_at: string };
@@ -124,6 +127,29 @@ export function Identifier({ value }: { value: string | null | undefined }) {
     <code className="identifier" title={full} data-full-identifier={full}>
       {abbreviated(full)}
     </code>
+  );
+}
+
+/** A signer or principal by name and handle, the key on hover (lake#1326); an identity no account
+ * acts for reads "Unknown signer" and a short key. */
+export function SignerName({ id, people, viewer }: { id: string | null | undefined; people: People | undefined; viewer?: string }) {
+  const label = signerLabel(id, people, viewer);
+  return (
+    <span className="signer" title={label.key} data-full-identifier={label.key}>
+      <span className={label.known ? "text-ink" : "text-ink-2"}>{label.name}</span>
+      {label.detail && <span className="ml-1 font-mono text-[11.5px] text-ink-3">{label.detail}</span>}
+    </span>
+  );
+}
+
+export function SignerList({ values, people, viewer, empty = "None" }: { values: string[] | undefined; people: People | undefined; viewer?: string; empty?: string }) {
+  if (!values?.length) return <span className="muted">{empty}</span>;
+  return (
+    <span className="identity-list">
+      {values.map((value, index) => (
+        <SignerName key={index} id={value} people={people} viewer={viewer} />
+      ))}
+    </span>
   );
 }
 

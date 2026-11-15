@@ -2200,6 +2200,44 @@ public:
             });
     }
 
+    Result<std::map<std::string, SignerName>>
+    signer_names(const std::vector<std::string>& taap_ids) override {
+        if (taap_ids.empty()) {
+            return std::map<std::string, SignerName>{};
+        }
+        return with_tx<std::map<std::string, SignerName>>(
+            [&](pqxx::work& tx) -> Result<std::map<std::string, SignerName>> {
+                // A linked own identity acts for its account (lake#762), as account_for_identity.
+                const pqxx::result rows = tx.exec_params(
+                    "WITH wanted AS (SELECT DISTINCT jsonb_array_elements_text($1::jsonb) AS "
+                    "taap_id), resolved AS (SELECT wanted.taap_id, "
+                    "COALESCE(identity_links.account_taap_id, wanted.taap_id) AS account "
+                    "FROM wanted LEFT JOIN identity_links "
+                    "ON identity_links.own_taap_id = wanted.taap_id) "
+                    "SELECT resolved.taap_id, 'user', users.display_name, "
+                    "COALESCE(customers.name, '') FROM resolved "
+                    "JOIN users ON users.taap_id = resolved.account AND users.deleted_at IS NULL "
+                    "LEFT JOIN customers ON customers.user_id = users.id "
+                    "AND customers.customer_type = 'individual' AND customers.deleted_at IS NULL "
+                    "UNION ALL SELECT resolved.taap_id, 'organization', "
+                    "organizations.display_name, COALESCE(customers.name, '') FROM resolved "
+                    "JOIN organizations ON organizations.taap_id = resolved.account "
+                    "AND organizations.deleted_at IS NULL "
+                    "LEFT JOIN customers ON customers.organization_id = organizations.id "
+                    "AND customers.customer_type = 'organization' "
+                    "AND customers.deleted_at IS NULL",
+                    nlohmann::json(taap_ids).dump());
+                std::map<std::string, SignerName> names;
+                for (const pqxx::row& row : rows) {
+                    names[row[0].as<std::string>()] =
+                        SignerName{row[1].as<std::string>(),
+                                   row[2].is_null() ? std::string() : row[2].as<std::string>(),
+                                   row[3].as<std::string>()};
+                }
+                return names;
+            });
+    }
+
     Result<Organization> create_organization(const NewOrganization& in) override {
         if (auto checked = check_principal_id(in.taap_id, "taap_id"); !checked) {
             return std::unexpected(checked.error());

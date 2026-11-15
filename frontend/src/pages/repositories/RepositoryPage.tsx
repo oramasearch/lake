@@ -26,6 +26,7 @@ import {
   Identifier,
   itemsOf,
   pending,
+  SignerName,
   ToRepositories,
   useForgeRead,
   Visibility,
@@ -36,6 +37,7 @@ import {
   type Ref,
   type Repository,
   type TreeEntry,
+  type WithPeople,
 } from "./forge";
 
 type Customer = { id: string; name: string; user_id: string | null };
@@ -62,13 +64,13 @@ function RepositoryHome({ id }: { id: string }) {
   const customerId = repository.data?.customer_id;
   const owner = useForgeRead<Customer>(signedIn && customerId ? "get_customer" : null, { customer_id: customerId }, { retry: false });
   const refs = useForgeRead<Items<Ref>>("repository_refs", { id });
-  const changes = useForgeRead<Items<Change>>("list_changes", { id });
+  const changes = useForgeRead<Items<Change> & WithPeople>("list_changes", { id });
   const refList = itemsOf(refs.data);
   const defaultRef = refList[0]?.name ?? "main";
   const hasRefs = refs.data !== undefined && refList.length > 0;
   const tree = useForgeRead<Items<TreeEntry>>(hasRefs ? "repository_tree" : null, { id, ref: defaultRef });
   const readme = useForgeRead<RepositoryFile>(hasRefs ? "repository_file" : null, { id, ref: defaultRef, path: "README.md" }, { retry: false });
-  const access = useForgeRead<Items<AccessEntry>>(signedIn ? "entity_effective_access" : null, { object_type: "repository", id }, { retry: false });
+  const access = useForgeRead<Items<AccessEntry> & WithPeople>(signedIn ? "entity_effective_access" : null, { object_type: "repository", id }, { retry: false });
   const releases = useForgeRead<Items<ForgeRecord>>("list_releases", { repository_id: id }, { retry: false });
   const workspaceId = repository.data?.workspace_id;
   const workspace = useForgeRead<Workspace>(signedIn && customerId && workspaceId ? "get_workspace" : null, { customer_id: customerId, workspace_id: workspaceId }, { retry: false });
@@ -260,7 +262,7 @@ function RepositoryHome({ id }: { id: string }) {
                 <ul className="detail-list">
                   {itemsOf(access.data).map((entry, index) => (
                     <li key={index}>
-                      <Identifier value={entry.principal_taap_id} />
+                      <SignerName id={entry.principal_taap_id} people={access.data?.people} viewer={viewer.taap_id} />
                       <ForgeStatus value={entry.role} />
                     </li>
                   ))}
@@ -329,7 +331,7 @@ function RepositoryHome({ id }: { id: string }) {
                       {change.message.split("\n")[0] || "Untitled change"}
                     </Link>
                     <div className="truncate text-[12px] text-ink-3">
-                      {change.author} · <span title={dateTime(change.occurred_at)}>{relative(change.occurred_at)}</span>
+                      <SignerName id={change.author} people={changes.data?.people} viewer={viewer.taap_id} /> · <span title={dateTime(change.occurred_at)}>{relative(change.occurred_at)}</span>
                     </div>
                   </div>
                   <Identifier value={change.id} />

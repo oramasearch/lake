@@ -57,6 +57,12 @@ struct User {
 struct Organization {
     std::string id, taap_id, display_name, created_at, updated_at;
 };
+// Who signed or holds something, as a person reads it (lake#1326): the account a TAAP identity acts
+// for, that account's display name and its handle (its own account's name). Never an email.
+struct SignerName {
+    std::string kind; // "user" or "organization"
+    std::string display_name, handle;
+};
 struct Customer {
     std::string id, customer_type, user_id, organization_id, name, created_at, updated_at;
 };
@@ -1943,6 +1949,11 @@ public:
     // organization's display name. Unknown identities are absent from the map (lake#445).
     virtual Result<std::map<std::string, std::string>>
     principal_names(const std::vector<std::string>& taap_ids) = 0;
+    // The name and handle of the account each TAAP identity acts for (lake#1326): a user's own
+    // identifier or the own identity linked to it (as account_for_identity), or an organization's
+    // identifier. Deleted accounts and unknown identities are absent from the map.
+    virtual Result<std::map<std::string, SignerName>>
+    signer_names(const std::vector<std::string>& taap_ids) = 0;
 
     virtual Result<Organization> create_organization(const NewOrganization&) = 0;
     virtual Result<std::vector<Organization>> list_organizations(int limit) = 0;

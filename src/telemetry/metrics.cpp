@@ -338,6 +338,10 @@ public:
     principal_names(const std::vector<std::string>& taap_ids) override {
         return call("principal_names", [&] { return store_->principal_names(taap_ids); });
     }
+    control::Result<std::map<std::string, control::SignerName>>
+    signer_names(const std::vector<std::string>& taap_ids) override {
+        return call("signer_names", [&] { return store_->signer_names(taap_ids); });
+    }
     control::Result<control::Organization>
     create_organization(const control::NewOrganization& value) override {
         return call("create_organization", [&] { return store_->create_organization(value); });

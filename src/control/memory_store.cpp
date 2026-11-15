@@ -4372,6 +4372,52 @@ InMemoryStore::principal_names(const std::vector<std::string>& taap_ids) {
     return names;
 }
 
+Result<std::map<std::string, SignerName>>
+InMemoryStore::signer_names(const std::vector<std::string>& taap_ids) {
+    std::lock_guard lock(mutex_);
+    std::map<std::string, SignerName> names;
+    const auto handle_of = [&](const auto& matches) {
+        for (const Customer& customer : customers_) {
+            if (matches(customer) && !deleted_customers_.contains(customer.id)) {
+                return customer.name;
+            }
+        }
+        return std::string();
+    };
+    for (const std::string& taap_id : taap_ids) {
+        if (taap_id.empty()) {
+            continue;
+        }
+        std::string account = taap_id;
+        for (const auto& [user_id, link] : identity_links_) {
+            if (link.own_taap_id == taap_id) {
+                account = link.account_taap_id;
+            }
+        }
+        for (const User& user : users_) {
+            if (user.taap_id == account && !deleted_users_.contains(user.id)) {
+                names[taap_id] =
+                    SignerName{"user", user.display_name, handle_of([&](const Customer& customer) {
+                                   return customer.customer_type == "individual" &&
+                                          customer.user_id == user.id;
+                               })};
+            }
+        }
+        for (const Organization& organization : organizations_) {
+            if (organization.taap_id == account &&
+                !deleted_organizations_.contains(organization.id)) {
+                names[taap_id] = SignerName{"organization",
+                                            organization.display_name,
+                                            handle_of([&](const Customer& customer) {
+                                                return customer.customer_type == "organization" &&
+                                                       customer.organization_id == organization.id;
+                                            })};
+            }
+        }
+    }
+    return names;
+}
+
 Result<Organization> InMemoryStore::create_organization(const NewOrganization& in) {
     if (auto checked = check_principal_id(in.taap_id, "taap_id"); !checked) {
         return std::unexpected(checked.error());

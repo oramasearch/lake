@@ -7,6 +7,67 @@
 
 namespace lake::api {
 
+nlohmann::json signer_people(ApiContext& context, const std::vector<std::string>& taap_ids) {
+    nlohmann::json people = nlohmann::json::object();
+    if (!context.store || taap_ids.empty()) {
+        return people;
+    }
+    const auto names = context.store->signer_names(taap_ids);
+    if (!names) {
+        return people;
+    }
+    for (const auto& [taap_id, name] : *names) {
+        people[taap_id] = {
+            {"kind", name.kind}, {"name", name.display_name}, {"handle", name.handle}};
+    }
+    return people;
+}
+
+nlohmann::json signer_people_schema() {
+    return {{"type", "object"},
+            {"description",
+             "Who each signer or principal named in this answer is: the TAAP identifier mapped "
+             "to the account's kind (user or organization), name and handle. An identity no "
+             "account acts for is absent."},
+            {"additionalProperties",
+             {{"type", "object"},
+              {"properties",
+               {{"kind", {{"type", "string"}}},
+                {"name", {{"type", "string"}}},
+                {"handle", {{"type", "string"}}}}}}}};
+}
+
+void forge_record_signers(const nlohmann::json& value, std::vector<std::string>& out) {
+    if (!value.is_object()) {
+        return;
+    }
+    const auto add = [&out](const nlohmann::json& identity) {
+        if (identity.is_string() && !identity.get_ref<const std::string&>().empty()) {
+            out.push_back(identity.get<std::string>());
+        } else if (identity.is_object() && identity.contains("taap_id")) {
+            const nlohmann::json& id = identity.at("taap_id");
+            if (id.is_string() && !id.get_ref<const std::string&>().empty()) {
+                out.push_back(id.get<std::string>());
+            }
+        }
+    };
+    for (const char* field : {"author", "opened_by"}) {
+        if (const auto found = value.find(field); found != value.end()) {
+            add(*found);
+        }
+    }
+    if (const auto reviewers = value.find("reviewers");
+        reviewers != value.end() && reviewers->is_array()) {
+        for (const nlohmann::json& reviewer : *reviewers) {
+            add(reviewer);
+        }
+    }
+    if (const auto approval = value.find("approval");
+        approval != value.end() && approval->is_object() && approval->contains("by")) {
+        add(approval->at("by"));
+    }
+}
+
 nlohmann::json repository_person_json(const RepositoryPerson& person) {
     return {{"taap_id", person.taap_id},
             {"kind", person.kind},
