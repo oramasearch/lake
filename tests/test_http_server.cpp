@@ -55,6 +55,7 @@
 #include "audit_test_support.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/clerk_webhooks.hpp"
+#include "lake/api/liquid_clients.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/server.hpp"
 #include "lake/api/web_app.hpp"
@@ -5220,6 +5221,51 @@ TEST(HttpServer, ViewerCarriesTheTermsAndPrivacyLinks) {
                   configured ? "https://acme.example/terms" : "");
         EXPECT_EQ(viewer["legal"]["privacy_url"], "");
     }
+}
+
+// lake#1324: a liquid client outside the supported range is told so before any route, in the
+// envelope a REST caller reads or, on a sync path, in the sync protocol's error body. server_info
+// always answers, so a client can learn the range.
+TEST(HttpServer, ALiquidClientOutsideTheSupportedRangeIsToldSo) {
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.worker_coroutines = 1;
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    HttpConnection connection(server.port());
+    const auto newest = lake::api::newest_supported_liquid();
+    const std::string too_new = lake::api::to_string({newest.major, newest.minor + 1, 0});
+    const auto with_version = [&](std::string_view method,
+                                  std::string_view path,
+                                  const std::string& version,
+                                  std::string_view content_type = "application/json") {
+        return connection.request(
+            method, path, {}, {}, "HTTP/1.1", {}, content_type, {{"Liquid-Version", version}});
+    };
+
+    const std::string info = with_version("GET", "/v1/server_info", too_new);
+    ASSERT_TRUE(info.starts_with("HTTP/1.1 200")) << info;
+    EXPECT_EQ(nlohmann::json::parse(response_body(info))["value"]["liquid"],
+              lake::api::liquid_clients_json());
+
+    const std::string refused = with_version("GET", "/v1/viewer", too_new);
+    ASSERT_TRUE(refused.starts_with("HTTP/1.1 400")) << refused;
+    const auto body = nlohmann::json::parse(response_body(refused));
+    EXPECT_EQ(body["error"]["code"], "unsupported_client_version");
+    EXPECT_EQ(body["error"]["message"], lake::api::liquid_client_refusal(too_new));
+
+    const std::string served = with_version("GET", "/v1/viewer", lake::api::to_string(newest));
+    EXPECT_TRUE(served.starts_with("HTTP/1.1 200")) << served;
+    EXPECT_TRUE(connection.request("GET", "/v1/viewer").starts_with("HTTP/1.1 200"));
+
+    const std::string sync = with_version("POST",
+                                          "/v1/repositories/no-such-repository/sync/pull",
+                                          too_new,
+                                          lake::api::liquid_sync_media_type);
+    ASSERT_TRUE(sync.starts_with("HTTP/1.1 400")) << sync;
+    EXPECT_EQ(response_header(sync, "content-type"), "application/vnd.liquid.error-v1");
+    EXPECT_NE(sync.find("newer than this Lake supports"), std::string::npos);
 }
 
 // With Clerk, the web app mounts Clerk's sign-in (docs/api/clerk.md); lake keeps the exchange and

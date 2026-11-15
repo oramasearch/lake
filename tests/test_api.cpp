@@ -44,12 +44,14 @@
 #include <openssl/hmac.h>
 
 #include <liquid/liquid.hpp>
+#include <liquid/version.hpp>
 
 #include "objects/records.hpp"  // from LAKE_LIQUID_SOURCE_DIR/src (see tests/CMakeLists.txt)
 
 #include "api/workspace_records_api.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/forge.hpp"
+#include "lake/api/liquid_clients.hpp"
 #include "lake/api/markdown.hpp"
 #include "lake/api/mcp.hpp"
 #include "lake/api/registry.hpp"
@@ -3155,6 +3157,50 @@ TEST(Registry, ServerInfoNeedsNoAuth) {
         events.push_back(std::string(event));
     }
     EXPECT_EQ(r.value["stripe_webhook_events"], events);
+    // lake#1324: what a liquid client checks, read from the code, never repeated here.
+    EXPECT_EQ(r.value["liquid"], lake::api::liquid_clients_json());
+    EXPECT_EQ(r.value["liquid"]["sync_protocol"], lake::api::liquid_sync_protocol_version);
+    EXPECT_EQ(r.value["liquid"]["forge_api"], lake::api::liquid_forge_api_version);
+    EXPECT_EQ(r.value["liquid"]["oldest_release"], lake::api::oldest_supported_liquid);
+    EXPECT_EQ(r.value["liquid"]["newest_release"], liquid::version_string());
+}
+
+// lake#1324: the supported range is [oldest_supported_liquid, the linked libliquid].
+TEST(LiquidClients, TheRangeRunsFromTheFirstReleaseToTheLinkedLiquid) {
+    using lake::api::LiquidRelease;
+    using lake::api::parse_liquid_release;
+    const auto oldest = parse_liquid_release(lake::api::oldest_supported_liquid);
+    ASSERT_TRUE(oldest);
+    const LiquidRelease newest = lake::api::newest_supported_liquid();
+    EXPECT_EQ(lake::api::to_string(newest), liquid::version_string());
+    EXPECT_LE(*oldest, newest);
+    // The content type the sync routes speak is the one published.
+    EXPECT_EQ(lake::api::liquid_sync_media_type,
+              "application/vnd.liquid.sync-v" +
+                  std::to_string(lake::api::liquid_sync_protocol_version));
+
+    EXPECT_EQ(lake::api::liquid_client_refusal(lake::api::to_string(*oldest)), "");
+    EXPECT_EQ(lake::api::liquid_client_refusal(lake::api::to_string(newest)), "");
+    EXPECT_EQ(lake::api::liquid_client_refusal("v" + lake::api::to_string(newest)), "");
+    EXPECT_EQ(lake::api::liquid_client_refusal(lake::api::to_string(newest) + "-rc.1"), "");
+
+    const LiquidRelease too_new{newest.major, newest.minor, newest.patch + 1};
+    const std::string newer = lake::api::liquid_client_refusal(lake::api::to_string(too_new));
+    EXPECT_NE(newer.find("newer than this Lake supports"), std::string::npos) << newer;
+    EXPECT_NE(newer.find(lake::api::to_string(newest)), std::string::npos) << newer;
+    if (oldest->patch > 0 || oldest->minor > 0 || oldest->major > 0) {
+        const LiquidRelease too_old{0, 0, 0};
+        const std::string older = lake::api::liquid_client_refusal(lake::api::to_string(too_old));
+        EXPECT_NE(older.find("older than this Lake supports"), std::string::npos) << older;
+        EXPECT_NE(older.find("upgrade liquid"), std::string::npos) << older;
+    }
+    for (const std::string_view bad : {"", "1", "1.2", "1.2.x", "01.2.3", "1.2.3-", "1.2.3.4"}) {
+        const std::string refused = lake::api::liquid_client_refusal(bad);
+        EXPECT_NE(refused.find("is not a liquid release"), std::string::npos) << bad;
+    }
+    EXPECT_TRUE(lake::api::liquid_version_exempt("/v1/server_info"));
+    EXPECT_FALSE(lake::api::liquid_version_exempt("/v1/viewer"));
+    EXPECT_NE(lake::api::find_error_code("unsupported_client_version"), nullptr);
 }
 
 TEST(Telemetry, PrometheusCounterAndHistogram) {

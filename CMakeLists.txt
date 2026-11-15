@@ -349,6 +349,7 @@ add_library(lake-core STATIC
   src/api/billing_capabilities.cpp
   src/api/balance.cpp
   src/api/client_address.cpp
+  src/api/liquid_clients.cpp
   src/api/coupons.cpp
   src/api/stripe.cpp
   src/api/audit_routing.cpp

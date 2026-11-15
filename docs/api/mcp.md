@@ -150,7 +150,9 @@ the storage quota) have their own groups; issues stay with Repositories.
 
 `GET /llms.txt` and `GET /llms-full.txt` are **public** (`text/plain`, cached 5 minutes):
 what Lake is and what it does today (Data, Design, Train, Ship, Ask Orama, organizations and
-access, secrets, usage and billing), how to connect, every tool by group (llms-full adds each tool's description and input
+access, secrets, usage and billing; repositories name the liquid CLI that clones and pushes them,
+liquify, the IDE that opens them, and `server_info`'s supported liquid releases, lake#1324), how to
+connect, every tool by group (llms-full adds each tool's description and input
 schema), the flows and the rules an agent must keep (an edited pipeline is proposed again, a gate
 failure runs nothing, search needs a published index, deleting destroys data). Every word in them
 says **Lake** and never `space` (the account, the workspace or the organization instead, whichever

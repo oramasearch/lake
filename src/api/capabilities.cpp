@@ -5,6 +5,7 @@
 #include "lake/api/agent_stream_triggers.hpp"
 #include "lake/api/authentication_work.hpp"
 #include "lake/api/brand.hpp"
+#include "lake/api/liquid_clients.hpp"
 #include "lake/api/mcp_connections.hpp"
 #include "lake/api/stripe.hpp"
 #include "lake/api/workspace_settings.hpp"
@@ -2749,7 +2750,8 @@ void register_server_info(Registry& registry, std::string_view version) {
         .name = "server_info",
         .title = "Server info",
         .description = "Name, node, version and API level of this Lake, whether Deployments "
-                       "are set up on it, and its region and the deployment's regions. No "
+                       "are set up on it, its region and the deployment's regions, and the "
+                       "liquid sync and forge versions and liquid releases it supports. No "
                        "authentication.",
         .input_schema = {{"type", "object"},
                          {"properties", json::object()},
@@ -2798,7 +2800,24 @@ void register_server_info(Registry& registry, std::string_view version) {
                               {"description",
                                "The Stripe webhook events this version of Lake handles, sorted; "
                                "the same list `lake manifest` prints."},
-                              {"items", {{"type", "string"}}}}}}}},
+                              {"items", {{"type", "string"}}}}},
+                            // lake#1324 (docs/api/liquid-clients.md): what a liquid client
+                            // checks before it syncs.
+                            {"liquid",
+                             {{"type", "object"},
+                              {"description",
+                               "What liquid and liquify check before they sync: the sync protocol "
+                               "and forge API versions this Lake serves, and the oldest and newest "
+                               "liquid release it supports. A request whose `Liquid-Version` "
+                               "header names a release outside that range is refused with "
+                               "`unsupported_client_version`."},
+                              {"properties",
+                               {{"sync_protocol", {{"type", "integer"}}},
+                                {"sync_media_type", {{"type", "string"}}},
+                                {"forge_api", {{"type", "integer"}}},
+                                {"oldest_release", {{"type", "string"}}},
+                                {"newest_release", {{"type", "string"}}},
+                                {"version_header", {{"type", "string"}}}}}}}}}},
         .kind = CapabilityKind::Read,
         .requires_auth = false,
         .object = "server",
@@ -2829,7 +2848,8 @@ void register_server_info(Registry& registry, std::string_view version) {
                  {"region", region_json(ctx.regions)},
                  {"regions", regions_json(ctx.regions)},
                  {"order_sheet_url", order_sheet_url_json(ctx.regions)},
-                 {"stripe_webhook_events", stripe_webhook_events_json()}});
+                 {"stripe_webhook_events", stripe_webhook_events_json()},
+                 {"liquid", liquid_clients_json()}});
         }});
 }
 

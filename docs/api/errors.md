@@ -36,6 +36,7 @@ Every capability answers a failure the same way on REST and MCP:
 | `secret_required` | 400 | A value that looks like a secret was sent in plain text (a Ship app's environment); store it as a Secret and pass its reference. |
 | `invalid_digest` | 400 | An archive or record does not match the digest it carries, so it was changed or damaged. |
 | `invalid_signature` | 400 | A signature does not verify against its key. |
+| `unsupported_client_version` | 400 | The request's `Liquid-Version` header names a liquid release outside the range this Lake supports, or is not a release. The message names the client's release, the range and the side to upgrade; `server_info`'s `liquid` gives the range ([liquid clients](liquid-clients.md), lake#1324). |
 | `unauthenticated` | 401 | No credential was accepted. Bearer refusals carry `reason` (`missing`, `invalid` or `expired`) and `help` (`/developer/mcp`). Password/MFA/recovery credential failures and account cooldowns share `invalid credentials`, without account-discovery details. |
 | `payment_required` | 402 | The account's prepaid balance is past its overdraft limit, or it has not made its first top-up, and the call starts something that costs money ([balance](billing.md#the-gate), lake#1114). `details` is `{customer_id, balance_micros, overdraft_micros, add_micros, add_funds_url, reason}` (`reason` `first_top_up` or `overdraft`). Reading, signing in, stopping and deleting are never refused this way. |
 | `unauthorized` | 403 | The credential is valid but does not grant this call on this object. |

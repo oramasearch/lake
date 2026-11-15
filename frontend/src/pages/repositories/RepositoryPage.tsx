@@ -111,6 +111,10 @@ function RepositoryHome({ id }: { id: string }) {
           </p>
           <CopyBlock label="First checkout into a new directory" value={`liquid clone ${url} ${directory}\ncd ${directory}`} multiline />
           <CopyBlock label="From that checkout, after capturing and naming your changes" value={`liquid push ${url}`} />
+          <p className="muted m-0 text-[12.5px]">
+            To work on it in an editor, open the checkout in <strong>liquify</strong>, liquid&apos;s IDE (<code>liquify {directory}</code>), or clone it from liquify&apos;s start
+            screen with this repository&apos;s URL.
+          </p>
         </div>
       )}
     </>

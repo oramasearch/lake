@@ -15,6 +15,7 @@
 #include "lake/api/billing.hpp"
 #include "lake/api/clerk_webhooks.hpp"
 #include "lake/api/client_address.hpp"
+#include "lake/api/liquid_clients.hpp"
 #include "lake/api/mcp_client.hpp"
 #include "lake/api/mcp_connections.hpp"
 #include "lake/api/metering_recorder.hpp"
@@ -15270,6 +15271,38 @@ struct ApiServer::Impl {
                                      "no-store");
     }
 
+    // A liquid client names its release in Liquid-Version (lake#1324, docs/api/liquid-clients.md).
+    // One outside the supported range is told so here, before any route, instead of failing
+    // part-way through the protocol. A sync path answers in the sync protocol's error body, every
+    // other path in the JSON envelope; `server_info` and the probes are always served.
+    boost::http::route_task refuse_liquid_version(boost::http::route_params& route) {
+        const std::string header(liquid_version_header);
+        if (route.req.count(header) == 0) {
+            co_return boost::http::route_next;
+        }
+        const std::string path(route.url.path());
+        if (liquid_version_exempt(path)) {
+            co_return boost::http::route_next;
+        }
+        const std::string refusal = liquid_client_refusal(route.req.at(header));
+        if (refusal.empty()) {
+            co_return boost::http::route_next;
+        }
+        if (path.find("/sync/") != std::string::npos) {
+            auto encoded = liquid::sync_server::encode_error(
+                liquid::error{liquid::errc::unsupported, refusal, "unsupported_client_version"});
+            const std::vector<std::byte> body =
+                encoded ? std::move(*encoded) : std::vector<std::byte>{};
+            co_return co_await send_bytes(
+                route, boost::http::status::bad_request, sync_error_content_type, body);
+        }
+        co_return co_await send_text(route,
+                                     boost::http::status::bad_request,
+                                     error_body("unsupported_client_version", refusal),
+                                     "application/json; charset=utf-8",
+                                     "no-store");
+    }
+
     boost::http::route_task await_store_root(boost::http::route_params& route) {
         namespace http = boost::http;
         if (store_root_state.load() == StoreRootState::open) {
@@ -16485,6 +16518,17 @@ bool ApiServer::start() {
     // A cookie-authenticated unsafe request from another origin is refused before any route.
     router.use(guarded("cross_site", [&impl](http::route_params& route) -> http::route_task {
         auto result = co_await impl.refuse_cross_site(route);
+        if (result.what() != http::route_what::next) {
+            const auto timing = request_timing(route);
+            const auto start = timing ? timing->started : std::chrono::steady_clock::now();
+            const RequestTimingScope timing_scope(route, start);
+            impl.record_request(route, impl.route_pattern_for(route), start);
+        }
+        co_return result;
+    }));
+    // A liquid client outside the supported range is refused before any route (lake#1324).
+    router.use(guarded("liquid_version", [&impl](http::route_params& route) -> http::route_task {
+        auto result = co_await impl.refuse_liquid_version(route);
         if (result.what() != http::route_what::next) {
             const auto timing = request_timing(route);
             const auto start = timing ? timing->started : std::chrono::steady_clock::now();

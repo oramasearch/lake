@@ -227,6 +227,8 @@ Expect:
   `liquid clone '<origin>/v1/repositories/<id>' './<name>'`, then `cd './<name>'` on the next line.
 - The block **From that checkout, after capturing and naming your changes** holds
   `liquid push '<origin>/v1/repositories/<id>'`.
+- Below the blocks a line names **liquify**, liquid's IDE: open the checkout with
+  `liquify './<name>'`, or clone it from liquify's start screen with the repository's URL.
 - The modal is titled "Clone This Repository" with the subtitle `<owner>/<name>`, and shows the
   same blocks.
 - **Copy** turns to "Copied" for about two seconds. The pasted text matches the block exactly.
