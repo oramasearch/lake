@@ -370,6 +370,12 @@ struct PasskeyAssertion {
 };
 struct OAuthIdentity {
     std::string pool_id, provider, subject, email, display_name, device_name, identity_document;
+    // Whether the provider says the person proved `email` (lake#1299): an OpenID Connect ID token's
+    // `email_verified`, or GitHub's public profile address, which GitHub allows only from the
+    // account's verified addresses. A sign-up keeps `email` only when this is true; otherwise the
+    // account is created without an address, so the address never matches an invitation or links
+    // an account.
+    bool email_verified = false;
 };
 // A person who signed in through Clerk (docs/api/clerk.md). The custodial fields carry a TAAP
 // identity lake minted for them; the store keeps it only when it creates the user.

@@ -11133,7 +11133,13 @@ struct ApiServer::Impl {
             }
             identity.subject = user["id"].is_string() ? user["id"].get<std::string>()
                                                       : std::to_string(user["id"].get<long long>());
-            identity.email = user.value("email", "");
+            // GitHub answers `"email": null` for an account with no public address.
+            identity.email = user.contains("email") && user["email"].is_string()
+                                 ? user["email"].get<std::string>()
+                                 : std::string();
+            // GitHub's public profile address can only be one of the account's verified
+            // addresses, so a present one counts as verified (lake#1299).
+            identity.email_verified = !identity.email.empty();
             identity.display_name = user.value("name", user.value("login", std::string()));
         } else {
             const std::string id_token = token.value("id_token", "");
@@ -11154,6 +11160,8 @@ struct ApiServer::Impl {
             }
             identity.subject = claims->subject;
             identity.email = claims->email;
+            // Only an address the ID token says was verified is kept at sign-up (lake#1299).
+            identity.email_verified = claims->email_verified;
             identity.display_name = claims->display_name;
         }
         control::Result<control::IssuedSession> issued =

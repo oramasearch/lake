@@ -880,7 +880,13 @@ std::optional<OidcClaims> verify_oidc_id_token(std::string_view token,
         subject.empty() || text("nonce") != nonce) {
         return std::nullopt;
     }
-    return OidcClaims{subject, text("email"), text("name"), issued_at, text("sid")};
+    const bool email_verified =
+        claims.contains("email_verified") &&
+        ((claims["email_verified"].is_boolean() && claims["email_verified"].get<bool>()) ||
+         (claims["email_verified"].is_string() &&
+          claims["email_verified"].get<std::string>() == "true"));
+    return OidcClaims{
+        subject, text("email"), text("name"), issued_at, text("sid"), email_verified};
 }
 
 std::expected<VerifiedPasskeyRegistration, std::string>
@@ -9652,7 +9658,9 @@ public:
                 rows = tx.exec_params("INSERT INTO users (taap_id, email, display_name, pool_id) "
                                       "VALUES ($1, $2, $3, $4) RETURNING id::text",
                                       identity->identifier,
-                                      nullable(in.email),
+                                      // An address the provider did not say was verified is not
+                                      // kept (lake#1299).
+                                      nullable(in.email_verified ? in.email : std::string()),
                                       in.display_name,
                                       in.pool_id);
                 user_id = rows[0][0].as<std::string>();

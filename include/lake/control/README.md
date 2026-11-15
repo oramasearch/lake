@@ -105,7 +105,9 @@ See [the lease contract](../../../docs/api/agent-bus.md).
 result for organizations a person runs, plus `list_user_memberships` and
 `list_invitee_invitations`, which takes the user and matches `email` invitations only to a verified
 address: never for an account SSO or SCIM provisioned (lake#1297). See
-[organizations.md](../../../docs/api/organizations.md).
+[organizations.md](../../../docs/api/organizations.md). `OAuthIdentity::email_verified` and
+`identity_crypto.hpp`'s `OidcClaims::email_verified` carry whether a provider verified the address;
+an OAuth sign-up keeps it only then (lake#1299, [identity.md](../../../docs/api/identity.md)).
 
 `workspace_records.hpp` declares `WorkspaceRecords` (append, list, get, conditional put,
 remove and update of sealed records in one workspace Zetta's record store) and `RecordSet<Codec>`, the typed collection every table that moves into a

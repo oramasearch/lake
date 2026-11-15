@@ -300,7 +300,8 @@ ranges, and verify the digest from the completed file; [`builds.md`](builds.md) 
 
 lake#1297: [`organizations.md`](organizations.md), [`sso.md`](sso.md) and [`clerk.md`](clerk.md)
 say that an SSO or SCIM account's address is never verified, so no `email` invitation reaches it and
-no Clerk sign-in links to it by address.
+no Clerk sign-in links to it by address. lake#1299: [`identity.md`](identity.md) says an OAuth/OIDC
+sign-up keeps the provider's address only when the provider says it was verified (`email_verified`).
 
 [`services.md`](services.md), [`storage.md`](storage.md) and [`workspaces.md`](workspaces.md)
 list `LAKE_SERVICE_CONNECTION_URL`, with which lake asks the operator for one connection at a time

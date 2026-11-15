@@ -381,6 +381,55 @@ TEST(Scim, AProvisionedAddressReachesNoEmailInvitationAndLinksNoClerkSignIn) {
     EXPECT_NE(signed_up->user_id, provisioned->id);
 }
 
+// lake#1299: an OAuth/OIDC sign-up keeps the provider's address only when the provider says it was
+// verified; otherwise the account has no address, so it matches no email invitation.
+TEST(OAuth, SignUpKeepsOnlyAVerifiedAddress) {
+    SsoSurface surface;
+    const ApiResult organization =
+        surface.call("create_organization", {{"display_name", "Inviting organization"}});
+    ASSERT_TRUE(organization.ok) << organization.error.message;
+    for (const char* address : {"unverified@example.com", "verified@example.com"}) {
+        ASSERT_TRUE(surface
+                        .call("create_invitation",
+                              {{"organization_id", organization.value.at("id")},
+                               {"invitee_type", "email"},
+                               {"invitee", address},
+                               {"role", "member"},
+                               {"expires_at", "2999-01-01T00:00:00Z"}})
+                        .ok);
+    }
+    const auto sign_up = [&](const std::string& subject, const std::string& email, bool verified) {
+        lake::control::OAuthIdentity identity{"lake",
+                                              "stub-oidc",
+                                              subject,
+                                              email,
+                                              "Person",
+                                              "browser",
+                                              "identity-document-" + subject};
+        identity.email_verified = verified;
+        const auto issued = surface.store.sign_in_oauth(identity);
+        EXPECT_TRUE(issued) << (issued ? "" : issued.error().message);
+        return issued ? surface.store.get_user(issued->session.user_id)
+                      : lake::control::Result<lake::control::User>(
+                            std::unexpected(issued.error()));
+    };
+
+    const auto unverified = sign_up("subject-unverified", "unverified@example.com", false);
+    ASSERT_TRUE(unverified) << unverified.error().message;
+    EXPECT_TRUE(unverified->email.empty()) << "an unverified address is not kept";
+    const auto none = surface.store.list_invitee_invitations(unverified->id, {}, 10);
+    ASSERT_TRUE(none);
+    EXPECT_TRUE(none->empty());
+
+    const auto verified = sign_up("subject-verified", "verified@example.com", true);
+    ASSERT_TRUE(verified) << verified.error().message;
+    EXPECT_EQ(verified->email, "verified@example.com");
+    const auto reached = surface.store.list_invitee_invitations(verified->id, {}, 10);
+    ASSERT_TRUE(reached);
+    ASSERT_EQ(reached->size(), 1U);
+    EXPECT_EQ(reached->front().invitee, "verified@example.com");
+}
+
 // lake#870: principal ids are TAAP ids; `admin` belongs to the admin token alone.
 TEST(PrincipalIds, OnlyTaapIdentitiesAreValid) {
     using lake::control::valid_principal_id;

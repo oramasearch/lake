@@ -1,5 +1,10 @@
 # API implementation
 
+The OAuth callback in `http_server.cpp` marks an address verified only from an ID token's
+`email_verified` claim, or a GitHub public profile address (which GitHub allows only from verified
+addresses); the stores keep an unverified one off the new account (lake#1299). See
+[identity.md](../../docs/api/identity.md).
+
 `http_server.cpp` installs the on-demand service connection exchange
 (`WorkspaceService::set_connection_http`, orama-operator#773) over its outbound client:
 `OutboundRequest::ca_bundle` makes a request trust only the given roots (the operator control

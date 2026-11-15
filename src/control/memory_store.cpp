@@ -5233,7 +5233,13 @@ Result<IssuedSession> InMemoryStore::sign_in_oauth(const OAuthIdentity& input) {
     }
     const std::string now = now_iso8601();
     const std::string identity = "taap:1:ed25519:" + identity_crypto::random_secret();
-    users_.push_back(User{new_uuid_v4(), identity, input.email, input.display_name, now, now});
+    // An address the provider did not say was verified is not kept (lake#1299).
+    users_.push_back(User{new_uuid_v4(),
+                          identity,
+                          input.email_verified ? input.email : std::string(),
+                          input.display_name,
+                          now,
+                          now});
     oauth_credentials_.push_back(OAuthCredential{users_.back().id, pool, subject});
     Device& device = add_device(devices_, users_.back().id, input.device_name);
     IssuedSession issued =

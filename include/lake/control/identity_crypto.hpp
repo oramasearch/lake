@@ -73,6 +73,9 @@ struct OidcClaims {
     // `sid`: the Clerk session id its default session token carries, signed (lake#1163). A
     // custom JWT template never carries it.
     std::string session_id;
+    // `email_verified` is true (a JSON true, or the string "true" some issuers send): the issuer
+    // says the person proved `email` (lake#1299). Anything else, absent included, is false.
+    bool email_verified = false;
 };
 
 // `audience_absent`: the token must carry no `aud` at all, as Clerk's default session token does
