@@ -316,7 +316,7 @@ whatever grants the person the agent acts for holds elsewhere. Unprovable is out
 `Policy.EffectiveAccessMatchesAuthorization`, the identity scope test, and the WebAuthn test are
 the executable contract. The registry test also
 enumerates every capability and requires object/action metadata. Run the Postgres fixture from
-[`../build/ci.md`](../build/ci.md) to exercise the recursive query used in production.
+[`../build/local.md`](../build/local.md) to exercise the recursive query used in production.
 
 New capabilities must name their object, action, and object resolver. New list or search paths
 must call `authorize_batch` on candidates before returning them. Do not add authorization in an

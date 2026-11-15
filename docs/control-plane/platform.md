@@ -17,7 +17,7 @@ the contract for the operator leaf; it does not change the `Lake` CRD here.
 `LAKE_CONTROL_HOST`, else `LAKE_PUBLIC_HOST`, is the Lake namespace value on every operator row. A
 white-labelled Lake's public host is the customer's, and the operator keeps the rows named by the
 Orama host through `LAKE_CONTROL_HOST`, the same host it keys them on itself (lake#1136,
-[`../deployment/white-label-sign-in.md`](../deployment/white-label-sign-in.md)). The operator must inject the
+[`../api/clerk.md`](../api/clerk.md)). The operator must inject the
 Zetta URL and token together. A logs URL may be omitted; platform state continues to work while
 log reads return `store_unavailable`.
 

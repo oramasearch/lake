@@ -55,7 +55,7 @@ memory and PostgreSQL, and `test_api.cpp`'s `SyncHttp.PushRecordsTheRepositorysL
 admin grant/revoke and signed audit against memory and PostgreSQL. `tunnel_fixture.hpp` creates
 local keys and deliberately overprivileged CSRs. Transport evidence in `test_schema_conformance.cpp`
 covers REST/MCP issuance. Network tests also cover 0085 replay and pending/scoped history providers.
-See [tunnel credentials](../docs/api/tunnel-grants.md) and [the proof](../docs/build/tunnel-grants-proof.md).
+See [tunnel credentials](../docs/api/tunnel-grants.md) and the proof.
 
 `test_network.cpp` runs shared memory/PostgreSQL store cases for all four secure-networking
 records through the telemetry wrapper. PostgreSQL-only cases verify contract columns, defaults,

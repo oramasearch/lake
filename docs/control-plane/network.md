@@ -162,7 +162,7 @@ expiration and concurrent writers.
 ### Native Proof for lake#728 — 2026-10-14
 
 The historical output below predates tunnel CSR issuance and migration 0085. The lake#730
-commands and results are recorded in [tunnel-grants-proof.md](../build/tunnel-grants-proof.md).
+commands and results are kept with the maintainers' build records.
 
 Both native builds completed with Clang 22.1.8, `BUILD_SHARED_LIBS=OFF` in `build` and `ON` in
 `build-shared`, using the authorized Zetta checkout and sibling Liquid checkout. The commands

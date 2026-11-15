@@ -471,7 +471,7 @@ int main(int argc, char** argv) {
     opts.search_memory_bytes = static_cast<std::size_t>(
         std::max<std::uint64_t>(1024ULL * 1024ULL, env_u64("LAKE_SEARCH_MEMORY_BYTES", 256ULL * 1024ULL * 1024ULL)));
     opts.public_host = env_or("LAKE_PUBLIC_HOST", "");
-    // A white-labelled Lake (lake#1136, docs/deployment/white-label-sign-in.md): the operator moves
+    // A white-labelled Lake (lake#1136, docs/api/clerk.md): the operator moves
     // LAKE_PUBLIC_HOST to the customer's host, keeps the Orama host as an alias, and keeps the
     // control rows named by the Orama host. Invalid values stop startup.
     std::string control_host;

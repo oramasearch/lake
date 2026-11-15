@@ -1,4 +1,4 @@
-// What the browser scripts share (docs/deployment/browser-testing.md): Playwright, a log with
+// What the browser scripts share (tools/e2e/README.md): Playwright, a log with
 // pass/fail checks, Clerk sign-in with a one-time ticket (lake lands a signed-in person on `/`),
 // lake's /v1 capabilities called with the browser's own session, the first top-up through Stripe's
 // test Checkout, and the person's first workspace started from Ask Orama's home (`/ask`).

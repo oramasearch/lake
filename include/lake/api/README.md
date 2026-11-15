@@ -297,7 +297,7 @@ calls share an in-process client bucket. See [the contract](../../../docs/api/id
 `white_label.hpp` declares a white-labelled Lake's hosts (`InstanceHosts`: public host, aliases, control
 host) and SSO-only sign-in (`sso_only_refusal`). `ServerOptions` carries `host_aliases` and
 `sign_in_sso_provider`; `ApiContext` carries `sign_in_sso_provider`. See
-[white-label sign-in](../../../docs/deployment/white-label-sign-in.md) (lake#1136).
+white-label sign-in (lake#1136).
 
 `resource_repairs.hpp` (lake#1207) declares `run_resource_repair_pass` and `note_deployment`, the
 pass and the hook behind notifications and auto-fix ([docs/api/notifications.md](../../../docs/api/notifications.md)).

@@ -437,7 +437,7 @@ accepted arbitrary names; add other approved models explicitly.
 
 Agent pods need neither: they reach the model through Lake. The operator's
 `spec.agents.openaiSecretName`, which used to put the key into every agent pod, is left unset once the
-agents use the gateway ([deployment/aks.md](../deployment/aks.md#speech-to-text-key)).
+agents use the gateway.
 
 ## The workspace's model
 

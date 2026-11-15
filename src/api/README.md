@@ -889,3 +889,4 @@ bearer against `LAKE_AGENT_BUS_DIR` as the directory is now (`AgentBusCredential
 capabilities in `workspace_capabilities.cpp` and `reporter_of` in `usage_capabilities.cpp` refuse a
 bound credential every task outside its workspace, and `claim_agent_task` answers no credential
 when it claims by reference. See [agent-bus.md](../../docs/api/agent-bus.md#task-credentials-by-reference-lake871).
+white-label sign-in (lake#1136).

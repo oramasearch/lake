@@ -8,7 +8,7 @@
 
 #include <nlohmann/json.hpp>
 
-// A white-labelled Lake (lake#1136, lake#1129, docs/deployment/white-label-sign-in.md): a Lake that
+// A white-labelled Lake (lake#1136, lake#1129, docs/api/clerk.md): a Lake that
 // serves a customer's own domain and signs people in there, through a Clerk instance for that
 // domain or the customer's own identity provider. The operator supplies every value as an
 // environment variable (orama-operator#947); with none set Lake behaves as before.

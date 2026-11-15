@@ -15,7 +15,7 @@ It complements the automated checks; it replaces none of them:
 |---|---|---|
 | `npm test`, `npm run build` | The app's pure rules (routes, wording, formats) and the effect and list-error checks | `frontend/` |
 | `frontend/checks/*.mjs` | Single flows driven by Playwright against a running Lake | `frontend/checks/` |
-| `tools/e2e/walkthrough.mjs`, `services.mjs`, `mcp.mjs`, `storage.mjs` | Design, Train and Ship, the service catalog, Developer → MCP and storage on a deployed Lake | [`../../deployment/browser-testing.md`](../../deployment/browser-testing.md) |
+| `tools/e2e/walkthrough.mjs`, `services.mjs`, `mcp.mjs`, `storage.mjs` | Design, Train and Ship, the service catalog, Developer → MCP and storage on a deployed Lake | [`../../../tools/e2e/README.md`](../../../tools/e2e/README.md) |
 | The `testing` e2e gate (`LakeE2ETest`) | Every feature through REST, MCP and a headless browser, for a substantial release | the bridge's `lake-devops` skill |
 | **This runbook** | What a person sees and does on every page: labels, states, permissions, phone width, keyboard | here |
 

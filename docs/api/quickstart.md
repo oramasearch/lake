@@ -492,7 +492,7 @@ decision 53), both of which multitenancy already holds. Audit goes to the worksp
   `quickstart_status` until `trained`, `train_quickstart` again, `quickstart_snippets` with
   `origins`; the key in the code answers `search_index` and `predict` with that `Origin`, and 403
   with another.
-- In a browser: `tools/e2e/quickstart.mjs` ([../deployment/browser-testing.md](../deployment/browser-testing.md)).
+- In a browser: `tools/e2e/quickstart.mjs` ([../../tools/e2e/README.md](../../tools/e2e/README.md)).
 
 ## How to change it
 

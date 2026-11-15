@@ -24,15 +24,15 @@ regenerate it whenever the pin moves.
 ## Publish a deployment image
 
 Deployment images are built by GitHub Actions, not by a developer workstation, and go to the
-**private** Docker Hub repository `oramasearch/lake`. After the required credentials in
-[`ci.md`](ci.md) are configured, create an immutable Docker-compatible Git tag and push it:
+**private** Docker Hub repository `oramasearch/lake`. After the workflow's credentials are
+configured, create an immutable Docker-compatible Git tag and push it:
 
 ```sh
 git tag <tag>
 git push origin <tag>
 ```
 
-The [`image` workflow](../../.github/workflows/image.yml) checks out the pinned bridge source,
+The `image` workflow checks out the pinned bridge source,
 supplies its Zetta module as the named build context, builds `linux/amd64`, and publishes
 `oramasearch/lake:<tag>` plus `oramasearch/lake:sha-<short-sha>`. It rejects `latest`; `latest`
 and workstation-built deployment images are not used. The workflow supplies the full checked-out
@@ -40,15 +40,13 @@ source revision and a UTC creation time as build arguments. The runtime image st
 `org.opencontainers.image.revision` and `org.opencontainers.image.created`; the binary embeds the
 revision and returns it in `GET /v1/server_info`.
 
-Wait for the workflow to succeed before updating `Lake.spec.image`; the deployment runbook is in
-[`../deployment/aks.md`](../deployment/aks.md).
+Wait for the workflow to succeed before updating `Lake.spec.image`.
 
 ## Run it under the operator
 
 The `Lake` CR on `orama-operator` runs the image: `spec.image: oramasearch/lake:<tag>`,
 `spec.pullSecretName: oramasearch-dockerhub` (the Secret must exist in `spec.namespace`), port
-4900 by default (`spec.port`), and no args needed. The manual dispatch path for an unpublished tag
-is in [`ci.md`](ci.md).
+4900 by default (`spec.port`), and no args needed.
 
 ## Local verification
 
@@ -75,8 +73,8 @@ produce the release image natively.
 ## Change the image recipe
 
 Keep `Dockerfile` and `.dockerignore` as the image recipe; the context excludes `build/` and
-`.git/`. When the build-stage toolchain changes, update [`ci.yml`](../../.github/workflows/ci.yml),
-[`ci.md`](ci.md) and [`local.md`](local.md) in the same change so pull-request builds and local
+`.git/`. When the build-stage toolchain changes, update the CI workflow and
+[`local.md`](local.md) in the same change so pull-request builds and local
 builds use the image toolchain.
 
 ### Pinned inputs (lake#1003)

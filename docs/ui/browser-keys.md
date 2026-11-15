@@ -31,4 +31,4 @@ server or a script; the card says it lasts as long as the session that made it.
 
 - `frontend/tests/quickstart.test.ts` (`npm test`) covers `siteOrigin`.
 - `tools/e2e/quickstart.mjs` types the test site's origin, makes the key and runs the plain web
-  page code from that origin ([../deployment/browser-testing.md](../deployment/browser-testing.md)).
+  page code from that origin ([../../tools/e2e/README.md](../../tools/e2e/README.md)).

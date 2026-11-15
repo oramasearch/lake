@@ -234,7 +234,7 @@ closed ([metering](metering.md#app-traffic)).
 A secret environment value names one field of one secret in a secret mount of the app's own
 workspace ([secrets.md](secrets.md)); lake's secret store is its source of truth and a Kubernetes
 Secret is only the projection the operator writes at deploy (lake#625,
-[../deployment/secrets.md](../deployment/secrets.md)).
+[secrets.md](secrets.md)).
 
 - `set_app_env` takes `secret: {mount_id, name, field}`, or `secret_ref` as the string
   `lake-secret://<mount id>/<name>#<field>` (the name may contain `/` and `#`; the field follows the

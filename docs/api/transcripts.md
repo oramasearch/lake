@@ -155,7 +155,7 @@ The transcriber is an injected dependency, `lake::api::Transcriber` on `ApiConte
 | `LAKE_OPENAI_API_KEY` | OpenAI API key for speech-to-text. Unset: speech-to-text is off. |
 | `LAKE_TRANSCRIBE_MODEL` | Transcription model; default `gpt-4o-transcribe` (`whisper-1` and `gpt-4o-mini-transcribe` also work). |
 
-How the dev Lake gets the key is in [deployment](../deployment/aks.md#speech-to-text-key).
+How the dev Lake gets the key is in deployment.
 
 ## Limits
 

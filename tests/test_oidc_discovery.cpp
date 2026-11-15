@@ -721,7 +721,7 @@ TEST(OidcSignInLakeOAuth, AGenericLakeOAuthProviderUsesDiscoveryToo) {
     ASSERT_NE(redirected.find(" 302 "), std::string::npos) << redirected;
     // The token exchange and the key fetch go to the discovered endpoints; the identity document
     // here is not a TAAP one, so the sign-in itself is refused after verification, as for any
-    // first OAuth sign-in without one (docs/deployment/sign-in.md §3).
+    // first OAuth sign-in without one (docs/api/clerk.md).
     const std::string cookie = header(started, "Set-Cookie");
     const std::string callback = http(port,
                                       "GET",
