@@ -53,7 +53,14 @@ identity and what it signs as) and, for a managed key, offers **Use my own ident
 shows and paste the output (`use_own_identity`); a refused signature starts again from the document
 ([identity.md](../api/identity.md#your-own-identity)); Sessions and devices reads
 `list_sessions` and `list_devices`; Passkeys and Tokens link to `/passkeys` and `/tokens`, where the capability forms
-are ([identity.md](identity.md)); Notifications lists what Lake told the current workspace about failed apps, failed builds and auto-fix that stopped, with Fix, Open and Dismiss ([apps.md](apps.md#when-an-app-fails), lake#1207).
+are ([identity.md](identity.md)). **One credential, two names (lake#1328).** Account → Tokens says
+*API token* and Developer → API and MCP say *key*; both call `create_token` and list the same rows,
+and each page says so in one sentence. The repository page's Clone and Push says *API token* and
+points at Tokens. Both drawers offer the same *liquid and liquify* preset (`LIQUID_SCOPES` in
+`frontend/src/pages/developer/logic.ts`): the sync capabilities plus `list_reviews`,
+`create_review`, `update_review`, `list_review_comments`, `create_review_comment`,
+`map_review_anchors` and `list_branch_protections`, so one token clones, pushes and reviews from
+liquify (`Forge.TheLiquidAndLiquifyTokenPresetCanReview`, `frontend/tests/developer.test.ts`); Notifications lists what Lake told the current workspace about failed apps, failed builds and auto-fix that stopped, with Fix, Open and Dismiss ([apps.md](apps.md#when-an-app-fails), lake#1207).
 
 ### Deleting your account
 

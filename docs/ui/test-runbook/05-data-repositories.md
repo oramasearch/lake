@@ -222,8 +222,9 @@ As: owner · Needs: TD-REPO
 4. Press **Escape**.
 
 Expect:
-- The card reads "Create an account token on this instance under **Tokens** and export it as
-  `LIQUID_TOKEN` in your terminal. Use a token issued by this instance only." **Tokens** links to `/tokens`.
+- The card reads "Create an API token on this instance under Account → **Tokens** with the
+  *liquid and liquify* scopes, and export it as `LIQUID_TOKEN` in your terminal. Use a token
+  issued by this instance only." **Tokens** links to `/tokens`.
 - The block **First checkout into a new directory** holds
   `liquid clone '<origin>/v1/repositories/<id>' './<name>'`, then `cd './<name>'` on the next line.
 - The block **From that checkout, after capturing and naming your changes** holds

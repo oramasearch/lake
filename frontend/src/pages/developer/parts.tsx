@@ -331,7 +331,7 @@ export function KeyCreator({ purpose, scopes, onCreated }: { purpose: Purpose; s
           label="Capabilities, comma separated"
           help={
             <>
-              Capability names, or <code>registry_pull</code> to pull images. For liquid push and pull:{" "}
+              Capability names, or <code>registry_pull</code> to pull images. For liquid and liquify (clone, push, pull and reviews):{" "}
               <button type="button" className="min-h-0 cursor-pointer border-0 bg-transparent p-0 text-action underline" onClick={() => set("named", LIQUID_SCOPES)}>
                 <code>{LIQUID_SCOPES}</code>
               </button>
@@ -546,8 +546,8 @@ export function KeysPanel({
       </Card>
       <KeysTable scopes={scopes} />
       <p className="text-[12px] text-ink-3">
-        A key works for both the REST API and MCP. Sign-in sessions and devices are on <Link to="/sessions">Sessions</Link>; every token is also on{" "}
-        <Link to="/tokens">Tokens</Link>.
+        A key is an API token: the same credential Account → <Link to="/tokens">Tokens</Link> makes and lists, and every key made here is listed there too. It works
+        for the REST API, MCP, liquid and liquify. Sign-in sessions and devices are on <Link to="/sessions">Sessions</Link>.
       </p>
     </div>
   );

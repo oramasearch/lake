@@ -104,9 +104,10 @@ The same reads are capabilities:
 Repositories are read and written with the `liquid` command line. The full set of commands is in
 [The liquid CLI](/docs/cli); this is the path from the web app to a working checkout.
 
-1. Make a token: open the account menu → **Tokens** → **New token**. For push and pull, give it
-   the scopes `refs,find_missing,push,pull,upload_chunks,read_chunk` (the drawer fills them in with
-   one click). Copy the secret; it is shown once.
+1. Make an API token: open the account menu → **Tokens** → **New token**. For liquid and liquify,
+   give it the *liquid and liquify* scopes (the drawer fills them in with one click):
+   `refs,find_missing,push,pull,upload_chunks,read_chunk,list_reviews,create_review,update_review,list_review_comments,create_review_comment,map_review_anchors,list_branch_protections`. They clone, pull and push, and let liquify list, open and comment on reviews. Copy the
+   secret; it is shown once.
 2. In your terminal, export it: `export LIQUID_TOKEN=<the token>`. liquid sends it as the bearer
    credential and never prints it; it never goes in the URL.
 3. On the repository's home page press **Clone** (or use the **Clone and push** card) and copy the

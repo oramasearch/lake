@@ -19,6 +19,7 @@ import {
   keyFormProblem,
   keyInput,
   keyState,
+  LIQUID_SCOPES,
   operationsOf,
   quickStartFetch,
   quickStartPython,
@@ -308,3 +309,14 @@ test("the Quick start Python example reads LAKE_KEY or carries the key made", ()
   assert.doesNotMatch(none, /\$LAKE_KEY/);
   assert.match(quickStartPython("https://lake.example", "lk_x"), /"Authorization": "Bearer lk_x"/);
 });
+
+// lake#1328: one token from the "liquid and liquify" preset clones, pushes and reviews.
+test("the liquid and liquify preset carries sync and the review capabilities liquify calls", () => {
+  const names = LIQUID_SCOPES.split(",");
+  for (const name of ["refs", "find_missing", "push", "pull", "upload_chunks", "read_chunk"]) assert.ok(names.includes(name), name);
+  for (const name of ["list_reviews", "create_review", "update_review", "list_review_comments", "create_review_comment", "map_review_anchors"])
+    assert.ok(names.includes(name), name);
+  assert.equal(new Set(names).size, names.length, "no name twice");
+  assert.equal(names.includes("*"), false);
+});
+

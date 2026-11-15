@@ -108,8 +108,8 @@ function RepositoryHome({ id }: { id: string }) {
       ) : (
         <div className="space-y-3">
           <p className="muted m-0 text-[12.5px]">
-            Create an account token on this instance under <Link to="/tokens">Tokens</Link> and export it as <code>LIQUID_TOKEN</code> in your terminal. Use a token issued by this
-            instance only.
+            Create an API token on this instance under Account → <Link to="/tokens">Tokens</Link> with the <em>liquid and liquify</em> scopes, and export it as{" "}
+            <code>LIQUID_TOKEN</code> in your terminal. Use a token issued by this instance only.
           </p>
           <CopyBlock label="First checkout into a new directory" value={`liquid clone ${url} ${directory}\ncd ${directory}`} multiline />
           <CopyBlock label="From that checkout, after capturing and naming your changes" value={`liquid push ${url}`} />

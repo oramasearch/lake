@@ -4868,6 +4868,86 @@ TEST(Repositories, PeopleNameKnownAccountsOnlyAndTheAccessList) {
     EXPECT_EQ(access.value.dump().find("grace@example.test"), std::string::npos);
 }
 
+// lake#1328: the web app's "liquid and liquify" token preset (frontend/src/pages/developer/
+// logic.ts, offered on Developer → API and Account → Tokens) names real capabilities, and a token
+// scoped to exactly it reaches the review capabilities liquify calls and nothing else.
+TEST(Forge, TheLiquidAndLiquifyTokenPresetCanReview) {
+    std::ifstream file(std::filesystem::path(LAKE_TEST_SOURCE_DIR) /
+                       "frontend/src/pages/developer/logic.ts");
+    const std::string source((std::istreambuf_iterator<char>(file)), {});
+    std::vector<std::string> preset;
+    for (const char* list : {"LIQUID_SYNC_SCOPES", "LIQUID_REVIEW_SCOPES"}) {
+        const std::regex array("export const " + std::string(list) + R"re( = \[([^\]]*)\])re");
+        std::smatch found;
+        ASSERT_TRUE(std::regex_search(source, found, array)) << list;
+        const std::string body = found[1].str();
+        const std::regex name(R"re("([a-z_]+)")re");
+        for (auto match = std::sregex_iterator(body.begin(), body.end(), name);
+             match != std::sregex_iterator();
+             ++match) {
+            preset.push_back((*match)[1].str());
+        }
+    }
+    for (const char* needed : {"refs",
+                               "find_missing",
+                               "push",
+                               "pull",
+                               "upload_chunks",
+                               "read_chunk",
+                               "list_reviews",
+                               "create_review",
+                               "update_review",
+                               "list_review_comments",
+                               "create_review_comment",
+                               "map_review_anchors"}) {
+        EXPECT_NE(std::ranges::find(preset, needed), preset.end()) << needed;
+    }
+
+    Surface surface;
+    for (const std::string& name : preset) {
+        EXPECT_TRUE(surface.registry.find(name)) << name << " is not a capability";
+    }
+    const ApiResult user =
+        surface.call("create_user", {{"display_name", "Ada"}, {"taap_id", "taap:1:ed25519:ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository = surface.call(
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", surface.workspace(customer.value["id"])},
+         {"name", "preset"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const std::string repository_id = repository.value["id"];
+
+    // A session credential carrying exactly the preset.
+    surface.ctx.session_credential = true;
+    surface.ctx.scopes = preset;
+    const ApiResult review = surface.call(
+        "create_review", {{"repository_id", repository_id}, {"change_id", "change-1"}});
+    ASSERT_TRUE(review.ok) << review.error.message;
+    const ApiResult comment = surface.call(
+        "create_review_comment",
+        {{"repository_id", repository_id},
+         {"review_id", review.value["id"]},
+         {"body", "Looks right."},
+         {"anchor", {{"change", "change-1"}, {"path", "src/lib.cpp"}, {"line", 1}, {"column", 0}}}});
+    EXPECT_TRUE(comment.ok) << comment.error.message;
+    EXPECT_TRUE(surface.call("list_reviews", {{"repository_id", repository_id}}).ok);
+    EXPECT_TRUE(surface.call("list_review_comments", {{"repository_id", repository_id}}).ok);
+    const ApiResult updated = surface.call(
+        "update_review",
+        {{"repository_id", repository_id}, {"review_id", review.value["id"]}, {"state", "closed"}});
+    EXPECT_NE(updated.error.message, "credential does not grant update_review");
+    // Outside the preset, the token is refused.
+    const ApiResult refused =
+        surface.call("delete_repository", {{"id", repository_id}});
+    EXPECT_EQ(refused.error.code, "unauthorized");
+    EXPECT_EQ(refused.error.message, "credential does not grant delete_repository");
+}
+
 TEST(Export, ManifestSignerMustBeNamedAfterItsSigningKey) {
     lake::control::InMemoryStore source;
     lake::control::InMemoryStore attacker;
