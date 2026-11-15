@@ -453,6 +453,15 @@ browser session."}}` when:
   its `Content-Type` is not `application/json` (parameters such as `charset` are allowed). The
   binary repository sync routes under `/v1/repositories/` are not JSON and are not checked for it.
 
+**Routes that issue a session are checked with or without one** (LSR-110, lake#977). A cross-site
+`POST` carries no `SameSite=Lax` cookie, so the rule above alone would never see a request that
+*creates* a session: a page elsewhere could post the attacker's own credential and sign the
+visitor's browser in as the attacker (login CSRF). `POST /session`, `POST /identity/clerk-session`,
+the App sign-in forms (`/apps/<id>/identity/...`) and the sign-in capabilities (`/v1/sign_up_password`,
+`sign_in_password`, `verify_mfa`, `sign_in_passkey`, `recover_with_code`, `complete_recovery`) are
+refused with `403` `"Cross-site requests cannot sign in."` on the same origin rules whenever no bearer
+is sent, and the `/v1` ones also when their `Content-Type` is not `application/json`.
+
 A missing `Origin` and a missing `Sec-Fetch-Site` pass: a non-browser client sends neither, and a
 browser sends `Origin` on every cross-origin unsafe request. Bearer-authenticated calls are not
 affected, from any origin, with one exception: a **browser key** (`lbk.…`, lake#1152,
