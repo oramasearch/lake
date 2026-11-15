@@ -68,9 +68,9 @@ COMPONENTS: list[dict] = [
      "url": "https://github.com/IBM/plex",
      "text": {"github": "IBM/plex", "ref": None, "path": "LICENSE.txt"}},
     {"name": "Orama design tokens (vendor/orama-design)", "version": "as vendored",
-     "license": "MIT (to be confirmed)", "use": "vendored design tokens",
-     "url": "https://github.com/oramasearch/orama-design",
-     "text": {"inline": "Orama Search Inc.; to be released under MIT with this stack (license to be confirmed before release)."}},
+     "license": "MIT", "use": "vendored design tokens",
+     "url": "vendored from a private Orama Search Inc. repository",
+     "text": {"inline": "Copyright (c) 2026 Orama Search Inc. Released under the MIT License as part of this repository (see LICENSE); vendored from a private Orama Search Inc. repository."}},
 ]
 NPM_USE = {"frontend": "bundled into the web UI (frontend/)"}
 NOTES: list[str] = [
