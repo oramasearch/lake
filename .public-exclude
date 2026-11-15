@@ -31,7 +31,6 @@ docs/deployment/users.md
 docs/deployment/white-label-sign-in.md
 docs/deployment/production-2026-09-08.md
 docs/deployment/dev-2026-10-01.md
-docs/deployment/observed/
 
 # Build proofs recorded on maintainers' machines, and the hosted CI notes
 docs/build/*-proof.md

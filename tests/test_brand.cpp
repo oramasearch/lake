@@ -261,12 +261,12 @@ TEST(BrandConfig, InvalidSettingsAreRefusedNamingTheSetting) {
         {"no support address",
          [](BrandSources& s) { s.support_email.clear(); },
          "LAKE_BRAND_SUPPORT_EMAIL"},
-        {"Orama's support address",
-         [](BrandSources& s) { s.support_email = "support@orama.com"; },
+        {"this Lake's support address",
+         [](BrandSources& s) { s.support_email = "help@lake.example.com"; },
          "LAKE_BRAND_SUPPORT_EMAIL"},
         {"no sender", [](BrandSources& s) { s.email_from.clear(); }, "LAKE_BRAND_EMAIL_FROM"},
         {"Lake's sender",
-         [](BrandSources& s) { s.email_from = "Acme <orders@lake.live>"; },
+         [](BrandSources& s) { s.email_from = "Acme <orders@mail.lake.example.com>"; },
          "LAKE_BRAND_EMAIL_FROM"},
         {"a sender that is no address",
          [](BrandSources& s) { s.email_from = "Acme Data"; },
@@ -284,7 +284,8 @@ TEST(BrandConfig, InvalidSettingsAreRefusedNamingTheSetting) {
     for (const Case& c : cases) {
         BrandSources sources = acme_sources();
         c.change(sources);
-        const auto brand = brand_from_sources(sources, default_resend_from, default_support_email);
+        const auto brand = brand_from_sources(
+            sources, "Lake <orders@lake.example.com>", "support@lake.example.com");
         ASSERT_FALSE(brand) << c.why;
         EXPECT_NE(brand.error().find(c.setting), std::string::npos)
             << c.why << ": " << brand.error();

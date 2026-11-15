@@ -11,7 +11,7 @@ snapshot in [`docs/deployment/observed/`](../../docs/deployment/observed/).
 newest committed snapshot and the in-tree registry. Against the live service:
 
 ```sh
-tools/docs/check-status.py --observed https://lake.oramadev.net/v1/openapi.json
+tools/docs/check-status.py --observed https://lake.example.com/v1/openapi.json
 ```
 
 `--snapshot <path> --revision <rev>` records a new observation; see the status page's

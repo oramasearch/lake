@@ -10361,9 +10361,10 @@ TEST(WebApp, ViewerReportsTheTermsAndPrivacyLinks) {
 
 TEST(WebApp, LegalUrlSettingsKeepTheDefaultTurnOffOrRefuse) {
     using lake::api::legal_url_setting;
-    const std::string_view fallback = lake::api::default_terms_url;
-    EXPECT_EQ(fallback, "https://www.orama.com/legal/terms");
-    EXPECT_EQ(lake::api::default_privacy_url, "https://www.orama.com/legal/privacy");
+    // No legal link of lake's own: an install names its own pages, or shows none.
+    EXPECT_EQ(lake::api::default_terms_url, "");
+    EXPECT_EQ(lake::api::default_privacy_url, "");
+    const std::string_view fallback = "https://example.com/legal/terms";
     EXPECT_EQ(legal_url_setting("LAKE_TERMS_URL", nullptr, fallback).value(), fallback);
     EXPECT_EQ(legal_url_setting("LAKE_TERMS_URL", "", fallback).value(), fallback);
     EXPECT_EQ(legal_url_setting("LAKE_TERMS_URL", "off", fallback).value(), "");
@@ -10371,7 +10372,7 @@ TEST(WebApp, LegalUrlSettingsKeepTheDefaultTurnOffOrRefuse) {
               "https://acme.example/legal/terms?v=2#top");
     EXPECT_EQ(legal_url_setting("LAKE_PRIVACY_URL", "http://localhost:3000/privacy", fallback).value(),
               "http://localhost:3000/privacy");
-    for (const char* bad : {"javascript:alert(1)", "/legal/terms", "www.orama.com/legal/terms", "https://",
+    for (const char* bad : {"javascript:alert(1)", "/legal/terms", "www.example.com/legal/terms", "https://",
                             "https://a.example/x y", "https://a.example/\"x", "https://a.example/<b>",
                             "ftp://a.example/terms"}) {
         const auto refused = legal_url_setting("LAKE_TERMS_URL", bad, fallback);

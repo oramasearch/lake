@@ -18,7 +18,7 @@ Every row of the page's *Area status* table names the capabilities it speaks for
 GET /v1/openapi.json) or a snapshot written by --snapshot is accepted, so the same check runs
 offline in ctest against the committed snapshot and against the live service:
 
-    tools/docs/check-status.py --observed https://lake.oramadev.net/v1/openapi.json
+    tools/docs/check-status.py --observed https://lake.example.com/v1/openapi.json
 
 --snapshot PATH writes the observed capability names as a snapshot file and exits.
 """
