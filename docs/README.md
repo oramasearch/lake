@@ -100,7 +100,6 @@ cross-repository plan and decisions are kept with the liquid project.
 [`ui/performance.md`](ui/performance.md) documents what is measured for the web app: capability
 latency, the `Server-Timing` response fields, the bundle's split and caching with measured sizes,
 and the dev-site measurements of slow Zetta reads (lake#446).
-cross-repo plan and decisions are in `oramasearch/liquid-bridge` `docs/`.
 
 [api/provisioning.md](api/provisioning.md) specifies personal customer sign-up;
 [ui/sign-up-walkthrough.md](ui/sign-up-walkthrough.md) describes the first-repository journey and keeps its 2026-09-08 proof.

@@ -4,8 +4,7 @@
 describes what lake's navigation and
 home page become once lake is Orama's cloud offering. What lake serves today is in
 [`../ui/front-door.md`](../ui/front-door.md) and stays accurate until the build issues listed at
-the end land. The decisions this design rests on are
-[liquid-bridge decision 43](https://github.com/oramasearch/liquid-bridge/blob/main/docs/decisions.md).
+the end land.
 
 The static mock is [`ui/mocks/cloud/`](ui/mocks/cloud/README.md).
 
