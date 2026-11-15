@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Usage figures in words, as the server's usage page wrote them (usage_duration, usage_money,
  * usage_hour). Shared by Usage and an organization's Usage tab. */
 

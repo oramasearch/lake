@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // lake's control-plane schema as built into this binary (lake#1119, orama-operator#936), and

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A dataset's page leads to a model (lake#818): Train a model on this opens New project for the
  * dataset, and creating the project opens Build pipeline with the dataset chosen under From data.
  * `npm test`; the build runs it. */

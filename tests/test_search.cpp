@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "audit_test_support.hpp"
 #include <atomic>
 #include <chrono>

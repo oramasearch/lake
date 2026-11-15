@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // OpenID Connect discovery for Lake OAuth and enterprise OIDC (lake#837,
 // docs/api/identity.md#openid-connect-discovery): the document's checks, its cache, and sign-in end
 // to end against local identity providers shaped like Microsoft Entra and Okta, whose endpoints are

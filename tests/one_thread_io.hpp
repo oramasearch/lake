@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // Runs a liquid client task on an io_context that exactly one thread drives (lake#510).

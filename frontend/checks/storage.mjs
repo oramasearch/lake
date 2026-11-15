@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Screenshots of Data → Drives → Storage (lake#664, docs/ui/drives.md#storage) at 1440 and 390
 // wide: the table with a volume, your own bucket and a store Lake keeps, New storage for each kind
 // of provider, and the delete warnings. Run against `npx vite --port 5175`; every /v1 call is

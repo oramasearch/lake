@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/network_records.hpp"
 
 namespace lake::control {

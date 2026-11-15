@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The instance brand (lake#1135, lake#1137, docs/serving/brand.md): read and validated once at
 // start, then read by every surface that names the product.
 

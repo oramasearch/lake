@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The catalogue icons (lake#639) in the real app, light and dark, at 1440 and 390 px: Design →
 // Solutions, Methodologies, a solution, a methodology, Opportunities, the Catalogue Icons gallery and
 // Search's Solutions place. Run against `npx vite --port 5174`; every /v1 call is answered by the

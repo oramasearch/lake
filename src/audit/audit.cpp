@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/audit/audit.hpp"
 
 #include <array>

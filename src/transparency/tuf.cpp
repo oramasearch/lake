@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/transparency/tuf.hpp"
 
 #include <algorithm>

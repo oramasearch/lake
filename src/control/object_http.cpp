@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The workspace store's HTTP client (lake#544): keep-alive connections to each workspace Zetta,
 // one name resolution per origin while it stays fresh, TCP_NODELAY and keepalive probes on every
 // connection, and a bounded dial.

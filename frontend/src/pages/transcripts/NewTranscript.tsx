@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** New transcript (lake#561, docs/ui/transcripts.md): a `Modal sheet`, full screen on a phone with
  * its actions above the keyboard. Four ways in:
  *

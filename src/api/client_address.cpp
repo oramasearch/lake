@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/client_address.hpp"
 
 #include <algorithm>

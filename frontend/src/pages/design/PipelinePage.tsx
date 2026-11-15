@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Design → Pipeline (lake's pipeline_content): see, inspect, change, govern and follow one Zetta
  * execution graph. The graph is the server's own drawing (`render_pipeline`, inserted as the SVG
  * markup it answers); selecting a step keeps it in the URL (`step=`). A Project Agent turn is

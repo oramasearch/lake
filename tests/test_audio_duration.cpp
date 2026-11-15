@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // How long a recording is, read from its container (lake#658): the seconds speech-to-text is billed
 // by when the model reports none. Each format is built here byte by byte, as a recorder writes it.
 

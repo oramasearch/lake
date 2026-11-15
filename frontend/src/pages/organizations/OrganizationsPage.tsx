@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Organizations (`/organizations`): the organizations the viewer can see as cards, the invitations
  * addressed to them, and for a person the dialogs to create an organization or turn their personal
  * workspace into one (web_ui_organizations, serve_organizations_page and its three POST handlers). */

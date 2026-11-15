@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * SSO-only sign-in (lake#1136): a white-labelled Lake whose only way in is the customer's identity
  * provider offers that provider alone, and starts SAML and OIDC the way Lake's server expects.

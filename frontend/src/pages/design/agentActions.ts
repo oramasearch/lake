@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The writes Design → Agents and Design → Agent make (lake#653), through Lake's named engine
  * capabilities (`create_agent`, `update_agent`, `delete_agent`, lake#650) and Lake's own
  * schedules and the streams that start an agent (`set_agent_streams`, lake#677). */

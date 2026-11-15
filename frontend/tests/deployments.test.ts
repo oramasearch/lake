@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Ship → Deployments asks once on a lake without the platform mirror (lake#605). `npm test`; the
  * build runs it. */
 import { test } from "node:test";

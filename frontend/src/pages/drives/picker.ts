@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What `FolderPicker` shows and lets a person choose (lake#682, docs/ui/drives.md#the-picker): a
  * folder (Move), any item (a shortcut to an item), or only the items a caller accepts, such as a
  * model file (Train → Models, Bring one → A drive). A `search_drives` match becomes an item of its

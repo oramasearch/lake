@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The per-request log line and the per-workspace request series (lake#384,
 // docs/serving/telemetry.md).
 

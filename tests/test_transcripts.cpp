@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Speech-to-text and transcripts (docs/api/transcripts.md, lake#561): the pure parts. Caption
 // cleaning, audio decoding, the OpenAI request lake sends and how it reads the answer, paging and
 // excerpts. The capabilities against workspace records are in test_workspace_records.cpp.

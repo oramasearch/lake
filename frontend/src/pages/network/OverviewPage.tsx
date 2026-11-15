@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Network → Overview (`/w/<id>/network/overview`, lake#729, docs/ui/network.md): the workspace's
  * network at a glance. Figures for what Lake asks the cluster to allow (connections, developer
  * access, private networks, egress), how many of those the cluster has applied, then the recent

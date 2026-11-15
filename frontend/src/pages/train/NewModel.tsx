@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** New model on Train → Models (lake#654, docs/ui/train.md#a-standalone-model): a model made on its
  * own, not as a project pipeline's step. Two ways in:
  *

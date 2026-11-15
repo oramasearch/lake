@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Regions (lake#757, docs/ui/regions.md): what `server_info` says about this Lake's region and the
  * deployment's other regions, and the words the header, the sign-in and sign-up pages and the
  * Workspaces page show. Each region is a separate Lake with its own accounts, so the other regions

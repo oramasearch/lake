@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Experiments over a workspace methodology's parameters (lake#689): which methodologies the Start an
  * Experiment drawer offers, how a workspace methodology's declared parameters read, its objective

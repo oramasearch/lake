@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The quickstart's column rules (lake#1181, docs/api/quickstart.md#columns): each column's kind
 // from the engine's profile, the columns offered first, the training copy, and the engine's
 // refusals in plain words. Pure: no engine.

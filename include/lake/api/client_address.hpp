@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // Which address a request is counted against for per-client limits (lake#1083, lake#1132): the

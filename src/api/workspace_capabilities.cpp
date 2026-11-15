@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "methodology_serving.hpp"
 #include "lake/api/capabilities.hpp"
 

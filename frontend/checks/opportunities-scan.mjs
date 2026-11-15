@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // lake#1195: a workspace scan survives leaving the page. Opens Design → Opportunities with no
 // `?task=` while the workspace's scan runs (list_opportunities answers `last_scan` running), checks
 // the page says "Scanning… started …" and the Scan button says it is running, then lets the scan

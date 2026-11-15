@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";

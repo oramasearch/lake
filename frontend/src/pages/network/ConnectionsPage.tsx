@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Network → Connections (`/w/<id>/network/connections`, lake#729, docs/ui/network.md): the paths
  * declared between this workspace's apps and services, each with its ports, its own credential when
  * an app reaches a service, and whether the cluster has applied it. "Connect" declares one

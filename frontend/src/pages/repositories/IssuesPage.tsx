@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /issues?repository_id=&state=&label=&assignee= (web_ui_issues): the issue tracker. `list_issues`
  * takes no filters, so the page filters: Open, Closed and All tabs (`state`; no state is Open), label
  * and assignee chips (`label`, `assignee`), all in the address, and a search by title or id. A person

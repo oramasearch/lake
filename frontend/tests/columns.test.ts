@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A table's columns follow the order the answer names, not the rows' sorted keys (lake#812): the
  * Query page's results, and the dataset page's Columns and First Rows tabs. `npm test`; the build
  * runs it. */

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Design → Solution (lake#597): one solution, Orama's or the workspace's own, read with lake's
  * `get_solution`. Orama's is read-only: its page shows the catalogue entry, its runs and Start This
  * Solution (a drawer) when it runs or is in preview, and offers Duplicate to Edit. Your own has

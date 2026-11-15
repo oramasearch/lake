@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Terms of service and privacy policy on sign-up and sign-in: every form, Clerk's
  * and lake's own, carries the sentence with the links `viewer.legal` reports, and none when the

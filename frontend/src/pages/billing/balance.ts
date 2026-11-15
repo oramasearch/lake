@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The prepaid balance (lake#1114, docs/api/billing.md#balance, docs/ui/balance.md): what
  * `account_balance` and `viewer.balance` answer, the banner every page shows while the balance is
  * low, negative or blocked, the Add funds page's link and amounts, the history of credits and

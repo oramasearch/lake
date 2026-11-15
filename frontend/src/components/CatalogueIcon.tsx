@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A solution's or methodology's icon (lake#639): the glyph `lib/catalogueIcons.ts` picks for the
  * entry, drawn in lake's tokens. At 28 px and up it sits on a soft tile; below, it is the bare
  * glyph, for lists and search hits. The accent is blue for a methodology and amber for a solution

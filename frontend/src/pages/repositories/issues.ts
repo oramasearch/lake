@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The issue pages' pure logic (lake#598): which issues a view shows, the labels a person typed, the
  * colour a label carries, who a TAAP identity is, and the smallest `update_issue` an edit needs.
  * `npm test` covers it (tests/issues.test.ts). */

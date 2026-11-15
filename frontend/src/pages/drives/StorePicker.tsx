@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Choose the workspace storage a service or an app mounts (lake#666, docs/ui/drives.md#mounts):
  * one row per store of the workspace, a volume with the path it is mounted at, a bucket as
  * environment variables, each read-only or not. A store that cannot be mounted says why (a volume

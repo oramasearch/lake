@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """Validate captured HTTP payloads with an independent JSON Schema implementation."""
 
 import json

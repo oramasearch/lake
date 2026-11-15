@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Developer → API and Developer → MCP (src/pages/developer/logic.ts): the `create_token` input a
  * key form builds (as the server's MCP key handler and Tokens built it), how a token's scopes

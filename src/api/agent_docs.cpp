@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/agent_docs.hpp"
 
 #include <algorithm>

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Tenant image routes (lake#383 phase A, docs/api/registry.md#where-a-tenant-
 // image-lives): create_image_repository, list_image_repositories, the legacy routing rule the
 // one-shot copy uses, and the image bytes metering counts.

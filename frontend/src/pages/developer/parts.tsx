@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The pieces Developer → API and Developer → MCP share, after rev-os's developer kit: the page
  * tabs (kept in `?tab=`, so a link can open one), code blocks with Copy on a dark plane, a
  * download button, and the keys: a form that calls `create_token`, the callout that shows a new

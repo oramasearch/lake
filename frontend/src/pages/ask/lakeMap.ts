@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What you can do with Lake, on Ask Orama's home (lake#764), as pure rules so `npm test` runs them
  * (tests/home.test.ts). The groups are the rail's (Data, Design, Train, Ship, Network, Organization,
  * Developer); each item is a page the rail offers this person, what it is for in one line, and one

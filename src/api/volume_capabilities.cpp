@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The operator's volumes (migration 0069, operator#259, operator#260,
 // docs/api/volumes.md): set_workspace_storage grows a workspace Zetta's volumes,
 // request_volume_snapshot asks for a snapshot now, and volume_snapshots reads every snapshot

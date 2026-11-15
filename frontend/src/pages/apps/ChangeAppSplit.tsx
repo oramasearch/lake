@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Change App (lake#1241, docs/ui/apps.md#change-app-split-screen): a split screen over the app page,
  * the conversation with the Application Agent (lake#1240) on the left and the running App in a frame
  * on the right. The divider drags (or moves with the arrow keys) and its place is remembered. Once a

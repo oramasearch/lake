@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+
 """The agents' live scenario suite: every library agent, over the agent bus, as a person (lake#269).
 
 Each scenario is a test with a pass condition and a GitHub issue (label `test`) that records its

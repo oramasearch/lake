@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The operator's volumes (migration 0069, operator#259, operator#260, docs/api/volumes.md):
 // set_workspace_storage, request_volume_snapshot and volume_snapshots, against the memory store and
 // against PostgreSQL, where the trigger refuses a smaller size on its own.

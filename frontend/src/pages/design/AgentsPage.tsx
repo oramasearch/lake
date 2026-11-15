@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Design → Agents (lake#653, renamed from Agent Library): where agents are designed. It works as
  * Design → Solutions does (lake#597): Orama's agents (the Agent Library, read-only, "By Orama",
  * with Duplicate on their page) beside the workspace's own (editable, "Yours"), a filter by who an

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Developer → MCP (`/developer/mcp`): connect an agent to lake on one page, after rev-os's
  * Developer → MCP. The endpoint, the tool groups, the worked flows and the read-only scopes come
  * from `mcp_setup`; a key is `create_token`. Six numbered steps: make a key (shown once) or paste

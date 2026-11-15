@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Network → Activity (`/w/<id>/network/activity`, lake#729, docs/ui/network.md): the workspace's
  * recent network decisions, what reached what and whether it was allowed (`network_activity`).
  * The records are the workspace's own; until the cluster reports them, the page says so rather

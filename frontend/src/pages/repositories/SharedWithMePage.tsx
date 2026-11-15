@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /shared-with-me (web_ui_shared_with_me): live folders shared directly with the viewer's
  * identity, with their figures, a search and a filter by state. */
 import { useState } from "react";

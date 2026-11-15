@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The apex order sheet (lake#831, docs/api/orders.md): its configuration and validation, the order
 // form's checks, the status link, the emails and their Resend client (against a test double for
 // HTTP), the abuse limit, Stripe Checkout and its webhook, the cloud_orders contract in both stores

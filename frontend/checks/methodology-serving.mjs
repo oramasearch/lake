@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Screenshots of Ship → Model for a model a workspace methodology trained (lake#690,
 // docs/ui/ship.md) at 1440 and 390 wide: published and starting, then serving with Try It's
 // predictions. Run against `npx vite --port 5175`; every /v1 call is answered by the mocks below,

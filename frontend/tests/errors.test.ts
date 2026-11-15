@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Which failed reads are asked again, and which stop polling (lake#575). `npm test`; the build
  * runs it. */
 import { test } from "node:test";

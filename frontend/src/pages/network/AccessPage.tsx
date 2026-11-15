@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Network → Developer Access (`/w/<id>/network/access`, lake#729, docs/ui/network.md): who may open
  * a tunnel from their own machine to one service or app port, until when. An account admin grants
  * (`grant_network_tunnel`) and revokes (`revoke_network_tunnel`); the person granted gets their own

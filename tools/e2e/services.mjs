@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Every service kind through lake's Services page (docs/api/services.md): New service, wait for
 // Ready (reporting how long it took against the kind's start time in the menu), Show connection
 // (field names only), delete with the typed name, wait until gone. Passwords and tokens are never

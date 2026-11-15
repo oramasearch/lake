@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Data → Drives → Storage in a browser (docs/api/storage.md, docs/ui/drives.md#storage, lake#664):
 // for each type and provider New storage offers that Lake can create without a bucket of the
 // person's own, create a store (a volume of 1 GiB), wait for Ready, show its connection (field names

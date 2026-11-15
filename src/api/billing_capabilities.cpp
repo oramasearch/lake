@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Billing (lake#564, docs/api/billing.md): price_list, set_price_list,
 // billing_account, set_billing_contact, bill_preview, issue_invoice, resend_invoice,
 // list_invoices, get_invoice, record_invoice_payment and void_invoice, with the manual payment

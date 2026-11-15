@@ -1,51 +1,134 @@
-# Contributing to Lake
+# Contributing to lake
 
-Thank you for helping. This page says how to build Lake, run its tests, send a change, keep the
-server's shape, and cut a release.
+Thank you for helping. This document says how to build and test lake, how a change gets in,
+and the one thing every commit needs: a sign-off.
+
+## Before you start
+
+- For a bug, open an issue with what you did, what you expected and what happened, and the
+  version or commit.
+- For a larger change (a new feature, a new dependency, a change to an interface), open an issue
+  first so the approach can be agreed before you write it.
+- **Security issues are never reported in a public issue.** See [SECURITY.md](SECURITY.md): write
+  to **security@orama.com**.
 
 ## Build and test
 
-Lake is C++26 (CMake 3.28 or newer, Ninja, Clang 17 or newer) with a React web app under
-`frontend/`. [`docs/build/local.md`](docs/build/local.md) lists the requirements, the native build,
-the test suite with and without Postgres, and how to run the binary.
-[`docs/build/testing.md`](docs/build/testing.md) covers the test runner's options, and
-[`docs/build/layout.md`](docs/build/layout.md) the source tree.
+You need CMake 3.28 or newer, Ninja, Clang 17 or newer (Homebrew LLVM on macOS, `clang++-NN` on
+Linux), OpenSSL 3, libpq and Node. On macOS: `brew install cmake ninja llvm openssl@3 libpq node`.
+
+lake builds against two sibling checkouts that are not submodules: [zetta](https://github.com/oramasearch/zetta)
+(required, `LAKE_ZETTA_SOURCE_DIR`) and [liquid](https://github.com/oramasearch/liquid)
+(`LAKE_LIQUID_SOURCE_DIR`, default `../liquid`). Boost and GoogleTest are fetched by CMake on the
+first configure.
 
 ```sh
-git clone --recurse-submodules <this repository>
+git clone --recurse-submodules https://github.com/oramasearch/lake.git
 cd lake
-cmake -S . -B build -G Ninja -DLAKE_ZETTA_SOURCE_DIR=/path/to/zetta
+cmake -S . -B build -G Ninja \
+  -DLAKE_ZETTA_SOURCE_DIR=/path/to/zetta \
+  -DLAKE_LIQUID_SOURCE_DIR=/path/to/liquid
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-**One networking checkout.** Lake compiles Zetta's client transport from one Zetta checkout, the
-one `LAKE_ZETTA_SOURCE_DIR` names, and links it to its own Boost.HTTP, Beast2, Capy and Corosio
-targets, so the binary carries one networking stack. Use the Zetta commit this release pins, never
-an unrelated clone; a second copy of the networking stack is not allowed.
+In an existing checkout, run `git submodule update --init --recursive` first. A Debug build is
+the same configure with `-DCMAKE_BUILD_TYPE=Debug` in its own build directory; run the suite
+against it when a change touches coroutines or threads.
 
-PostgreSQL tests use `lake::test::postgres_uri()` for a fresh database per test; the database
-`LAKE_TEST_DB_URI` names belongs to the caller and is not modified.
+The web app is in `frontend/`:
 
-## Sending a change
+```sh
+cd frontend
+npm ci
+npm run typecheck
+npm test
+npm run build
+```
 
-- Open an issue first for anything larger than a small fix, so the approach can be agreed.
-- Branch from `dev` and open the pull request against `dev`. `main` holds the last release.
-- Write commit messages as [Conventional Commits](https://www.conventionalcommits.org/)
-  (`fix(api): ...`, `feat(ui): ...`, `docs: ...`).
-- Every behaviour change comes with a test that fails without it, and the documentation for the
-  folder it touches (each folder's `README.md`, and the pages under `docs/`) in the same change.
-  `README.md` is the front door only; status goes in `docs/design/status.md`.
-- A schema change takes the next free migration number ([`db/README.md`](db/README.md)); two
-  migrations never share a number. Migrations never run in the lake server process.
-- Every environment variable lake reads is declared in `environment_variables()`
-  (`src/api/manifest.cpp`), and every Stripe event it handles in `stripe_webhook_events`.
-- Format only the lines you change (`git clang-format`, from `.clang-format`).
-- **Before you finish:** `cmake --build build && ctest --test-dir build` is green, and the binary is
-  **smoke-tested by hand**: start it (`./build/lake --memory-store --listen 127.0.0.1:4900`) and
-  exercise what you changed through the API or the web app.
-- If a test or binary crashes (segmentation fault, bus error, abort), rebuild with
-  AddressSanitizer and run the suite under it before calling it a flake.
+More detail, including the Postgres-backed tests, is in [docs/build/local.md](docs/build/local.md).
+A crash in a test (segmentation fault, bus error, abort) is investigated with an AddressSanitizer
+build, not rerun until it passes.
+
+## Making a change
+
+1. Fork the repository and branch from `dev`. `main` is the last release; it moves only when a
+   release is cut.
+2. Keep one change per pull request, with the tests that prove it. A change in behavior updates
+   the documentation it touches in the same pull request.
+3. Write commit messages in the [Conventional Commits](https://www.conventionalcommits.org/) form,
+   for example `fix(api): reject an empty name`.
+4. Sign off every commit (next section).
+5. Open the pull request against `dev`. Start its description with what changes, why, and how.
+
+A maintainer reviews it. Pull requests are merged with a merge commit, so every commit you sign
+stays in the history.
+
+## Sign your commits (Developer Certificate of Origin)
+
+lake takes contributions under the [Developer Certificate of Origin](https://developercertificate.org/)
+(DCO). There is no contributor license agreement to sign. Your contribution is licensed under the
+project's license, the MIT License (see [LICENSE](LICENSE)).
+
+By adding a `Signed-off-by` line to a commit, you certify the DCO below for that commit. Git adds
+the line for you with `-s`:
+
+```sh
+git commit -s -m "fix(api): reject an empty name"
+```
+
+which records:
+
+```
+Signed-off-by: Your Name <you@example.com>
+```
+
+The name and address are the ones in your `git config user.name` and `user.email`. Use your real
+name; anonymous contributions cannot be accepted. To sign commits you have already made:
+
+```sh
+git commit --amend -s --no-edit        # the last commit
+git rebase --signoff dev               # every commit on your branch
+```
+
+A pull request with an unsigned commit is not merged until it is signed.
+
+```
+Developer Certificate of Origin
+Version 1.1
+
+Copyright (C) 2004, 2006 The Linux Foundation and its contributors.
+
+Everyone is permitted to copy and distribute verbatim copies of this
+license document, but changing it is not allowed.
+
+
+Developer's Certificate of Origin 1.1
+
+By making a contribution to this project, I certify that:
+
+(a) The contribution was created in whole or in part by me and I
+    have the right to submit it under the open source license
+    indicated in the file; or
+
+(b) The contribution is based upon previous work that, to the best
+    of my knowledge, is covered under an appropriate open source
+    license and I have the right under that license to submit that
+    work with modifications, whether created in whole or in part
+    by me, under the same open source license (unless I am
+    permitted to submit under a different license), as indicated
+    in the file; or
+
+(c) The contribution was provided directly to me by some other
+    person who certified (a), (b) or (c) and I have not modified
+    it.
+
+(d) I understand and agree that this project and the contribution
+    are public and that a record of the contribution (including all
+    personal information I submit with it, including my sign-off) is
+    maintained indefinitely and may be redistributed consistent with
+    this project or the open source license(s) involved.
+```
 
 ## How the server is built
 
@@ -72,6 +155,7 @@ The rules that keep the server small and the same shape as Zetta's:
   client JavaScript beyond what a page strictly needs.
 - `std::expected` at every public boundary; no exceptions across public APIs.
 
+
 ## Cutting a release
 
 A release is a tag on `main`. The pages and their conventions are in
@@ -91,11 +175,21 @@ A release is a tag on `main`. The pages and their conventions are in
    and publish the GitHub release from the page.
 5. Build the image from the tag and give it the same tag.
 
-## Security
+## License headers
 
-Do not report a vulnerability in a public issue. See `SECURITY.md` for how to report one.
+Every source file starts with the line `SPDX-License-Identifier: MIT`, in that file's comment
+syntax, for example `// SPDX-License-Identifier: MIT`. Add it to a new file yourself, or run:
 
-## Licence
+```sh
+python3 tools/spdx-headers.py           # adds the line where it is missing
+python3 tools/spdx-headers.py --check   # lists files without it
+```
 
-By contributing you agree that your contribution is licensed under the repository's licence.
-The copyright holder is named in [`COPYRIGHT`](COPYRIGHT).
+Code copied from another project keeps its own license header and is listed in
+[THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES). Say so in the pull request, with where it came from
+and its license; it must be compatible with the MIT License.
+
+## Code of conduct
+
+Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md). Report unacceptable
+behavior to **conduct@orama.com**.

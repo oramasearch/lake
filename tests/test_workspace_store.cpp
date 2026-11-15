@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // lake#380: a workspace's liquid store in its workspace Zetta (docs/architecture/workspace-store.md).
 //
 // The backend, the encryption below liquid, and the owner run against FakeZettaObjects, which

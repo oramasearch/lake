@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Train → Agents (lake#653): training and improving the agents that learn. It lists only the
  * workspace's agents with something to train, those whose behaviour comes from a model, a
  * pipeline or a training schedule, each with how its training stands (`agent_training_status`).

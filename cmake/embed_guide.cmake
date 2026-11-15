@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 # Embeds lake's Docs section (docs/guide/*.md, lake#252) into the binary: one raw string per page,
 # in the order GUIDE_SECTIONS lists, with the page's slug (its file name), its title (its first
 # line) and the section the Docs navigation groups it under (lake#561).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Markdown images never load by themselves (lake#943). A reply an agent wrote, or a README, issue
  * or comment someone else wrote, may name any address as an image, and a browser that fetched it
  * would tell that server whatever the address carries: an agent misled by content it read could put

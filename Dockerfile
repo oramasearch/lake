@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 # lake — Linux/amd64 image.
 #
 # Builds the single `lake` binary from the local, fully-checked-out source (the HTTP stack is

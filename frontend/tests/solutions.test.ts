@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Design → Solutions with a workspace's own solutions beside Orama's (lake#597,
  * src/pages/design/logic.ts): which kind an entry is, the toolbar's filter, the methodology field a

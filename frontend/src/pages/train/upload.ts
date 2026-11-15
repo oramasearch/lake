@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Load data → Upload's dataset name (lake#814): choosing a file names the dataset after it, made a
  * valid SQL name (`customers.csv` → `customers`, `My Data 2024.csv` → `my_data_2024`), and the name
  * stays editable. Pure, tested by `tests/upload.test.ts`. */

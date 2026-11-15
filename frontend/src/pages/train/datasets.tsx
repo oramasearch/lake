@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Datasets as Train and Ship read them: the lean list, which tables are run outputs, and a list of
  * objects as a table. Shared by Data, Dataset, Query and Search Indexes. */
 import type { Row } from "@/lib/api";

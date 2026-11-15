@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT */
+
 /* Train → Experiments: the rules of assets/experiments/experiments.css, scoped to the pages'
    `.experiments` wrapper instead of `#experiments`. Lake tokens only. The confirmation dialog is
    the kit's Modal, so the old <dialog> rules are not carried. */

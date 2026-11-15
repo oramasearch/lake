@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The check that the image's frontend stage copies what the tests and scripts read (lake#693).
 // Negative cases reproduce the two image builds that failed on 2026-10-11: lake#639 read
 // assets/catalogue-icons/ and lake#653 read src/api/engine_openapi.json from beside frontend/.

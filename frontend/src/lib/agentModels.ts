@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The model a workspace's agents call (lake#1230, docs/ui/workspace-selection.md#settings): one of the
  * chat models this Lake serves, read with `get_workspace_settings` and chosen with
  * `set_workspace_settings`; unset means the default, gpt-6.1-sol. Each model shows its price per

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // A connection's streams (lake#652, docs/api/mcp-connections.md#a-connections-agent-
 // and-streams): the store root's owner, and only it, mirrors each connection's notifications to its
 // notifications topic, starts a job of the connection's agent for each new event on its input

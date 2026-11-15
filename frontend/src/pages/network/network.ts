@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Network (lake#729, docs/ui/network.md): the words, inputs and sentences the Network pages use.
  * Pure, so `tests/network.test.ts` runs it under Node. The rows are Lake's secure-networking
  * desired state and the operator's observation of it (`list_network_connections`,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The audit views: `/audit` (the operator's Audit Log, every log) and `/activity` (Your Activity,
  * the signed-in person's own events). One renderer on the server (web_ui_audit) behind
  * serve_audit_page and serve_activity_page. The outcome, the order and "Include reads" are chips

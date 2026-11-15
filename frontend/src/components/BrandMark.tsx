@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The brand's mark: a white-labelled Lake's logo (its dark version in the dark theme), or Lake's
  * own mark (lake#1135). The logo carries the brand's name as its text. */
 import type { Brand } from "@/lib/brand";

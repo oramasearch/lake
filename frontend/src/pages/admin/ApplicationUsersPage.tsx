@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Application users (`/application/users?id=`): the users of one application's pool, each with
  * Suspend (web_ui_application_users, serve_application_users_page,
  * serve_application_user_suspend). */

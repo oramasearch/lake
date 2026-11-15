@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Usage over time (lake#564): the Usage dashboard's pure logic. The windows a person picks and the
  * one before each, how each dimension's unit reads, the change against the last period, readings of
  * several accounts added together, the stacked chart's series, the CSV export, limit amounts in a

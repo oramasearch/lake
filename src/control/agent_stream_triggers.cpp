@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/agent_stream_triggers.hpp"
 
 #include <algorithm>

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The metering contract (lake#658, docs/api/metering.md#what-is-metered-where): everything that
 // consumes a resource for a customer is metered into its workspace's usage, and every dimension
 // that is metered is on the price list. These tests fail when a capability, a workload kind or a

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** One topic (web_ui_streams.cpp, topic mode; its `#streams-controls` script), as a message
  * browser: the retained messages newest first as rows, with Live (the bounded forward long poll of
  * `browse_stream`) as the prominent control, paging and a jump; a side column with the topic,

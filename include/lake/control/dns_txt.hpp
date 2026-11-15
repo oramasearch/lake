@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // TXT lookups for custom-domain proof of control (lake#949, docs/api/platform.md#custom-domains).

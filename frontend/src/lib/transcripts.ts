@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Transcripts (lake#561) as plain logic: the record's shape, the words a page shows for it, a
  * title from a file or a time, and the context Ask Orama is given about one. `npm test` covers it
  * (tests/transcripts.test.ts). The capabilities are `list_transcripts`, `get_transcript`,

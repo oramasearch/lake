@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Modal, Drawer and ConfirmButton: the only elevated surfaces. Panels carry no shadow; overlays
  * use lake's dialog shadow so they read as above the page.
  *

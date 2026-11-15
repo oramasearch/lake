@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // Billing (lake#564, docs/api/billing.md): Orama Cloud's price list, the bill for a

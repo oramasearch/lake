@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** An app's secret environment names a lake secret (lake#625): the stored reference, what the
  * Environment table shows, and the form's set_app_env input. `npm test`; the build runs it. */
 import { test } from "node:test";

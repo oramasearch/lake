@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/own_identity.hpp"
 
 #include <algorithm>

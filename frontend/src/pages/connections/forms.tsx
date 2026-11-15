@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The connection forms shared by Data → Connections and Data → Datasets (lake#651): Add connection
  * (a drawer) and the pull of a table into a dataset (`create_dataset_from_query`), which Datasets'
  * Load data and a connection's "Load into a dataset" both use. */

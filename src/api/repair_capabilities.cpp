@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // When a resource fails (lake#1207, docs/api/notifications.md): Lake tells the person who deployed
 // it, offers an agent to fix it (a `repair` turn) or to change it from instructions (a `change`
 // turn), and, when the person opts in, lets the agent repair it itself within a bounded number of

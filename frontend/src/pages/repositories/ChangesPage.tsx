@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /changes?repository_id= (web_ui_repository_log): the repository's changes, newest first, with
  * their figures (changes, authors, the latest) and a search over message, author and id. */
 import { useState } from "react";

@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT */
+
 /* The app's look: rev-os's visual language (docs/ui/web-app.md → The look) on lake's own colours
    and type. Layered after lake.css and app.css, so it restyles lake's component classes in place:
    every page built from them takes the look without being rewritten. Lake tokens only; the one

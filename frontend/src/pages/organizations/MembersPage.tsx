@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Members (`/members?organization_id=&team_id=`): an organization's or team's memberships with
  * their attestations (web_ui_memberships, serve_members_page). */
 import { useState } from "react";

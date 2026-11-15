@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Data → MCP Connections (lake#652, src/pages/mcp/logic.ts): the "Try it" form a tool's own JSON
  * Schema makes and the arguments its values make, the prefix shown while a name is typed, the

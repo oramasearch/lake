@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Redeem a Code (lake#1156, docs/ui/balance.md#coupon-codes): the Billing page's card where an
  * account's owner or admin types a coupon code from an ad. `redeem_coupon` gives the account a
  * credit from Orama; the server checks the code, one redemption per account and per person, and

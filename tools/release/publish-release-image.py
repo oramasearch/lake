@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+
 """Give a built lake image its release tag in Docker Hub, only from a tagged, approved source.
 
 usage: DOCKER_CONFIG=<dir> python3 -I tools/release/publish-release-image.py <build-tag> <vX.Y.Z>

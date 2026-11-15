@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The PostgreSQL fixture's start-up sweep never fails a test (lake#1254). Under `ctest -j` every
 // test process sweeps stale `lake_fixture_*` databases at start, and two processes can reach the
 // same one: PostgreSQL marks a database invalid as soon as a DROP starts, and an ALTER DATABASE on

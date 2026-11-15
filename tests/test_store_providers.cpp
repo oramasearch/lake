@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Every bucket and filesystem provider a store drive browses (lake#664, docs/api/storage.md): one
 // conformance suite, run against each provider's StoreContents over a local fake of the provider —
 // an S3 server that checks SigV4, an Azure Blob server that checks Shared Key or a SAS, the

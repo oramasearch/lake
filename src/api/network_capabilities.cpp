@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Secure-networking capabilities (lake#728, docs/api/network.md). The desired rows and operator
 // observations are the 0084/0085 control-plane contract. Tunnel credentials sign a recipient's
 // CSR; app connection credentials expose their workspace-secret reference and rotate by generation;

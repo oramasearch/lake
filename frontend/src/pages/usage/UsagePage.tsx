@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Usage (`/usage`, lake#564): every dimension of what the chosen workspaces store and use, over a
  * period against the one before, as figures, a chart stacked by workspace or by kind, tables, limit
  * meters and a CSV export. The workspace multi-select is Home's (`?ws=`); `?range=` picks the period

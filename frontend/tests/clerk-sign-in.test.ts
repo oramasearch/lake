@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * The Clerk sign-in page (lake#1115, lake#1116): it stops posting after Lake refuses a token, and
  * it speaks of invitations only where the Clerk instance's sign-up is by invitation. `npm test`.

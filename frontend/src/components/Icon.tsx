@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Lake's icon set (16×16, currentColor), the same shapes the server-rendered pages used. */
 import type { ReactElement } from "react";
 

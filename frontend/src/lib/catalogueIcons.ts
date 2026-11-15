@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The catalogue icons (lake#639): one hand-drawn glyph for every solution and methodology in
  * Orama's catalogue, the family glyphs a methodology the set does not know yet falls back to, and
  * the rule that picks a glyph for any entry, a workspace's own solutions included.

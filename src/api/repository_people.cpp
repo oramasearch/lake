@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "repository_people.hpp"
 
 #include <optional>

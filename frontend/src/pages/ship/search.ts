@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A search hit as a person reads it (zetta#1243, lake#596): the matched row's fields, in the
  * index's own field order, rather than the workspace's internal row id. No imports, so `npm test`
  * runs it directly. */

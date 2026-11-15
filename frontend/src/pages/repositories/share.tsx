@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What the Drive sharing and public share pages share: link state and wording
  * (`share_link_state`, `share_link_actions`), the bearer-link addresses and the share error. */
 import { Link2Off as LinkIcon } from "lucide-react";

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The quickstart process (lake#1128, docs/api/quickstart.md): start_quickstart, quickstart_status,
 // train_quickstart and quickstart_snippets compose upload_dataset, create_index, expose_index,
 // train_model and expose_model through the registry, and keep their state in the workspace Zetta.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * The catalogue icons (lake#639, src/lib/catalogueIcons.ts): every solution and methodology in
  * Orama's catalogue has its own glyph, every glyph keeps to the grid and the two tones, a new entry

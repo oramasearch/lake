@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/registry.hpp"
 #include "lake/api/balance.hpp"
 

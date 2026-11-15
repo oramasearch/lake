@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/audit_recorder.hpp"
 
 #include <algorithm>

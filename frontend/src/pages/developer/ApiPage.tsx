@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Developer → API (`/developer/api`): everything needed to call lake from a program, after
  * rev-os's Developer → API. Keys makes and revokes the viewer's API tokens (`create_token`,
  * `list_sessions`, `revoke_session`); Quick start shows the calls with the viewer's origin and

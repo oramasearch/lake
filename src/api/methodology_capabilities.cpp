@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // A workspace's own methodologies from Python code beside Orama's read-only catalogue
 // (docs/api/methodologies.md, lake#655).
 //

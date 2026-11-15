@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Sign in with a passkey (`/passkey-sign-in`): the WebAuthn assertion, then the pending return or
  * Sessions, as the server page did. */
 import { useState } from "react";

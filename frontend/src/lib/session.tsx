@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Who is viewing, and in which space and workspace. One read, `viewer`, answers it: the same
  * resolved viewer the server used to render navigation (signed in, operator, the spaces and
  * workspaces the person can choose, whether sign-in is Clerk). The workspace in the URL

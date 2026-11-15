@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The shell, in rev-os's layout on lake's colours: a 2px brand strip; a left rail of lake's groups
  * (Design, Train, Ship, Organization or Administration) with the current group open and its pages
  * listed beneath on a hairline, Docs and Developer at its foot, then the signed-in person and the

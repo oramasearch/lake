@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The Usage dashboard's chart: one dimension over time, stacked by workspace or by kind, drawn with
  * uPlot as Train and Ship's charts are, in lake's colours, redrawn when the theme changes. Each
  * band is a period's value stacked on the bands before it (stackSeries); the legend and the

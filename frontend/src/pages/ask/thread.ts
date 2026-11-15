@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The Ask Orama conversation a person is in, per workspace, shared by the side panel and the home
  * (lake#600): which conversation, the turn being followed and who they talk to. Kept for this tab
  * (`sessionStorage`), so closing the panel, moving between pages or opening the home keeps it; every

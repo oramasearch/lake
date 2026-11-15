@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What the Ship, Experiments and Streams pages share: workspace links, permission flags, the
  * agent-task turn (Application Agent, Experiments Agent), Markdown, the platform pages' repository
  * tabs and stale banner, and small text helpers. Candidates to hoist into `lib/`. */

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+
 """Vendor the workspace engine's input schemas into lake (lake#650).
 
 Every capability a lake caller may reach in a workspace engine (the `workspace_reads` and

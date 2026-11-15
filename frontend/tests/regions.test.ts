@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Regions in the web app (lake#757): read from `server_info`, nothing when the Lake has no region.
  * `npm test`; the build runs it. */
 import { test } from "node:test";

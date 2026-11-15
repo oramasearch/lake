@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // An identity document is public, so holding one proves nothing: password sign-up and a first
 // OAuth sign-in bind a document to a new account only with a fresh signature by its key (lake#931,
 // docs/api/identity.md#proving-you-hold-the-key).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** "Try it" for one connected tool (lake#652, docs/ui/mcp-connections.md): a drawer whose form is
  * made from the tool's own input schema (logic.ts `formFields`), run through `read_mcp_tool` for a
  * read and `call_mcp_tool` for a change, which the person confirms first. The answer is shown as

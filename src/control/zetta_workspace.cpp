@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/zetta_workspace.hpp"
 
 #include <algorithm>

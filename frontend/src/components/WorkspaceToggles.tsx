@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The workspace multi-select of Home's Dashboard and Usage: "All workspaces" and one toggle per
  * workspace, kept in `?ws=` and remembered in this browser (lib/workspaceSelection.ts). */
 import { useMemo } from "react";

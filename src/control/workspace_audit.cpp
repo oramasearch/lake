@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/workspace_audit.hpp"
 
 #include <algorithm>

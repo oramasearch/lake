@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Services (web_ui.cpp services_content): every database, stream and engine the space runs on
  * lake. Not a workspace page: the services belong to the space. The catalog of kinds is a card
  * grid (each opens the New Service drawer on its kind); the services are a table. A connection is

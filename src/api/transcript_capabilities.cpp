@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Speech-to-text and workspace transcripts (docs/api/transcripts.md, lake#561): `transcribe`
 // turns audio into text through the injected Transcriber (OpenAI with lake's key), and the five
 // transcript capabilities keep what was said as sealed `lake_transcripts` records in the

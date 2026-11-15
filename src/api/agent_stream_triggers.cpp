@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // An agent started by a workspace stream (lake#677, docs/api/agent-launches.md#stream-triggers).
 // An agent's stream triggers name topics of its workspace Zetta; each new message on one starts a
 // job of the agent with the message as its input, as the person who set the trigger, the way a

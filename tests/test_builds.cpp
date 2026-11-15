@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include <ctime>
 #include <memory>
 #include <string>

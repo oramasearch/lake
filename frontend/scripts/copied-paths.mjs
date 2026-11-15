@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Which paths outside frontend/ the image's `frontend` stage can read (lake#693).
 //
 // The Dockerfile's `frontend` stage builds the app in /frontend from `COPY frontend/ ./` plus

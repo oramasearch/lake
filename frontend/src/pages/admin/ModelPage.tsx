@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Model (`/models/:namespace/:id`, `/models/:id`): a model repository's storage, training
  * provenance, files and revisions (web_ui_model, serve_model_page). The name is resolved with
  * resolve_model, then read with get_model. Public models open signed out. */

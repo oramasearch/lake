@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // SAML 2.0 Web Browser SSO for an enterprise SSO provider (docs/api/sso.md#saml-sign-in, lake#836).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** New MCP connection (lake#652, docs/ui/mcp-connections.md): a `Modal sheet`. Where the server runs
  * comes first. A **remote** server: its URL, a name (its prefix shown as the person types), the
  * transport, and how Lake authenticates: none, a bearer token kept in a secret of this workspace (a

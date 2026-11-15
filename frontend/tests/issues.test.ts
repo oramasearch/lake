@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Repository issues (lake#598): the views, labels and their colours, people's names, the smallest
  * update an edit sends and why a person cannot write. `npm test`; the build runs it. */
 import { test } from "node:test";

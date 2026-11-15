@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The digest Approve sends with a proposal (lake#233): SHA-256, in hex, of the proposal as
  * nlohmann::json's `dump()` writes it, which is what the server computes (http_server.cpp
  * `proposal_digest`). That is compact JSON with every object's keys in byte order (std::map), no

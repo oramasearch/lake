@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Coupons (`/coupons`, lake#1156, docs/ui/balance.md#coupon-codes): the operator's coupon codes for
  * ads. Each code is worth an amount of credit from Orama; the page lists every code with its state
  * and its ads report (redemptions, first paid top-ups, spend), sums the same per campaign, creates a

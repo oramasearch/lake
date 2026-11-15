@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * The Experiments charts' transformations (moved from the server's experiments.js test,
  * tests/experiment_charts.cjs, lake#561): smoothing, missing steps, time axes, log scale,

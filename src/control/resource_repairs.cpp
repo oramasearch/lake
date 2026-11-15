@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/resource_repairs.hpp"
 
 #include <algorithm>

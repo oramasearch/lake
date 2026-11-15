@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Phone checks for lake's web app at 390×844, an iPhone user agent, touch and DPR 3
 // (docs/ui/mobile-web.md → How to Check It). Run against `npx vite --port 5174`; every /v1 call is
 // answered by the mocks below, so no lake is needed. Playwright is not a dependency of the app:

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Browser walkthrough of the quickstart process (lake#1128, lake#1182, docs/ui/quickstart.md): Clerk
 // sign-in with a one-time ticket, which lands on Quickstart at `/`; the first top-up when the
 // account's prepaid balance is blocked (lib.ensureFunds, Stripe's test Checkout only); then a CSV

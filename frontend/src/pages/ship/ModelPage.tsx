@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Ship → Model (`/ship/model?id=`, lake#599): serving one model version.
  * - Inference: publish or unpublish, the endpoint, the call to paste, and a try-it panel that
  *   calls `predict` with a row. A clustering model (lake#1243) predicts no column: the page shows

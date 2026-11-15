@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Where a sign-in page goes once lake's `lake_session` cookie is set, and the identity calls'
  * shared options. Sign-in pages navigate with a full `location.assign`, so the whole app (and the
  * `viewer` read) starts again as the new session. */

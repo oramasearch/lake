@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+
 """Measure how long each service kind takes to start, phase by phase (lake#197).
 
 Creates services through lake's API, follows them every second through list_services, reads the

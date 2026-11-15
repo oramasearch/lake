@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The pieces several Design pages share, in the kit's look: the card panel, the Runs table, status
  * chips, the gate checks, a JSON disclosure, Markdown, the pipeline graph drawn in the browser,
  * tabs kept in the address, and the workspace breadcrumb. */

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** One click opens.
  *
  * Right after a page loads the browser is busy, so a dialog or a panel can take a moment to

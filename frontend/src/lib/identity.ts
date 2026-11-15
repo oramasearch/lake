@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Which key an account signs with (lake#762, docs/api/identity.md#your-own-identity): pure helpers
  * for Account → Identity. Pages say "managed key" and "own key"; never the store's word for it.

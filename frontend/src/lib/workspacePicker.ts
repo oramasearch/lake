@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What the top bar's workspace picker shows (components/WorkspacePicker.tsx, lake#638): who owns
  * each group of workspaces, what the pill says, when the filter box appears and what it keeps. Pure,
  * so `npm test` covers it. */

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Invitations (`/invitations?organization_id=&team_id=`): the invitations an organization or team
  * sent (web_ui_invitations, serve_invitations_page). */
 import { useState } from "react";

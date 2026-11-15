@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Clerk webhooks (lake#765, docs/api/clerk.md#webhooks): Svix verification and the user events
 // that create, update and disable Lake accounts.
 #include "audit_test_support.hpp"

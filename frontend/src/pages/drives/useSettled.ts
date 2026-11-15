@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The value, once it has stopped changing for `ms` (a search box's query, before it is sent). */
 import { useEffect, useState } from "react";
 

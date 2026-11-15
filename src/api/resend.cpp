@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Resend (lake#831, docs/api/orders.md#email): lake's own client for Resend's REST API. No Resend
 // SDK; the HTTP exchange is injected (ResendHttp), the server's outbound client in lake.
 

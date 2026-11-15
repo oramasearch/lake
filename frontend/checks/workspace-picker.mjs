@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Screenshots of the top bar's workspace picker (lake#638, docs/ui/workspace-selection.md → The
 // picker) at 1440 and 390 wide. Run against `npx vite --port 5174`; every /v1 call is answered by the
 // mocks below (one account with three workspaces and two organizations), so no lake is needed.

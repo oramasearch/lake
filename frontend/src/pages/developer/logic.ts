@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Developer → API and Developer → MCP, the parts that are rules rather than layout: the
  * `create_token` input a key form builds, how a token's scopes read, and the OpenAPI document
  * turned into searchable groups of operations with a curl line each. No imports from the app, so

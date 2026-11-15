@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // Resend, the email vendor lake sends its own transactional email through (lake#831,

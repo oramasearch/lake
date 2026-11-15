@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "one_thread_io.hpp"
 #include "postgres_fixture.hpp"
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Lake's mark: the lake glyph in white on a rounded square in the action blue, the brand's
  * gradient running across it. */
 export function LakeMark({ size = 28 }: { size?: number }) {

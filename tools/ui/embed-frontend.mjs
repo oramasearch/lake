@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
+
 // Embed the built web app (frontend/dist) into the lake binary: one C++ translation unit holding
 // every file's bytes, its served path and its media type. lake serves `/index.html` for page
 // routes and everything under `/ui/` (Vite's content-hashed output) immutable.

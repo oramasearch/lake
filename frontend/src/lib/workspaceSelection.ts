@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A multi-workspace selection, as Home's Dashboard and Usage keep it (lake#561, lake#564): the
  * URL's `?ws=<id>,<id>` first, else what this browser remembered, else every workspace. Ids that
  * are not among the viewer's workspaces are dropped. An empty answer means all of them. */

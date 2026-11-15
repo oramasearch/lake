@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What a delete or revoke takes, said from its `dry_run: true` answer (lake#645,
  * docs/ui/deletion.md). Each capability answers its own plan; these turn one into the lines the
  * confirmation dialog lists (a figure and what it counts) and the text the person types to confirm.

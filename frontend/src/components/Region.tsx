@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Regions in the web app (lake#757, docs/ui/regions.md), read from `server_info`: the top bar's
  * region (its label, and a link to each other region's host), and the sentence on the sign-in and
  * sign-up pages. A Lake with no region renders nothing. */

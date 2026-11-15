@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /artifact?repository_id=&id= (web_ui_artifact): one build result. Outputs, indexed members and
  * attestations on the left; the result's facts, timing, trace and a search inside it on the
  * right. */

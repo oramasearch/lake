@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A render error stays inside the screen that hit it: the shell, the navigation and every other
  * screen keep working, and the person sees what happened instead of a blank page. Resets when the
  * route changes. */

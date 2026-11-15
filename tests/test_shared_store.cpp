@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Two lake processes and one store root (lake#467, lake#479).
 //
 // A rollout that overlaps a single-replica Lake runs a second lake process on the store volume

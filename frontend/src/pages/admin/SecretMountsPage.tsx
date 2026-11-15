@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Secret Mounts (`/secret-mounts?workspace_id=&organization_id=`): the secret mounts the viewer
  * may read in one workspace (web_ui_secret_mounts, serve_secret_mounts_page), and New Mount
  * (`create_secret_mount`, docs/ui/secrets.md). The workspace is the one named in the query, else

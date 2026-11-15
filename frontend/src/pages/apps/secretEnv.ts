@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** An app's secret environment (lake#625): each value names one field of one secret in a lake
  * secret mount of the app's workspace, stored as `lake-secret://<mount id>/<name>#<field>`. The
  * operator projects it into the app when it is deployed and rewrites it when the secret changes. */

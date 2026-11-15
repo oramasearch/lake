@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Coupon codes for ads (lake#1156, docs/api/billing.md#coupon-codes): only the operator or the
 // instance administrator creates, lists and disables codes; a person redeems one for an account
 // they administer, and the redemption is an ordinary grant from Orama (lake#1134) with the

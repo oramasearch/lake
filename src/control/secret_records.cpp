@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/secret_records.hpp"
 
 namespace lake::control {

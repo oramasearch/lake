@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Preloaded into the frontend tests and scripts (`node --import ./scripts/watch-copied-reads.mjs`,
 // lake#693). It records every file a process reads, lists, stats or imports in the repository
 // outside frontend/, and at exit fails the process when the Dockerfile's `frontend` stage does not

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** An environment's logs (web_ui.cpp web_ui_logs; serve_logs_page), in a terminal panel. The page
  * reads `environment_logs` with GET and polls it every 3 seconds from `next_since`, appending lines
  * (the server page's script POSTed to a GET-only read and never appended anything). */

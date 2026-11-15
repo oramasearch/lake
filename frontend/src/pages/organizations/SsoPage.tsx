@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Enterprise SSO (`/sso?organization_id=&provider_id=`): an organization's providers, the issuer
  * claims it allows and one provider's SCIM provisioning log (web_ui_sso, serve_sso_page). */
 import { useState } from "react";

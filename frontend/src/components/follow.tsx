@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A conversation keeps its place, ported from rev-os's `components/assistant/follow.tsx`
  * (lake#561): it follows each new answer while the person is at the end, stays put when they have
  * scrolled up to read (a "New reply" chip takes them down), and stays at the end when the keyboard

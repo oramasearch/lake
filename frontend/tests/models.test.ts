@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Train → Models and Ship → Models (lake#599): which trained records are versions of one model,
  * their held-out scores and comparisons, the pipeline steps a model belongs to, the predict call

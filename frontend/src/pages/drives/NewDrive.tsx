@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** New drive (create_drive), in a drawer: its name, how it keeps its files, for a repository
  * drive a new repository (named from the drive) or one this workspace already has, and for a
  * storage drive one of the workspace's buckets or filesystems (lake#656). Drives → Storage opens it

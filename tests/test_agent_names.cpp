@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Agent names (lake#763): the Agent Library (include/lake/control/agent_library.hpp) is the one
 // source of what each agent is called. These tests fail when a name breaks the naming scheme, when
 // any other spelling of an agent's name appears anywhere in lake (code, the web app, the in-app

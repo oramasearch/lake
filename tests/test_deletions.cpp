@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Deleting and revoking what Lake could only create before (lake#645, docs/api/deletion.md):
 // organizations, invitations, grants and secret mounts in the control plane, and a workspace's
 // datasets, models, runs, search indexes and Ask Orama conversations in its workspace Zetta. Every

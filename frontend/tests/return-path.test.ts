@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A return path after sign-in stays on this origin (LSR-184, lake#990). `npm test`. */
 import { test } from "node:test";
 import assert from "node:assert/strict";

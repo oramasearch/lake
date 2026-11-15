@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Lake on a phone, as plain logic, ported from rev-os's `lib/phone.ts` (lake#561). No React and no
  * DOM, so `npm test` covers it: which recording format a browser can make, how far the on-screen
  * keyboard covers the page, when a conversation follows a new answer, which files a transcript

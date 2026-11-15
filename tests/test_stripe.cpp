@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Stripe, lake's payment provider (lake#620, docs/api/billing.md#stripe): lake's own
 // REST client against a fake Stripe, the webhook signature and its tolerance window, notices
 // applied once per event id, other apps' and other Lakes' events ignored in a shared account

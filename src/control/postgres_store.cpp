@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The one translation unit that names libpqxx. Each call opens (or reuses) one
 // connection and runs one transaction, inline on the caller's thread; SQL
 // errors map to the store's error codes.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "../src/api/store_repository.hpp"
 #include "audit_test_support.hpp"
 #include "personal_customer_test_support.hpp"

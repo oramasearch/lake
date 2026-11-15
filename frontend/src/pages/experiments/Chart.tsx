@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** One uPlot chart in lake's colours (`assets/experiments/experiments.js` createChart): drag a
  * region to zoom on X, Shift-drag to pan, a resize observer, and a redraw when the theme changes.
  * Metric charts register themselves so the toolbar's zoom and pan act on all of them, and keep

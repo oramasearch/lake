@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /artifacts?repository_id=&action=&output=&content=&cursor=&limit= (web_ui_artifacts): build
  * results, filtered and paged by the capability (limit 1–1000, default 100). */
 import { useState } from "react";

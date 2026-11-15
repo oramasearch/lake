@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // SAML sign-in through Lake's Assertion Consumer Service (lake#836, docs/api/sso.md#saml-sign-in):
 // the canonicalizer against the specification's examples, verification of responses signed by an
 // independent implementation (tests/fixtures/saml), the refusals (tampering, signature wrapping,

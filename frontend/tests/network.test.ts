@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Network (lake#729): the section's place in the rail, that its pages reach every network
  * capability (lake#728), and the words, inputs and sentences the pages use. `npm test`; the build
  * runs it. */

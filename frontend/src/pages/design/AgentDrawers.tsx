@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The drawers that design an agent (lake#653): New agent (blank, or duplicated from one of
  * Orama's) and Edit, both over the shared definition form, which also names the workspace streams
  * that start it (lake#677). */

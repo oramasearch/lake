@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Ship → Apps (web_ui.cpp web_ui_apps; handlers serve_apps_page and serve_app_form create,
  * agent and agent_confirm): the space's apps as a card grid with their figures, New app (from a
  * repository or an image) in a drawer, and an Application Agent turn with its proposal confirmed

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
+
 // Writes the catalogue icons (lake#639) as standalone SVG files under assets/catalogue-icons/, the
 // copy a website can use. The source of record is
 // frontend/src/lib/catalogueIcons.ts; never edit the SVG files by hand.

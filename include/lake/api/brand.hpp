@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // The instance brand (lake#1135, lake#1137, docs/serving/brand.md): the name, logo, colours and

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/request_recorder.hpp"
 
 #include <algorithm>

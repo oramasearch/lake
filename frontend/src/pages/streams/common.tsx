@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What the two Streams pages share (web_ui_streams.cpp): the page heading, the trail, the topic
  * labels and a promise-returning confirmation dialog. */
 import { type ReactNode, useCallback, useRef, useState } from "react";

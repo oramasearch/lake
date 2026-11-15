@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Ask Orama (`/ask`; the home of a signed-in person from lake#600 until lake#1128 made Quickstart
  * the home): the conversation the side panel holds
  * (pages/ask/thread.ts), across the page's width in one centred, readable column, its message box at

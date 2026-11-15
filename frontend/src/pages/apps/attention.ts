@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Which apps need attention on the Apps page (lake#1208). A Degraded app is crash-looping or
  * unavailable, so it is counted with Failed ones rather than read as fine. */
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Ship → Search Index (web_ui.cpp index_content): what one index covers, publish and unpublish,
  * a search playground whose question stays in the URL (`q`, `field`, `top_k`), and how to call it
  * from outside with a key that can only search. Laid out as a Split: the playground and the code

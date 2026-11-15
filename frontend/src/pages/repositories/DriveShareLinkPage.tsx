@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /drive/share/link?repository_id=&ref=&path=&workspace_id=&link_id= (web_ui_drive_share_link): one
  * folder link: who can use it, what it allows, when it stops, and revoking it. lake has no
  * `get_drive_share_link`, so the page finds it among the folder's links as the server did. */

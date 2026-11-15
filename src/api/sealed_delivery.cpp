@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // mint_sealed_secret and the sealed-secret envelope version 1 (lake#625): a user's workspace secret
 // delivered to a Kubernetes Secret the operator writes, sealed so that only the target cluster can
 // open it. See include/lake/api/sealed_delivery.hpp and docs/api/secrets.md#projections.

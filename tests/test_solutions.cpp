@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // A workspace's own AI solutions (docs/api/solutions.md, lake#597): the pure parts. What a
 // solution must carry, how one of Orama's catalogue entries becomes an editable copy, the names a
 // copy takes, and where their audit goes. The capabilities against workspace records are in

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Regions (lake#757, docs/api/regions.md): the four environment variables, server_info's region
 // fields, the closest region to a visitor's country, the apex host's preference cookie, the
 // picker that keeps the path and query, and the apex's agent documents that name every region

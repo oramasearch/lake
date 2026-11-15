@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Words the web app shows (lake#583): no page names Zetta to a person. The rest of the app speaks
  * of lake and the workspace (docs/ui/web-app.md, "Words"). Comments and identifiers (`hasZetta`,
  * `bindings.zetta`) may name it; text a person reads may not. `npm test`; the build runs it. */

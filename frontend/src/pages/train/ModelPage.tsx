@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Train → Model (`/train/model?id=`, lake#599): training one model. Its versions (one per run or
  * trial) with their held-out scores over time, two versions compared, what the chosen version
  * learned from, the pipeline step or steps it belongs to, retraining (its pipeline run again) and

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The top bar's search (⌘K or "/", lake#633): Go to (pages and workspaces, instant) and every place
  * Data → Search covers, searched as the person types in every workspace they have. Each place
  * fills in as it answers; a slow one never holds the others, and a failed one says so in its group.

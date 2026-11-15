@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The router: every registered screen, inside the shell unless it is bare (sign-in, public share
  * pages). Workspace pages answer at `/w/:workspaceId<path>`; their unprefixed address opens the
  * remembered or only workspace, or asks for one. */

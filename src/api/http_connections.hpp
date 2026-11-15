@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 // lake#534: lake's HTTP connections, decoupled from the requests being handled.
 //

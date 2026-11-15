@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** One environment (web_ui.cpp web_ui_environment; serve_environment_page and the four
  * serve_platform_form routes), as a Split: environment variables, domains and deployment history
  * on the left; the current deployment and its logs on the right. The forms call their

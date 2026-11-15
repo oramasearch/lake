@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Train → Run (web_ui.cpp workspace_content "run", run_report_panel, run_details_panel): one run,
  * its report once it finished, its lineage, outputs, log and trace, beside its facts. While it runs
  * the page checks again every 15 seconds; the report is asked for only once the run is no longer

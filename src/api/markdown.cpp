@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/markdown.hpp"
 
 #include <cctype>

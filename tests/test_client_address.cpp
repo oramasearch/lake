@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Which address per-client limits count a request against (lake#1083,
 // docs/deployment/client-addresses.md).
 #include <gtest/gtest.h>

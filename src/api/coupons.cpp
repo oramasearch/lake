@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Coupon codes for ads (lake#1156, docs/api/billing.md#coupon-codes): the operator creates a code
 // worth an amount of cloud credit (create_coupon, list_coupons, disable_coupon), and a person
 // redeems it for an account they administer (redeem_coupon), in Billing or carried through sign-up

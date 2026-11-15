@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What the repository, forge and Drive pages share: the shapes their capabilities answer, lake's
  * forge markup helpers (identifiers, badges, sizes, the repository tabs and breadcrumbs), the
  * repository error page and the conflict resolution block (web_ui.cpp). */

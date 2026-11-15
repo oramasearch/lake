@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+
 """Build the lake cloud navigation mock (docs/design/cloud.md) as static HTML.
 
 The shell markup copies `web_ui_shell` in src/api/web_ui.cpp, and the stylesheet and icons are

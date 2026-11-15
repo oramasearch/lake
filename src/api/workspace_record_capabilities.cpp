@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The one-shot copy of a retired control-store table into the owning workspace Zettas
 // (docs/architecture/workspace-records.md, lake#370). One operator capability serves every
 // collection that moves: each follow-up adds its collection to `copy_collections` and a copier.

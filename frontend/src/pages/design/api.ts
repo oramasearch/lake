@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The calls every Design page shares: the space and workspace it works in, the engine reads and
  * actions through `workspace_query` / `workspace_act`, and links under the current workspace.
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The UI kit: the components every screen is made of, so no screen invents its own. They render
  * lake's existing component classes (styles/lake.css), so the look is lake's; Tailwind utilities,
  * bound to the same tokens, only arrange them. */

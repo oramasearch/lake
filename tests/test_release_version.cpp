@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The version lives in three places (CONTRIBUTING.md, *Cutting a release*): `project(lake VERSION)`
 // in CMakeLists.txt, `version_string()` in src/version.cpp and `current_version()` in
 // include/lake/version.hpp. These tests read each from the code, never repeating the number, and

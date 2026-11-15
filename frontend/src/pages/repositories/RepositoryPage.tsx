@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /repository?id= (web_ui_repository): the repository home, as a code host draws it. A header with
  * the name, visibility and actions (Clone, Build image); the repository's tabs; figures; then the
  * files at the default ref, recent changes and the README on the left, and clone and push, About,

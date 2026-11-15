@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A database's safe mode (lake#906, docs/ui/safe-mode.md): Off, Warn Writes or Warn All, kept in
  * the workspace per database or connection (`get_safe_mode`, `set_safe_mode`). A call the level
  * warns on is refused with `safe_mode_warning`, whose details carry the exact statements and a

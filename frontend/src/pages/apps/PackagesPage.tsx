@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Ship → Packages (web_ui.cpp web_ui_packages): the instance registry's catalog, the space's
  * image repositories, and its image builds with their live log — a tab per registry kind, each
  * package with its versions and its install command to copy, and a Builds tab. */

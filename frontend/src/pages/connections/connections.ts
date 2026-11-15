@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Data → Connections (lake#651, docs/ui/connections.md): the words and inputs the Connections pages
  * use, and where the old Datasets links go now. Pure, so `tests/connections.test.ts` runs it under
  * Node. A connection is the workspace engine's (`list_connections`, `create_connection`,

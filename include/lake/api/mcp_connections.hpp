@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // A workspace's MCP connections (lake#652, docs/api/mcp-connections.md): the
