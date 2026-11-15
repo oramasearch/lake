@@ -6667,6 +6667,63 @@ void register_conversation_capabilities(Registry& registry) {
         .async_handler = render_pipeline});
 }
 
+bool library_agent_may_read(const Capability& capability) {
+    // Reads only, including actions that only read (workspace_query).
+    if (capability.kind != CapabilityKind::Read && capability.action != "read") {
+        return false;
+    }
+    // Objects whose reads are credentials, secrets, sign-in or identity material: a person reads
+    // these themselves, never through an agent that reads for them.
+    static const std::set<std::string, std::less<>> withheld_objects{"agent_bus",
+                                                                     "agent_usage",
+                                                                     "application",
+                                                                     "authentication",
+                                                                     "certificate",
+                                                                     "clerk",
+                                                                     "lake_session",
+                                                                     "methodology_deployment",
+                                                                     "methodology_run",
+                                                                     "oauth",
+                                                                     "principal",
+                                                                     "secret",
+                                                                     "secret_mount",
+                                                                     "user"};
+    if (withheld_objects.contains(capability.object)) {
+        return false;
+    }
+    // Named, never a prefix (a prefix hides reads it should not): reads of other objects that
+    // still disclose secrets, keys, credentials or identity configuration.
+    static const std::set<std::string, std::less<>> withheld_names{"account_identity",
+                                                                   "decrypt",
+                                                                   "export_application_user",
+                                                                   "get_encryption_key",
+                                                                   "list_browser_keys",
+                                                                   "list_devices",
+                                                                   "list_encryption_keys",
+                                                                   "list_federation_issuers",
+                                                                   "list_grants",
+                                                                   "list_invitations",
+                                                                   "list_network_tunnel_grants",
+                                                                   "list_network_tunnel_sessions",
+                                                                   "list_offline_grants",
+                                                                   "list_recovery_notifications",
+                                                                   "list_secret_mounts",
+                                                                   "list_secrets",
+                                                                   "list_sessions",
+                                                                   "list_sso_providers",
+                                                                   "list_sso_provisioning_logs",
+                                                                   "mcp_setup",
+                                                                   "read_secret",
+                                                                   "repository_recovery_status",
+                                                                   "scim_get_group",
+                                                                   "scim_get_user",
+                                                                   "scim_list_groups",
+                                                                   "scim_list_users",
+                                                                   "secret_metadata",
+                                                                   "tunnel_client_downloads"};
+    return !withheld_names.contains(capability.name);
+}
+
 void register_agent_run_capabilities(Registry& registry) {
     const auto customer_agent_schema = [](json properties, json required) {
         return customer_input_schema(std::move(properties), std::move(required));
@@ -7343,13 +7400,13 @@ void register_agent_run_capabilities(Registry& registry) {
                     co_return ApiResult::failure(prior.error().code, prior.error().message);
                 }
                 if (agent == "agent-ask-orama") {
-                    // Ask Orama reads everything the person may read and changes nothing itself:
-                    // its key carries every read capability and agent_turn, never an action.
+                    // Ask Orama reads the workspace's data the person may read and changes nothing
+                    // itself: its key carries agent_turn and the reads library agents may make
+                    // (lake#985), never an action, a secret, a credential or identity material,
+                    // and every one of them is confined to this task's workspace.
                     scopes = {"agent_turn", "workspace_openapi"};
                     for (const auto& capability : registry.list()) {
-                        // Every read, including actions that only read (workspace_query).
-                        if (capability->kind == CapabilityKind::Read ||
-                            capability->action == "read") {
+                        if (library_agent_may_read(*capability)) {
                             scopes.push_back(capability->name);
                         }
                     }

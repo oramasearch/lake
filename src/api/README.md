@@ -36,6 +36,18 @@ reasons (`explain_run_failure`, `clustering_problem`) and a confirm's words (`co
 `sql` and loads the copy with a nested `upload_dataset`.
 See [quickstart.md](../../docs/api/quickstart.md).
 
+`registry.cpp` confines an agent's task, launch or schedule credential to its own account and
+workspace (lake#985): `agent_confinement` sets `AuthorizationConfinement` on the call's
+authorization cache, and `agent_input_refusal` refuses an input naming another account,
+workspace or repository. `library_agent_may_read` (`workspace_capabilities.cpp`) is the read list
+Ask Orama's turn key is generated from. See
+[agent-bus.md](../../docs/api/agent-bus.md#a-task-credential-is-confined-to-its-workspace).
+
+`registry.cpp` also enforces a launch's dataset work area (lake#1055): `work_area_input` names the
+database on a confined `get_dataset`, `work_area_refusal` refuses at dispatch every call that
+cannot be shown to stay inside the work area, and `confine_answer` keeps only its datasets in a
+`list_datasets` answer. See [agent-launches.md](../../docs/api/agent-launches.md#a-runs-dataset-work-area).
+
 `browser_key_capabilities.cpp` registers `create_browser_key`, `list_browser_keys` and
 `revoke_browser_key` (lake#1152). A browser key acts as no person: `authorize_browser_key` in
 `registry.cpp` admits it only to `search_index` and `predict` on its binding, from its origins

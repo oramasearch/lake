@@ -217,6 +217,44 @@ TEST_F(Streams, LaunchCredentialCannotSelectAnotherWorkspaceInTheSameSpace) {
               "unauthorized");
 }
 
+// LSR-118 (lake#985): a task credential acts only in its task's account and workspace, also when
+// the input names a resource and no workspace: another account, another account's repository and
+// another workspace's repository of the same account are refused before any handler reads them.
+TEST_F(Streams, TaskCredentialReadsOnlyItsOwnWorkspacesResources) {
+    const auto elsewhere = store->create_repository(
+        {other, "elsewhere", "", "private", lake::test::repository_workspace(*store, other)});
+    ASSERT_TRUE(elsewhere) << elsewhere.error().message;
+    const auto second = workspace->add(store, customer, "second");
+    const auto sibling = store->create_repository({customer, "sibling", "", "private", second});
+    ASSERT_TRUE(sibling) << sibling.error().message;
+    const auto task = store->create_agent_task({.customer_id = customer,
+                                                .agent = "agent-ask-orama",
+                                                .kind = "test",
+                                                .workspace_id = workspace->id,
+                                                .scopes = {"list_streams", "get_repository"}});
+    ASSERT_TRUE(task);
+    context.credential_token_hash = lake::control::identity_crypto::sha256_hex("confined-claim");
+    ASSERT_TRUE(
+        store->claim_agent_task(task->id, "agent-ask-orama", context.credential_token_hash));
+    context.session_credential = true;
+    context.operator_credential = false;
+    context.credential_kind = "agent_task";
+    context.credential_session_id = "task:" + task->id;
+    context.scopes = {"list_streams", "get_repository"};
+
+    const auto other_account = call("list_streams", {{"customer_id", other}});
+    EXPECT_EQ(other_account.error.code, "unauthorized");
+    EXPECT_NE(other_account.error.message.find("its own workspace"), std::string::npos);
+    for (const std::string& repository : {elsewhere->id, sibling->id}) {
+        json args{{"repository_id", repository}};
+        const auto refused =
+            liquid::runtime::block_on(registry.call_async("get_repository", args, context));
+        ASSERT_TRUE(refused);
+        EXPECT_EQ(refused->error.code, "unauthorized") << repository;
+    }
+    EXPECT_TRUE(call("list_streams", {{"customer_id", customer}}).ok);
+}
+
 // LSR-009 (lake#918): a launch's credential reaches only its own workspace through the object its
 // input names, whose workspace the handler derives (here a repository), and its `workspace_act`
 // runs no action its credential does not name. A public repository stays readable.

@@ -48,8 +48,10 @@ shows it and keeps it honest.
 
 - **It works as the person.** A turn goes through `agent_turn` ([agent-launches.md](agent-launches.md)),
   which hands Ask Orama a key for that turn only, derived from the person's own credential and
-  carrying **every read capability and `agent_turn`, never an action**. The key is revoked when the
-  turn ends.
+  carrying **the library-agent reads and `agent_turn`, never an action, a secret or a credential**,
+  and confined to the conversation's workspace
+  ([agent-bus.md](agent-bus.md#a-task-credential-is-confined-to-its-workspace), lake#985). The key
+  is revoked when the turn ends.
 - **It never changes anything itself.** A change comes back as a proposal. **Confirm** runs it in
   lake, as the person, through the ordinary registry path with its own authorization and audit.
   Only a proposal lake stored in that person's conversation can be confirmed: a forged index or

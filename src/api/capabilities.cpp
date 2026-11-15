@@ -6980,9 +6980,13 @@ std::expected<search::Query, ApiError> search_scope(const json& input, ApiContex
                         input.value("change", ""),
                         input.value("history", false),
                         input.value("workspace_id", "")};
+    // An agent credential searches only its own account and workspace (lake#985).
+    query.confined = context.authorization_cache.confinement.active;
+    query.confined_customer = context.authorization_cache.confinement.customer_id;
+    query.confined_workspace = context.authorization_cache.confinement.workspace_id;
     const bool operator_principal =
         context.operator_credential || context.acting_identity == "admin";
-    control::AuthorizationCache cache;
+    control::AuthorizationCache cache = control::fresh_cache_like(context.authorization_cache);
     const auto space_readable = [&](const std::string& customer_id) {
         const auto object = context.store->find_policy_object("customer", customer_id);
         if (!object) {

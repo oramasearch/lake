@@ -239,6 +239,12 @@ void register_workspace_store_capabilities(Registry& registry);
 // stop_agent_launch, schedule_agent, list_agent_schedules, unschedule_agent, agent_turn. Registered
 // by register_workspace_capabilities.
 void register_agent_run_capabilities(Registry& registry);
+// Whether a library agent's task credential that reads for a person (Ask Orama) may carry this
+// capability (LSR-118, lake#985): a read of the workspace's data, never an action, a secret, a
+// credential, a sign-in or recovery ceremony, or identity material such as SSO and SCIM settings.
+// The task's scopes are generated from this list, and every call is still confined to the task's
+// own account and workspace (docs/api/agent-bus.md#a-task-credential-is-confined-to-its-workspace).
+bool library_agent_may_read(const Capability& capability);
 
 // The Zetta capabilities a lake caller may reach on a workspace: reads through GET, actions
 // through POST (docs/api/workspaces.md). The agent path /workspaces/<customer>/zetta/v1/ and

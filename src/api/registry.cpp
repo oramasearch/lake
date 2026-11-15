@@ -854,6 +854,101 @@ const nlohmann::json& agent_task_input(const Capability& capability,
     return resolved;
 }
 
+// The account and workspace an agent's task, launch or schedule credential was made for (LSR-118,
+// lake#985): nullopt for any other credential. A row that cannot be read confines the credential to
+// nothing (active, no customer), so it reaches no object.
+std::optional<control::AuthorizationConfinement> agent_confinement(const ApiContext& context) {
+    const std::string& session = context.credential_session_id;
+    const auto id_after = [&](std::string_view prefix) -> std::string {
+        return session.starts_with(prefix) ? session.substr(prefix.size()) : std::string();
+    };
+    control::AuthorizationConfinement bound{.active = true};
+    if (context.credential_kind == "agent_task") {
+        if (const auto task = context.store->get_agent_task(id_after("task:"))) {
+            bound.customer_id = task->customer_id;
+            bound.workspace_id = task->workspace_id;
+        }
+    } else if (context.credential_kind == "agent_launch") {
+        if (const auto launch = context.store->get_agent_launch(id_after("launch:"))) {
+            bound.customer_id = launch->customer_id;
+            bound.workspace_id = launch->workspace_id;
+        }
+    } else if (context.credential_kind == "agent_schedule") {
+        if (const auto schedule = context.store->get_agent_cron_schedule(id_after("schedule:"))) {
+            bound.customer_id = schedule->customer_id;
+            bound.workspace_id = schedule->workspace_id;
+        }
+    } else {
+        return std::nullopt;
+    }
+    return bound;
+}
+
+// What an agent credential's input names outside its own account or workspace (lake#985), before
+// any handler reads it: a `customer_id`, any of `workspace_ids`, or a repository (`repository_id`,
+// `repository`, or `id` on a repository capability) of another account or workspace. The policy
+// check refuses the same objects through the confined cache; this refuses the inputs a handler
+// might act on without a policy decision, and says so in one way whichever is reached.
+std::optional<ApiResult> agent_input_refusal(const Capability& entry,
+                                             const nlohmann::json& input,
+                                             const control::AuthorizationConfinement& bound,
+                                             ApiContext& context) {
+    const ApiResult refused =
+        ApiResult::failure("unauthorized", "this agent credential acts only in its own workspace");
+    if (bound.customer_id.empty()) {
+        return refused;
+    }
+    if (!input.is_object()) {
+        return std::nullopt;
+    }
+    if (const auto customer = input.find("customer_id");
+        customer != input.end() && customer->is_string() &&
+        customer->get<std::string>() != bound.customer_id) {
+        return refused;
+    }
+    if (const auto workspace = input.find("workspace_id");
+        workspace != input.end() && workspace->is_string() && !bound.workspace_id.empty() &&
+        workspace->get<std::string>() != bound.workspace_id) {
+        return refused;
+    }
+    if (const auto workspaces = input.find("workspace_ids");
+        workspaces != input.end() && workspaces->is_array()) {
+        for (const auto& id : *workspaces) {
+            if (!id.is_string() ||
+                (!bound.workspace_id.empty() && id.get<std::string>() != bound.workspace_id)) {
+                return refused;
+            }
+        }
+    }
+    std::vector<std::string> repositories;
+    for (const char* field : {"repository_id", "repository"}) {
+        if (const auto named = input.find(field); named != input.end() && named->is_string()) {
+            repositories.push_back(named->get<std::string>());
+        }
+    }
+    if (entry.object == "repository") {
+        if (const auto named = input.find("id"); named != input.end() && named->is_string()) {
+            repositories.push_back(named->get<std::string>());
+        }
+    }
+    for (const std::string& id : repositories) {
+        if (id.empty()) {
+            continue;
+        }
+        const auto repository = context.store->get_repository(id);
+        if (!repository) {
+            // Not a repository id (a name the handler resolves within the account, or nothing):
+            // the handler's own authorization decides, inside the confined cache.
+            continue;
+        }
+        if (repository->customer_id != bound.customer_id ||
+            (!bound.workspace_id.empty() && repository->workspace_id != bound.workspace_id)) {
+            return refused;
+        }
+    }
+    return std::nullopt;
+}
+
 const nlohmann::json& workspace_path_input(const Capability& capability,
                                            const nlohmann::json& input,
                                            const ApiContext& context,
@@ -1003,6 +1098,20 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         }
     }
     const Capability& entry = *state.capability;
+    // An agent's task, launch or schedule credential acts as the person who started it, but only
+    // inside that task's account and workspace (LSR-118, lake#985), whether or not the input names
+    // a workspace: every policy decision of this call is confined, and an input naming another
+    // account's or workspace's resource is refused before a handler reads it.
+    if (context.authorized && context.store) {
+        if (const auto bound = agent_confinement(context)) {
+            context.authorization_cache.confinement = *bound;
+            if (auto refused = agent_input_refusal(entry, input, *bound, context)) {
+                state.result = std::move(*refused);
+                state.proceed = false;
+                return state;
+            }
+        }
+    }
     if (context.store &&
         (entry.name == "sign_up_password" || entry.name == "sign_in_password" ||
          entry.name == "verify_mfa" || entry.name == "recover_with_code" ||

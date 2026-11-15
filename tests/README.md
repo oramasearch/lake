@@ -1044,3 +1044,13 @@ own pool while `viewer` names the provider (`WhiteLabelSsoOnly.*`).
 environment keeps its token, only the claim's token verifies it, releasing frees the host) and
 `DnsTxt.*` (the TXT question, reading an answer with a CNAME and split records, truncation, NXDOMAIN,
 resolv.conf). The capability flow is in `test_platform.cpp` (`PlatformFixture.*Domain*`).
+`test_policy.cpp`'s `Policy.AConfinedDecisionAllowsOnlyObjectsInsideItsAccountAndWorkspace` and
+`Policy.LibraryAgentReadsLeaveOutSecretsAndCredentials`, and `test_streams.cpp`'s
+`Streams.TaskCredentialReadsOnlyItsOwnWorkspacesResources`, cover lake#985: an agent credential
+reaches no other account or workspace, and Ask Orama's read list leaves out secrets and
+credentials.
+
+`test_streams.cpp`'s `AgentWorkArea.ADatasetWorkAreaBecomesCanonicalScopes` and
+`Streams.ADatasetConfinedLaunchCredentialStaysInItsWorkArea` cover a launch's dataset work area
+(lake#1055): the scopes it becomes, and that a launch credential called directly reaches only that
+work area. See [agent-launches.md](../docs/api/agent-launches.md#a-runs-dataset-work-area).

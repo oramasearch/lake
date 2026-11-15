@@ -3108,6 +3108,9 @@ Service::query(const Query& query, const std::string& principal, control::Store&
         policy_object_ids.erase(std::unique(policy_object_ids.begin(), policy_object_ids.end()),
                                 policy_object_ids.end());
         control::AuthorizationCache cache;
+        cache.confinement.active = query.confined;
+        cache.confinement.customer_id = query.confined_customer;
+        cache.confinement.workspace_id = query.confined_workspace;
         const auto decisions =
             control::authorize_batch(store, principal, policy_object_ids, "read", cache);
         if (!decisions) {

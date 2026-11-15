@@ -300,6 +300,15 @@ revision it was minted for, read every path. Commit messages and authors (`list_
 on a restricted folder is refused its file, does not see it in the tree and cannot export the
 repository; a grant on the folder gives both back.
 
+## An agent's decisions stay in its workspace (lake#985)
+
+A decision made for an agent's task, launch or schedule credential is confined to that credential's
+account and workspace (`AuthorizationConfinement` on the authorization cache, set by
+`prepare_call`): an object is allowed only when its full parent chain, past any inheritance cut,
+reaches that account's `customer` object and every repository on it belongs to that workspace,
+whatever grants the person the agent acts for holds elsewhere. Unprovable is outside. See
+[agent-bus.md](agent-bus.md#a-task-credential-is-confined-to-its-workspace).
+
 ## Verify and change
 
 `Policy.InheritsDownTheGraphAndStopsAtACut`,

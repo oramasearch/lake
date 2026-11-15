@@ -644,7 +644,7 @@ std::expected<void, ApiError> require_drive_share_role(const DriveLocation& loca
         return {};
     }
     // ensure_folder_location may have materialized policy objects since registry authorization.
-    control::AuthorizationCache cache;
+    control::AuthorizationCache cache = control::fresh_cache_like(context.authorization_cache);
     for (const std::string action : {"read", "write", "admin", "deploy", "review", "share"}) {
         if (action != "share" && !control::role_allows(role, action)) {
             continue;
@@ -683,7 +683,7 @@ authorize_drive_operations(const control::Repository& repository,
                            const std::vector<RepositoryTreeEntry>& entries,
                            const std::vector<RepositoryWriteOperation>& operations,
                            ApiContext& context) {
-    control::AuthorizationCache cache;
+    control::AuthorizationCache cache = control::fresh_cache_like(context.authorization_cache);
     auto require_write = [&](const std::string& path) -> SyncStoreResult<void> {
         const auto location = drive_location_at(repository, entries, path, context, false);
         if (!location) {
@@ -2195,7 +2195,8 @@ void register_drive_capabilities(Registry& registry) {
                                               "/principal_taap_id");
                 }
                 if (!context.operator_credential) {
-                    control::AuthorizationCache cache;
+                    control::AuthorizationCache cache =
+                        control::fresh_cache_like(context.authorization_cache);
                     const auto administers = control::authorize(*context.store,
                                                                 context.acting_identity,
                                                                 location->object.id,
