@@ -17,10 +17,10 @@ deduplication remain liquid repository values.
 | `move_drive_path` | `write` on the source, every source descendant, and destination | A new liquid move preserving the stable path node |
 | `delete_drive_path` | `write` on the path and every descendant | A new liquid deletion without history removal |
 | `drive_history` | `read` on the path or nearest retained parent | Changes whose structural diff names `path` as its old or new path, one item per change with the path's state after it (see below) |
-| `diff_drive_versions` | `read` on the path or nearest retained parent | The two immutable files and a structural text difference |
+| `diff_drive_versions` | `read` on the path or nearest retained parent, **at `left` and at `right` as well as at `ref`** (lake#923: the node a path names can differ between revisions) | The two immutable files and a structural text difference |
 | `drive_conflict` | `read` on the path | Conflict kind, exact region, explanation, reasons, preserved values, and a text difference when registered |
 | `resolve_conflict` | `write` on the path | The selected value and the Liquid change carrying its resolution record |
-| `restore_drive_version` | `write` on the destination in current `main`, including any replaced descendants | A new liquid change containing the file bytes from `change_id` |
+| `restore_drive_version` | `write` on the destination in current `main`, including any replaced descendants, and `read` on the path as it was at `change_id` (lake#923) | A new liquid change containing the file bytes from `change_id` |
 
 A path object has `object_type=path` and external id `<repository UUID>:<liquid node id>`. The
 stable liquid tree node id means a move does not discard policy. Reads use the nearest existing
