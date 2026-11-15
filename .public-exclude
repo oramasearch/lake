@@ -1,15 +1,10 @@
 # Paths kept out of the public export of this repository (gitignore syntax).
 #
 # The public repository is created from one export of the release branch. Everything listed here
-# stays in this repository only: contributor instructions for the maintainers' own tooling, the
-# maintainers' own deployment runbooks and records, pricing material, and release notes written
-# before the first public release. Everything not listed here is published and must read as a
-# public document.
-
-# Maintainers' agent instructions (the public tree has CONTRIBUTING.md instead)
-CLAUDE.md
-AGENTS.md
-.claude/
+# stays in this repository only: the maintainers' own deployment runbooks and records, pricing
+# material, and release notes written before the first public release. Everything not listed here
+# is published and must read as a public document. The agent files (CLAUDE.md, AGENTS.md, .claude/,
+# .codex/, .cursor/) are never listed here: they ship with the public repository.
 
 # Hosted CI configuration (not part of the published tree)
 .github/
