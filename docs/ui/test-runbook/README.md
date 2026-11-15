@@ -17,6 +17,8 @@ It complements the automated checks; it replaces none of them:
 | `frontend/checks/*.mjs` | Single flows driven by Playwright against a running Lake | `frontend/checks/` |
 | `tools/e2e/walkthrough.mjs`, `services.mjs`, `mcp.mjs`, `storage.mjs` | Design, Train and Ship, the service catalog, Developer → MCP and storage on a deployed Lake | [`../../../tools/e2e/README.md`](../../../tools/e2e/README.md) |
 | The `testing` e2e gate (`LakeE2ETest`) | Every feature through REST, MCP and a headless browser, for a substantial release | the bridge's `lake-devops` skill |
+| `tools/e2e/walkthrough.mjs`, `services.mjs`, `mcp.mjs`, `storage.mjs` | Design, Train and Ship, the service catalog, Developer → MCP and storage on a deployed Lake | [`../../deployment/browser-testing.md`](../../deployment/browser-testing.md) |
+| The `testing` e2e gate (`LakeE2ETest`) | Every feature through REST, MCP and a headless browser, for a substantial release | the release process |
 | **This runbook** | What a person sees and does on every page: labels, states, permissions, phone width, keyboard | here |
 
 ## Files
@@ -132,10 +134,9 @@ File it in `oramasearch/lake` with the label `bug`, one issue per defect:
 - **Test through the browser only.** Never change a cluster, a database or a Kubernetes object to
   make a case pass or to clean up after one. When a case needs state the UI cannot make, it says so;
   ask for it to be made through the operator.
-- **Only on nonprod.** Use `lake-testing.oramadev.net` for a release and `lake-dev.oramadev.net`
-  for anything else ([setup.md](setup.md#environments)). Never run this on `lake.live`,
-  `eu.lake.live` or `us.lake.live` without Steve's go-ahead, and never on `lake.oramadev.net`,
-  which is being removed.
+- **Only on nonprod.** Use `lake-testing.example.com` for a release and `lake-dev.example.com`
+  for anything else ([setup.md](setup.md#environments)). Never run this against a
+  production deployment.
 - **Touch only what the run made.** Every object a case creates is named with the run's prefix
   (`qa-<MMDD>-…`); delete only those.
 - **Mail and messages to real people:** invitations and shares go only to the test inboxes in

@@ -204,7 +204,7 @@ which is not built.
   ```sh
   curl -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
     -d "{\"name\":\"memo.m4a\",\"audio_base64\":\"$(base64 -i memo.m4a)\"}" \
-    https://lake.oramadev.net/v1/transcribe
+    https://lake.example.com/v1/transcribe
   ```
 
 ## How to change it

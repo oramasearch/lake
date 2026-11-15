@@ -113,7 +113,7 @@ TEST(AgentNames, EveryNameFollowsTheScheme) {
             EXPECT_EQ(parts.back(), "Agent") << name << ": every agent but Ask Orama ends in Agent";
         }
     }
-    // Steve, 2026-10-17 (lake#763).
+    // lake#763.
     EXPECT_EQ(lake::control::agent_display_name("agent-creator"), "Agent Creator Agent");
 }
 

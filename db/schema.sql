@@ -3261,7 +3261,7 @@ INSERT INTO schema_migrations (version) VALUES ('0066_assign_unrouted_repositori
 -- workspace's repositories are served from its space's store on lake's volume
 -- (<LAKE_STORE_ROOT>/<space>/store); move_workspace_store `switch` copies what is new, verifies
 -- every repository and sets it, after which they are served from the workspace store and the
--- space's store stays on the volume, read-only, until Steve approves removing it. The operator
+-- space's store stays on the volume, read-only, until an operator approves removing it. The operator
 -- does not read the column.
 -- ---------------------------------------------------------------------------------------------
 ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS store_moved_at timestamptz;
@@ -4760,7 +4760,7 @@ ALTER TABLE billing_invoice_lines ADD CONSTRAINT billing_invoice_lines_class_che
 CREATE TABLE IF NOT EXISTS model_token_prices_guard (
     applied_at timestamptz NOT NULL DEFAULT now()
 );
--- The default gateway models' token prices (Steve, 2026-10-23): OpenAI's published standard
+-- The default gateway models' token prices: OpenAI's published standard
 -- price per million tokens, https://developers.openai.com/api/docs/pricing, read 2026-10-23,
 -- plus 30%, in millionths of a US dollar per 1,000,000 tokens (docs/api/billing.md#rates):
 --   gpt-5.5                 $5.00 in, $30.00 out  ->  6500000 / 39000000 (under 272K context)
@@ -5135,7 +5135,7 @@ INSERT INTO schema_migrations (version) VALUES ('0104_app_restarts') ON CONFLICT
 CREATE TABLE IF NOT EXISTS agent_model_prices_guard (
     applied_at timestamptz NOT NULL DEFAULT now()
 );
--- Steve, 2026-10-26: OpenAI's published standard price per million tokens,
+-- OpenAI's published standard price per million tokens,
 -- https://developers.openai.com/api/docs/pricing and the model pages, read 2026-10-26, plus 30%,
 -- in millionths of a US dollar per 1,000,000 tokens:
 --   gpt-6.1-sol    $2.00 in, $10.00 out  ->  2600000 / 13000000;  long  5200000 / 19500000

@@ -24,8 +24,8 @@ export const LAKE_GROUPS: { key: string; title: string; line: string }[] = [
 ];
 
 /** Each page: what it is for, the question to ask, and the library agent it needs to be useful. */
-// `label`, where set, is the home's name for the page; otherwise the rail's (Steve, 2026-10-17:
-// "the design part is all about AI").
+// `label`, where set, is the home's name for the page; otherwise the rail's (the design
+// part is all about AI).
 const THINGS: Record<string, { does: string; ask: string; needs?: string; label?: string }> = {
   "/repositories": { does: "Code and files, with their full history.", ask: "Which of my repositories changed this week?" },
   "/drives": { does: "Folders of files to keep and share.", ask: "What is in my drives?" },

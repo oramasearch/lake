@@ -153,8 +153,8 @@ Zetta capability.
 
 A workspace has one setting today, `agent_model`: the model every agent turn of the workspace calls
 through Lake's model gateway, whatever model the agent asks for
-([model-gateway.md](model-gateway.md#the-workspaces-model)). Steve, 2026-10-26: *"let's the users
-choose"*, *"default to sol"*.
+([model-gateway.md](model-gateway.md#the-workspaces-model)). People choose the model;
+the default is `gpt-6.1-sol`.
 
 - **Allowed values** are the chat models this Lake serves: `LAKE_MODEL_GATEWAY_MODELS` (by default
   `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, `gpt-6-luna`, `gpt-5.5`, `gpt-5`, `gpt-4o`) without
@@ -417,8 +417,8 @@ the operator wrote the bare token and every App with workspace data stopped at s
 `GET <base>/zetta/v1/sql?statement=…` (what app-runtime's `workspace.sql()` sends) and
 `POST <base>/zetta/v1/sql` with a JSON body (`statement`, and optionally `database`,
 `safe_mode_confirmation`, `intent`) run Lake's [`workspace_sql`](#capabilities), not the
-engine's `sql` (lake#1229, lake#1212). An App has only the access its binding gives it (Steve,
-2026-10-26), so:
+engine's `sql` (lake#1229, lake#1212). An App has only the access its binding gives it,
+so:
 
 - **A read.** It needs what every read on this route needs: an App's binding with `read`, or `read`
   on the customer for a person, or `workspace_sql` among an agent turn's scopes. Anything else is

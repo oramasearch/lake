@@ -67,9 +67,8 @@ where cascade was chosen over refusal.
 
 ## What is on dev
 
-Measured read-only on 2026-10-03 (`du` in pod `lake-prod-c7cd58699-95l5z`, `SELECT count(*)` on
-`lake-prod-controldb-1`). The store volume `lake-prod-store` is a 100 GiB `managed-csi` Azure disk,
-581 MB used.
+Measured read-only on 2026-10-03 on a development Lake (`du` in the Lake pod, `SELECT count(*)` on
+its control database). The store volume is a 100 GiB `managed-csi` Azure disk, 581 MB used.
 
 | Path | Size | Contents |
 |---|---|---|
@@ -260,8 +259,8 @@ and release its lease.
 5. **Switch** (`mode: switch`), per workspace: lake holds that workspace's repository requests,
    copies what arrived since step 3, verifies again, records the switch in a content-free central
    column (`workspaces.store_moved_at`), and answers the held requests from the new store.
-6. **Leave.** The account's old store stays read-only on the volume. Removing it needs Steve's yes
-   (the store volume rule), after the copy is verified on dev.
+6. **Leave.** The account's old store stays read-only on the volume. Removing it needs an operator's
+   approval (the store volume rule), after the copy is verified on dev.
 
 Storage measurement for metering switches from a live `du` of the account's store to the bucket's
 `usage`, now per workspace.

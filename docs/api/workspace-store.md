@@ -130,11 +130,11 @@ Otherwise it answers `customer_id` (the account) and:
 
 1. Deploy an image with this change and liquid `8955519` or later, and Zetta with the object capability on every
    workspace Zetta (dev Zetta has it). Apply migration `0067`.
-2. Snapshot `lake-prod-store` and each workspace Zetta's volume.
+2. Snapshot the Lake's store volume and each workspace Zetta's volume.
 3. For each workspace: `plan`, then `copy`, then `verify` until `complete`, then `switch`.
 4. Check the workspace's repository pages, a `liquid pull`, and a push; `store_moved_at` is set.
 5. Leave `LAKE_STORE_ROOT/<space>/store` in place until every workspace of the account is switched
-   and Steve approves removing it; then run `remove_space_store` with `dry_run: true`, check the
+   and an operator approves removing it; then run `remove_space_store` with `dry_run: true`, check the
    paths and bytes, and run it again with `dry_run: false`.
 
 **A workspace switched with no repository before lake#383 phase B** (on dev

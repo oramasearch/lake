@@ -305,7 +305,7 @@ and pending results and updates the dispatch row, while retaining the connection
 records preserve pending cleanup across restarts and storage outages; another person may set up
 streams again under their own authority. See [offboarding](clerk.md#webhooks).
 
-Optional, per connection (Steve's design in lake#652):
+Optional, per connection (lake#652):
 
 - **Its agent.** `create_mcp_connection_agent {id, prompt, name?}` makes, as the person, a Python
   agent on `oramasearch/agent-runtime` (`workspace_act create_agent`, a `zetta` definition) whose

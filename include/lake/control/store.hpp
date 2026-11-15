@@ -1177,7 +1177,7 @@ struct ServiceKind {
     int ready_seconds = 60;
 };
 inline constexpr ServiceKind service_kinds[] = {
-    {"zetta", "Zetta", 30},          // Steve, 2026-09-26 (measured once at 41 s)
+    {"zetta", "Zetta", 30},          // chosen 2026-09-26 (measured once at 41 s)
     {"cassandra", "Cassandra", 420}, // not yet measured without a node scale-up (lake#197)
     {"clickhouse", "ClickHouse", 75},
     {"duckdb", "DuckDB", 30},

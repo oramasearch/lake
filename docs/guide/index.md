@@ -148,7 +148,7 @@ rows most at risk and what the run cannot tell you ([Train a Model](/docs/train)
 3. Call it from your own code with a Lake key in `LAKE_KEY`:
 
 ```
-curl -s https://lake.oramadev.net/v1/predict \
+curl -s https://lake.example.com/v1/predict \
   -H "Authorization: Bearer $LAKE_KEY" -H 'Content-Type: application/json' \
   -d '{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "model_id": "<model id>", "rows": [{"entity": "a1", "support_tickets": 11}]}'
 ```

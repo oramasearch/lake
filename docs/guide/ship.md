@@ -57,7 +57,7 @@ command with your account, workspace and model filled in and one row keyed by th
 features, ready to paste. Opening it from the page header shows every published model at once.
 
 ```
-curl -s https://lake.oramadev.net/v1/predict \
+curl -s https://lake.example.com/v1/predict \
   -H "Authorization: Bearer $LAKE_KEY" -H 'Content-Type: application/json' \
   -d '{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "model_id": "<model id>", "rows": [{"entity": "acme", "support_tickets": 11, "tenure_months": 4}]}'
 ```
@@ -222,7 +222,7 @@ workspace and index filled in:
 
 ```
 curl -s -H "Authorization: Bearer $LAKE_SEARCH_KEY" \
-  "https://lake.oramadev.net/v1/search_index?customer_id=<customer id>&workspace_id=<workspace id>&index_id=<index id>&query=renewal%20risk&top_k=10"
+  "https://lake.example.com/v1/search_index?customer_id=<customer id>&workspace_id=<workspace id>&index_id=<index id>&query=renewal%20risk&top_k=10"
 ```
 
 - REST: `GET /v1/search_index?customer_id=<customer id>&workspace_id=<workspace id>&index_id=<index id>&query=renewal%20risk`

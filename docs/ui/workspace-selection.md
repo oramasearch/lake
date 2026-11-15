@@ -28,7 +28,7 @@ form into `/w/<id>/`; both are gone.
   person's own first workspace, else the first workspace any organization of theirs has.
 
 So a workspace deleted since it was linked or remembered never leaves the app on *Choose a
-workspace* while another exists (Steve, 2026-10-11: the review organization's only workspace was
+workspace* while another exists (seen 2026-10-11: the review organization's only workspace was
 deleted and the picker read "ux-review-2026… / Choose a w…"). Once the `viewer` read has settled
 (not while it is being fetched again, so a workspace made a moment ago is not taken for a deleted
 one), the session stores the fallback in `lake-workspace` and, when the URL named the deleted

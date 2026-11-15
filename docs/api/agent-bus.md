@@ -438,7 +438,7 @@ the repository's isolated database fixture.
 
 ```sh
 export TMPDIR="$PWD/.cache/proof-tmp"
-export LAKE_TEST_DB_URI=postgresql://stevesperandeo@127.0.0.1:5432/lake_issue414_proof_20260930
+export LAKE_TEST_DB_URI=postgresql://lake@127.0.0.1:5432/lake_issue414_proof_20260930
 ctest --test-dir build --output-on-failure -j 1
 ctest --test-dir build-shared --output-on-failure -j 1
 ```

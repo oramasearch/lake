@@ -1453,7 +1453,7 @@ workload resource classes are unchanged. No records are rewritten. The new const
 all existing class names, and reapplying the schema is idempotent.
 
 It also seeds the default gateway models' input and output prices (OpenAI's published price plus
-30%, Steve 2026-10-23), once, while `0095_model_token_prices` is not yet recorded: a new
+30%), once, while `0095_model_token_prices` is not yet recorded: a new
 publication for the current UTC month with the rates of the list in force (none on a fresh
 instance) plus the model rates, and the model rates added to any later list; an operator's rate for
 the same class is kept. The rates and their source are in

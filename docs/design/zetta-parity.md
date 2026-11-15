@@ -106,7 +106,7 @@ statements stay out of reach.
 
 ## Tracking
 
-**Phases 3–5 are paused (Steve, 2026-09-26): do not implement them until the pause is lifted.**
+**Phases 3–5 are paused (2026-09-26): do not implement them until the pause is lifted.**
 
 | Phase | Issue |
 |---|---|

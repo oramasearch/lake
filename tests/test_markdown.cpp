@@ -177,7 +177,7 @@ TEST(Docs, LinksBetweenGuidesResolve) {
     }
 }
 
-// The product speaks of workspaces, never of a "space" or a "personal space" (Steve, 2026-10-10),
+// The product speaks of workspaces, never of a "space" or a "personal space",
 // and never uses the banned word. Code spans and blocks may name fields such as `customer_id`.
 TEST(Docs, GuidesSpeakOfWorkspaces) {
     const std::regex space(R"re(\bspaces?\b)re", std::regex::icase);
@@ -303,7 +303,7 @@ TEST(Docs, GuidesCallTheProductLake) {
 }
 
 // A person runs an AI training experiment, as an experiment tracker says it, never a "study"
-// (Steve, 2026-10-10, lake#561). The engine's names (`study-events.*`, Experiments Agent's `study`
+// (lake#561). The engine's names (`study-events.*`, Experiments Agent's `study`
 // field) appear only in code spans and blocks, which the prose leaves out.
 TEST(Docs, GuidesSpeakOfExperiments) {
     const std::regex study(R"re(\bstud(y|ies)\b)re", std::regex::icase);

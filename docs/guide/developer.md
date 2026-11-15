@@ -52,17 +52,17 @@ Failure:
 4. Run the first block in a terminal:
 
 ```
-curl -s https://lake.oramadev.net/v1/viewer -H "Authorization: Bearer $LAKE_KEY"
+curl -s https://lake.example.com/v1/viewer -H "Authorization: Bearer $LAKE_KEY"
 ```
 
 `viewer` needs no key; with one it names you and the workspaces you can open. Replace
-`lake.oramadev.net` with your Lake's address wherever it appears on this page.
+`lake.example.com` with your Lake's address wherever it appears on this page.
 
 ### Send a User-Agent
 
 Every call must carry a `User-Agent` header that names your program. `curl`, Python `requests`,
 Node's `fetch` and browsers send one already. Python's built-in `urllib` sends
-`Python-urllib/3.x`, which the network edge in front of lake.oramadev.net refuses before the call
+`Python-urllib/3.x`, which the network edge in front of lake.example.com refuses before the call
 reaches Lake: the answer is `403` with the plain-text body `error code: 1010`, not Lake's JSON
 envelope. Name your script instead:
 
@@ -70,7 +70,7 @@ envelope. Name your script instead:
 import json, os, urllib.request
 
 req = urllib.request.Request(
-    "https://lake.oramadev.net/v1/viewer",
+    "https://lake.example.com/v1/viewer",
     headers={"Authorization": "Bearer " + os.environ["LAKE_KEY"],
              "User-Agent": "my-script/1.0"},
 )
@@ -85,14 +85,14 @@ A read is `GET /v1/<capability>` with its input as query parameters. Numbers and
 read as the schema declares them:
 
 ```
-curl -s "https://lake.oramadev.net/v1/list_repositories?limit=5" -H "Authorization: Bearer $LAKE_KEY"
+curl -s "https://lake.example.com/v1/list_repositories?limit=5" -H "Authorization: Bearer $LAKE_KEY"
 ```
 
 An action is `POST /v1/<capability>` with a JSON body and `Content-Type: application/json`. For
 example, `POST /v1/create_repository`:
 
 ```
-curl -s https://lake.oramadev.net/v1/create_repository \
+curl -s https://lake.example.com/v1/create_repository \
   -H "Authorization: Bearer $LAKE_KEY" -H 'Content-Type: application/json' \
   -d '{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "analytics", "description": "Our analysis code"}'
 ```
@@ -122,7 +122,7 @@ A list that can be narrowed to a workspace is narrowed by the prefix. This lists
 repositories of one workspace:
 
 ```
-curl -s "https://lake.oramadev.net/w/<workspace id>/v1/list_repositories?limit=5" -H "Authorization: Bearer $LAKE_KEY"
+curl -s "https://lake.example.com/w/<workspace id>/v1/list_repositories?limit=5" -H "Authorization: Bearer $LAKE_KEY"
 ```
 
 The prefix is how the web app scopes every call a `/w/<workspace id>/` page makes. A client you

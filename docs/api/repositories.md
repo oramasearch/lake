@@ -166,14 +166,14 @@ so REST, OpenAPI, and MCP expose the same operations.
 H='Authorization: Bearer <token>'
 curl -H "$H" -H 'content-type: application/json' \
   -d '{"customer_id":"<customer id>","workspace_id":"<workspace id>","name":"liquid","description":"the tool","visibility":"public"}' \
-  https://lake.oramadev.net/v1/create_repository
-curl -H "$H" 'https://lake.oramadev.net/v1/list_repositories?customer_id=<customer id>&limit=20'
+  https://lake.example.com/v1/create_repository
+curl -H "$H" 'https://lake.example.com/v1/list_repositories?customer_id=<customer id>&limit=20'
 curl -H "$H" -H 'content-type: application/json' \
   -d '{"id":"<repository id>","visibility":"organization"}' \
-  https://lake.oramadev.net/v1/set_repository_visibility
+  https://lake.example.com/v1/set_repository_visibility
 curl -H "$H" -H 'content-type: application/json' \
   -d '{"id":"<repository id>","name":"liquid-next"}' \
-  https://lake.oramadev.net/v1/rename_repository
+  https://lake.example.com/v1/rename_repository
 ```
 
 The UI lists them at `/repositories` ([`../ui/README.md`](../ui/README.md)); the detail page

@@ -75,7 +75,7 @@ lifetimes are covered in [Tokens and Keys](/docs/tokens).
 Open the repository on Lake and press **Clone**. The dialog's first block is:
 
 ```sh
-liquid clone https://lake.oramadev.net/v1/repositories/<repository id> analytics
+liquid clone https://lake.example.com/v1/repositories/<repository id> analytics
 cd analytics
 ```
 
@@ -105,8 +105,8 @@ liquid diff <change a> <change b>
 ## Push and Pull
 
 ```sh
-liquid push https://lake.oramadev.net/v1/repositories/<repository id>
-liquid pull https://lake.oramadev.net/v1/repositories/<repository id>
+liquid push https://lake.example.com/v1/repositories/<repository id>
+liquid pull https://lake.example.com/v1/repositories/<repository id>
 liquid refs
 ```
 
@@ -125,10 +125,10 @@ Push and pull need the network. Every other command works offline against the ch
 `liquid review` works on Lake's reviews for the repository named by `--lake <repository URL>`:
 
 ```sh
-liquid review list --lake https://lake.oramadev.net/v1/repositories/<repository id> --state open
-liquid review open <change id> --lake https://lake.oramadev.net/v1/repositories/<repository id>
-liquid review comment <review id> src/parse.cpp:42@<change id> "Handle an empty file here." --lake https://lake.oramadev.net/v1/repositories/<repository id>
-liquid review approve <review id> --lake https://lake.oramadev.net/v1/repositories/<repository id>
+liquid review list --lake https://lake.example.com/v1/repositories/<repository id> --state open
+liquid review open <change id> --lake https://lake.example.com/v1/repositories/<repository id>
+liquid review comment <review id> src/parse.cpp:42@<change id> "Handle an empty file here." --lake https://lake.example.com/v1/repositories/<repository id>
+liquid review approve <review id> --lake https://lake.example.com/v1/repositories/<repository id>
 ```
 
 `show`, `close`, `watch` and `protections` work the same way, and `--json` writes stable JSON. A

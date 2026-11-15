@@ -57,7 +57,7 @@ Orama design tokens, the same IBM Plex faces and the same component classes the 
 
 ## The look
 
-The app follows rev-os's visual language on lake's own colours and type (Steve, 2026-10-10):
+The app follows rev-os's visual language on lake's own colours and type:
 
 - a 2px brand strip;
 - a 232px rail of lake's groups with lucide icons, where the current group is open and lists its
@@ -113,7 +113,7 @@ short:
 - **The product is Lake, with a capital L** (lake#642). Page text says **Lake**, and
   **Lake Console** where it names the app itself: the bare document title, the brand link's and the
   sign-in brand's accessible names, and `index.html`'s title. Other pages are titled
-  "Lake — <page>". Technical names keep their form: hostnames (`lake.live`, `lake.oramadev.net`),
+  "Lake — <page>". Technical names keep their form: hostnames (`lake.live`, `lake.example.com`),
   the MCP server name `lake`, CLI commands, `LAKE_*` variables, identifiers, paths and anything in
   `<code>`. `tests/name.test.ts` fails the build on a string or JSX text that names the product
   lowercase. The server's messages the pages show say Lake too (the registry's descriptions and

@@ -78,7 +78,7 @@ may wrap across source lines.
   Experiments Agent's `study` field). An experiment's attempts are **trials**, each a training
   **run**. `Docs.GuidesSpeakOfExperiments` checks the prose (lake#561).
 - Call the product **Lake**, with a capital L (lake#642), and the web app the **Lake
-  Console**. Technical names keep their form: hostnames (`lake.live`, `lake.oramadev.net`), the MCP
+  Console**. Technical names keep their form: hostnames (`lake.live`, `lake.example.com`), the MCP
   server name, CLI commands, `LAKE_*` variables, identifiers and paths, in code spans where they
   stand alone. `Docs.GuidesCallTheProductLake` checks the prose.
 - Headings are Title Case (Lake's rule, `docs/ui/design-system.md` → *Capitalization*).

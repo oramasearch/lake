@@ -1,6 +1,6 @@
 # Workspace Data Plane
 
-Refs [lake#311](https://github.com/oramasearch/lake/issues/311). Decisions: Steve,
+Refs [lake#311](https://github.com/oramasearch/lake/issues/311). Decided
 2026-09-29. This document describes the target contract and the events-first implementation;
 the inventory below deliberately includes existing violations that require separate changes.
 
@@ -108,7 +108,7 @@ the engine, so mutable rows, one-use codes and claims use the same mechanism.
 
 The items records do not cover (the liquid stores, search indexes, registry and transparency log on
 lake's store volume, and lake's telemetry: #380–#384; `repositories` and `repository_refs`,
-lake#315 part 2 and #319, are done) are planned in [workspace storage plan](workspace-storage-plan.md), with the decisions Steve made
+lake#315 part 2 and #319, are done) are planned in [workspace storage plan](workspace-storage-plan.md), with the decisions taken
 ([lake#512](https://github.com/oramasearch/lake/issues/512)) and the issues in order.
 
 ## Storage Audit

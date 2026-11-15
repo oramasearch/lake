@@ -26,7 +26,7 @@ export const HOME_NAV: NavItem[] = [
 
 const AO: Audience[] = ["account", "operator"];
 
-/** The Data group: where a person's data lives and is found (Steve, 2026-10-10). Datasets is the
+/** The Data group: where a person's data lives and is found. Datasets is the
  * Train → Data page, kept at its address; Connections (lake#651) sits between it and Transcripts. */
 export const DATA_NAV: NavItem[] = [
   { section: "data", path: "/repositories", label: "Repositories", icon: "repository", audience: ["visitor", "account", "operator"] },

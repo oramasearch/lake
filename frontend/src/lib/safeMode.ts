@@ -13,7 +13,7 @@ export const SAFE_MODES: { mode: SafeMode; label: string; help: string }[] = [
   { mode: "warn_all", label: "Warn All", help: "Ask before every query." },
 ];
 
-/** The level a target has until someone sets one (Steve, 2026-10-23): a database is Off, so no
+/** The level a target has until someone sets one: a database is Off, so no
  * automated write waits for a person; a saved connection is Warn Writes, which prompts for nothing
  * because sources are read-only, until someone chooses Warn All. */
 export function defaultSafeMode(target: SafeModeTarget): SafeMode {

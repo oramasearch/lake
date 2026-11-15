@@ -113,7 +113,7 @@ Repositories are read and written with the `liquid` command line. The full set o
    first block. It looks like this:
 
 ```sh
-liquid clone https://lake.oramadev.net/v1/repositories/<repository id> analytics
+liquid clone https://lake.example.com/v1/repositories/<repository id> analytics
 cd analytics
 ```
 
@@ -122,7 +122,7 @@ cd analytics
 5. Copy the second block to publish:
 
 ```sh
-liquid push https://lake.oramadev.net/v1/repositories/<repository id>
+liquid push https://lake.example.com/v1/repositories/<repository id>
 ```
 
 `liquid pull <the same URL>` brings in what others pushed. The address is

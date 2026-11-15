@@ -1,8 +1,7 @@
 # When a resource fails: notifications, repair, change and auto-fix
 
-lake#1207. Steve, 2026-10-25: *"let's build a skill to notify the user and allow them to try and fix
-the issue, with additionally auto commits/drips, or additional instructions to modify/update a app
-with more instructions"*.
+lake#1207. When a resource fails, Lake notifies the person and lets them try to fix it: by an
+automatic fix committed as a drip, or by giving more instructions to change the app.
 
 When something a person deployed fails, Lake tells them where they will see it, offers an agent to
 fix it, and, if they opt in, lets the agent fix it by itself a bounded number of times. The same

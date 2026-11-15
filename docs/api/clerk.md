@@ -190,7 +190,7 @@ account is disabled.
   cleared. A storage outage leaves those records for retry and grants no authority; other workspace
   data and the MCP connection remain. The same agent-workload withdrawal runs on account deletion.
 - **`session.revoked`, `session.removed`, `session.ended`** end **browser sessions only**
-  (lake#1163; Steve, 2026-10-24: *"don't revoke api keys on signout"*). `data.id` is the Clerk
+  (lake#1163: signing out never revokes an API key). `data.id` is the Clerk
   session that ended and `data.user_id` its user. Lake revokes, for the account linked to that user:
   - every Lake browser session bound to that Clerk session (`sessions.clerk_session_id`, set at
     exchange from the session token's signed `sid`), whenever the event arrives;
@@ -296,7 +296,7 @@ The Clerk instance needs:
   a first Clerk sign-in never links to such an account anyway: it gets a new account and takes the
   address ([who a Clerk sign-in becomes](#who-a-clerk-sign-in-becomes)).
 
-### The instance lake.oramadev.net uses
+### Setting up your Clerk instance
 
 Clerk application `lake-testing` (`app_3JpNNpVUwgRgnkItIPbzzRWa2BP`, first named `lake`) in the
 `steve@orama.com` workspace, development instance `ins_3JpNNvZd4jnehvW6XsKWcMq6MKx`

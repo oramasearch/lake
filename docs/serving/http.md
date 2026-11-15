@@ -323,7 +323,7 @@ are recorded in [`../build/dependencies.md`](../build/dependencies.md).
 
 ## Statuses Behind Cloudflare
 
-lake on `lake.oramadev.net` is reached through Cloudflare. Cloudflare answers an origin's `502` or
+lake on `lake.example.com` is reached through Cloudflare. Cloudflare answers an origin's `502` or
 `504` with its own HTML page (*"Error 502: Bad gateway … The origin web server returned an invalid
 or incomplete response"*) and drops lake's body; it passes `500`, `501` and `503` and every 4xx
 through unchanged (Cloudflare's *Custom Errors* and *Error 502/504* pages). Until lake#572 lake
@@ -530,8 +530,8 @@ Consumer Service, `POST /v1/saml/<provider id>/acs`: the identity provider's for
 by design, and the route never reads the session a cookie carries; it verifies the signed response
 and replaces the session (lake#836).
 
-**Why.** Ship apps are hosted one label below the platform's zone (`<name>.oramadev.net` beside
-`lake.oramadev.net`), so customer app code is *same-site* with lake and a browser sends
+**Why.** Ship apps are hosted one label below the platform's zone (`<name>.example.com` beside
+`lake.example.com`), so customer app code is *same-site* with lake and a browser sends
 `lake_session` with its requests whatever the cookie's `SameSite`. Before this, an app page could
 make a signed-in person's browser run any action as a "simple" `text/plain` request or a form post
 (inventory §4.4). Requiring JSON forces a CORS preflight, which lake's wildcard CORS cannot satisfy

@@ -86,7 +86,7 @@ test("the person's own account comes first, then each organization in lake's ord
 
 test("a workspace deleted since it was linked or remembered falls back to one the person can reach", () => {
   const empty: PickerSpace = { ...acme, workspaces: [] };
-  // Steve's screenshot: the remembered organization's only workspace was deleted.
+  // A reported case: the remembered organization's only workspace was deleted.
   const gone = resolveWorkspace([empty, mine], { fromPath: null, remembered: "deleted-ws", suggested: null });
   assert.deepEqual(gone, { id: "c1-0", replace: false, remember: "c1-0" }, "the person's own first workspace, stored in place of the stale one");
   const linked = resolveWorkspace([empty, mine], { fromPath: "deleted-ws", remembered: "deleted-ws", suggested: null });

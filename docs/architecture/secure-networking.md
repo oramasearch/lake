@@ -19,8 +19,7 @@ Related pages:
 
 ## What it gives a customer
 
-Steve, 2026-10-13: *"let's make sure that our workspaces are locked down sandboxes ... and that all
-network and dns connections are explicit"*.
+Workspaces are locked-down sandboxes, and every network and DNS connection is explicit.
 
 | A customer can | Lake capability | Enforced by |
 |---|---|---|

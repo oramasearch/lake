@@ -361,8 +361,8 @@ durable identity.
   (a `browser` or `taap` session): each key ancestor's expiry, revocation and linked device.
   Revoking a key, or any key it descends from, makes all its descendants unusable on their next
   request; children do not survive a revoked parent key.
-- **Signing out never ends a key** (lake#1163; Steve, 2026-10-24: *"don't revoke api keys on
-  signout"*). A sign-in ancestor ends the walk without being checked, except that it must belong
+- **Signing out never ends a key** (lake#1163: signing out never revokes an
+  API key). A sign-in ancestor ends the walk without being checked, except that it must belong
   to the same user and pool: when the browser or TAAP session a key was made from is revoked
   (`/logout`, a Clerk session event, `revoke_session` on it), expires, or loses its device, the
   key and its descendants keep working. A key made in a browser still keeps the expiry it was

@@ -1,6 +1,6 @@
 /**
  * What a person reads in the web app: an AI training experiment, as an experiment tracker says it,
- * never a "study" (Steve, 2026-10-10, lake#561). The engine calls an experiment a study, so its
+ * never a "study" (lake#561). The engine calls an experiment a study, so its
  * names may appear in code: `list_studies` and `study_id` (an underscore joins them to the word), the
  * `study-events.<id>` topic, the `study.id` run parameter, and the Experiments Agent's `study` field read
  * as `result.study` or written as `study:`, or quoted alone as `"study"`. Every other "study" or

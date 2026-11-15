@@ -218,8 +218,8 @@ never count one service twice, samples every live workspace on its maintenance t
 schema and reports the resources.**
 Compute is metered by the resources each workload is **scheduled with**: each container's request,
 or its limit where it has none, as Kubernetes admitted it (a namespace's default request included).
-Steve, 2026-10-11: *"service minutes are actually cpu minutes and ram minutes (different prices)...
-and gpu minutes and vram minutes"*.
+Service minutes are CPU minutes and RAM minutes, priced separately, and likewise GPU minutes
+and VRAM minutes.
 
 **Where lake learns them.** The Orama operator writes `workload_resources` in lake's control
 PostgreSQL (migration `0075_workload_resources`, [schema](../control-plane/schema.md#workload-resources-migration)):

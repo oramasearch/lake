@@ -121,7 +121,7 @@ text and controls retain the design-system roles in both themes.
 
 ## Capitalization
 
-Steve, 2026-09-26: nav items and headings are **Title Case** ("Search Indexes", not "Search
+Nav items and headings are **Title Case** ("Search Indexes", not "Search
 indexes").
 
 | Where | Case | Examples |

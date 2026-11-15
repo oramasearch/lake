@@ -172,7 +172,7 @@ test("the home says what Lake does, grouped as the rail is, claiming only what t
   const network = ["/network/overview", "/network/connections", "/network/access", "/network/private-networks", "/network/egress", "/network/policies", "/network/activity"];
   const withNetwork = lakeMap(network.map((path) => ({ section: "network", path, label: path })), { runningAgents: new Set() });
   assert.deepEqual(withNetwork.find((g) => g.key === "network")!.things.map((t) => t.path), network);
-  // Design is about AI (Steve, 2026-10-17): the home names its pages as AI.
+  // Design is about AI: the home names its pages as AI.
   assert.equal(fewer.find((g) => g.key === "design")!.things[0].label, "AI Projects");
   assert.deepEqual(fewer.find((g) => g.key === "ship")!.things.map((t) => t.path), ["/ship/apps"]);
   // Billing shows only when the rail shows it (navFor drops it where LAKE_BILLING is off).

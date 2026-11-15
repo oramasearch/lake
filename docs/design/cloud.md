@@ -17,11 +17,11 @@ in one line: **we help companies design, train, and ship AI**
 (Orama's website). lake is where a customer does that in
 Orama's cloud, so its navigation should follow the same three verbs.
 
-Four decisions shape the design (Steve, 2026-09-25):
+Four decisions shape the design (2026-09-25):
 
 | Decision | Consequence for the navigation |
 |---|---|
-| The product is called **lake**, served at **lake.live**, linked from orama.com. Today the only deployment is `lake.oramadev.net` on AKS; lake.live is the target host | The brand in the sidebar stays `lake`. Page titles keep the `lake — …` form |
+| The product is called **lake**, served at **lake.live**, linked from orama.com. Today the only deployment is `lake.example.com` on AKS; lake.live is the target host | The brand in the sidebar stays `lake`. Page titles keep the `lake — …` form |
 | lake is the **cloud** offering, and can also run **on-prem** for enterprise customers. **Orama Studio is a separate on-prem enterprise product** | lake does not link out to Studio. Everything a cloud customer designs, trains and ships is a lake page. The same navigation serves an on-prem lake |
 | **Repositories are the central object.** A liquid repository is a shared, multiplayer place for any data (files, objects, datasets, models, code), closer to a shared drive folder than a code repository | Repositories sit at the top of the navigation. Design, Train and Ship are views of what lives in them, never a separate store |
 | Sign-in is **lake's own identity** (passwords, passkeys, TOTP, OAuth, SSO, SCIM) | No change to the session model or `context_for` |

@@ -367,7 +367,7 @@ The prompt and the answer are never in the audit.
 
 | Variable | Meaning |
 |---|---|
-| `LAKE_OPENAI_API_KEY` | Orama's provider key, a platform environment variable of the Lake pod (on the dev cluster, `spec.env` from Secret `lake-prod-openai`). Unset, the gateway answers `not_supported` |
+| `LAKE_OPENAI_API_KEY` | The operator's provider key, a platform environment variable of the Lake pod (for example `spec.env` from a Secret). Unset, the gateway answers `not_supported` |
 | `LAKE_MODEL_PROVIDER_URL` | an OpenAI-compatible base URL; default `https://api.openai.com/v1` |
 | `LAKE_MODEL_GATEWAY_MODELS` | JSON array of exact model/provider objects, such as `[{"model":"gpt-5.5","provider":"openai"}]`; absent defaults to `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, `gpt-6-luna`, `gpt-5.5`, `gpt-5`, `gpt-4o` and `text-embedding-3-small`; `[]` disables all model calls |
 
@@ -387,7 +387,7 @@ with `store_unavailable`. Even an embedding model needs both rates, although it 
 output tokens. Publish approved rates with `set_price_list` before enabling a model. Choose rates
 for the configured provider; an allowlist entry never derives prices from its name.
 
-**The default models are priced by the schema** (Steve, 2026-10-23: the provider's published
+**The default models are priced by the schema** (the provider's published
 per-token price plus 30%). Migration `0095_model_token_prices` seeds them once, on a fresh and an
 existing control plane alike, in millionths of a US dollar per 1,000,000 tokens, from
 OpenAI's published standard price ([pricing](https://developers.openai.com/api/docs/pricing), read 2026-10-23):
@@ -399,8 +399,7 @@ OpenAI's published standard price ([pricing](https://developers.openai.com/api/d
 | `gpt-4o` | $2.50 / $10.00 | $3.25 / $13.00 | 3250000 / 13000000 |
 | `text-embedding-3-small` | $0.02 / none | $0.026 / $0.026 | 26000 / 26000 |
 
-Migration `0105_agent_model_prices` (lake#1230, Steve 2026-10-26: *"let's use the latest and ensure
-the price is covered properly"*) adds the gpt-6.x models and the long-context rates the same way, from
+Migration `0105_agent_model_prices` (lake#1230) adds the gpt-6.x models and the long-context rates the same way, from
 the same page and the model pages, read 2026-10-26:
 
 | Model | OpenAI input / output (per 1M) | Lake input / output (per 1M) | `unit_micros` input / output | `@long` input / output |
@@ -441,8 +440,8 @@ agents use the gateway.
 
 ## The workspace's model
 
-People choose the model their agents use (lake#1230; Steve, 2026-10-26: *"let's the users choose"*,
-*"default to sol"*). Each workspace has a setting `agent_model`, one of the chat models this Lake
+People choose the model their agents use (lake#1230), with `gpt-6.1-sol` as the
+default. Each workspace has a setting `agent_model`, one of the chat models this Lake
 serves (the configured list without embedding models), read with `get_workspace_settings` and set with
 `set_workspace_settings` ([workspaces.md](workspaces.md#settings)). **Unset means `gpt-6.1-sol`**
 (`default_agent_model`). Its tool calls go through the provider's Responses API

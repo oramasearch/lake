@@ -1847,7 +1847,7 @@ std::optional<std::string> session_lookup_id(std::string_view bearer) {
 
 // The session itself and every ancestor up to the first sign-in session (browser or TAAP) must
 // be live. A sign-in ancestor ends the walk without being checked: signing out never ends a key
-// made from that sign-in (lake#1163, Steve: "don't revoke api keys on signout"); it still must
+// made from that sign-in (lake#1163: signing out never revokes an API key); it still must
 // belong to the same user and pool. Revoking a key still ends that key's own descendants.
 bool active_session_lineage(pqxx::work& tx,
                             const std::string& session_id,

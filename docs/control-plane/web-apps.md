@@ -64,7 +64,7 @@ customer lock. Hosts are unique and must be one label beneath `LAKE_APPS_WILDCAR
 `restart_app` bumps `generation` like every edit and also sets `restart_generation` to that new
 generation (migration `0104_app_restarts`, lake#1228). Before, a restart changed only `generation`:
 the operator rendered the same pod template, Kubernetes replaced nothing, and the App kept serving
-the old process (Steve pressed Restart on production on 2026-10-26 and had to delete the pod by
+the old process (a Restart on 2026-10-26 needed the pod deleted by
 hand). The operator reads `restart_generation` and, when it is above 0, writes it on the pod
 template as the annotation `orama.cloud/lake-app-restart`, so each restart is a new template and
 the Deployment rolls its pods. No other edit changes it, so scaling or changing access never

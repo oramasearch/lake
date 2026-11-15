@@ -538,7 +538,7 @@ and are not run by this change.
 4. Unresolved rows: `workspace_not_switched` (switch it, then rerun), `blob_missing` and
    `blob_corrupt` (push the image again, or rerun its build; cache repositories may simply be
    rebuilt). From then on a copied blob is read only from its workspace store.
-5. Once `verify` answers `complete: true` on every page, file the change that removes, with Steve's
+5. Once `verify` answers `complete: true` on every page, file the change that removes, with an operator's
    approval, the files listed in `instance_paths` of every verify page (null until every routed
    workspace was read and `oci_tags` is complete; advisory: check each path again against the
    records and the instance's repositories when it is removed), the tenant pointers under
@@ -760,8 +760,8 @@ own. These steps are for the coordinator and are not run by this change.
 
 **Done.** On dev (lake `20261003c`, revision `5858129`; workspace Zetta `dev-82f617ea`), the copy
 for `ask_messages` gave: plan 15 assigned, 0 unresolved, one workspace; copy 15 copied, 0 already
-present, 0 failed; verify `complete: true`, 15 verified, 0 missing, 0 mismatched. Steve approved the
-drop on 2026-10-03, and migration `0050_drop_ask_messages` (guard `drop_ask_messages_guard`,
+present, 0 failed; verify `complete: true`, 15 verified, 0 missing, 0 mismatched. The drop was
+approved on 2026-10-03, and migration `0050_drop_ask_messages` (guard `drop_ask_messages_guard`,
 lake#483) drops the table; `copy_workspace_records` no longer accepts the collection. Steps 1 to 7
 below are kept as the pattern the later runbooks refer to. Applying `0050` on dev is the
 coordinator's: the operator vendors `db/schema.sql` and selects `drop_ask_messages_guard`.

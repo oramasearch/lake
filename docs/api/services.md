@@ -95,7 +95,7 @@ store ids), each with the customer, service id, kind and name. `start_workspace`
 | Variable | Set by | Meaning |
 |---|---|---|
 | `LAKE_SERVICE_DIR` | operator | The mounted Secret `lake-<lake>-services`, one `<slug>.json` per Ready service. Without it, Services, Design, Train and Ship say they are not available |
-| `LAKE_SERVICES_PER_CUSTOMER` | optional | Live services per customer; default `0`, no limit (Steve, 2026-09-26) |
+| `LAKE_SERVICES_PER_CUSTOMER` | optional | Live services per customer; default `0`, no limit |
 
 ## Verify
 
@@ -123,12 +123,12 @@ reads the pods' Ready transition from Kubernetes, deletes the service, and print
 Ready), `connected` (lake reads the connection) — with the operator's messages, then the median and
 p90 per kind. `ready_seconds` is the median of `connected`.
 
-Measured 2026-09-26 on lake.oramadev.net (`3dbbfcd`, operator `main-375debd`), one AKS node,
+Measured 2026-09-26 on lake.example.com (`3dbbfcd`, operator `main-375debd`), one AKS node,
 one service at a time, instances 1, 1 GiB. Seconds from *Create*:
 
 | Kind | Operator saw it | Pods Ready | Operator Ready | Usable (`connected`) | `ready_seconds` | Before lake#197 |
 |---|---|---|---|---|---|---|
-| Zetta | 1.7 | 38.5 | 41.4 | 41.4 | 30 (Steve, 2026-09-26) | — |
+| Zetta | 1.7 | 38.5 | 41.4 | 41.4 | 30 | — |
 | Postgres | 1.7 | 40.2 | 43.7 | 43.7 | 45 | ~2 min |
 | SQLite | 1.7 | 21.5 | 24.0 | 24.0 | 25 | 52–123 |
 | DuckDB | 1.7 | 23.5 | 26.5 | 26.5 | 30 | 62–113 |

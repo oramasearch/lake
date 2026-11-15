@@ -107,7 +107,7 @@ A random 96-bit nonce per block keeps the collision bound under 2⁻³² for up 
 writes) per data key; the header's key version leaves room for rotation, which is not built.
 
 **Every workspace store depends on `LAKE_INSTANCE_KEK`.** Each data key is wrapped under a key
-derived from it, and nothing else can unwrap it: losing the KEK (the Secret `lake-prod-instance-kek`)
+derived from it, and nothing else can unwrap it: losing the KEK (the Secret that holds it)
 loses every workspace store. The KEK has no rotation and no backup outside that Secret today.
 
 **A key is created only for a new store.** A missing data key is created only while lake creates a

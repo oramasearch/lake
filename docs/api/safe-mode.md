@@ -5,9 +5,8 @@ Zetta's safe mode (zetta#1373) in the workspace image; until then the two capabi
 `not_supported` and no call is warned.**
 
 Every database of a workspace, and every saved connection, has a **safe mode**, modelled on the one
-in Bobby Tables (Steve Sperandeo, 2026-10-23, on lake#906): *"you can have safe mode off, warn
-writes, warn all ... let's do the same so we can warn with the queries that we're going to run, and
-can control it / change it per database."*
+in Bobby Tables (lake#906): safe mode is Off, Warn Writes or Warn All, so the queries about to run
+can be warned about, and it is set per database.
 
 | Level | `mode` | What it does |
 |---|---|---|

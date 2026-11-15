@@ -1,11 +1,9 @@
 # Agents: designed in Design → Agents, trained in Train → Agents
 
 **Status: implemented 2026-09-27 (lake#229, epic lake#228); split into Design and Train 2026-10-11
-(lake#653, not deployed).** Steve, 2026-10-11: *"the Agents section should be able to create agents
-in the Design section (like solutions do; rename agent library to just agents, and allow agents to
-be created (designed) there) ... the Train > Agents page should be dedicated to training
-model-based agents and improving them and their performance metrics, launching experiments,
-etc..."* Conversation still happens in Ask Orama.
+(lake#653, not deployed).** Agents are created (designed) in Design → Agents, as solutions are;
+the Agent Library is now just Agents. Train → Agents is dedicated to training model-based agents and
+improving them: their performance metrics, experiments and the like. Conversation still happens in Ask Orama.
 
 | Where | What it is for |
 |---|---|
@@ -125,8 +123,8 @@ Design-time editing is not on this page; **Edit its design** opens Design → Ag
 | `agent-project-corpus` | Project Corpus Agent | Ask Orama, when a person asks for a training corpus: it builds one, worked examples of building or changing a pipeline on their own data, replayed against their workspace; changes nothing (lake#263, lake#788) | its own service |
 
 **Names (lake#763).** The catalogue is the one source of agent names. Every name is title-case
-words with one blank between them, with "Agent" last for every agent but Ask Orama (Steve,
-2026-10-17; the Agent Creator Agent keeps "Agent" twice on purpose). The API, *Talk to*, the
+words with one blank between them, with "Agent" last for every agent but Ask Orama (the
+Agent Creator Agent keeps "Agent" twice on purpose). The API, *Talk to*, the
 Agents pages and every server message read the name from the catalogue; the web app, the in-app
 guide and these docs write it out, and `tests/test_agent_names.cpp` fails when a name breaks the
 scheme, when an old spelling or a name run together into one word appears anywhere in lake (release

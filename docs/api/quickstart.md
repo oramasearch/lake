@@ -1,6 +1,6 @@
 # The quickstart process
 
-lake#1128. Steve, 2026-10-24: *"it's meant to get new users having success early"*.
+lake#1128. The Quickstart gets new users to a first success early.
 
 ## What it is
 
@@ -98,9 +98,8 @@ with its storage `type` and, from lake#1181, its detected `kind` ([columns](#col
 
 ## Columns
 
-lake#1181. Steve, 2026-10-24, after the Quickstart on lake-dev (v0.7.0) refused a dataset with a date
-column (`transform_required: add_snapshot_date`) and showed the raw code: *"it should be able to use
-any type of columns (auto-detect)"*.
+lake#1181. The Quickstart uses any type of column and detects each kind. Before, v0.7.0 refused a
+dataset with a date column (`transform_required: add_snapshot_date`) and showed the raw code.
 
 **Detection.** `start_quickstart` asks the engine's own column profile, `analyze_dataset`
 (`sample_rows` 10000, `as_of` the snapshot date), and keeps each column's kind on the record
@@ -249,9 +248,8 @@ sign-in that made it, so signing out leaves the website working.
 
 ## The agent prompt
 
-lake#1185. Steve, 2026-10-24: *"you should have a tab for copy agent prompt (default), and another tab
-for just the source code... but the copy prompt should include the source and the full context for
-the agent to success in installing it into their website"*.
+lake#1185. Two tabs: *Copy agent prompt* (the default) and the source code alone. The prompt
+carries the source and the full context an agent needs to install it into a website.
 
 `quickstart_snippets` answers `prompt`, one Markdown block a person pastes into a coding agent in
 their website's project (`agent_prompt` in `src/api/quickstart_capabilities.cpp`). It holds:
@@ -283,9 +281,8 @@ prompt* tab, and the snippets in *Source code* ([../ui/quickstart.md](../ui/quic
 ## The conversation (lake#1182)
 
 The model step starts with a conversation, not a guessed column. Before lake#1182 a dataset with no
-yes-or-no column ended in *Nothing to Predict Yet*; Steve, 2026-10-25: *"shouldn't this be an agent
-chat conversation?"*, approved with *"maybe it generates some potential opportunities... or apps?
-maybe a dashboard with analysis?"*.
+yes-or-no column ended in *Nothing to Predict Yet*. It is now an agent conversation, which can suggest
+opportunities, apps or a dashboard with analysis.
 
 `start_quickstart_conversation` calls `send_ask_message` as the same person, nested through the
 registry, so the conversation is an ordinary Ask Orama conversation: kept in the workspace Zetta
@@ -459,7 +456,7 @@ both of which multitenancy already holds. Audit goes to the workspace's own chai
   dates found in values, and every refusal explained without its code.
 - `Quickstart.AnyColumnTypesTrainADatedDatasetIsPreparedNotRefused`,
   `ATransformRequiredLakeCanSatisfyIsAppliedAndTriedOnce` and `WhatCannotBeTrainedIsSaidInPlainWords`
-  run Steve's shape (first name, country, a date, an id, free text, numbers, an empty and a constant
+  run a reported dataset's shape (first name, country, a date, an id, free text, numbers, an empty and a constant
   column) through the test double, including a `transform_required` retry.
 - `QuickstartZetta.ADatedDatasetWithAnyColumnTypesTrainsAndAnswersOnARealEngine` trains that shape
   on a real Zetta (v0.5.0), publishes it and predicts on the search hits' rows, date included.
