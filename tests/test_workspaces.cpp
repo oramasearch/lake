@@ -6008,6 +6008,40 @@ TEST(Workspaces, SqlNamesTheWordAMisspeltStatementStartsWith) {
     EXPECT_EQ(r.w.caller->calls.size(), before) << "the read-only guard still holds";
 }
 
+// LSR-017 (lake#926): the guard reads the text as a SQL parser does, and refuses anything a second
+// parser could split into another statement: a comment, a dollar quote, a backslash in a string, an
+// open quote. None of them reaches the workspace.
+TEST(Workspaces, SqlRefusesTextAParserCouldSplitDifferently) {
+    ReadyWorkspace r;
+    const std::size_t before = r.w.caller->calls.size();
+    for (const char* refused : {
+             "SELECT 1 -- ' ; DROP TABLE datasets.accounts",
+             "SELECT '-- ' ; DROP TABLE datasets.accounts",
+             "SELECT 1 /* ' */ ; DELETE FROM datasets.accounts",
+             "SELECT 1; DROP TABLE datasets.accounts",
+             "SELECT 'it''s' ; DROP TABLE datasets.accounts",
+             "SELECT 'open",
+             "SELECT \"open",
+             "SELECT $$;$$; DROP TABLE datasets.accounts",
+             "SELECT $tag$;$tag$",
+             "SELECT 'a\\'; DROP TABLE datasets.accounts --'",
+             "WITH x AS (SELECT 1) SELECT * FROM x -- trailing",
+         }) {
+        const auto answer = r.call("workspace_sql", {{"statement", refused}});
+        EXPECT_FALSE(answer.ok) << refused;
+        EXPECT_EQ(answer.error.code, "invalid_input") << refused;
+        EXPECT_EQ(answer.error.path, "/statement") << refused;
+    }
+    EXPECT_EQ(r.w.caller->calls.size(), before) << "no refused statement reached the workspace";
+    // Quotes, doubled quotes, quoted names and a trailing semicolon still read.
+    for (const char* read : {"SELECT * FROM datasets.accounts WHERE note = 'a;b -- c /* d'",
+                             "SELECT * FROM datasets.accounts WHERE note = 'it''s';",
+                             "SELECT \"odd;name\" FROM datasets.accounts"}) {
+        const auto answer = r.call("workspace_sql", {{"statement", read}});
+        EXPECT_NE(answer.error.path, "/statement") << read << ": " << answer.error.message;
+    }
+}
+
 // lake#1229: the workspace Zetta route's `sql` (an App's binding) answers at most
 // gateway_sql_row_cap rows, and never cuts an answer silently.
 TEST(WorkspaceSql, GatewayRowCapRewritesOnlyAStatementWithoutItsOwnLimit) {
