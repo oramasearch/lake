@@ -1161,9 +1161,11 @@ are in [`docs/releases/`](docs/releases/README.md); read its `README.md` first. 
    `revision`, `/readyz` answers 200, and a browser's request for `/` (`Accept: text/html`) answers
    200. A bare `curl` of `/` answers 404 by design.
 9. **Tag the image `vX.Y.Z` in Docker Hub**, naming the digest that is deployed, without
-   rebuilding: `retag-image.py lake <YYYYMMDD><letter> vX.Y.Z` (in the `liquid-dev` skill). Both
-   tags must print the digest the running pod reports, and an anonymous request for the
-   repository must still answer 404.
+   rebuilding: `python3 -I tools/release/publish-release-image.py <YYYYMMDD><letter> vX.Y.Z`
+   (lake#994, [release-images.md](docs/deployment/release-images.md)). It refuses unless the Git
+   tag is the approved release merge commit on `main`, the image was built from it, and `vX.Y.Z`
+   does not exist yet; a release tag is never written twice. Both tags must print the digest the
+   running pod reports, and an anonymous request for the repository must still answer 404.
 10. **Move the pins and record the roll**: liquid-bridge's pin of `modules/lake` to the tag, the
     umbrella's pointer to liquid-bridge, and the deployment paragraph in liquid-bridge's
     `docs/action-plan.md`. Update **Status** above and the README's deployment line.

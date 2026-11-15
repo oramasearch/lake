@@ -1,0 +1,4 @@
+# Who may approve a lake release image (tools/release/publish-release-image.py, lake#994):
+# the GitHub login that merged, or approved in a review, the release pull request from dev
+# into main. Changing this file is itself a pull request.
+homer6
