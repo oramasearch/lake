@@ -33,10 +33,10 @@ using namespace lake::api;
 
 // The value the operator sets for production: Europe first, then the United States.
 constexpr std::string_view production_regions =
-    R"([{"name":"swedencentral","label":"Europe","host":"eu.lake.live","latitude":"60.67488","longitude":"17.14127"},)"
-    R"({"name":"eastus","label":"United States","host":"us.lake.live","latitude":"37.3719","longitude":"-79.8164"}])";
+    R"([{"name":"swedencentral","label":"Europe","host":"eu.lake.example.com","latitude":"60.67488","longitude":"17.14127"},)"
+    R"({"name":"eastus","label":"United States","host":"us.lake.example.com","latitude":"37.3719","longitude":"-79.8164"}])";
 
-Regions production(std::string_view own = "swedencentral", std::string_view apex = "lake.live") {
+Regions production(std::string_view own = "swedencentral", std::string_view apex = "lake.example.com") {
     auto regions = regions_from_environment(own, "", production_regions, apex);
     EXPECT_TRUE(regions) << regions.error();
     return regions ? *regions : Regions{};
@@ -72,24 +72,24 @@ TEST(RegionsEnvironment, ReadsTheOperatorsValues) {
     EXPECT_TRUE(regions->configured());
     EXPECT_EQ(regions->name, "swedencentral");
     EXPECT_EQ(regions->label, "Europe");
-    EXPECT_EQ(regions->apex_host, "lake.live");
+    EXPECT_EQ(regions->apex_host, "lake.example.com");
     ASSERT_EQ(regions->list.size(), 2U);
-    EXPECT_EQ(regions->list[0].host, "eu.lake.live");
+    EXPECT_EQ(regions->list[0].host, "eu.lake.example.com");
     EXPECT_DOUBLE_EQ(regions->list[0].latitude, 60.67488);
     EXPECT_DOUBLE_EQ(regions->list[1].longitude, -79.8164);
     EXPECT_EQ(regions->list[1].label, "United States");
     EXPECT_EQ(region_json(&*regions), json({{"name", "swedencentral"}, {"label", "Europe"}}));
     EXPECT_EQ(
         regions_json(&*regions),
-        json::array({{{"name", "swedencentral"}, {"label", "Europe"}, {"host", "eu.lake.live"}},
-                     {{"name", "eastus"}, {"label", "United States"}, {"host", "us.lake.live"}}}));
+        json::array({{{"name", "swedencentral"}, {"label", "Europe"}, {"host", "eu.lake.example.com"}},
+                     {{"name", "eastus"}, {"label", "United States"}, {"host", "us.lake.example.com"}}}));
 }
 
 TEST(RegionsEnvironment, TheLabelComesFromTheListWhenUnsetAndNumbersAreAccepted) {
     const auto regions = regions_from_environment(
         "eastus",
         "",
-        R"([{"name":"eastus","label":"United States","host":"us.lake.live","latitude":37.3719,"longitude":-79.8164}])",
+        R"([{"name":"eastus","label":"United States","host":"us.lake.example.com","latitude":37.3719,"longitude":-79.8164}])",
         "");
     ASSERT_TRUE(regions) << regions.error();
     EXPECT_EQ(regions->label, "United States");
@@ -112,49 +112,49 @@ TEST(RegionsEnvironment, InvalidValuesAreStartupErrorsNamingTheVariable) {
         error_of(
             "",
             "",
-            R"([{"name":"eu","label":"Europe","host":"eu.lake.live/x","latitude":"1","longitude":"2"}])",
+            R"([{"name":"eu","label":"Europe","host":"eu.lake.example.com/x","latitude":"1","longitude":"2"}])",
             ""),
-        "LAKE_REGIONS[0].host must be a host name such as eu.lake.live, not \"eu.lake.live/x\"");
+        "LAKE_REGIONS[0].host must be a host name such as eu.lake.example.com, not \"eu.lake.example.com/x\"");
     EXPECT_EQ(
         error_of(
             "",
             "",
-            R"([{"name":"eu","label":"Europe","host":"eu.lake.live","latitude":"north","longitude":"2"}])",
+            R"([{"name":"eu","label":"Europe","host":"eu.lake.example.com","latitude":"north","longitude":"2"}])",
             ""),
         "LAKE_REGIONS[0].latitude must be a number, not \"north\"");
     EXPECT_EQ(
         error_of(
             "",
             "",
-            R"([{"name":"eu","label":"Europe","host":"eu.lake.live","latitude":"1","longitude":"200"}])",
+            R"([{"name":"eu","label":"Europe","host":"eu.lake.example.com","latitude":"1","longitude":"200"}])",
             ""),
         "LAKE_REGIONS[0].longitude must be between -180 and 180");
     EXPECT_EQ(
         error_of(
-            "", "", R"([{"name":"eu","label":"Europe","host":"eu.lake.live","latitude":"1"}])", ""),
+            "", "", R"([{"name":"eu","label":"Europe","host":"eu.lake.example.com","latitude":"1"}])", ""),
         "LAKE_REGIONS[0].longitude must be a number");
     EXPECT_EQ(
         error_of(
             "",
             "",
-            R"([{"name":"eu","label":"A","host":"a.lake.live","latitude":"1","longitude":"2"},)"
-            R"({"name":"eu","label":"B","host":"b.lake.live","latitude":"1","longitude":"2"}])",
+            R"([{"name":"eu","label":"A","host":"a.lake.example.com","latitude":"1","longitude":"2"},)"
+            R"({"name":"eu","label":"B","host":"b.lake.example.com","latitude":"1","longitude":"2"}])",
             ""),
         "LAKE_REGIONS names the region \"eu\" twice");
     EXPECT_EQ(
         error_of(
             "",
             "",
-            R"([{"name":"eu; Domain=x","label":"A","host":"a.lake.live","latitude":"1","longitude":"2"}])",
+            R"([{"name":"eu; Domain=x","label":"A","host":"a.lake.example.com","latitude":"1","longitude":"2"}])",
             ""),
         "LAKE_REGIONS[0].name must be letters, digits, hyphens and underscores, not \"eu; "
         "Domain=x\"");
     EXPECT_EQ(error_of("westus2", "", production_regions, ""),
               "LAKE_REGION \"westus2\" is not one of the regions in LAKE_REGIONS");
-    EXPECT_EQ(error_of("", "", "", "lake.live"),
+    EXPECT_EQ(error_of("", "", "", "lake.example.com"),
               "LAKE_APEX_HOST needs LAKE_REGIONS: the picker lists them");
-    EXPECT_EQ(error_of("", "", production_regions, "lake.live/<x>"),
-              "LAKE_APEX_HOST must be a host name such as lake.live");
+    EXPECT_EQ(error_of("", "", production_regions, "lake.example.com/<x>"),
+              "LAKE_APEX_HOST must be a host name such as lake.example.com");
 }
 
 TEST(RegionsClosest, CountryCentroidsAreISOAlpha2) {
@@ -216,13 +216,13 @@ TEST(RegionsPreference, TheCookieWinsOverTheCountry) {
 TEST(RegionsPreference, ContinuingKeepsThePathAndQuery) {
     const Regions regions = production();
     const Region& us = regions.list[1];
-    EXPECT_EQ(region_continue_url(us, "/"), "https://us.lake.live/");
+    EXPECT_EQ(region_continue_url(us, "/"), "https://us.lake.example.com/");
     EXPECT_EQ(region_continue_url(us, "/w/abc/design/projects?tab=runs&x=%20y"),
-              "https://us.lake.live/w/abc/design/projects?tab=runs&x=%20y");
+              "https://us.lake.example.com/w/abc/design/projects?tab=runs&x=%20y");
     // Anything that is not an origin-form path goes to the region's front page.
     for (const std::string_view target :
          {"", "https://evil.example/", "x", "/a b", "/a\r\nSet-Cookie: x"}) {
-        EXPECT_EQ(region_continue_url(us, target), "https://us.lake.live/") << target;
+        EXPECT_EQ(region_continue_url(us, target), "https://us.lake.example.com/") << target;
     }
 }
 
@@ -232,7 +232,7 @@ TEST(RegionsPicker, ListsEveryRegionPreselectsOneAndEscapes) {
     EXPECT_NE(html.find("<h1>Choose a Region</h1>"), std::string::npos);
     EXPECT_NE(html.find("value=\"swedencentral\">"), std::string::npos);
     EXPECT_NE(html.find("value=\"eastus\" checked>"), std::string::npos);
-    EXPECT_NE(html.find("eu.lake.live"), std::string::npos);
+    EXPECT_NE(html.find("eu.lake.example.com"), std::string::npos);
     EXPECT_NE(html.find("action=\"/w/a?x=1&amp;y=&quot;2&quot;\""), std::string::npos);
     EXPECT_EQ(html.find("class=\"error\""), std::string::npos);
     EXPECT_NE(web_ui_region_picker(regions, regions.list[0], "/", "Choose one.")
@@ -258,7 +258,7 @@ TEST(RegionsServerInfo, ReportsTheRegionThroughTheRegistry) {
     ASSERT_TRUE(result.ok) << result.error.message;
     EXPECT_EQ(result.value["region"], json({{"name", "eastus"}, {"label", "United States"}}));
     ASSERT_EQ(result.value["regions"].size(), 2U);
-    EXPECT_EQ(result.value["regions"][1]["host"], "us.lake.live");
+    EXPECT_EQ(result.value["regions"][1]["host"], "us.lake.example.com");
     // The schema REST, OpenAPI and MCP publish names both fields.
     const auto capability = registry.find("server_info");
     ASSERT_NE(capability, nullptr);
@@ -364,7 +364,7 @@ TEST(RegionsApex, EveryPathOnTheApexIsThePicker) {
     // The country preselects; any path, the API's included, is the picker; the port is ignored.
     for (const std::string_view target :
          {"/", "/w/abc/design?tab=runs", "/v1/server_info", "/mcp"}) {
-        Response page = send(port, "GET", target, "lake.live", {{"CF-IPCountry", "US"}});
+        Response page = send(port, "GET", target, "lake.example.com", {{"CF-IPCountry", "US"}});
         ASSERT_EQ(page.status, 200) << target << " " << page.body;
         EXPECT_TRUE(page.headers["content-type"].starts_with("text/html")) << target;
         EXPECT_EQ(page.headers["cache-control"], "no-store");
@@ -373,17 +373,17 @@ TEST(RegionsApex, EveryPathOnTheApexIsThePicker) {
     EXPECT_TRUE(checked(send(port, "GET", "/", "LAKE.live:443", {{"CF-IPCountry", "DE"}}),
                         "swedencentral"));
     // No country: the first region.
-    EXPECT_TRUE(checked(send(port, "GET", "/", "lake.live"), "swedencentral"));
+    EXPECT_TRUE(checked(send(port, "GET", "/", "lake.example.com"), "swedencentral"));
     // The region chosen before wins over the country.
     EXPECT_TRUE(
         checked(send(port,
                      "GET",
                      "/",
-                     "lake.live",
+                     "lake.example.com",
                      {{"CF-IPCountry", "DE"}, {"Cookie", "theme=dark; lake_region=eastus"}}),
                 "eastus"));
     // The form posts back to the same path and query.
-    Response page = send(port, "GET", "/w/abc/design?tab=runs&x=1", "lake.live");
+    Response page = send(port, "GET", "/w/abc/design?tab=runs&x=1", "lake.example.com");
     EXPECT_NE(page.body.find("action=\"/w/abc/design?tab=runs&amp;x=1\""), std::string::npos);
 
     // The stylesheet and fonts the page links are served on the apex too.
@@ -391,29 +391,29 @@ TEST(RegionsApex, EveryPathOnTheApexIsThePicker) {
     ASSERT_NE(stylesheet, std::string::npos);
     const std::string css =
         page.body.substr(stylesheet + 6, page.body.find('"', stylesheet + 6) - stylesheet - 6);
-    Response style = send(port, "GET", css, "lake.live");
+    Response style = send(port, "GET", css, "lake.example.com");
     EXPECT_EQ(style.status, 200) << css;
     EXPECT_TRUE(style.headers["content-type"].starts_with("text/css"))
         << style.headers["content-type"];
-    EXPECT_EQ(send(port, "GET", "/healthz", "lake.live").status, 200);
+    EXPECT_EQ(send(port, "GET", "/healthz", "lake.example.com").status, 200);
 
     // Continuing remembers the choice and keeps the path and query.
     Response chosen = send(
         port,
         "POST",
         "/w/abc/design?tab=runs&x=1",
-        "lake.live",
+        "lake.example.com",
         {{"Content-Type", "application/x-www-form-urlencoded"}, {"X-Forwarded-Proto", "https"}},
         "region=eastus");
     EXPECT_EQ(chosen.status, 302) << chosen.body;
-    EXPECT_EQ(chosen.headers["location"], "https://us.lake.live/w/abc/design?tab=runs&x=1");
+    EXPECT_EQ(chosen.headers["location"], "https://us.lake.example.com/w/abc/design?tab=runs&x=1");
     EXPECT_EQ(chosen.headers["set-cookie"],
               "lake_region=eastus; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax; Secure");
     // A region that is not offered is refused with the page again, and nothing is remembered.
     Response refused = send(port,
                             "POST",
                             "/",
-                            "lake.live",
+                            "lake.example.com",
                             {{"Content-Type", "application/x-www-form-urlencoded"}},
                             "region=westus2");
     EXPECT_EQ(refused.status, 400);
@@ -421,7 +421,7 @@ TEST(RegionsApex, EveryPathOnTheApexIsThePicker) {
     EXPECT_NE(refused.body.find("Choose one of the regions below."), std::string::npos);
 
     // The region's own host is the app and the API as before, with the region in server_info.
-    Response info = send(port, "GET", "/v1/server_info", "eu.lake.live");
+    Response info = send(port, "GET", "/v1/server_info", "eu.lake.example.com");
     ASSERT_EQ(info.status, 200) << info.body;
     const json value = json::parse(info.body)["value"];
     EXPECT_EQ(value["region"], json({{"name", "swedencentral"}, {"label", "Europe"}}));
@@ -430,24 +430,24 @@ TEST(RegionsApex, EveryPathOnTheApexIsThePicker) {
 }
 
 TEST(RegionsApex, NoPickerWhenUnset) {
-    // Nonprod: nothing set. lake.live is just another host, and server_info reports no region.
+    // Nonprod: nothing set. lake.example.com is just another host, and server_info reports no region.
     ApiServer server(options_with(Regions{}));
     ASSERT_TRUE(server.start()) << server.reason();
-    Response info = send(server.port(), "GET", "/v1/server_info", "lake.live");
+    Response info = send(server.port(), "GET", "/v1/server_info", "lake.example.com");
     ASSERT_EQ(info.status, 200) << info.body;
     const json value = json::parse(info.body)["value"];
     EXPECT_EQ(value["region"], json(nullptr));
     EXPECT_EQ(value["regions"], json::array());
-    Response page = send(server.port(), "GET", "/", "lake.live", {{"CF-IPCountry", "US"}});
+    Response page = send(server.port(), "GET", "/", "lake.example.com", {{"CF-IPCountry", "US"}});
     EXPECT_EQ(page.body.find("Choose a Region"), std::string::npos);
     server.stop();
 
     // Regions without an apex host: a region Lake that is not the picker.
     ApiServer region_only(options_with(production("eastus", "")));
     ASSERT_TRUE(region_only.start()) << region_only.reason();
-    EXPECT_EQ(send(region_only.port(), "GET", "/", "lake.live").body.find("Choose a Region"),
+    EXPECT_EQ(send(region_only.port(), "GET", "/", "lake.example.com").body.find("Choose a Region"),
               std::string::npos);
-    Response region_info = send(region_only.port(), "GET", "/v1/server_info", "lake.live");
+    Response region_info = send(region_only.port(), "GET", "/v1/server_info", "lake.example.com");
     ASSERT_EQ(region_info.status, 200) << region_info.body;
     EXPECT_EQ(json::parse(region_info.body)["value"]["region"]["name"], "eastus");
     region_only.stop();
@@ -503,8 +503,8 @@ TEST(RegionsApexAgentDocuments, NameEveryRegionOfTheList) {
         EXPECT_FALSE(has(*document, "https://lake.example/v1/"));
         EXPECT_FALSE(has(*document, "https://lake.example/developer/mcp"));
         // No region host is written in the code: production's hosts appear only from the list.
-        EXPECT_FALSE(has(*document, "eu.lake.live"));
-        EXPECT_FALSE(has(*document, "us.lake.live"));
+        EXPECT_FALSE(has(*document, "eu.lake.example.com"));
+        EXPECT_FALSE(has(*document, "us.lake.example.com"));
     }
     // Each still teaches the tools as a region's does.
     EXPECT_TRUE(has(llms, "`create_pipeline` (write)"));
@@ -522,63 +522,63 @@ TEST(RegionsApexAgentDocuments, TheApexServesThemAndARegionKeepsItsOwn) {
     ASSERT_TRUE(server.start()) << server.reason();
     const unsigned short port = server.port();
 
-    Response llms = send(port, "GET", "/llms.txt", "lake.live", {{"CF-IPCountry", "US"}});
+    Response llms = send(port, "GET", "/llms.txt", "lake.example.com", {{"CF-IPCountry", "US"}});
     ASSERT_EQ(llms.status, 200) << llms.body.substr(0, 300);
     EXPECT_EQ(llms.headers["content-type"], "text/plain; charset=utf-8");
     EXPECT_EQ(llms.headers["cache-control"], "public, max-age=300");
     EXPECT_TRUE(llms.body.starts_with("# Lake\n")) << llms.body.substr(0, 300);
     EXPECT_FALSE(has(llms.body, "<html"));
-    EXPECT_TRUE(has(llms.body, "https://lake.live is not a Lake"));
-    for (const std::string_view region : {"https://eu.lake.live", "https://us.lake.live"}) {
+    EXPECT_TRUE(has(llms.body, "https://lake.example.com is not a Lake"));
+    for (const std::string_view region : {"https://eu.lake.example.com", "https://us.lake.example.com"}) {
         for (const std::string_view path :
              {"/mcp`", "/llms.txt", "/llms-full.txt", "/skills/lake/SKILL.md"}) {
             EXPECT_TRUE(has(llms.body, std::string(region) + std::string(path))) << region << path;
         }
     }
-    EXPECT_TRUE(has(llms.body, "(https://lake.live/skills/lake/SKILL.md)"));
+    EXPECT_TRUE(has(llms.body, "(https://lake.example.com/skills/lake/SKILL.md)"));
     // The port and the case of the host do not matter, as for the picker.
     EXPECT_TRUE(has(send(port, "GET", "/llms.txt", "LAKE.live:443").body,
-                    "https://lake.live is not a Lake"));
+                    "https://lake.example.com is not a Lake"));
 
-    Response full = send(port, "GET", "/llms-full.txt", "lake.live");
+    Response full = send(port, "GET", "/llms-full.txt", "lake.example.com");
     ASSERT_EQ(full.status, 200);
     EXPECT_EQ(full.headers["content-type"], "text/plain; charset=utf-8");
     EXPECT_TRUE(full.body.starts_with("# Lake — every tool\n"));
-    EXPECT_TRUE(has(full.body, "https://us.lake.live/mcp"));
+    EXPECT_TRUE(has(full.body, "https://us.lake.example.com/mcp"));
     EXPECT_TRUE(has(full.body, "Input schema:"));
 
     for (const std::string_view path : {"/skills/lake/SKILL.md", "/developer/mcp/skill"}) {
-        Response skill = send(port, "GET", path, "lake.live");
+        Response skill = send(port, "GET", path, "lake.example.com");
         ASSERT_EQ(skill.status, 200) << path;
         EXPECT_EQ(skill.headers["content-type"], "text/markdown; charset=utf-8") << path;
         EXPECT_EQ(skill.headers["content-disposition"], "attachment; filename=SKILL.md");
         EXPECT_TRUE(skill.body.starts_with("---\nname: lake\n")) << path;
-        EXPECT_TRUE(has(skill.body, "https://eu.lake.live/mcp"));
-        EXPECT_TRUE(has(skill.body, "https://us.lake.live/mcp"));
+        EXPECT_TRUE(has(skill.body, "https://eu.lake.example.com/mcp"));
+        EXPECT_TRUE(has(skill.body, "https://us.lake.example.com/mcp"));
     }
 
     // Everything else on the apex is still the picker, including a POST to an agent path.
     for (const std::string_view target : {"/", "/mcp", "/skills/", "/llms.txt.bak"}) {
-        Response page = send(port, "GET", target, "lake.live");
+        Response page = send(port, "GET", target, "lake.example.com");
         EXPECT_TRUE(page.headers["content-type"].starts_with("text/html")) << target;
     }
     Response posted = send(port,
                            "POST",
                            "/llms.txt",
-                           "lake.live",
+                           "lake.example.com",
                            {{"Content-Type", "application/x-www-form-urlencoded"}},
                            "region=eastus");
     EXPECT_EQ(posted.status, 302);
-    EXPECT_EQ(posted.headers["location"], "https://us.lake.live/llms.txt");
+    EXPECT_EQ(posted.headers["location"], "https://us.lake.example.com/llms.txt");
 
     // A region's own host answers its own text, naming only itself.
-    Response region = send(port, "GET", "/llms.txt", "eu.lake.live");
+    Response region = send(port, "GET", "/llms.txt", "eu.lake.example.com");
     ASSERT_EQ(region.status, 200);
     EXPECT_EQ(region.headers["content-type"], "text/plain; charset=utf-8");
-    EXPECT_TRUE(has(region.body, "Lake's MCP server is `http://eu.lake.live/mcp`"));
+    EXPECT_TRUE(has(region.body, "Lake's MCP server is `http://eu.lake.example.com/mcp`"));
     EXPECT_FALSE(has(region.body, "Choose a region first"));
-    EXPECT_FALSE(has(region.body, "us.lake.live"));
-    Response region_skill = send(port, "GET", "/skills/lake/SKILL.md", "eu.lake.live");
+    EXPECT_FALSE(has(region.body, "us.lake.example.com"));
+    Response region_skill = send(port, "GET", "/skills/lake/SKILL.md", "eu.lake.example.com");
     EXPECT_EQ(region_skill.headers["content-type"], "text/markdown; charset=utf-8");
     EXPECT_FALSE(has(region_skill.body, "Choose a region first"));
     server.stop();
@@ -588,7 +588,7 @@ TEST(RegionsApexAgentDocuments, TheApexServesThemAndARegionKeepsItsOwn) {
 TEST(RegionsApexAgentDocuments, NoRegionsMeansTheUsualText) {
     ApiServer server(options_with(Regions{}));
     ASSERT_TRUE(server.start()) << server.reason();
-    for (const std::string_view host : {"lake.live", "lake-dev.oramadev.net"}) {
+    for (const std::string_view host : {"lake.example.com", "lake-dev.example.net"}) {
         Response llms = send(server.port(), "GET", "/llms.txt", host);
         ASSERT_EQ(llms.status, 200) << host;
         EXPECT_EQ(llms.headers["content-type"], "text/plain; charset=utf-8");
@@ -602,32 +602,32 @@ TEST(RegionsApexAgentDocuments, NoRegionsMeansTheUsualText) {
 }
 
 TEST(RegionsApex, ACouponCodeGoesToTheChosenRegion) {
-    // An ad links to lake.live/?code=LAKE50 (lake#1156): the picker says the code goes along, its
+    // An ad links to lake.example.com/?code=LAKE50 (lake#1156): the picker says the code goes along, its
     // form posts back to the same query, and continuing keeps it on the region's host, where the
     // web app keeps it through sign-up.
     ApiServer server(options_with(production()));
     ASSERT_TRUE(server.start()) << server.reason();
     const unsigned short port = server.port();
-    Response page = send(port, "GET", "/?code=LAKE50", "lake.live", {{"CF-IPCountry", "US"}});
+    Response page = send(port, "GET", "/?code=LAKE50", "lake.example.com", {{"CF-IPCountry", "US"}});
     ASSERT_EQ(page.status, 200) << page.body;
     EXPECT_NE(page.body.find("action=\"/?code=LAKE50\""), std::string::npos);
     EXPECT_NE(page.body.find("Your code <strong>LAKE50</strong> goes with you"), std::string::npos);
     Response chosen = send(port,
                            "POST",
                            "/?code=LAKE50",
-                           "lake.live",
+                           "lake.example.com",
                            {{"Content-Type", "application/x-www-form-urlencoded"}},
                            "region=eastus");
     EXPECT_EQ(chosen.status, 302) << chosen.body;
-    EXPECT_EQ(chosen.headers["location"], "https://us.lake.live/?code=LAKE50");
+    EXPECT_EQ(chosen.headers["location"], "https://us.lake.example.com/?code=LAKE50");
     // Among other parameters too.
     Response mixed = send(port,
                           "POST",
                           "/?utm_source=google&code=LAKE50",
-                          "lake.live",
+                          "lake.example.com",
                           {{"Content-Type", "application/x-www-form-urlencoded"}},
                           "region=swedencentral");
-    EXPECT_EQ(mixed.headers["location"], "https://eu.lake.live/?utm_source=google&code=LAKE50");
+    EXPECT_EQ(mixed.headers["location"], "https://eu.lake.example.com/?utm_source=google&code=LAKE50");
     server.stop();
 
     // A code that is not letters, digits and hyphens is not shown (the query is still carried).

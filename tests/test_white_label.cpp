@@ -105,10 +105,10 @@ Response send(unsigned short port,
 } // namespace
 
 TEST(WhiteLabelEnvironment, NothingSetIsTheUsualLake) {
-    const auto hosts = instance_hosts_from_environment("eu.lake.live", "", "");
+    const auto hosts = instance_hosts_from_environment("eu.lake.example.com", "", "");
     ASSERT_TRUE(hosts) << hosts.error();
     EXPECT_TRUE(hosts->aliases.empty());
-    EXPECT_EQ(hosts->control_host, "eu.lake.live");
+    EXPECT_EQ(hosts->control_host, "eu.lake.example.com");
     const auto none = instance_hosts_from_environment("", "", "");
     ASSERT_TRUE(none) << none.error();
     EXPECT_EQ(none->control_host, "");
@@ -116,14 +116,14 @@ TEST(WhiteLabelEnvironment, NothingSetIsTheUsualLake) {
 
 TEST(WhiteLabelEnvironment, ReadsTheOperatorsValues) {
     const auto hosts = instance_hosts_from_environment(
-        "data.example.com", " Acme.Lake.Live , acme.lake.live,,old.example.com.", "acme.lake.live");
+        "data.example.com", " Acme.Lake.Example.Com , acme.lake.example.com,,old.example.com.", "acme.lake.example.com");
     ASSERT_TRUE(hosts) << hosts.error();
     EXPECT_EQ(hosts->public_host, "data.example.com");
-    EXPECT_EQ(hosts->aliases, (std::vector<std::string>{"acme.lake.live", "old.example.com"}));
-    EXPECT_EQ(hosts->control_host, "acme.lake.live");
-    EXPECT_TRUE(is_host_alias(hosts->aliases, "ACME.lake.live:443"));
+    EXPECT_EQ(hosts->aliases, (std::vector<std::string>{"acme.lake.example.com", "old.example.com"}));
+    EXPECT_EQ(hosts->control_host, "acme.lake.example.com");
+    EXPECT_TRUE(is_host_alias(hosts->aliases, "ACME.lake.example.com:443"));
     EXPECT_FALSE(is_host_alias(hosts->aliases, "data.example.com"));
-    EXPECT_FALSE(is_host_alias(hosts->aliases, "evil-acme.lake.live"));
+    EXPECT_FALSE(is_host_alias(hosts->aliases, "evil-acme.lake.example.com"));
 }
 
 TEST(WhiteLabelEnvironment, InvalidValuesAreStartupErrorsNamingTheVariable) {
@@ -133,7 +133,7 @@ TEST(WhiteLabelEnvironment, InvalidValuesAreStartupErrorsNamingTheVariable) {
     const auto itself = instance_hosts_from_environment("data.example.com", "DATA.example.com", "");
     ASSERT_FALSE(itself);
     EXPECT_NE(itself.error().find("LAKE_PUBLIC_HOST itself"), std::string::npos);
-    const auto alone = instance_hosts_from_environment("", "acme.lake.live", "");
+    const auto alone = instance_hosts_from_environment("", "acme.lake.example.com", "");
     ASSERT_FALSE(alone);
     EXPECT_NE(alone.error().find("need LAKE_PUBLIC_HOST"), std::string::npos);
     const auto control = instance_hosts_from_environment("data.example.com", "", "-bad-");
@@ -229,7 +229,7 @@ TEST(WhiteLabelAliases, PagesOnAnAliasGoToThePublicHostAndTheApiIsServed) {
     options.port = 0;
     options.store = std::make_shared<lake::control::InMemoryStore>();
     options.public_host = "data.example.com";
-    options.host_aliases = {"acme.lake.live"};
+    options.host_aliases = {"acme.lake.example.com"};
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
     const unsigned short port = server.port();
@@ -241,18 +241,18 @@ TEST(WhiteLabelAliases, PagesOnAnAliasGoToThePublicHostAndTheApiIsServed) {
              {"/sign-in?next=%2Fdocs", "https://data.example.com/sign-in?next=%2Fdocs"},
              {"/w/abc/design?tab=runs", "https://data.example.com/w/abc/design?tab=runs"},
          }}) {
-        Response page = send(port, "GET", target, "acme.lake.live:443", {{"Accept", "text/html"}});
+        Response page = send(port, "GET", target, "acme.lake.example.com:443", {{"Accept", "text/html"}});
         EXPECT_EQ(page.status, 302) << target << " " << page.body;
         EXPECT_EQ(page.headers["location"], location) << target;
         EXPECT_EQ(page.headers["cache-control"], "no-store") << target;
     }
     // The API, MCP's discovery and health are served on the alias as on the public host.
-    Response info = send(port, "GET", "/v1/server_info", "acme.lake.live");
+    Response info = send(port, "GET", "/v1/server_info", "acme.lake.example.com");
     ASSERT_EQ(info.status, 200) << info.body;
     EXPECT_EQ(json::parse(info.body)["value"]["name"], "lake");
-    EXPECT_EQ(send(port, "GET", "/healthz", "acme.lake.live").status, 200);
+    EXPECT_EQ(send(port, "GET", "/healthz", "acme.lake.example.com").status, 200);
     // A browser opening the API's own pages is not redirected either: they are server routes.
-    EXPECT_NE(send(port, "GET", "/v1/server_info", "acme.lake.live", {{"Accept", "text/html"}}).status,
+    EXPECT_NE(send(port, "GET", "/v1/server_info", "acme.lake.example.com", {{"Accept", "text/html"}}).status,
               302);
     // On the public host nothing is redirected.
     EXPECT_NE(send(port, "GET", "/", "data.example.com", {{"Accept", "text/html"}}).status, 302);

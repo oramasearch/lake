@@ -555,7 +555,8 @@ std::expected<Brand, std::string> brand_from_sources(const BrandSources& given,
         }
         brand.email_from = sources.email_from;
     }
-    if (lake_address(brand.email_from) || brand.email_from == default_resend_from) {
+    if (brand.email_from.empty() || lake_address(brand.email_from) ||
+        brand.email_from == default_resend_from) {
         return std::unexpected("LAKE_BRAND_EMAIL_FROM must be set for a custom brand, on a domain "
                                "verified in Resend: email would still be sent as " +
                                brand.email_from);

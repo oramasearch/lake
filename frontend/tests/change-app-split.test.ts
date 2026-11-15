@@ -75,7 +75,7 @@ test("the divider resizes between a quarter and three quarters, and is remembere
 });
 
 test("only an http(s) App address is framed", () => {
-  assert.equal(frameUrl("https://reports.us.lake.live"), "https://reports.us.lake.live");
+  assert.equal(frameUrl("https://reports.us.lake.example.com"), "https://reports.us.lake.example.com");
   assert.equal(frameUrl("javascript:alert(1)"), "");
   assert.equal(frameUrl(undefined), "");
 });

@@ -1,0 +1,107 @@
+{
+  "enabled": true,
+  "url": "",
+  "currency": "USD",
+  "shared": {
+    "title": "Shared",
+    "summary": "Your own workspaces on Lake's shared regions. Pay only for what you use, billed by the minute at the published price list.",
+    "features": [
+      "No monthly fee: usage-based",
+      "Backups included",
+      "Europe and United States"
+    ],
+    "price_list_url": "",
+    "promise": "Train and serve a model in 5 minutes for under $5",
+    "show_promise": false
+  },
+  "offers": {
+    "private_warehouse": {
+      "title": "Private Warehouse",
+      "summary": "A dedicated warehouse on shared hardware, in a shared region.",
+      "features": [
+        "Your own warehouse, isolated from other customers",
+        "Backups included",
+        "Provisioned automatically once paid",
+        "Your own domain, white-labelled (available on request)"
+      ],
+      "monthly_usd": 1000,
+      "starting_from": false,
+      "credit_percent": 40,
+      "checkout": true
+    },
+    "dedicated_cluster": {
+      "title": "Dedicated Cluster",
+      "summary": "A dedicated Kubernetes cluster on the cloud provider and in the region you choose, including regions beyond the shared ones.",
+      "features": [
+        "Your own Kubernetes cluster",
+        "Choose the cloud provider and the region",
+        "Backups included",
+        "Your own domain, white-labelled (available on request)"
+      ],
+      "monthly_usd": 5000,
+      "starting_from": false,
+      "credit_percent": 40,
+      "checkout": true
+    },
+    "on_prem": {
+      "title": "On-Prem",
+      "summary": "Source available, full service (Metis), SOC 2 compliant. On any cloud provider or on bare metal, with any accelerators, in any region.",
+      "features": [
+        "Any cloud provider or bare metal, with any accelerators (GPUs and others)",
+        "Any region, and multi-region deployments with geo-based load balancing and failover",
+        "Full service (Metis)",
+        "Backups included",
+        "Your own domain, white-labelled (available on request)"
+      ],
+      "monthly_usd": 10000,
+      "starting_from": true,
+      "credit_percent": 40,
+      "checkout": false
+    }
+  },
+  "providers": [
+    {
+      "id": "azure",
+      "label": "Microsoft Azure",
+      "checkout": true,
+      "regions": [
+        {"id": "eastus", "label": "United States (Virginia)"},
+        {"id": "westus2", "label": "United States (Washington)"},
+        {"id": "swedencentral", "label": "Europe (Sweden)"},
+        {"id": "westeurope", "label": "Europe (Netherlands)"},
+        {"id": "canadacentral", "label": "Canada (Toronto)"},
+        {"id": "japaneast", "label": "Asia (Tokyo)", "checkout": false},
+        {"id": "southeastasia", "label": "Asia (Singapore)", "checkout": false}
+      ]
+    },
+    {
+      "id": "aws",
+      "label": "Amazon Web Services",
+      "checkout": false,
+      "regions": [
+        {"id": "us-east-1", "label": "United States (Virginia)"},
+        {"id": "eu-north-1", "label": "Europe (Stockholm)"},
+        {"id": "ca-central-1", "label": "Canada (Montreal)"},
+        {"id": "ap-northeast-1", "label": "Asia (Tokyo)"},
+        {"id": "ap-southeast-1", "label": "Asia (Singapore)"}
+      ]
+    },
+    {
+      "id": "gcp",
+      "label": "Google Cloud",
+      "checkout": false,
+      "regions": [
+        {"id": "us-central1", "label": "United States (Iowa)"},
+        {"id": "europe-north1", "label": "Europe (Finland)"},
+        {"id": "northamerica-northeast1", "label": "Canada (Montreal)"},
+        {"id": "asia-northeast1", "label": "Asia (Tokyo)"},
+        {"id": "asia-southeast1", "label": "Asia (Singapore)"}
+      ]
+    }
+  ],
+  "trust": [
+    {"text": "SOC 2 compliant: ask for the report", "url": "mailto:support@orama.com?subject=SOC%202%20report"},
+    {"text": "Source available, with access to the source code", "url": "mailto:support@orama.com?subject=Source%20access"}
+  ],
+  "limits": {"orders_per_client_per_hour": 5, "orders_per_hour": 60}
+}

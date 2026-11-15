@@ -351,7 +351,8 @@ TEST(BrandConfig, TheFileGivesTheBrandAndTheEnvironmentWins) {
 // Lake's own brand sends exactly the email it sent before the brand existed.
 TEST(BrandEmail, LakesOwnBrandSendsTheSameEmail) {
     set_instance_brand(Brand{});
-    auto settings = resend_settings_from_environment("re_lake1135fakekey0001", "", "");
+    auto settings = resend_settings_from_environment(
+        "re_lake1135fakekey0001", "Lake <orders@example.com>", "support@example.com");
     ASSERT_TRUE(settings) << settings.error();
     const auto sheet = order_sheet_from_environment("");
     ASSERT_TRUE(sheet) << sheet.error();
@@ -359,16 +360,16 @@ TEST(BrandEmail, LakesOwnBrandSendsTheSameEmail) {
         *sheet, customer_regions(), *settings, sample_order(), "customer", "https://x/orders/1");
     EXPECT_EQ(customer.subject,
               "We received your Lake order (0b6f2c1e-1111-4222-8333-444455556666)");
-    EXPECT_EQ(customer.reply_to, "support@orama.com");
+    EXPECT_EQ(customer.reply_to, "support@example.com");
     EXPECT_TRUE(customer.text.starts_with(
         "Thank you. We received your order form and will be in touch shortly. Nothing has been "
         "charged and nothing is set up until we have spoken.\n\nYour order: https://x/orders/1\n\n"
         "Order: 0b6f2c1e-1111-4222-8333-444455556666\n"))
         << customer.text;
     EXPECT_TRUE(customer.text.ends_with(
-        "\nQuestions: reply to this email or write to support@orama.com.\n"))
+        "\nQuestions: reply to this email or write to support@example.com.\n"))
         << customer.text;
-    EXPECT_EQ(settings->from, "Lake <orders@lake.live>");
+    EXPECT_EQ(settings->from, "Lake <orders@example.com>");
 
     BalanceView view;
     view.balance_micros = -2'500'000;

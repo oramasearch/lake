@@ -368,8 +368,8 @@ TEST(Balance, TheViewFollowsTheBalance) {
     EXPECT_FALSE(lake::api::balance_settings_from_environment("", "", "", "", "5", ""))
         << "a refresh under 30 seconds";
 
-    EXPECT_EQ(lake::api::add_funds_link("https://lake.live", "abc"),
-              "https://lake.live/billing/add-funds?customer_id=abc");
+    EXPECT_EQ(lake::api::add_funds_link("https://lake.example.com", "abc"),
+              "https://lake.example.com/billing/add-funds?customer_id=abc");
 }
 
 TEST(Balance, ATopUpIsCreditedOncePerPayment) {

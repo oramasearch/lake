@@ -206,9 +206,8 @@ int usage() {
                  "people (not with Clerk)");
     std::println("  LAKE_ORDER_SHEET JSON merged over the apex order sheet's default offers, "
                  "prices and limits (docs/api/orders.md)");
-    std::println("  LAKE_RESEND_API_KEY Orama's Resend key for order email; LAKE_RESEND_FROM the "
-                 "sender (default Lake <orders@lake.live>); LAKE_SUPPORT_EMAIL where orders go "
-                 "(default support@orama.com)");
+    std::println("  LAKE_RESEND_API_KEY the Resend key for email; LAKE_RESEND_FROM the "
+                 "sender; LAKE_SUPPORT_EMAIL where orders go (all three needed to send email)");
     std::println("  LAKE_BRAND_FILE a JSON brand; LAKE_BRAND_NAME, _SHORT_NAME, _COMPANY, "
                  "_ASSISTANT_NAME, _CONSOLE_TITLE, _BY_ORAMA, _LOGO, _LOGO_DARK, _FAVICON, "
                  "_ACCENT, _ACCENT_DARK, _SUPPORT_EMAIL, _EMAIL_FROM, _LEGAL_NAME, _TERMS_URL, "
