@@ -1241,11 +1241,33 @@ public:
             return std::unexpected("OCI repository name is invalid");
         }
         const std::string id = control::new_uuid_v4();
+        // The repository the upload was started for (LSR-192, lake#998): an append or a finish
+        // names it in its URL and is refused when it names another.
+        const auto owned =
+            write(upload_owner_path(id), std::as_bytes(std::span(repository.data(), repository.size())));
+        if (!owned) {
+            return std::unexpected(owned.error());
+        }
         const auto saved = write(upload_path(id), {});
         if (!saved) {
             return std::unexpected(saved.error());
         }
         return id;
+    }
+
+    // Whether upload `id` was started for `repository`. An upload without its owner record
+    // (started before LSR-192) belongs to no repository.
+    bool upload_belongs_to(std::string_view id, std::string_view repository) const {
+        if (!safe_component(id)) {
+            return false;
+        }
+        std::unique_lock lock(mutex_);
+        std::ifstream input(upload_owner_path(id), std::ios::binary);
+        if (!input) {
+            return false;
+        }
+        const std::string owner((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        return !owner.empty() && owner == repository;
     }
 
     ArtifactResult<std::uint64_t> upload_size(std::string_view id) const {
@@ -1341,6 +1363,7 @@ public:
         if (error) {
             return std::unexpected("could not publish OCI blob: " + error.message());
         }
+        std::filesystem::remove(upload_owner_path(id), error);
         return *actual;
     }
 
@@ -1989,6 +2012,10 @@ private:
 
     std::filesystem::path upload_path(std::string_view id) const {
         return root_ / "uploads" / std::string(id);
+    }
+
+    std::filesystem::path upload_owner_path(std::string_view id) const {
+        return root_ / "upload-owners" / std::string(id);
     }
 
     std::filesystem::path blob_path(std::string_view digest) const {
@@ -12125,6 +12152,15 @@ struct ApiServer::Impl {
             co_return co_await registry_auth_error(route, authorized.error().access);
         }
         const std::string upload = route_value(route, "upload");
+        // An upload continues only in the repository it was started for (LSR-192, lake#998):
+        // push access to one repository is not access to another's upload.
+        if (!artifacts.upload_belongs_to(upload, repository)) {
+            co_return co_await registry_error(route,
+                                              boost::http::status::not_found,
+                                              "OCI upload is unknown in this repository",
+                                              true,
+                                              "BLOB_UPLOAD_UNKNOWN");
+        }
         const auto initial_size = artifacts.upload_size(upload);
         if (!initial_size) {
             co_return co_await registry_error(route,
