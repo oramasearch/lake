@@ -218,6 +218,39 @@ folder, environment and `secrets/<customer_id>` ids, and objects planted before 
 in the store) neither let it upload into the other account's folder nor claim its branch rule,
 environment or secret mounts, while the owner keeps its access.
 
+## Restricted folders hold for every repository read (lake#975)
+
+**What.** A `path` object with `inherit = false` cuts its folder or file off from the
+repository's grants. Drive always decided a path by the nearest object on it that counts
+(`nearest_drive_location`). Before lake#975 the other reads of repository content authorized only
+the repository, so a repository reader without a grant on the cut still read what it protects
+(finding LSR-108 of the 2026-10 security review). Now every one decides each path the way Drive
+does, through `RepositoryPathAccess` (`src/api/repository_path_access.cpp`):
+
+| Read | What a cut the caller cannot read does |
+|---|---|
+| `repository_file` | `unauthorized` at `/path` |
+| `repository_tree` | its entries are left out |
+| `change_diff` | an entry is left out unless every path it names is readable at a revision that holds it (the change, or its first parent for a move or a delete) |
+| `list_conflicts` | a conflict is left out unless its path is readable at the sides that hold it |
+| `search` | a hit is left out, decided at the change it was found in |
+| Drive search (`search_drives`) | names under the cut are not found |
+| `pull`, `read_chunk`, `export_repository` | `unauthorized`: they carry every path and cannot leave a folder out, so they need `read` on every cut of the repository |
+
+**How.** `RepositoryPathAccess::load` reads the repository's path objects once, level by level
+below the repository's own object (only objects there count, lake#913). A repository with no
+object that cuts inheritance needs nothing more. Otherwise the tree at the ref read gives each
+path's nodes; the path's deciding object is found top down exactly as Drive finds it, and only
+paths with a cut on that chain are authorized, in one `authorize_batch`. It fails closed: a path
+the tree does not hold, a tree that cannot be read, or a repository with more than 10,000 path
+objects refuses the path. The operator, and a build's or an app's source credential reading the
+revision it was minted for, read every path. Commit messages and authors (`list_changes`,
+`get_change`) are the repository's, not a path's, and stay readable to its readers.
+
+**Verify.** `Drive.RepositoryReadsHonourRestrictedFolders`: a repository reader without a grant
+on a restricted folder is refused its file, does not see it in the tree and cannot export the
+repository; a grant on the folder gives both back.
+
 ## Verify and change
 
 `Policy.InheritsDownTheGraphAndStopsAtACut`,

@@ -333,6 +333,7 @@ add_library(lake-core STATIC
   src/api/console_capabilities.cpp
   src/api/forge_capabilities.cpp
   src/api/repository_people.cpp
+  src/api/repository_path_access.cpp
   src/api/export_capabilities.cpp
   src/api/github_import_capabilities.cpp
   src/api/pki_capabilities.cpp

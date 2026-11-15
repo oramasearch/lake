@@ -6573,6 +6573,82 @@ TEST(Drive, HistoryAuthorizesTheNodeAtEveryRevisionItReads) {
         << "both sides are the shared folder Bob may read";
 }
 
+// LSR-108 (lake#975): a path object that does not inherit cuts its folder off from the
+// repository's grants for every read of repository content, as it does for Drive. A repository
+// reader without a grant on the cut neither reads the folder's files nor sees them in the tree,
+// and cannot read the repository whole; a grant there gives both back.
+TEST(Drive, RepositoryReadsHonourRestrictedFolders) {
+    Surface surface;
+    RepositoryFixtureStore repositories;
+    surface.ctx.sync_store = &repositories;
+    const auto owner = surface.call(
+        "create_user", {{"taap_id", "taap:1:ed25519:cut-owner"}, {"display_name", "Owner"}});
+    ASSERT_TRUE(owner.ok);
+    const auto customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", owner.value["id"]}, {"name", "cut-reads"}});
+    ASSERT_TRUE(customer.ok);
+    const auto repository = surface.call("create_repository",
+                                         {{"customer_id", customer.value["id"]},
+                                          {"workspace_id", surface.workspace(customer.value["id"])},
+                                          {"name", "drive"}});
+    ASSERT_TRUE(repository.ok);
+    const std::string repository_id = repository.value["id"];
+    const auto object = surface.store.find_policy_object("repository", repository_id);
+    ASSERT_TRUE(object);
+    // The fixture's `shared` folder is restricted: its object does not inherit.
+    const auto restricted =
+        surface.store.create_policy_object({"path",
+                                            repository_id + ":22222222222222222222222222222222",
+                                            object->id,
+                                            "admin",
+                                            "test",
+                                            false});
+    ASSERT_TRUE(restricted);
+    const std::string reader = "taap:1:ed25519:cut-reader";
+    ASSERT_TRUE(surface.store.create_grant({reader, object->id, "read", "test", "admin", "test"}));
+    surface.ctx.operator_credential = false;
+    surface.ctx.acting_identity = reader;
+
+    const json restricted_file{
+        {"id", repository_id}, {"ref", "main"}, {"path", "shared/readme.md"}};
+    EXPECT_EQ(surface.call("repository_file", restricted_file).error.code, "unauthorized");
+    EXPECT_TRUE(surface
+                    .call("repository_file",
+                          {{"id", repository_id}, {"ref", "main"}, {"path", "readme.md"}})
+                    .ok);
+    // A path the tree does not hold cannot be ruled out of the cut.
+    EXPECT_EQ(surface
+                  .call("repository_file",
+                        {{"id", repository_id}, {"ref", "main"}, {"path", "./shared/readme.md"}})
+                  .error.code,
+              "unauthorized");
+    const auto paths_of = [&] {
+        std::set<std::string> paths;
+        const auto tree = surface.call("repository_tree", {{"id", repository_id}, {"ref", "main"}});
+        EXPECT_TRUE(tree.ok) << tree.error.message;
+        for (const auto& item : tree.value["items"]) {
+            paths.insert(item["path"].get<std::string>());
+        }
+        return paths;
+    };
+    auto listed = paths_of();
+    EXPECT_TRUE(listed.contains("readme.md"));
+    EXPECT_FALSE(listed.contains("shared"));
+    EXPECT_FALSE(listed.contains("shared/readme.md"));
+    EXPECT_EQ(surface.call("export_repository", {{"repository_id", repository_id}}).error.code,
+              "unauthorized");
+
+    // A grant on the restricted folder gives it back.
+    ASSERT_TRUE(
+        surface.store.create_grant({reader, restricted->id, "read", "test", "admin", "test"}));
+    surface.ctx.authorization_cache = {};
+    EXPECT_TRUE(surface.call("repository_file", restricted_file).ok);
+    listed = paths_of();
+    EXPECT_TRUE(listed.contains("shared"));
+    EXPECT_TRUE(listed.contains("shared/readme.md"));
+}
+
 // LSR-015 (lake#924): a Drive write advances its branch, so the branch's rules apply to it as to a
 // push. main allows only another person to push: an otherwise authorized writer's upload, restore
 // and conflict resolution are refused and nothing is committed.

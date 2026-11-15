@@ -15,6 +15,7 @@
 #include "lake/api/sealed_delivery.hpp"
 #include "lake/version.hpp"
 #include "lake_attestation.hpp"
+#include "repository_path_access.hpp"
 #include "repository_records_api.hpp"
 
 #include <algorithm>
@@ -28,6 +29,7 @@
 #include <map>
 #include <optional>
 #include <ranges>
+#include <set>
 #include <string>
 #include <string_view>
 
@@ -527,6 +529,105 @@ ApiResult repository_content_list_result(SyncStoreResult<std::vector<T>> rows, T
     return ApiResult::success({{"items", std::move(items)}});
 }
 
+ApiResult api_error_result(const ApiError& error) {
+    return ApiResult::failure(error.code, error.message, error.path);
+}
+
+// The paths of a repository at `ref` the caller may not read (LSR-108, lake#975), decided as Drive
+// decides them: a path below a path object that does not inherit needs a grant there. Empty
+// without asking for the tree when no such object exists. A tree that cannot be read refuses
+// every path (fail closed).
+struct RepositoryPathFilter {
+    RepositoryPathAccess access;
+    // Trees read so far, by ref.
+    std::map<std::string, std::vector<RepositoryTreeEntry>> trees;
+
+    std::expected<std::set<std::string>, ApiError>
+    unreadable(ApiContext& ctx,
+               const control::Repository& repository,
+               const std::string& ref,
+               const std::vector<std::string>& paths) {
+        if (access.unrestricted()) {
+            return std::set<std::string>{};
+        }
+        auto tree = trees.find(ref);
+        if (tree == trees.end()) {
+            if (!ctx.sync_store) {
+                return std::unexpected(
+                    ApiError{"store_unavailable", "no repository store is configured", {}});
+            }
+            auto read = ctx.sync_store->repository_tree(repository.customer_id, repository.id, ref);
+            if (!read) {
+                return std::set<std::string>(paths.begin(), paths.end());
+            }
+            tree = trees.emplace(ref, std::move(*read)).first;
+        }
+        return access.unreadable(ctx, tree->second, paths);
+    }
+
+    // Whether `path` is readable at the revisions `refs` name: one of them holds it, and none
+    // that holds it refuses it.
+    std::expected<bool, ApiError> readable_at(ApiContext& ctx,
+                                              const control::Repository& repository,
+                                              const std::vector<std::string>& refs,
+                                              const std::string& path) {
+        if (access.unrestricted()) {
+            return true;
+        }
+        bool held = false;
+        for (const std::string& ref : refs) {
+            if (ref.empty()) {
+                continue;
+            }
+            const auto refused = unreadable(ctx, repository, ref, {path});
+            if (!refused) {
+                return std::unexpected(refused.error());
+            }
+            const auto tree = trees.find(ref);
+            if (tree == trees.end() ||
+                std::ranges::find(tree->second, path, &RepositoryTreeEntry::path) ==
+                    tree->second.end()) {
+                continue;
+            }
+            if (refused->contains(path)) {
+                return false;
+            }
+            held = true;
+        }
+        return held;
+    }
+};
+
+std::expected<RepositoryPathFilter, ApiError>
+repository_path_filter(ApiContext& ctx, const control::Repository& repository, const json& in) {
+    auto access =
+        RepositoryPathAccess::load(ctx, repository, repository_input_value(in, "ref", "revision"));
+    if (!access) {
+        return std::unexpected(access.error());
+    }
+    return RepositoryPathFilter{std::move(*access), {}};
+}
+
+// A read of the whole repository (pull, read_chunk) carries every path, so it needs read on every
+// path object of the repository that does not inherit (lake#975).
+std::optional<ApiResult> whole_repository_refusal(ApiContext& ctx,
+                                                  const control::Repository& repository) {
+    const auto access = RepositoryPathAccess::load(ctx, repository);
+    if (!access) {
+        return api_error_result(access.error());
+    }
+    const auto every = access->reads_every_cut(ctx);
+    if (!every) {
+        return api_error_result(every.error());
+    }
+    if (!*every) {
+        return ApiResult::failure("unauthorized",
+                                  "this repository has restricted folders you cannot read, so it "
+                                  "cannot be read whole; read its files one at a time instead");
+    }
+    return std::nullopt;
+}
+
 // The rows the caller may read: public ones for an anonymous caller, otherwise those its policy
 // allows, in order.
 std::expected<std::vector<control::Repository>, ApiResult>
@@ -722,6 +823,61 @@ ApiResult search_result(search::Result<search::QueryResult> result) {
                                {"building_workspaces", result->building_workspaces},
                                {"stale_workspaces", result->stale_workspaces},
                                {"items", std::move(values)}});
+}
+
+// Search authorizes each hit's repository; a hit inside a path object that does not inherit is
+// also checked there, at the change it was found in, as Drive decides that path (lake#975). A hit
+// whose path that change's tree does not hold, or whose repository cannot be read, is dropped
+// (fail closed).
+ApiResult without_restricted_hits(ApiContext& context, search::QueryResult& result) {
+    if (result.items.empty() || context.operator_credential ||
+        context.acting_identity == control::operator_principal) {
+        return ApiResult::success(nullptr);
+    }
+    std::map<std::string, std::optional<RepositoryPathFilter>> filters;
+    std::map<std::string, control::Repository> repositories;
+    // The paths of each repository at each change, decided in one batch.
+    std::map<std::pair<std::string, std::string>, std::vector<std::string>> asked;
+    for (const search::Hit& hit : result.items) {
+        auto filter = filters.find(hit.repository);
+        if (filter == filters.end()) {
+            std::optional<RepositoryPathFilter> loaded;
+            if (const auto repository = context.store->get_repository(hit.repository)) {
+                if (auto access = RepositoryPathAccess::load(context, *repository)) {
+                    loaded = RepositoryPathFilter{std::move(*access), {}};
+                    repositories.emplace(hit.repository, *repository);
+                }
+            }
+            filter = filters.emplace(hit.repository, std::move(loaded)).first;
+        }
+        if (filter->second && !filter->second->access.unrestricted()) {
+            asked[{hit.repository, hit.change}].push_back(hit.path);
+        }
+    }
+    std::map<std::pair<std::string, std::string>, std::set<std::string>> refused;
+    for (const auto& [key, paths] : asked) {
+        const auto& [repository, change] = key;
+        auto decided =
+            filters.at(repository)->unreadable(context, repositories.at(repository), change, paths);
+        if (!decided) {
+            return api_error_result(decided.error());
+        }
+        refused.emplace(key, std::move(*decided));
+    }
+    std::erase_if(result.items, [&](const search::Hit& hit) {
+        const auto& filter = filters.at(hit.repository);
+        if (!filter) {
+            return true;
+        }
+        if (filter->access.unrestricted()) {
+            return false;
+        }
+        if (hit.change.empty() || hit.path.empty()) {
+            return true;
+        }
+        return refused.at({hit.repository, hit.change}).contains(hit.path);
+    });
+    return ApiResult::success(nullptr);
 }
 
 // The key of a TOTP secret, stored as hexadecimal, written as RFC 4648 base32 without padding:
@@ -5145,10 +5301,26 @@ void register_repository_capabilities(Registry& registry) {
             if (!ctx.sync_store) {
                 return no_repository_store();
             }
-            return repository_content_list_result(
+            auto tree =
                 ctx.sync_store->repository_tree(repository->customer_id,
                                                 repository->id,
-                                                repository_input_value(in, "ref", "revision")),
+                                                repository_input_value(in, "ref", "revision"));
+            if (!tree) {
+                return from_sync_store_error(tree.error());
+            }
+            // Entries below a path object that does not inherit are left out unless the caller
+            // holds a grant there, as Drive decides them (lake#975).
+            const auto access = RepositoryPathAccess::load(
+                ctx, *repository, repository_input_value(in, "ref", "revision"));
+            if (!access) {
+                return api_error_result(access.error());
+            }
+            auto readable = access->readable_entries(ctx, std::move(*tree));
+            if (!readable) {
+                return api_error_result(readable.error());
+            }
+            return repository_content_list_result(
+                SyncStoreResult<std::vector<RepositoryTreeEntry>>(std::move(*readable)),
                 repository_tree_entry_json);
         }});
     registry.add(Capability{
@@ -5203,6 +5375,23 @@ void register_repository_capabilities(Registry& registry) {
             }
             if (!ctx.sync_store) {
                 return no_repository_store();
+            }
+            // A file below a path object that does not inherit needs a grant there, as its Drive
+            // download does (lake#975). Its node is read from the tree at the same ref; a path
+            // the tree does not hold is refused, since no cut can be ruled out.
+            auto filter = repository_path_filter(ctx, *repository, in);
+            if (!filter) {
+                return api_error_result(filter.error());
+            }
+            const std::string requested_path = in.at("path").get<std::string>();
+            const auto refused = filter->unreadable(
+                ctx, *repository, repository_input_value(in, "ref", "revision"), {requested_path});
+            if (!refused) {
+                return api_error_result(refused.error());
+            }
+            if (refused->contains(requested_path)) {
+                return ApiResult::failure(
+                    "unauthorized", "principal is not allowed to read this path", "/path");
             }
             const auto file =
                 ctx.sync_store->repository_file(repository->customer_id,
@@ -5310,10 +5499,70 @@ void register_repository_capabilities(Registry& registry) {
             if (!ctx.sync_store) {
                 return no_repository_store();
             }
-            return repository_content_list_result(
-                ctx.sync_store->repository_diff(
-                    repository->customer_id, repository->id, in.at("change_id").get<std::string>()),
-                repository_diff_entry_json);
+            const std::string change_id = in.at("change_id").get<std::string>();
+            auto entries =
+                ctx.sync_store->repository_diff(repository->customer_id, repository->id, change_id);
+            if (!entries) {
+                return from_sync_store_error(entries.error());
+            }
+            auto filter = repository_path_filter(ctx, *repository, in);
+            if (!filter) {
+                return api_error_result(filter.error());
+            }
+            if (!filter->access.unrestricted() && !entries->empty()) {
+                // A diff entry names a path at the change and, for a move or a delete, one at its
+                // first parent. Each is decided at the revision it names, and an entry is kept
+                // only when every path it names is readable at a revision that holds it
+                // (lake#975).
+                std::string parent;
+                const auto log =
+                    ctx.sync_store->repository_log(repository->customer_id, repository->id);
+                if (!log) {
+                    return from_sync_store_error(log.error());
+                }
+                if (const auto change = std::ranges::find(*log, change_id, &RepositoryChange::id);
+                    change != log->end() && !change->parents.empty()) {
+                    parent = change->parents.front();
+                }
+                std::vector<std::string> paths;
+                for (const RepositoryDiffEntry& entry : *entries) {
+                    for (const std::string* path : {&entry.path, &entry.old_path}) {
+                        if (!path->empty()) {
+                            paths.push_back(*path);
+                        }
+                    }
+                }
+                const auto at_change = filter->unreadable(ctx, *repository, change_id, paths);
+                if (!at_change) {
+                    return api_error_result(at_change.error());
+                }
+                std::set<std::string> at_parent(paths.begin(), paths.end());
+                if (!parent.empty()) {
+                    auto decided = filter->unreadable(ctx, *repository, parent, paths);
+                    if (!decided) {
+                        return api_error_result(decided.error());
+                    }
+                    at_parent = std::move(*decided);
+                }
+                const auto held = [&](const std::string& ref, const std::string& path) {
+                    const auto tree = filter->trees.find(ref);
+                    return tree != filter->trees.end() &&
+                           std::ranges::find(tree->second, path, &RepositoryTreeEntry::path) !=
+                               tree->second.end();
+                };
+                // Readable when some revision holds the path and none that holds it refuses it.
+                const auto readable = [&](const std::string& path) {
+                    const bool in_change = held(change_id, path);
+                    const bool in_parent = !parent.empty() && held(parent, path);
+                    return (in_change || in_parent) && (!in_change || !at_change->contains(path)) &&
+                           (!in_parent || !at_parent.contains(path));
+                };
+                std::erase_if(*entries, [&](const RepositoryDiffEntry& entry) {
+                    return (!entry.path.empty() && !readable(entry.path)) ||
+                           (!entry.old_path.empty() && !readable(entry.old_path));
+                });
+            }
+            return repository_content_list_result(std::move(entries), repository_diff_entry_json);
         }});
     registry.add(Capability{
         .name = "list_conflicts",
@@ -5336,9 +5585,35 @@ void register_repository_capabilities(Registry& registry) {
             if (!ctx.sync_store) {
                 return no_repository_store();
             }
-            return repository_content_list_result(
-                ctx.sync_store->repository_conflicts(repository->customer_id, repository->id),
-                repository_conflict_json);
+            auto conflicts =
+                ctx.sync_store->repository_conflicts(repository->customer_id, repository->id);
+            if (!conflicts) {
+                return from_sync_store_error(conflicts.error());
+            }
+            auto filter = repository_path_filter(ctx, *repository, in);
+            if (!filter) {
+                return api_error_result(filter.error());
+            }
+            if (!filter->access.unrestricted()) {
+                // A conflict carries both sides' bytes of one path; it is listed only when that
+                // path is readable at the sides that hold it (lake#975).
+                std::vector<RepositoryConflict> kept;
+                for (RepositoryConflict& conflict : *conflicts) {
+                    const auto readable =
+                        filter->readable_at(ctx,
+                                            *repository,
+                                            {conflict.left, conflict.right, conflict.base},
+                                            conflict.region.path);
+                    if (!readable) {
+                        return api_error_result(readable.error());
+                    }
+                    if (*readable) {
+                        kept.push_back(std::move(conflict));
+                    }
+                }
+                *conflicts = std::move(kept);
+            }
+            return repository_content_list_result(std::move(conflicts), repository_conflict_json);
         }});
     registry.add(Capability{.name = "list_artifacts",
                             .title = "List repository artifacts",
@@ -5607,6 +5882,11 @@ void register_repository_capabilities(Registry& registry) {
                        if (!repository) {
                            return repository.error();
                        }
+                       // A pull carries every path, so a restricted folder the caller
+                       // cannot read refuses it (lake#975).
+                       if (auto refused = whole_repository_refusal(context, *repository)) {
+                           return *refused;
+                       }
                        auto response = context.sync_store->pull(
                            repository->customer_id, repository->id, context.sync_request);
                        if (!response) {
@@ -5689,6 +5969,12 @@ void register_repository_capabilities(Registry& registry) {
             auto repository = live_sync_repository(input, context);
             if (!repository) {
                 return repository.error();
+            }
+            // A chunk is named by its digest alone, never by a path, so it cannot be decided per
+            // path: a repository with a restricted folder the caller cannot read refuses it
+            // (lake#975).
+            if (auto refused = whole_repository_refusal(context, *repository)) {
+                return *refused;
             }
             auto response = context.sync_store->read_chunk(repository->customer_id,
                                                            repository->id,
@@ -6739,6 +7025,11 @@ void register_search_capability(Registry& registry) {
                 }
                 auto result =
                     context.search->query(*scope, context.acting_identity, *context.store);
+                if (result) {
+                    if (auto filtered = without_restricted_hits(context, *result); !filtered.ok) {
+                        return filtered;
+                    }
+                }
                 if (result) {
                     context.audit_object =
                         input.value("repository", "").empty()

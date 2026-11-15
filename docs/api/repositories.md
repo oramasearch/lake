@@ -68,6 +68,12 @@ read libliquid directly through the lake repository-store adapter. Tree output i
 every entry retains its stable node identity plus logical and stored sizes, and every file links
 to its backing blob identity and its contents ([File contents](#file-contents)).
 
+A folder or file below a path object that does not inherit is read only with a grant there, as in
+Drive (lake#975): `repository_file` answers `unauthorized`, `repository_tree`, `change_diff` and
+`list_conflicts` leave it out, and `pull`, `read_chunk` and `export_repository`, which carry every
+path, are refused unless the caller may read every such folder. See
+[policy.md](policy.md#restricted-folders-hold-for-every-repository-read-lake975).
+
 ### File contents
 
 `repository_file` answers every file's exact bytes as standard padded base64 in `content_base64`.

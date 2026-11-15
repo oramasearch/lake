@@ -31,6 +31,7 @@
 #include "lake/control/store_kept.hpp"
 #include "lake/control/transcripts.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "repository_path_access.hpp"
 #include "store_repository.hpp"
 #include "workspace_records_api.hpp"
 
@@ -2771,7 +2772,17 @@ liquid::runtime::task<RepositoryPaths> repository_paths(ApiContext& context,
     if (!read) {
         co_return RepositoryPaths{{}, read.error().message};
     }
-    co_return RepositoryPaths{std::move(*read), {}};
+    // Names below a path object that does not inherit are found only by a caller with a grant
+    // there, as Drive browses them (lake#975).
+    const auto access = RepositoryPathAccess::load(context, found, "main");
+    if (!access) {
+        co_return RepositoryPaths{{}, access.error().message};
+    }
+    auto readable = access->readable_entries(context, std::move(*read));
+    if (!readable) {
+        co_return RepositoryPaths{{}, readable.error().message};
+    }
+    co_return RepositoryPaths{std::move(*readable), {}};
 }
 
 RepositoryPaths awaited_paths(std::expected<RepositoryPaths, liquid::error> completed) {
