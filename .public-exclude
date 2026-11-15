@@ -1,0 +1,45 @@
+# Paths kept out of the public export of this repository (gitignore syntax).
+#
+# The public repository is created from one export of the release branch. Everything listed here
+# stays in this repository only: contributor instructions for the maintainers' own tooling, the
+# maintainers' own deployment runbooks and records, pricing material, and release notes written
+# before the first public release. Everything not listed here is published and must read as a
+# public document.
+
+# Maintainers' agent instructions (the public tree has CONTRIBUTING.md instead)
+CLAUDE.md
+AGENTS.md
+.claude/
+
+# Hosted CI configuration (not part of the published tree)
+.github/
+
+# Pricing material
+docs/pricing/
+docs/billing/pricing-strategy.md
+
+# Runbooks and dated records for the maintainers' own deployments
+docs/deployment/aks.md
+docs/deployment/browser-testing.md
+docs/deployment/edge-certificates.md
+docs/deployment/operator-interface.md
+docs/deployment/resend.md
+docs/deployment/secrets.md
+docs/deployment/sign-in.md
+docs/deployment/stripe.md
+docs/deployment/users.md
+docs/deployment/white-label-sign-in.md
+docs/deployment/production-2026-09-08.md
+docs/deployment/dev-2026-10-01.md
+docs/deployment/observed/
+
+# Build proofs recorded on maintainers' machines, and the hosted CI notes
+docs/build/*-proof.md
+docs/build/ci.md
+
+# Release notes from before the first public release. The current version's page stays
+# (tests/test_release_version.cpp reads it); move this negation to each new version, or drop the
+# rule once the first public release is out.
+docs/releases/v0.*
+!docs/releases/v0.8.1.md
+docs/releases/history.md
