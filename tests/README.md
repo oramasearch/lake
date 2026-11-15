@@ -1058,4 +1058,12 @@ its own agent's running tasks. See [agent-bus.md](../docs/api/agent-bus.md#what-
 `test_streams.cpp`'s `AgentWorkArea.ADatasetWorkAreaBecomesCanonicalScopes` and
 `Streams.ADatasetConfinedLaunchCredentialStaysInItsWorkArea` cover a launch's dataset work area
 (lake#1055): the scopes it becomes, and that a launch credential called directly reaches only that
-work area. See [agent-launches.md](../docs/api/agent-launches.md#a-runs-dataset-work-area).
+work area. `Streams.ADatasetConfinedLaunchQueriesOnlyUnderTheEnginesDatasetScope`,
+`Workspaces.ADatasetScopedCallRunsOnlyWhereTheEngineEnforcesTheScope`,
+`Workspaces.ZettaCallerSendsTheDatasetScopeHeader` and
+`Workspaces.DatasetScopeHelpersNameTheWorkAreaAndTheEnginesRefusal` cover the `Zetta-Dataset-Scope`
+header (zetta#1515): a confined query carries the work area and runs only on an engine that enforces
+it, Lake's own proven calls go without it, and a scoped answer never comes from the definitions
+cache. `AgentRuns.RunsMadeBeforeWorkAreasAreRecreatedOrFlagged` (`test_workspaces.cpp`) covers the
+rows made before lake#1055: a conversation service is re-created on the next turn, and launches and
+schedules are flagged `recreate`. See [agent-launches.md](../docs/api/agent-launches.md#a-runs-dataset-work-area).

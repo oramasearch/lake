@@ -1043,8 +1043,9 @@ const nlohmann::json& work_area_input(const Capability& capability,
 
 // Why a call with a dataset-confined credential leaves its work area, or nothing. Only what can
 // be shown to stay inside is allowed: describing the API, listing datasets (the answer is filtered
-// to the work area), reading one of its datasets, reading the agent's own record, and reading the
-// one revision of the repository its definition is pinned to. Everything else, index searches
+// to the work area), reading one of its datasets, reading the agent's own record, reading the
+// one revision of the repository its definition is pinned to, and a read-only query, which the
+// workspace Zetta confines to the work area (Zetta-Dataset-Scope, zetta#1515). Everything else, index searches
 // included (an index names a bare source table, which proves no database), is refused before any
 // engine read. Capabilities that verify their own credential (the model gateway, usage reports)
 // are not workspace reads and are left to their own checks.
@@ -1057,6 +1058,12 @@ work_area_refusal(const Capability& entry, const nlohmann::json& input, ApiConte
     const auto [reached, inner] = reached_call(entry, input);
     const std::string confined = "this agent works only on " + work_area_text(*area);
     if (reached == "workspace_openapi" || reached == "list_datasets") {
+        return std::nullopt;
+    }
+    // A read-only query is the workspace Zetta's to judge (zetta#1515): call_workspace sends it
+    // with the work area as Zetta-Dataset-Scope, and WorkspaceService refuses it unless the engine
+    // is seen to enforce that scope. A work area of no dataset has nothing to query.
+    if (reached == "workspace_sql" && !area->empty()) {
         return std::nullopt;
     }
     if (reached == "get_dataset") {

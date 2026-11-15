@@ -115,6 +115,39 @@ public:
         co_return lake::control::settled(co_await topics.call(
             topic_url, topic_token, topic_capability, topic_read, topic_input));
     }
+
+    // Zetta-Dataset-Scope (lake#1055): each scoped call's capability and header value. A fake
+    // that enforces the scope refuses server_info under it, as zetta#1515 does; one that does not
+    // answers it like any call, as a Zetta that does not know the header would.
+    bool enforces_dataset_scope = false;
+    std::vector<std::pair<std::string, std::string>> scoped;
+
+    liquid::runtime::task<ZettaControlResult<json>> scoped_call(std::string called_url,
+                                                                std::string called_token,
+                                                                std::string called_capability,
+                                                                bool called_read,
+                                                                json called_input,
+                                                                std::string scope) override {
+        bool refuse = false;
+        {
+            std::lock_guard lock(mutex);
+            scoped.emplace_back(called_capability, scope);
+            refuse = enforces_dataset_scope && called_capability == "server_info";
+        }
+        if (refuse) {
+            co_return ZettaControlResult<json>(std::unexpected(lake::control::ZettaControlError{
+                "unauthorized",
+                "'server_info' cannot run under a dataset scope: it does not declare which "
+                "datasets it reads",
+                "",
+                {{"dataset_scope", scope}, {"datasets_read", nullptr}}}));
+        }
+        co_return lake::control::settled(co_await call(std::move(called_url),
+                                                       std::move(called_token),
+                                                       std::move(called_capability),
+                                                       called_read,
+                                                       std::move(called_input)));
+    }
 };
 
 lake::control::ClerkIdentity minted(std::string subject) {
@@ -1376,6 +1409,131 @@ TEST(Workspaces, ZettaCallerReadsALongPollWaitGivenAsText) {
     ASSERT_FALSE(*unreadable);
     EXPECT_EQ(unreadable->error().code, "invalid_input");
     EXPECT_EQ(unreadable->error().path, "/wait_ms");
+}
+
+// lake#1055 (zetta#1515): a dataset-confined call carries the work area as Zetta-Dataset-Scope.
+TEST(Workspaces, ZettaCallerSendsTheDatasetScopeHeader) {
+    const zetta::connect::HttpTransport previous = zetta::connect::default_http_transport();
+    const zetta::connect::AsyncHttpTransport previous_async =
+        zetta::connect::default_async_http_transport();
+    std::vector<std::vector<std::pair<std::string, std::string>>> sent;
+    zetta::connect::set_default_http_transport(
+        {},
+        [&sent](const zetta::connect::HttpRequest& request)
+            -> boost::capy::io_task<zetta::connect::HttpResponse> {
+            sent.emplace_back(request.headers.begin(), request.headers.end());
+            co_return boost::capy::io_result<zetta::connect::HttpResponse>{
+                {}, {200, json{{"ok", true}, {"value", {{"rows", json::array()}}}}.dump(), {}}};
+        });
+    lake::control::ZettaWorkspaceCaller caller;
+    const auto scoped = liquid::runtime::block_on(
+        caller.scoped_call("http://ws:4800", "t", "sql", true,
+                           {{"statement", "SELECT * FROM public.accounts"}},
+                           "public/accounts, datasets/orders"));
+    const auto plain = liquid::runtime::block_on(
+        caller.call("http://ws:4800", "t", "sql", true, {{"statement", "SELECT 1"}}));
+    zetta::connect::set_default_http_transport(previous, previous_async);
+    ASSERT_TRUE(scoped && *scoped);
+    ASSERT_TRUE(plain && *plain);
+    ASSERT_EQ(sent.size(), 2U);
+    const auto header = [](const auto& headers) -> std::optional<std::string> {
+        for (const auto& [name, value] : headers) {
+            if (name == lake::control::dataset_scope_header) {
+                return value;
+            }
+        }
+        return std::nullopt;
+    };
+    EXPECT_EQ(header(sent[0]), "public/accounts, datasets/orders");
+    EXPECT_FALSE(header(sent[1])) << "an unconfined call carries no scope";
+}
+
+TEST(Workspaces, DatasetScopeHelpersNameTheWorkAreaAndTheEnginesRefusal) {
+    using lake::control::dataset_scope_header_value;
+    EXPECT_EQ(dataset_scope_header_value({"public/accounts", "datasets/orders"}),
+              "public/accounts, datasets/orders");
+    EXPECT_EQ(dataset_scope_header_value({}), "");
+    EXPECT_TRUE(lake::control::engine_checks_dataset_scope("sql"));
+    for (const char* lake_proven : {"list_datasets", "get_dataset", "get_agent", "openapi.json",
+                                    "search", "run"}) {
+        EXPECT_FALSE(lake::control::engine_checks_dataset_scope(lake_proven)) << lake_proven;
+    }
+    EXPECT_TRUE(lake::control::dataset_scope_refusal(
+        {"unauthorized", "outside", "", {{"dataset_scope", "a.b"}, {"datasets_read", nullptr}}}));
+    EXPECT_FALSE(lake::control::dataset_scope_refusal({"unauthorized", "no grant"}));
+    EXPECT_FALSE(lake::control::dataset_scope_refusal(
+        {"invalid_input", "bad", "", {{"dataset_scope", "a.b"}}}));
+}
+
+// lake#1055: a dataset-scoped call runs only on a workspace Zetta that is seen to enforce the
+// scope. One that ignores the header never receives the call, and a scoped answer is never taken
+// from, or left in, the definitions cache.
+TEST(Workspaces, ADatasetScopedCallRunsOnlyWhereTheEngineEnforcesTheScope) {
+    Workspaces w;
+    const auto requested = w.run(w.service->request(w.customer_id));
+    ASSERT_TRUE(requested);
+    const auto service = w.store->get_service(requested->service_id);
+    ASSERT_TRUE(service);
+    ASSERT_TRUE(w.store->set_service_status(service->id, "Ready", "", "http://old-zetta.test"));
+    w.deliver(*service, {{"token", "t"}});
+    const std::vector<std::string> area{"public/accounts", "datasets/orders"};
+    const auto scoped = [&](std::string capability, json input) {
+        return w.run(w.service->call(w.customer_id, service->workspace_id, std::move(capability),
+                                     true, std::move(input), {}, false, area));
+    };
+    const auto sent = [&](std::string_view capability) {
+        return std::ranges::count(w.caller->calls, capability,
+                                  &std::pair<std::string, json>::first);
+    };
+
+    // An engine that does not know the header: refused, and the query never sent.
+    w.caller->value = {{"rows", json::array({json::array({1})})}};
+    const auto ignored = scoped("sql", {{"statement", "SELECT * FROM restricted.accounts"}});
+    ASSERT_FALSE(ignored);
+    EXPECT_EQ(ignored.error().code, "unauthorized");
+    EXPECT_NE(ignored.error().message.find("public/accounts, datasets/orders"), std::string::npos)
+        << ignored.error().message;
+    EXPECT_EQ(sent("sql"), 0) << "an engine that ignores the scope would run it unconfined";
+    ASSERT_FALSE(w.caller->scoped.empty());
+    EXPECT_EQ(w.caller->scoped.back().first, "server_info") << "only the probe was scoped";
+    // Remembered: a second call does not probe again within the window.
+    const std::size_t probes = w.caller->scoped.size();
+    EXPECT_FALSE(scoped("sql", {{"statement", "SELECT 1"}}));
+    EXPECT_EQ(w.caller->scoped.size(), probes);
+
+    // An engine that enforces it (a new address, so a new probe): the call carries the work area.
+    w.caller->enforces_dataset_scope = true;
+    ASSERT_TRUE(w.store->set_service_status(service->id, "Ready", "", "http://new-zetta.test"));
+    const auto ran = scoped("sql", {{"statement", "SELECT * FROM public.accounts"}});
+    ASSERT_TRUE(ran) << ran.error().message;
+    EXPECT_EQ(sent("sql"), 1);
+    EXPECT_EQ(w.caller->scoped.back(),
+              (std::pair<std::string, std::string>{"sql", "public/accounts, datasets/orders"}));
+
+    // The engine's own refusal of a read outside the scope reaches the caller as it said it.
+    w.caller->failure = lake::control::ZettaControlError{
+        "unauthorized",
+        "'sql' reads restricted.accounts, which is outside the dataset scope",
+        "",
+        {{"dataset_scope", "public.accounts, datasets.orders"},
+         {"datasets_read", {"restricted.accounts"}},
+         {"outside", {"restricted.accounts"}}}};
+    w.caller->failure_for = "sql";
+    const auto outside = scoped("sql", {{"statement", "SELECT * FROM restricted.accounts"}});
+    ASSERT_FALSE(outside);
+    EXPECT_EQ(outside.error().code, "unauthorized");
+    EXPECT_EQ(outside.error().details["outside"][0], "restricted.accounts");
+    w.caller->failure.reset();
+    w.caller->failure_for.clear();
+
+    // Never the definitions cache: an unconfined answer is not served to a scoped call.
+    w.caller->value = {{"version", 1}};
+    ASSERT_TRUE(w.run(w.service->call(w.customer_id, service->workspace_id, "list_methodologies",
+                                      true, json::object())));
+    w.caller->value = {{"version", 2}};
+    const auto fresh = scoped("list_methodologies", json::object());
+    ASSERT_TRUE(fresh);
+    EXPECT_EQ(fresh->at("version"), 2);
 }
 
 TEST(Workspaces, ASearchKeyFromAnOlderSessionLastsAsLongAsTheSession) {
@@ -2907,8 +3065,9 @@ TEST(AgentRuns, ARunsKeyCarriesTheReadsOfItsAgentsSkillsAndNoChange) {
     r.w.caller->answers["get_agent"] = {{"id", "a-1"}, {"name", "Plain"}, {"runtime", "python"}};
     const auto plain = r.call("launch_agent", {{"agent_id", "a-1"}});
     ASSERT_TRUE(plain.ok) << plain.error.message;
-    EXPECT_EQ(r.store.get_agent_launch(plain.value["id"])->scopes,
-              lake::control::agent_launch_scopes);
+    std::vector<std::string> base = lake::control::agent_launch_scopes;
+    base.emplace_back(lake::control::work_area_recorded_scope);
+    EXPECT_EQ(r.store.get_agent_launch(plain.value["id"])->scopes, base);
 
     // drives and usage (agent-runtime#7): their reads, never their changes, never another
     // skill's reads.
@@ -3786,6 +3945,85 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
     ASSERT_EQ(r.agents.turns.size(), before + 1);
     EXPECT_EQ(std::get<0>(r.agents.turns.back()), "http://al-1:8080");
     EXPECT_EQ(std::get<2>(r.agents.turns.back())["message"], "hello again");
+}
+
+// lake#1055: a launch, service or schedule made before Lake confined runs to their agent's
+// dataset work area keeps the broad scopes it was given. Lake re-creates a person's conversation
+// service like that on their next turn, and flags every other one with `recreate`.
+TEST(AgentRuns, RunsMadeBeforeWorkAreasAreRecreatedOrFlagged) {
+    AgentRuns r;
+    const std::string workspace = r.w.workspace_id();
+    r.w.caller->answers["get_agent"] = {
+        {"id", "p-1"},
+        {"name", "Py"},
+        {"runtime", "python"},
+        {"work_area", {{"kind", "dataset"}, {"detail", "public/accounts"}}}};
+    // As lake made them before: the scopes every run has, and no work area.
+    const auto old_service = r.store.create_agent_launch({.customer_id = r.w.customer_id,
+                                                          .agent_id = "p-1",
+                                                          .agent_name = "Py",
+                                                          .mode = "service",
+                                                          .trigger = "conversation",
+                                                          .scopes =
+                                                              lake::control::agent_launch_scopes,
+                                                          .created_by_user_id =
+                                                              r.principal.user_id,
+                                                          .created_by_taap_id =
+                                                              r.principal.taap_id,
+                                                          .workspace_id = workspace});
+    ASSERT_TRUE(old_service) << old_service.error().message;
+    ASSERT_TRUE(r.store.set_agent_launch_status(old_service->id, "Ready", "", "http://old:8080",
+                                                "x"));
+    const auto old_schedule =
+        r.store.create_agent_cron_schedule({.customer_id = r.w.customer_id,
+                                            .agent_id = "p-1",
+                                            .agent_name = "Py",
+                                            .cron = "0 9 * * 1",
+                                            .time_zone = "UTC",
+                                            .scopes = lake::control::agent_launch_scopes,
+                                            .created_by_user_id = r.principal.user_id,
+                                            .created_by_taap_id = r.principal.taap_id,
+                                            .workspace_id = workspace});
+    ASSERT_TRUE(old_schedule) << old_schedule.error().message;
+
+    const auto flagged = [&](const std::string& capability, const std::string& key,
+                             const std::string& id) {
+        const auto listed = r.call(capability, {{"agent_id", "p-1"}});
+        EXPECT_TRUE(listed.ok) << listed.error.message;
+        for (const json& row : listed.value.at(key)) {
+            if (row.at("id") == id) {
+                return row.at("recreate").get<bool>();
+            }
+        }
+        ADD_FAILURE() << id << " is not listed";
+        return false;
+    };
+    EXPECT_TRUE(flagged("list_agent_launches", "launches", old_service->id));
+    EXPECT_TRUE(flagged("list_agent_schedules", "schedules", old_schedule->id));
+
+    // The person's next turn does not reach the old service: lake withdraws it and starts one
+    // with the agent's work area.
+    const std::size_t before = r.agents.turns.size();
+    const auto turned = r.call("agent_turn", {{"agent", "p-1"}, {"message", "hello"}});
+    ASSERT_TRUE(turned.ok) << turned.error.message;
+    EXPECT_EQ(turned.value["status"], "starting");
+    EXPECT_EQ(r.agents.turns.size(), before) << "the old service is never called";
+    const std::string fresh_id = turned.value["launch_id"];
+    EXPECT_NE(fresh_id, old_service->id);
+    EXPECT_NE(r.store.get_agent_launch(old_service->id)->desired, "present");
+    const auto fresh = r.store.get_agent_launch(fresh_id);
+    ASSERT_TRUE(fresh);
+    EXPECT_TRUE(lake::control::records_work_area(fresh->scopes));
+    EXPECT_EQ(lake::control::dataset_work_area(fresh->scopes),
+              (std::vector<std::string>{"public/accounts"}));
+    EXPECT_FALSE(flagged("list_agent_launches", "launches", fresh_id));
+
+    // A service whose scopes are the agent's own is kept.
+    ASSERT_TRUE(r.store.set_agent_launch_status(fresh_id, "Ready", "", "http://fresh:8080", "x"));
+    const auto again = r.call("agent_turn", {{"agent", "p-1"}, {"message", "again"}});
+    ASSERT_TRUE(again.ok) << again.error.message;
+    ASSERT_EQ(r.agents.turns.size(), before + 1);
+    EXPECT_EQ(std::get<0>(r.agents.turns.back()), "http://fresh:8080");
 }
 
 // lake#932: a service launch acts with its creator's credential, so a second person talking to the

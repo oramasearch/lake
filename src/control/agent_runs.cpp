@@ -454,7 +454,12 @@ std::vector<std::string> agent_launch_scopes_for(const nlohmann::json& agent) {
     for (std::string& area : dataset_work_area_scopes(agent)) {
         scopes.push_back(std::move(area));
     }
+    scopes.emplace_back(work_area_recorded_scope);
     return scopes;
+}
+
+bool records_work_area(const std::vector<std::string>& scopes) {
+    return std::ranges::find(scopes, work_area_recorded_scope) != scopes.end();
 }
 
 std::optional<std::string> canonical_dataset(std::string_view id) {

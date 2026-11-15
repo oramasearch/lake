@@ -361,6 +361,8 @@ TEST_F(Streams, ADatasetConfinedLaunchCredentialStaysInItsWorkArea) {
     context.credential_session_id = "launch:" + launch->id;
     context.scopes = launch->scopes;
     context.scopes.push_back("list_streams");
+    // No launch is granted queries today; this one is, to show the engine's scope decides them.
+    context.scopes.push_back("workspace_sql");
 
     const auto refused = [&](const std::string& name, json args) {
         args["customer_id"] = customer;
@@ -378,9 +380,87 @@ TEST_F(Streams, ADatasetConfinedLaunchCredentialStaysInItsWorkArea) {
     refused("workspace_query",
             {{"capability", "get_dataset"}, {"input", {{"dataset", "accounts"}}}});
     refused("workspace_query", {{"capability", "search"}, {"input", {{"query", "x"}}}});
-    refused("workspace_sql", {{"sql", "SELECT 1"}});
+    // A query is the engine's to confine (zetta#1515); this one does not enforce the scope, so
+    // Lake does not send it.
+    refused("workspace_sql", {{"statement", "SELECT * FROM restricted.accounts"}});
+    EXPECT_TRUE(std::ranges::none_of(workspace->caller->calls,
+                                     [](const auto& sent) { return sent.first == "sql"; }));
     refused("list_streams", json::object());
     refused("repository_tree", {{"id", "definition-repo"}, {"ref", "main"}});
+}
+
+// lake#1055 (zetta#1515): a dataset-confined launch's query reaches a workspace Zetta that
+// enforces Zetta-Dataset-Scope, carrying the launch's work area; the calls Lake proves inside on
+// its own go without it, because the engine refuses under a scope every capability that does not
+// declare what it reads. A work area of no dataset has nothing to query.
+TEST_F(Streams, ADatasetConfinedLaunchQueriesOnlyUnderTheEnginesDatasetScope) {
+    const auto confine = [&](const std::string& detail) {
+        lake::control::NewAgentLaunch row;
+        row.customer_id = customer;
+        row.agent_id = "a-1";
+        row.agent_name = "Analyst";
+        row.mode = "job";
+        row.trigger = "manual";
+        row.scopes = lake::control::agent_launch_scopes_for(
+            json{{"work_area", {{"kind", "dataset"}, {"detail", detail}}}});
+        row.workspace_id = workspace->id;
+        const auto launch = store->create_agent_launch(row);
+        EXPECT_TRUE(launch) << launch.error().message;
+        context.session_credential = true;
+        context.operator_credential = false;
+        context.credential_kind = "agent_launch";
+        context.credential_session_id = "launch:" + launch->id;
+        context.scopes = launch->scopes;
+        // No launch is granted queries today (no skill reads workspace_sql); this one is.
+        context.scopes.push_back("workspace_sql");
+    };
+    confine("allowed_public/accounts, allowed_public.orders");
+    workspace->caller->enforces_dataset_scope = true;
+    workspace->caller->answers["sql"] = {{"columns", json::array({"n"})},
+                                         {"rows", json::array({json::array({3})})}};
+    const auto queried =
+        call("workspace_sql",
+             {{"customer_id", customer}, {"statement", "SELECT * FROM allowed_public.accounts"}});
+    ASSERT_TRUE(queried.ok) << queried.error.message;
+    ASSERT_FALSE(workspace->caller->scoped.empty());
+    EXPECT_EQ(workspace->caller->scoped.back(),
+              (std::pair<std::string, std::string>{
+                  "sql", "allowed_public/accounts, allowed_public/orders"}));
+
+    // The engine's refusal of a table outside the work area reaches the agent with its details.
+    workspace->caller->responder =
+        [](const std::string& capability,
+           const json&) -> std::optional<lake::control::ZettaControlResult<json>> {
+        if (capability != "sql") {
+            return std::nullopt;
+        }
+        return lake::control::ZettaControlResult<json>(std::unexpected(lake::control::ZettaControlError{
+            "unauthorized",
+            "'sql' reads restricted.accounts, which is outside the dataset scope",
+            "",
+            {{"datasets_read", {"restricted.accounts"}}, {"outside", {"restricted.accounts"}}}}));
+    };
+    const auto outside =
+        call("workspace_sql",
+             {{"customer_id", customer}, {"statement", "SELECT * FROM restricted.accounts"}});
+    EXPECT_EQ(outside.error.code, "unauthorized");
+    workspace->caller->responder = nullptr;
+
+    // list_datasets is proven by Lake (its answer filtered) and sent without the scope.
+    const std::size_t scoped = workspace->caller->scoped.size();
+    workspace->caller->answers["list_datasets"] = {{"datasets", json::array()}};
+    EXPECT_TRUE(call("workspace_query",
+                     {{"customer_id", customer}, {"capability", "list_datasets"}, {"input", json::object()}})
+                    .ok);
+    EXPECT_EQ(workspace->caller->scoped.size(), scoped);
+
+    // No dataset: Lake refuses the query itself.
+    confine("");
+    const std::size_t sent = workspace->caller->calls.size();
+    const auto nothing =
+        call("workspace_sql", {{"customer_id", customer}, {"statement", "SELECT 1"}});
+    EXPECT_EQ(nothing.error.code, "unauthorized");
+    EXPECT_EQ(workspace->caller->calls.size(), sent);
 }
 
 TEST_F(Streams, DeletedAppsAndExpiredBuildsAreReapedWithoutTouchingLiveTopics) {
