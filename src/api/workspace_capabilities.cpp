@@ -3289,7 +3289,10 @@ void register_sql_capability(Registry& registry) {
                 sent = std::move(*capped);
                 context.audit_details["row_cap"] = cap;
             }
-            json query{{"statement", sent}};
+            // The engine enforces the read itself (zetta#1501): with read_only it parses the text
+            // and refuses anything but one SELECT, so Lake's guard above is no longer the only
+            // line between a reader and the workspace administrator credential (lake#926).
+            json query{{"statement", sent}, {"read_only", true}};
             if (const std::string database = input.value("database", std::string());
                 !database.empty()) {
                 query["database"] = database;
