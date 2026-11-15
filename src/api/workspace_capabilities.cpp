@@ -8557,6 +8557,19 @@ ApiResult not_agent_service() {
                               "only that library agent, with its own bus credential, may call this");
 }
 
+// False when the caller's bus credential is bound to a workspace (lake#871) and the task is in
+// another one.
+bool bus_reaches(const ApiContext& context, const std::string& workspace_id) {
+    return context.agent_service_workspace_id.empty() ||
+           context.agent_service_workspace_id == workspace_id;
+}
+
+ApiResult not_bound_workspace() {
+    return ApiResult::failure("forbidden",
+                              "this bus credential is bound to another workspace",
+                              "/task_id");
+}
+
 // Replaces every "{{credential}}" string in a task body.
 void fill_credential(json& value, const std::string& credential) {
     if (value.is_string() && value.get<std::string>() == "{{credential}}") {
@@ -8632,6 +8645,9 @@ void register_agent_bus_capabilities(Registry& registry) {
                     task->workspace_id != input.at("workspace_id").get<std::string>()) {
                     continue;
                 }
+                if (!bus_reaches(context, task->workspace_id)) {
+                    continue;
+                }
                 tasks.push_back({{"sequence", event.sequence},
                                  {"task_id", task->id},
                                  {"customer_id", task->customer_id},
@@ -8647,15 +8663,26 @@ void register_agent_bus_capabilities(Registry& registry) {
         .description =
             "A library agent takes one task it received: exactly one claim succeeds (another is "
             "a conflict). Answers the task's body with the task's own credential in it, handed "
-            "over this once; Lake keeps only its SHA-256. Only that agent may call it, with "
-            "its own bus credential.",
+            "over this once; Lake keeps only its SHA-256. With `credentials: by_reference` the "
+            "credential never leaves Lake: the agent calls Lake with its own bus credential and "
+            "the header X-Lake-Agent-Task: <task_id>, and Lake adds the task's credential to "
+            "each request while the task runs on this agent. A bus credential bound to a "
+            "workspace always claims by reference. Only that agent may call it, with its own bus "
+            "credential.",
         .input_schema = {{"type", "object"},
                          {"required", json::array({"task_id", "agent"})},
                          {"additionalProperties", false},
                          {"properties",
                           {{"task_id", {{"type", "string"}}},
                            {"workspace_id", {{"type", "string"}}},
-                           {"agent", {{"type", "string"}}}}}},
+                           {"agent", {{"type", "string"}}},
+                           {"credentials",
+                            {{"type", "string"},
+                             {"enum", json::array({"in_body", "by_reference"})},
+                             {"description",
+                              "in_body (the default) fills each {{credential}} with the task's "
+                              "credential; by_reference fills it with an empty string and keeps "
+                              "the credential in Lake (docs/api/agent-bus.md)"}}}}}},
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
         .requires_auth = false,
@@ -8678,6 +8705,14 @@ void register_agent_bus_capabilities(Registry& registry) {
                 co_return ApiResult::failure(
                     "conflict", "workspace_id does not match the task", "/workspace_id");
             }
+            if (current && !bus_reaches(context, current->workspace_id)) {
+                co_return not_bound_workspace();
+            }
+            // A credential bound to one workspace is new, so its agent knows to act by reference:
+            // it never receives a task credential at all (lake#871).
+            const bool by_reference =
+                !context.agent_service_workspace_id.empty() ||
+                input.value("credentials", std::string("in_body")) == "by_reference";
             // The request the agent receives is a record in the task's workspace (lake#374). It
             // is read before the claim, so a workspace that cannot answer leaves the task
             // waiting for another claim instead of claimed without its request. A task that is
@@ -8726,10 +8761,13 @@ void register_agent_bus_capabilities(Registry& registry) {
             }
             json body = std::move(request);
             body["workspace_id"] = task->workspace_id;
-            fill_credential(body, credential);
+            // By reference, the credential exists only as the digest the claim stored: the agent
+            // names the task instead (control/agent_task_proxy.hpp).
+            fill_credential(body, by_reference ? std::string() : credential);
             context.audit_customer_id = task->customer_id;
             context.audit_object = "agent_task/" + task->id;
             co_return ApiResult::success({{"task_id", task->id},
+                                          {"credentials", by_reference ? "by_reference" : "in_body"},
                                           {"workspace_id", task->workspace_id},
                                           {"customer_id", task->customer_id},
                                           {"agent", task->agent},
@@ -8786,6 +8824,9 @@ void register_agent_bus_capabilities(Registry& registry) {
                 task->workspace_id != input.at("workspace_id").get<std::string>()) {
                 co_return ApiResult::failure(
                     "conflict", "workspace_id does not match the task", "/workspace_id");
+            }
+            if (!bus_reaches(context, task->workspace_id)) {
+                co_return not_bound_workspace();
             }
             json event = input;
             WorkspaceApiBus bus(context, task->customer_id, task->workspace_id);

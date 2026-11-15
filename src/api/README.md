@@ -880,3 +880,10 @@ reservations across REST, MCP and hosted forms, keyed by the trusted ingress add
 browser page on an alias to the public host (the `host_alias` middleware in `http_server.cpp`), and
 decides which sign-in capabilities the registry's `gate_instance_sign_in` refuses. See
 [white-label sign-in](../../docs/deployment/white-label-sign-in.md) (lake#1136).
+
+`http_server.cpp`'s `context_for` resolves a library agent's bus credential sent with
+`X-Lake-Agent-Task: <task id>` to that task's principal (task credentials by reference, lake#871),
+and records the workspace a bound bus credential (`<agent>.<workspace id>`) serves. The bus
+capabilities in `workspace_capabilities.cpp` and `reporter_of` in `usage_capabilities.cpp` refuse a
+bound credential every task outside its workspace, and `claim_agent_task` answers no credential
+when it claims by reference. See [agent-bus.md](../../docs/api/agent-bus.md#task-credentials-by-reference-lake871).

@@ -80,7 +80,7 @@ claim, and the credential is handed over once and never stored.
 | Capability | Kind | Who | What |
 |---|---|---|---|
 | `receive_agent_tasks {agent, workspace_id?, from_sequence?, wait_ms?}` | read | that library agent | the tasks on `agent-tasks.<agent>` from `from_sequence`, without those already claimed; an optional workspace filters the reply; `next_sequence` continues |
-| `claim_agent_task {task_id, agent, workspace_id?}` | action | that library agent | take the task; the body with its credential. An optional workspace must match. A second claim, or a claim by another agent, is a `conflict` |
+| `claim_agent_task {task_id, agent, workspace_id?, credentials?}` | action | that library agent | take the task; the body with its credential, or with none when `credentials` is `by_reference` ([below](#task-credentials-by-reference-lake871)). An optional workspace must match. A second claim, or a claim by another agent, is a `conflict` |
 | `publish_agent_event {task_id, agent, type, workspace_id?, message?, result?}` | action | that library agent | publish on the task workspace's `agent-events`, only for a claimed, unfinished task; an optional workspace must match |
 | `receive_agent_events {customer_id, workspace_id, task_id, from_sequence?, wait_ms?}` | read | whoever asked the task (or the operator) | retained task events and current task state |
 
@@ -109,6 +109,38 @@ Experiments Agent has the independent topic and credential `agent-tasks.agent-ex
 analysis remain in the selected workspace Zetta, reached with the claimed task credential. An
 initial proposal has no experiment write; a new task carrying the reviewed proposal receives only
 the engine's `create_study` and its backing `start_experiment` capability in addition to its reads.
+
+### Task credentials by reference (lake#871)
+
+A library agent is one shared process, so a task credential it receives sits in the memory of a
+process that serves every tenant. Decided under Steve's 2026-11-14 delegation: **credentials never
+reach the agent process; Lake adds them to each request.** A claim with
+`credentials: by_reference`:
+
+- mints the task's credential and stores its SHA-256 as the claim, exactly as before, but never
+  answers it: every `"{{credential}}"` in the body becomes an empty string, and the answer says
+  `credentials: by_reference`;
+- the agent then calls Lake (capabilities, MCP, the Zetta-shaped `/w/<workspace>/workspaces/...`
+  path) with **its own bus credential as the bearer** and the header
+  **`X-Lake-Agent-Task: <task id>`**;
+- Lake resolves that pair to the task's principal (`control/agent_task_proxy.hpp`) only while the
+  task is present, claimed and `Running` on that agent; anything else is refused as an invalid
+  credential, never answered as the bus credential. The principal carries the claim's digest, so
+  each call renews the lease and a reclaimed or finished task opens nothing, as with the
+  credential itself.
+
+A compromised agent process therefore holds no credential it can take elsewhere, and can act only
+for the tasks it is running at that moment, only through Lake, with each task's scopes and in each
+task's workspace. The default stays `in_body` until the library agents move to `by_reference`
+(their own repositories); then the in-body mode is removed.
+
+**One agent process per workspace (enterprise and isolated installs).** A file
+`<agent>.<workspace id>` in `LAKE_AGENT_BUS_DIR` is a bus credential bound to that workspace, for
+an agent process that serves it alone. With it, `receive_agent_tasks` lists only that workspace's
+tasks, a claim or event for another workspace's task is `forbidden`, `record_model_usage` accepts
+only that workspace's tasks, `X-Lake-Agent-Task` opens only that workspace's tasks, and every
+claim is by reference whatever it asks. Starting the per-workspace process and mounting its
+credential is the operator's part.
 
 The service token (`LAKE_AGENT_SERVICE_TOKEN`) is never a bus credential, and no user-created agent
 holds it (agent-runtime#14). Lake presents it only to the library agents. To a person's service
@@ -357,7 +389,7 @@ Streams browses without consuming. App/build events are workspace topics, not bu
 | `LAKE_DATA_PLANE_URL`, `LAKE_DATA_PLANE_TOKEN` | lake's own Zetta, the bus. It needs an image with pub/sub (zetta `dev` from f8ad170) |
 | `LAKE_AGENT_ENDPOINTS` | the library agents; one `agent-tasks.<agent>` topic each |
 | `LAKE_AGENT_LEASE_SECONDS` | optional comma-separated `key=seconds` pairs, e.g. `agent-project=600,agent-experiments=1200`; omitted agents use 600; integers must be 60–3600 inclusive; malformed, unknown or duplicate entries fail startup |
-| `LAKE_AGENT_BUS_DIR` | the library agents' bus credentials, a file per agent named by its key (mounted from `lake-<name>-agent-bus`) |
+| `LAKE_AGENT_BUS_DIR` | the library agents' bus credentials, a file per agent named by its key (mounted from `lake-<name>-agent-bus`); a file `<agent>.<workspace id>` is a credential bound to that workspace ([by reference](#task-credentials-by-reference-lake871)) |
 
 Without the bus, a library agent's turn answers `store_unavailable`. A lake run with
 `--memory-store` uses an in-memory bus. The startup line reports `agent_bus`: `zetta`, `memory` or
@@ -365,7 +397,7 @@ Without the bus, a library agent's turn answers `store_unavailable`. A lake run 
 
 ## Verify on a deployment
 
-Native regression tests are `Stores/AgentLeases.*` (memory and PostgreSQL) and
+Native regression tests are `Stores/AgentLeases.*` (memory and PostgreSQL), `AgentBusKeys.*` and
 `AgentLeaseConfig.*`. They age clocks without sleeping, exercise three expiries, credential
 revocation, event/capability renewal, racing terminal writes, retry publication recovery, the
 retry notice as the task's message, the indexed migration and schema reapplication. Run full CTest
@@ -427,6 +459,11 @@ Operator schema/configuration handoff and task-scoped event credentials remain t
 described above.
 
 ## Not yet
+
+- The library agents still claim `in_body`: each moves to `credentials: by_reference` in its own
+  repository (agent-runtime's bus client first), and then Lake drops the in-body mode (lake#871).
+- The operator does not yet run a per-workspace agent process with a workspace-bound bus
+  credential (lake#871).
 
 - Custom Python agents on `agent-runtime` still answer within the call.
 - Streaming subscriptions (SSE) replace the long poll when Zetta ships them.

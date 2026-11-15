@@ -121,8 +121,10 @@ cover the capabilities; `AgentRuns.ApplicationAgentWritesAppsOnlyAfterTheProposa
 workspace notice recovery and racing-terminal-write cases on memory and PostgreSQL stores.
 It checks that a retry notice is the task's message (the web app shows it), legacy migration
 adoption, schema reapplication, the partial expiry index, and duration bounds without clock sleeps.
-The Streams task-credential fixture takes a real claim before making calls. See
-[agent-bus.md](../docs/api/agent-bus.md).
+The Streams task-credential fixture takes a real claim before making calls. It also checks task
+credentials by reference (lake#871): a `by_reference` claim answers no credential, the task opens
+only for its own agent while it runs, and a workspace-bound bus credential reaches only its
+workspace. See [agent-bus.md](../docs/api/agent-bus.md).
 
 `HttpResponseIsolation.AskOramaSaysWhoIsWorkingOnALongTurn` (lake#451) runs a real Ask Orama
 claim, a delegation with its turn key, and the subagent's progress and result, and follows the turn

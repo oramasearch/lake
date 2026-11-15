@@ -301,3 +301,7 @@ host) and SSO-only sign-in (`sso_only_refusal`). `ServerOptions` carries `host_a
 
 `resource_repairs.hpp` (lake#1207) declares `run_resource_repair_pass` and `note_deployment`, the
 pass and the hook behind notifications and auto-fix ([docs/api/notifications.md](../../../docs/api/notifications.md)).
+
+`registry.hpp`'s `ApiContext::agent_service_workspace_id` is the workspace a library agent's bus
+credential is bound to, empty for the shared one (lake#871,
+[agent-bus.md](../../../docs/api/agent-bus.md#task-credentials-by-reference-lake871)).
