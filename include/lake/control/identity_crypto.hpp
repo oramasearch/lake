@@ -25,6 +25,11 @@ std::uint64_t dummy_secret_verifications();
 // New recovery codes are 128 random bits with a version prefix; legacy codes are refused.
 std::string new_recovery_code();
 std::string recovery_selector(std::string_view code);
+// The selector of a SCIM bearer token (lake#885): `scim1:` and the hex HMAC-SHA-256 of the token
+// under `key` (the instance key on PostgreSQL, a per-process key in memory). It finds the one
+// provider whose Argon2id hash is then checked, so an unknown token costs no derivation at all;
+// keyed, so a copy of the table alone does not let anyone test guesses of a weak token.
+std::string scim_token_selector(std::string_view key, std::string_view token);
 std::string new_totp_secret();
 bool verify_totp(std::string_view secret, std::string_view code);
 std::optional<std::int64_t> totp_step(std::string_view secret, std::string_view code);

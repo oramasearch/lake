@@ -46,7 +46,7 @@ token, applies federation issuer policy, and then creates the browser session.
 surface is rooted at `/scim/v2`: `/Users` and `/Groups` support filtered list, get, create,
 PATCH, and delete. Every request authenticates its `Authorization: Bearer` value against the
 Argon2id hash stored for one enabled provider; the token identifies the provider and therefore
-the target organization. SCIM responses use `application/scim+json`, SCIM resource schemas,
+the target organization ([SCIM bearer tokens](#scim-bearer-tokens)). SCIM responses use `application/scim+json`, SCIM resource schemas,
 `ListResponse`, and the SCIM error schema.
 
 A user create requires `externalId` or `userName` and the person's TAAP identity. The identity is
@@ -73,6 +73,25 @@ provider.
 All configuration, federation policy, sign-in, and provisioning capabilities run through the
 registry. They therefore use `authorize` before protected work and append exactly one signed
 audit event for every outcome. A rejected issuer is a denied authentication audit event.
+
+### SCIM bearer tokens
+
+A SCIM token names its provider by a **selector** (lake#1316, found by the deep search lake#885):
+`scim1:` and the HMAC-SHA-256 of the token, keyed by `LAKE_INSTANCE_KEK` (the in-memory store uses a
+per-process key), kept in `sso_providers.scim_token_selector` beside the Argon2id hash.
+`register_sso_provider` writes both. A SCIM request looks its selector up and checks only that
+provider's hash. An unknown token checks no hash at all and answers `unauthorized`. Before this,
+every anonymous SCIM request ran one Argon2id derivation (64 MiB) for every enabled provider of every
+tenant on the HTTP thread, so a made-up bearer cost as much as all tenants' providers together. The
+selector is keyed so that a copy of the table alone does not let anyone test guesses of a weak
+token; the Argon2id hash is still checked on a match.
+
+A provider registered before migration `0121_scim_token_selectors` has no selector. Only those
+providers are still tried by their hash when no selector matches, and the first successful request
+records the selector, so that set only ever shrinks; registering the provider again also records it.
+Verify: `Sso.ScimBearerFindsItsOwnProviderAmongManyTenants` and, with `LAKE_TEST_DB_URI`,
+`PostgresIdentity.ScimTokensFindTheirProviderBySelector`. When changing SCIM authentication, keep the
+lookup by selector before any hash is checked, and never add a scan of providers that have one.
 
 ## SAML sign-in
 

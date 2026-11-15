@@ -398,4 +398,37 @@ TEST(PrincipalIds, GrantsAndMembershipsNameOnlyTaapIdentities) {
     EXPECT_TRUE(granted.ok) << granted.error.message;
 }
 
+// lake#885: a SCIM bearer authenticates only its own provider, among many tenants', and an unknown
+// token is refused without trying any provider's hash.
+TEST(Sso, ScimBearerFindsItsOwnProviderAmongManyTenants) {
+    SsoSurface surface;
+    std::vector<std::string> providers;
+    for (int index = 0; index < 4; ++index) {
+        const ApiResult organization = surface.call(
+            "create_organization", {{"display_name", "SCIM tenant " + std::to_string(index)}});
+        ASSERT_TRUE(organization.ok) << organization.error.message;
+        const ApiResult provider =
+            surface.call("register_sso_provider",
+                         provider_input(organization.value.at("id"),
+                                        "scim-tenant-" + std::to_string(index),
+                                        "oidc",
+                                        "https://scim-" + std::to_string(index) + ".example"));
+        ASSERT_TRUE(provider.ok) << provider.error.message;
+        providers.push_back(provider.value.at("id"));
+    }
+    for (int index = 0; index < 4; ++index) {
+        const auto found =
+            surface.store.authenticate_scim("token-scim-tenant-" + std::to_string(index));
+        ASSERT_TRUE(found) << found.error().message;
+        EXPECT_EQ(found->id, providers[static_cast<std::size_t>(index)]);
+    }
+    const auto unknown = surface.store.authenticate_scim("token-scim-tenant-unknown");
+    ASSERT_FALSE(unknown);
+    EXPECT_EQ(unknown.error().code, "unauthorized");
+    EXPECT_FALSE(surface.store.authenticate_scim(""));
+    const ApiResult listed =
+        surface.call("scim_list_users", {{"bearer_token", "token-scim-tenant-unknown"}});
+    EXPECT_FALSE(listed.ok);
+}
+
 } // namespace

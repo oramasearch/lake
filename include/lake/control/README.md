@@ -1,5 +1,8 @@
 # Public control types
 
+`identity_crypto::scim_token_selector(key, token)` is the keyed selector a SCIM bearer is looked up by
+(lake#1316, [SSO](../../../docs/api/sso.md#scim-bearer-tokens)).
+
 `User::disabled_at` retains offboarding state for administrative reads and the stream workers.
 Person-owned agent creation, claims, renewal and credential resolution require an active account;
 offboarding withdraws its launches/schedules and invalidates its tasks in the same store operation

@@ -27,6 +27,7 @@
 #include "lake/api/registry.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/handles.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/thread.hpp"
@@ -714,6 +715,74 @@ TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
     const auto revoke = store->revoke_device(context->user_id, context->device_id);
     ASSERT_TRUE(revoke) << revoke.error().message;
     EXPECT_FALSE(store->context_for(sign_up->secret));
+}
+
+// lake#885: a SCIM bearer finds its provider by its keyed selector, so another tenant's provider
+// is never tried and an unknown token checks no hash. A provider registered before migration 0121
+// (no selector) still authenticates, and that records its selector.
+TEST(PostgresIdentity, ScimTokensFindTheirProviderBySelector) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || *uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    std::unique_ptr<lake::control::Store> store =
+        lake::control::make_postgres_store(uri, std::string(test_instance_kek));
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto register_provider = [&](const std::string& tenant) {
+        const auto organization = store->create_organization(
+            {"taap:1:ed25519:scim-" + tenant + "-" + suffix, "SCIM " + tenant, ""});
+        EXPECT_TRUE(organization) << organization.error().message;
+        return store->register_sso_provider({organization->id,
+                                             "lake",
+                                             "scim-" + tenant + "-" + suffix,
+                                             "oidc",
+                                             "https://scim-" + tenant + ".example/" + suffix,
+                                             "",
+                                             "",
+                                             "client-" + tenant,
+                                             "secret-" + tenant,
+                                             "scim-token-" + tenant + "-" + suffix,
+                                             nlohmann::json::object(),
+                                             false});
+    };
+    const auto first = register_provider("first");
+    const auto second = register_provider("second");
+    ASSERT_TRUE(first) << first.error().message;
+    ASSERT_TRUE(second) << second.error().message;
+
+    pqxx::connection connection(uri);
+    const auto selector_of = [&](const std::string& id) {
+        pqxx::work tx(connection);
+        const pqxx::result row = tx.exec_params(
+            "SELECT scim_token_selector FROM sso_providers WHERE id = $1::uuid", id);
+        tx.commit();
+        return row[0][0].is_null() ? std::string() : row[0][0].as<std::string>();
+    };
+    EXPECT_TRUE(selector_of(first->id).starts_with("scim1:"));
+    EXPECT_NE(selector_of(first->id), selector_of(second->id));
+    // Keyed: the selector is not the token's plain SHA-256.
+    EXPECT_NE(selector_of(first->id),
+              "scim1:" + lake::control::identity_crypto::sha256_hex("scim-token-first-" + suffix));
+
+    const auto first_auth = store->authenticate_scim("scim-token-first-" + suffix);
+    ASSERT_TRUE(first_auth) << first_auth.error().message;
+    EXPECT_EQ(first_auth->id, first->id);
+    const auto second_auth = store->authenticate_scim("scim-token-second-" + suffix);
+    ASSERT_TRUE(second_auth) << second_auth.error().message;
+    EXPECT_EQ(second_auth->id, second->id);
+    EXPECT_FALSE(store->authenticate_scim("scim-token-third-" + suffix));
+    EXPECT_FALSE(store->authenticate_scim(""));
+
+    {
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE sso_providers SET scim_token_selector = NULL WHERE id = $1::uuid",
+                       first->id);
+        tx.commit();
+    }
+    const auto legacy = store->authenticate_scim("scim-token-first-" + suffix);
+    ASSERT_TRUE(legacy) << legacy.error().message;
+    EXPECT_EQ(legacy->id, first->id);
+    EXPECT_TRUE(selector_of(first->id).starts_with("scim1:"));
 }
 
 TEST(PostgresIdentity, SsoFederationAndScimDeactivation) {

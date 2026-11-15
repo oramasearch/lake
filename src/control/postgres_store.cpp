@@ -458,6 +458,22 @@ std::string recovery_selector(std::string_view code) {
     return digest.empty() ? std::string() : "rc1:" + digest;
 }
 
+std::string scim_token_selector(std::string_view key, std::string_view token) {
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned int size = 0;
+    const std::string_view used_key = key.empty() ? std::string_view("lake-scim-selector/1") : key;
+    if (HMAC(EVP_sha256(),
+             used_key.data(),
+             static_cast<int>(used_key.size()),
+             reinterpret_cast<const unsigned char*>(token.data()),
+             token.size(),
+             digest.data(),
+             &size) == nullptr) {
+        return {};
+    }
+    return "scim1:" + hex(digest.data(), size);
+}
+
 std::string hash_secret(std::string_view secret) {
     std::array<unsigned char, 16> salt{};
     if (RAND_bytes(salt.data(), static_cast<int>(salt.size())) != 1)
@@ -10730,7 +10746,10 @@ public:
                 encrypted_secret = *encrypted;
             }
             const std::string token_hash = identity_crypto::hash_secret(input.scim_token);
-            if (token_hash.empty()) {
+            // The selector finds this provider's hash without trying every provider's (lake#885).
+            const std::string token_selector =
+                identity_crypto::scim_token_selector(instance_kek_, input.scim_token);
+            if (token_hash.empty() || token_selector.empty()) {
                 return std::unexpected(StoreError{"store_error", "could not hash SCIM token"});
             }
             const pqxx::result rows = tx.exec_params(
@@ -10738,9 +10757,10 @@ public:
                             "issuer, ") +
                     "metadata, signing_certificate, client_id, encrypted_client_secret, "
                     "scim_token_hash, "
-                    "attribute_mapping, jit_provisioning) VALUES ($1::uuid, $2, $3, $4, $5, $6, "
+                    "attribute_mapping, jit_provisioning, scim_token_selector) VALUES ($1::uuid, "
+                    "$2, $3, $4, $5, $6, "
                     "$7, $8, "
-                    "decode(NULLIF($9, ''), 'hex'), $10, $11::jsonb, $12) ON CONFLICT "
+                    "decode(NULLIF($9, ''), 'hex'), $10, $11::jsonb, $12, $13) ON CONFLICT "
                     "(organization_id, name) "
                     "DO UPDATE SET pool_id = EXCLUDED.pool_id, protocol = EXCLUDED.protocol, "
                     "issuer = "
@@ -10748,6 +10768,7 @@ public:
                     "EXCLUDED.signing_certificate, client_id = EXCLUDED.client_id, "
                     "encrypted_client_secret = "
                     "EXCLUDED.encrypted_client_secret, scim_token_hash = EXCLUDED.scim_token_hash, "
+                    "scim_token_selector = EXCLUDED.scim_token_selector, "
                     "attribute_mapping = EXCLUDED.attribute_mapping, jit_provisioning = "
                     "EXCLUDED.jit_provisioning, enabled = true RETURNING " +
                     sso_provider_columns,
@@ -10762,7 +10783,8 @@ public:
                 encrypted_secret,
                 token_hash,
                 input.attribute_mapping.dump(),
-                input.jit_provisioning);
+                input.jit_provisioning,
+                token_selector);
             return sso_provider_of(rows[0]);
         });
     }
@@ -10885,13 +10907,41 @@ public:
         });
     }
 
+    // A SCIM bearer names its provider by its selector (lake#885): only the providers with that
+    // selector (normally one) have their Argon2id hash checked, so an unknown token costs no
+    // derivation. Before, every request tried every enabled provider of every tenant in turn. A
+    // provider registered before migration 0121 has no selector yet; only those are tried by
+    // their hash, and the first success records the selector, so that set only ever shrinks.
     Result<SsoProvider> authenticate_scim(const std::string& bearer_token) override {
+        const std::string selector =
+            identity_crypto::scim_token_selector(instance_kek_, bearer_token);
+        if (bearer_token.empty() || selector.empty()) {
+            return std::unexpected(StoreError{"unauthorized", "SCIM bearer token is invalid"});
+        }
         return with_tx<SsoProvider>([&](pqxx::work& tx) -> Result<SsoProvider> {
-            const pqxx::result rows = tx.exec(std::string("SELECT ") + sso_provider_columns +
-                                              ", scim_token_hash FROM sso_providers "
-                                              "WHERE enabled ORDER BY created_at");
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + sso_provider_columns +
+                    ", scim_token_hash FROM sso_providers WHERE enabled AND "
+                    "scim_token_selector = $1 ORDER BY created_at",
+                selector);
             for (const pqxx::row& row : rows) {
                 if (identity_crypto::verify_secret(row[15].as<std::string>(), bearer_token)) {
+                    return sso_provider_of(row);
+                }
+            }
+            if (!rows.empty()) {
+                return std::unexpected(StoreError{"unauthorized", "SCIM bearer token is invalid"});
+            }
+            const pqxx::result legacy = tx.exec(std::string("SELECT ") + sso_provider_columns +
+                                                ", scim_token_hash FROM sso_providers WHERE "
+                                                "enabled AND scim_token_selector IS NULL "
+                                                "ORDER BY created_at");
+            for (const pqxx::row& row : legacy) {
+                if (identity_crypto::verify_secret(row[15].as<std::string>(), bearer_token)) {
+                    tx.exec_params("UPDATE sso_providers SET scim_token_selector = $2 "
+                                   "WHERE id = $1::uuid AND scim_token_selector IS NULL",
+                                   row[0].as<std::string>(),
+                                   selector);
                     return sso_provider_of(row);
                 }
             }

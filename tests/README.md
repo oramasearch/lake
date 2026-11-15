@@ -5,6 +5,9 @@ executable with no control store and checks that it stays live (`/healthz` 200, 
 survives the owner loop's first pass and exits 0 on SIGTERM, not SIGSEGV (lake#1168). The SCIM
 tests (`Scim.*`, `ScimHttp.*`) and `WorkspaceStoreSearch.*` cover lake#1175 and lake#1176, which
 show only under AddressSanitizer; see [testing](../docs/build/testing.md#addresssanitizer).
+`Sso.ScimBearerFindsItsOwnProviderAmongManyTenants` and `PostgresIdentity.ScimTokensFindTheirProviderBySelector`
+cover lake#1316: a SCIM bearer is found by its keyed selector among several tenants' providers, an unknown one
+checks no provider, and a provider without a selector (from before migration 0121) records one on first use.
 `test_brand.cpp` covers the instance brand (lake#1135, lake#1137): Lake's own brand leaves every
 email, page and agent surface as it was, a test brand reaches each with no "Lake", "Orama" or
 `lake.live` left, and invalid settings are refused naming the setting. `test_api.cpp`'s

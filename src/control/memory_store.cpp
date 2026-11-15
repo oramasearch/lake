@@ -50,6 +50,13 @@ std::string now_iso8601() {
 
 namespace {
 
+// The in-memory store's key for SCIM token selectors (lake#885): one per process, since nothing it
+// holds outlives the process.
+const std::string& scim_selector_key() {
+    static const std::string key = identity_crypto::random_secret();
+    return key;
+}
+
 std::string lower(std::string s) {
     for (auto& c : s)
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -6341,6 +6348,8 @@ Result<SsoProvider> InMemoryStore::register_sso_provider(const NewSsoProvider& i
                 return std::unexpected(StoreError{"store_error", "could not hash SCIM token"});
             }
             sso_scim_tokens_.emplace_back(provider.id, token_hash);
+            sso_scim_selectors_[provider.id] =
+                identity_crypto::scim_token_selector(scim_selector_key(), input.scim_token);
             sso_oidc_secrets_.erase(
                 std::remove_if(sso_oidc_secrets_.begin(),
                                sso_oidc_secrets_.end(),
@@ -6372,6 +6381,8 @@ Result<SsoProvider> InMemoryStore::register_sso_provider(const NewSsoProvider& i
         return std::unexpected(StoreError{"store_error", "could not hash SCIM token"});
     }
     sso_scim_tokens_.emplace_back(provider.id, token_hash);
+    sso_scim_selectors_[provider.id] =
+        identity_crypto::scim_token_selector(scim_selector_key(), input.scim_token);
     if (input.protocol == "oidc") {
         sso_oidc_secrets_.emplace_back(provider.id, input.client_secret);
     }
@@ -6425,12 +6436,29 @@ Result<OAuthProvider> InMemoryStore::get_sso_oidc_provider(const std::string& id
                          {"openid", "email", "profile"}};
 }
 
+// Only the providers whose selector the token has are checked, outside the store lock, so an
+// unknown token costs no Argon2id derivation and no other caller waits on one (lake#885).
 Result<SsoProvider> InMemoryStore::authenticate_scim(const std::string& bearer_token) {
-    std::lock_guard lock(mutex_);
-    for (const auto& [provider_id, token_hash] : sso_scim_tokens_) {
+    const std::string selector =
+        identity_crypto::scim_token_selector(scim_selector_key(), bearer_token);
+    if (bearer_token.empty() || selector.empty()) {
+        return std::unexpected(StoreError{"unauthorized", "SCIM bearer token is invalid"});
+    }
+    std::vector<std::pair<std::string, std::string>> candidates;
+    {
+        std::lock_guard lock(mutex_);
+        for (const auto& [provider_id, token_hash] : sso_scim_tokens_) {
+            const auto found = sso_scim_selectors_.find(provider_id);
+            if (found != sso_scim_selectors_.end() && found->second == selector) {
+                candidates.emplace_back(provider_id, token_hash);
+            }
+        }
+    }
+    for (const auto& [provider_id, token_hash] : candidates) {
         if (!identity_crypto::verify_secret(token_hash, bearer_token)) {
             continue;
         }
+        std::lock_guard lock(mutex_);
         const auto provider = std::ranges::find_if(sso_providers_, [&](const SsoProvider& item) {
             return item.id == provider_id && item.enabled;
         });

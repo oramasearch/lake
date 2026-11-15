@@ -912,6 +912,7 @@ private:
     std::vector<RecoveryContact> recovery_contacts_;
     std::vector<SsoProvider> sso_providers_;
     std::vector<std::pair<std::string, std::string>> sso_scim_tokens_;
+    std::map<std::string, std::string> sso_scim_selectors_; // provider id -> token selector
     std::vector<std::pair<std::string, std::string>> sso_oidc_secrets_;
     std::vector<FederationIssuer> federation_issuers_;
     struct SsoCredential {

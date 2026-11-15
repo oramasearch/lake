@@ -22,6 +22,13 @@ A new migration still follows the rules below: idempotent SQL, its row in `schem
 new `*_guard` table created by the newest migration (`LakeManifest.TheGuardTableIsTheNewestMigrations`
 fails otherwise).
 
+`0121_scim_token_selectors` (lake#1316) adds `sso_providers.scim_token_selector`, the HMAC-SHA-256
+of the provider's SCIM token under the instance key, with the partial index
+`sso_providers_scim_token_selector_idx`. SCIM authentication looks a bearer up by it and checks
+only that provider's Argon2id hash; providers registered before it have a NULL selector, are the
+only ones still tried by hash, and record their selector on their first success. Additive; guard
+`scim_token_selectors_guard`. See [SSO](../api/sso.md#scim-bearer-tokens).
+
 `0105_agent_model_prices` (lake#1230) seeds the `model_tokens` rates of the gpt-6.x models the
 gateway now serves (`gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, `gpt-6-luna`) and the
 long-context classes `<model>@long/input` and `<model>@long/output` of those and `gpt-5.5`, at
