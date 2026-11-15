@@ -730,6 +730,18 @@ std::string claimed_taap_id(std::string_view identity_document) {
     return document ? document->subject.taap_id : std::string{};
 }
 
+std::optional<liquid::identity_document> decode_document(std::string_view identity_document) {
+    const std::vector<unsigned char> bytes = from_base64url(identity_document);
+    if (bytes.empty()) {
+        return std::nullopt;
+    }
+    auto document = liquid::decode_identity_document(as_bytes_of(bytes));
+    if (!document) {
+        return std::nullopt;
+    }
+    return std::move(*document);
+}
+
 std::expected<VerifiedTaapSignIn, std::string>
 verify_taap_sign_in(std::string_view identity_document,
                     std::string_view pool_id,
@@ -10137,6 +10149,20 @@ public:
             if (rows.empty()) {
                 return std::unexpected(
                     StoreError{"not_found", "no account acts for this identity"});
+            }
+            return rows[0][0].as<std::string>();
+        });
+    }
+    Result<std::string> registered_identity_document(const std::string& taap_id) override {
+        return with_tx<std::string>([&](pqxx::work& tx) -> Result<std::string> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT d.document #>> '{}' FROM identity_documents d JOIN users u "
+                "ON u.id = d.user_id WHERE u.taap_id = $1 "
+                "UNION ALL SELECT own_document FROM identity_links WHERE own_taap_id = $1 LIMIT 1",
+                taap_id);
+            if (rows.empty() || rows[0][0].is_null()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no account registered this identity"});
             }
             return rows[0][0].as<std::string>();
         });

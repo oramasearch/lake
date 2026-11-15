@@ -2684,6 +2684,11 @@ public:
     // The account identifier a TAAP identity acts for: itself for an account's own identifier,
     // the account's identifier for a linked own identity; not_found otherwise.
     virtual Result<std::string> account_for_identity(const std::string& taap_id) = 0;
+    // The identity document a person registered for a TAAP identifier (base64url canonical CBOR):
+    // the initial document an account signed up with (identity_documents) or the own identity it
+    // linked (identity_links.own_document); not_found for an identifier no account registered.
+    // An attestation's issuer is verified against it (lake#1020, docs/api/models.md).
+    virtual Result<std::string> registered_identity_document(const std::string& taap_id) = 0;
     virtual Result<void> register_oauth_provider(const OAuthProvider&) = 0;
     virtual Result<OAuthProvider> get_oauth_provider(const std::string& pool_id,
                                                      const std::string& provider) = 0;

@@ -65,6 +65,11 @@ bound_taap_key(std::string_view identity_document, std::span<const std::string> 
 // decode.
 std::string claimed_taap_id(std::string_view identity_document);
 
+// A stored identity document (base64url canonical CBOR) decoded; nothing when it does not decode.
+// Used to hand a registered person's document to liquid as an attestation issuer's chain
+// (lake#1020).
+std::optional<liquid::identity_document> decode_document(std::string_view identity_document);
+
 struct OidcClaims {
     std::string subject;
     std::string email;

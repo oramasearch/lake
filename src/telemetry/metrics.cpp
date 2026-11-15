@@ -1562,6 +1562,10 @@ public:
     control::Result<std::string> account_for_identity(const std::string& taap_id) override {
         return call("account_for_identity", [&] { return store_->account_for_identity(taap_id); });
     }
+    control::Result<std::string> registered_identity_document(const std::string& taap_id) override {
+        return call("registered_identity_document",
+                    [&] { return store_->registered_identity_document(taap_id); });
+    }
     control::Result<void> register_oauth_provider(const control::OAuthProvider& value) override {
         return call("register_oauth_provider",
                     [&] { return store_->register_oauth_provider(value); });

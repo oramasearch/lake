@@ -2675,6 +2675,15 @@ public:
         workspace_config_ = std::move(config);
     }
 
+    // lake#1020: the identity chain of an attestation's issuer, from the identity documents people
+    // registered with Lake (empty for an identifier no account registered). Set once by the server
+    // before it serves.
+    using IssuerChains =
+        std::function<std::vector<liquid::identity_document>(const std::string& taap_id)>;
+    void configure_issuer_chains(IssuerChains chains) {
+        issuer_chains_ = std::move(chains);
+    }
+
     // The counters of an open workspace store, for tests and the latency measurement.
     std::shared_ptr<control::ObjectStoreCounters> workspace_store_counters(const std::string& workspace_id) {
         std::lock_guard maps(mutex_);
@@ -4714,10 +4723,22 @@ private:
                                          reason});
     }
 
-    static void append_verified_attestation(RepositoryArtifact& artifact,
-                                            const liquid::digest& id,
-                                            const liquid::attestation& statement) {
-        const auto verification = liquid::verify_attestation(statement);
+    // lake#1020: a statement a registered person issued verifies through the identity document
+    // they registered; any other issuer gets no chain, so liquid reads this process's identity
+    // store, which holds Lake's own chain only, and an unregistered person stays an unknown signer.
+    liquid::result<liquid::attestation_verification>
+    verify_issued(const liquid::attestation& statement) const {
+        liquid::attestation_verification_options options;
+        if (issuer_chains_ && !statement.issuer.taap_id.empty()) {
+            options.issuer_chain = issuer_chains_(statement.issuer.taap_id);
+        }
+        return liquid::verify_attestation(statement, options);
+    }
+
+    void append_verified_attestation(RepositoryArtifact& artifact,
+                                     const liquid::digest& id,
+                                     const liquid::attestation& statement) const {
+        const auto verification = verify_issued(statement);
         if (!verification) {
             append_attestation(artifact, id, statement, false, verification.error().message);
             return;
@@ -4725,9 +4746,9 @@ private:
         append_attestation(artifact, id, statement, verification->verified, verification->reason);
     }
 
-    static SyncStoreResult<void> append_result_attestations(liquid::repository& repository,
-                                                            const liquid::repository_result& record,
-                                                            RepositoryArtifact& artifact) {
+    SyncStoreResult<void> append_result_attestations(liquid::repository& repository,
+                                                     const liquid::repository_result& record,
+                                                     RepositoryArtifact& artifact) const {
         if (record.value.provenance) {
             const auto provenance =
                 liquid::runtime::block_on(liquid::build::verify_provenance(repository, record.id));
@@ -4827,9 +4848,9 @@ private:
         }
     }
 
-    static SyncStoreResult<RepositoryArtifact>
+    SyncStoreResult<RepositoryArtifact>
     artifact_record_with_evidence(liquid::repository& repository,
-                                  const liquid::repository_result& record) {
+                                  const liquid::repository_result& record) const {
         RepositoryArtifact output = artifact_record(record);
         const auto attestations = append_result_attestations(repository, record, output);
         if (!attestations) {
@@ -5032,9 +5053,9 @@ private:
         return text == nullptr ? std::string{} : *text;
     }
 
-    static SyncStoreResult<void> validate_model_attestations(const liquid::change_id& revision,
-                                                             const liquid::attestation& model,
-                                                             const liquid::attestation& run) {
+    SyncStoreResult<void> validate_model_attestations(const liquid::change_id& revision,
+                                                      const liquid::attestation& model,
+                                                      const liquid::attestation& run) const {
         if (model.profile != "model_provenance/1" ||
             model.subject_kind != liquid::attestation_subject_kind::model ||
             liquid::to_string(model.subject) != liquid::to_string(revision.value)) {
@@ -5047,8 +5068,8 @@ private:
             return std::unexpected(
                 SyncStoreError{"invalid_input", "the run attestation has the wrong subject"});
         }
-        const auto model_verification = liquid::verify_attestation(model);
-        const auto run_verification = liquid::verify_attestation(run);
+        const auto model_verification = verify_issued(model);
+        const auto run_verification = verify_issued(run);
         if (!model_verification || !run_verification) {
             return std::unexpected(
                 SyncStoreError{"invalid_input", "a provenance attestation could not be verified"});
@@ -5068,12 +5089,12 @@ private:
         return {};
     }
 
-    static RepositoryModelProvenance provenance_record(const liquid::change_id& revision,
-                                                       const std::string& dataset_repository_id,
-                                                       const liquid::digest& model_id,
-                                                       const liquid::digest& run_id,
-                                                       const liquid::attestation& model,
-                                                       const liquid::attestation& run) {
+    RepositoryModelProvenance provenance_record(const liquid::change_id& revision,
+                                                const std::string& dataset_repository_id,
+                                                const liquid::digest& model_id,
+                                                const liquid::digest& run_id,
+                                                const liquid::attestation& model,
+                                                const liquid::attestation& run) const {
         RepositoryModelProvenance output;
         output.model_revision = liquid::to_string(revision.value);
         output.dataset_repository_id = dataset_repository_id;
@@ -5082,8 +5103,8 @@ private:
         output.model_attestation = liquid::to_string(model_id);
         output.run_attestation = liquid::to_string(run_id);
         output.runner = std::string(run.issuer.identifier());
-        const auto model_verification = liquid::verify_attestation(model);
-        const auto run_verification = liquid::verify_attestation(run);
+        const auto model_verification = verify_issued(model);
+        const auto run_verification = verify_issued(run);
         output.verified = model_verification && run_verification && model_verification->verified &&
                           run_verification->verified;
         if (!output.verified) {
@@ -5797,6 +5818,7 @@ private:
     std::string root_;
     std::chrono::milliseconds owner_wait_;
     bool replication_allow_private_ = false;
+    IssuerChains issuer_chains_;
     std::chrono::milliseconds replication_timeout_{std::chrono::minutes(10)};
     // Guards the maps below and nothing else (see Lane).
     std::mutex mutex_;
@@ -8491,6 +8513,28 @@ struct ApiServer::Impl {
     std::mutex app_auth_audit_mutex;
     std::map<std::string, std::chrono::steady_clock::time_point> app_auth_denials;
 
+    // lake#1020: an attestation's issuer is attributed through the identity document its person
+    // registered with Lake. An identifier no account registered, or a store that cannot be read,
+    // gives no chain, so the attestation does not verify as that person's (fail closed).
+    void configure_issuer_chains() {
+        if (!options.store) {
+            return;
+        }
+        std::shared_ptr<control::Store> store = options.store;
+        sync_store.configure_issuer_chains(
+            [store](const std::string& taap_id) -> std::vector<liquid::identity_document> {
+                const auto stored = store->registered_identity_document(taap_id);
+                if (!stored) {
+                    return {};
+                }
+                auto document = control::identity_crypto::decode_document(*stored);
+                if (!document) {
+                    return {};
+                }
+                return {std::move(*document)};
+            });
+    }
+
     // lake#380: a switched workspace's repositories are served from its own store in its
     // workspace Zetta, reached with the workspace's mounted credential.
     void configure_workspace_stores() {
@@ -8808,6 +8852,7 @@ struct ApiServer::Impl {
         sync_store.configure_replication(options.replication_allow_private_addresses,
                                          options.replication_timeout);
         configure_workspace_stores();
+        configure_issuer_chains();
         lend_repositories_to_search();
         if (web_ui_stylesheet_url().empty()) {
             failure_reason = "could not calculate the stylesheet asset hash";

@@ -4633,6 +4633,9 @@ Result<IssuedSession> InMemoryStore::sign_up_password(const NewPasswordUser& inp
             customers_, [&](const Customer& customer) { return customer.name == handle; }));
     }
     users_.push_back(user);
+    if (!documented_identity.empty()) {
+        identity_documents_[documented_identity] = input.identity_document;
+    }
     if (managed) {
         custodial_identities_[user.id] = ClerkIdentity{"",
                                                        input.email,
@@ -5714,6 +5717,19 @@ Result<std::string> InMemoryStore::account_for_identity(const std::string& taap_
         return taap_id;
     }
     return std::unexpected(StoreError{"not_found", "no account acts for this identity"});
+}
+
+Result<std::string> InMemoryStore::registered_identity_document(const std::string& taap_id) {
+    std::lock_guard lock(mutex_);
+    if (const auto found = identity_documents_.find(taap_id); found != identity_documents_.end()) {
+        return found->second;
+    }
+    for (const auto& [user_id, link] : identity_links_) {
+        if (link.own_taap_id == taap_id) {
+            return link.own_document;
+        }
+    }
+    return std::unexpected(StoreError{"not_found", "no account registered this identity"});
 }
 
 Result<void> InMemoryStore::register_oauth_provider(const OAuthProvider& input) {

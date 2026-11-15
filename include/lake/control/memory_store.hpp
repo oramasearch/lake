@@ -586,6 +586,7 @@ public:
                                     const std::string& challenge) override;
     Result<AccountIdentity> link_own_identity(const IdentityLink&) override;
     Result<std::string> account_for_identity(const std::string& taap_id) override;
+    Result<std::string> registered_identity_document(const std::string& taap_id) override;
     Result<void> register_oauth_provider(const OAuthProvider&) override;
     Result<OAuthProvider> get_oauth_provider(const std::string& pool_id,
                                              const std::string& provider) override;
@@ -862,6 +863,9 @@ private:
     std::vector<IdentityLinkChallengeRecord> identity_link_challenges_;
     // user id -> its own identity, linked as the managed key's successor.
     std::map<std::string, IdentityLink> identity_links_;
+    // The initial identity document each documented sign-up registered, by its TAAP identifier
+    // (PostgreSQL's identity_documents, lake#1020).
+    std::map<std::string, std::string> identity_documents_;
     std::map<std::string, std::string> identity_linked_at_;
     std::vector<WebAuthnChallengeRecord> webauthn_challenges_;
     std::vector<OAuthProvider> oauth_providers_;
