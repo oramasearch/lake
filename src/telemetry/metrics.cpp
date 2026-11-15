@@ -1033,6 +1033,16 @@ public:
         return call("record_cloud_order_email",
                     [&] { return store_->record_cloud_order_email(outcome); });
     }
+    control::Result<control::CloudOrder> confirm_cloud_order_email(const std::string& id,
+                                                                   int max_age_seconds) override {
+        return call("confirm_cloud_order_email",
+                    [&] { return store_->confirm_cloud_order_email(id, max_age_seconds); });
+    }
+    control::Result<control::CloudOrderRecipientCounts>
+    count_cloud_order_recipients(const std::string& email) override {
+        return call("count_cloud_order_recipients",
+                    [&] { return store_->count_cloud_order_recipients(email); });
+    }
     control::Result<std::vector<control::CloudOrderEvent>>
     unaudited_cloud_order_events(int limit) override {
         return call("unaudited_cloud_order_events",

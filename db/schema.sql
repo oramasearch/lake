@@ -5243,3 +5243,34 @@ CREATE INDEX IF NOT EXISTS domain_claims_environment_idx
     ON domain_claims (repository_id, environment);
 CREATE TABLE IF NOT EXISTS domain_claims_guard (applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0106_domain_claims') ON CONFLICT DO NOTHING;
+
+-- 0107_order_email_confirmation (lake#1000, LSR-194, docs/api/orders.md#email): an order form's
+-- contact email is anyone's to type, so until the person who sent it follows the confirmation link
+-- the order mails that address only the confirmation and tells support nothing.
+-- `contact_email_confirmed_at` is when they did; NULL until then. A checkout order needs none: its
+-- mail is about a payment Stripe took from the person at that address. Orders that were mailed
+-- before this migration count as confirmed (once, while unrecorded), so their later mail still
+-- goes. The two indexes serve the per-recipient limits: orders naming one address (without case)
+-- in a day, and one domain (after the last @) in an hour. Additive. Numbered after the open 0106
+-- (lake#949).
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE cloud_orders ADD COLUMN IF NOT EXISTS contact_email_confirmed_at timestamptz;
+DO $order_email_confirmation$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations
+                    WHERE version = '0107_order_email_confirmation') THEN
+        UPDATE cloud_orders SET contact_email_confirmed_at = created_at
+         WHERE contact_email_confirmed_at IS NULL AND path = 'order_form'
+           AND (customer_emailed_state IS NOT NULL OR support_emailed_state IS NOT NULL);
+    END IF;
+END
+$order_email_confirmation$;
+CREATE INDEX IF NOT EXISTS cloud_orders_contact_email_idx
+    ON cloud_orders (lower(contact_email), created_at);
+CREATE INDEX IF NOT EXISTS cloud_orders_contact_domain_idx
+    ON cloud_orders ((substring(lower(contact_email) FROM '@([^@]*)$')), created_at);
+CREATE TABLE IF NOT EXISTS order_email_confirmation_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0107_order_email_confirmation')
+    ON CONFLICT DO NOTHING;

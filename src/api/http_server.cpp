@@ -13912,6 +13912,10 @@ struct ApiServer::Impl {
                 (path == "/order/price-list" || !offer_from_slug(path.substr(7)).empty())) {
                 co_return co_await serve_order_page(route, std::string(path.substr(7)));
             }
+            if (path.starts_with("/orders/") && path.ends_with("/confirm") && path.size() > 16) {
+                co_return co_await serve_order_confirm(
+                    route, std::string(path.substr(8, path.size() - 16)), post);
+            }
             if (!post && path.starts_with("/orders/") && path.size() > 8) {
                 co_return co_await serve_order_status(route, std::string(path.substr(8)));
             }
@@ -14102,6 +14106,31 @@ struct ApiServer::Impl {
                                      "We have received many orders from here in the last hour. "
                                      "Please try again later."));
         }
+        // lake#1000: per-recipient limits, whoever sends. Each order form mails its contact email
+        // once (the confirmation), so these bound the mail anyone can make lake send to one
+        // address or domain. Counted in the control plane, so every replica sees the same.
+        if (order->path == "order_form") {
+            const auto counts = options.store->count_cloud_order_recipients(order->contact_email);
+            if (!counts) {
+                co_return co_await send_order_html(
+                    route,
+                    http::status::service_unavailable,
+                    web_ui_order_message("Not Recorded",
+                                         "We could not record your order just now. Please try "
+                                         "again in a minute."));
+            }
+            const bool email_full = counts->email_last_day >= sheet.orders_per_email_per_day;
+            if (email_full || counts->domain_last_hour >= sheet.orders_per_domain_per_hour) {
+                metrics.increment_counter("lake_cloud_orders_refused_total",
+                                          {{"reason", email_full ? "recipient" : "domain"}});
+                co_return co_await send_order_html(
+                    route,
+                    http::status::too_many_requests,
+                    web_ui_order_message("Too Many Orders",
+                                         "We have received many orders for this email address "
+                                         "lately. Please try again later, or write to us."));
+            }
+        }
         order->email_error = options.resend.unavailable_reason();
         auto created = options.store->create_cloud_order(*order);
         if (!created) {
@@ -14190,6 +14219,71 @@ struct ApiServer::Impl {
             route,
             http::status::ok,
             web_ui_order_received(sheet, options.regions, *created, order_status_url(*created)));
+    }
+
+    // The order form's confirmation link (lake#1000): https://<apex>/orders/<id>/confirm?token=.
+    std::string order_confirmation_url(const control::CloudOrder& order) const {
+        const std::string origin = order_origin();
+        if (origin.empty() || order_status_key.empty()) {
+            return {};
+        }
+        return origin + "/orders/" + order.id +
+               "/confirm?token=" + order_confirmation_token(order_status_key, order.id);
+    }
+
+    // GET /orders/<id>/confirm?token=: a page with one button, so a mail scanner that follows the
+    // link confirms nothing; POST /orders/<id>/confirm (token in the form): confirms the order
+    // form's contact email, after which its emails go to the customer and to support (lake#1000).
+    boost::http::route_task
+    serve_order_confirm(boost::http::route_params& route, std::string id, bool post) {
+        namespace http = boost::http;
+        std::string token = query_value(route, "token");
+        if (post) {
+            auto [read_error, body] = co_await read_string_body(route, std::size_t{4} * 1024);
+            if (read_error) {
+                co_return http::route_error(read_error);
+            }
+            token = form_field(body, "token");
+        }
+        const auto not_found = [&] {
+            return web_ui_order_message("Link Not Valid",
+                                        "This confirmation link is not valid. Use the link in the "
+                                        "email we sent you.");
+        };
+        if (order_status_key.empty() ||
+            !order_confirmation_token_matches(order_status_key, id, token)) {
+            co_return co_await send_order_html(route, http::status::not_found, not_found());
+        }
+        if (!post) {
+            const auto order = options.store->get_cloud_order(id);
+            if (!order) {
+                co_return co_await send_order_html(route, http::status::not_found, not_found());
+            }
+            co_return co_await send_order_html(
+                route, http::status::ok, web_ui_order_confirm(*order, token));
+        }
+        const auto confirmed =
+            options.store->confirm_cloud_order_email(id, order_confirmation_max_age_seconds);
+        if (!confirmed) {
+            const std::string& code = confirmed.error().code;
+            co_return co_await send_order_html(
+                route,
+                code == "not_found" ? http::status::not_found
+                : code == "expired" ? http::status::gone
+                                    : http::status::service_unavailable,
+                code == "not_found" ? not_found()
+                : code == "expired"
+                    ? web_ui_order_message("Link Expired",
+                                           "This confirmation link has expired, and the order was "
+                                           "not sent to our team. Send the order form again.")
+                    : web_ui_order_message("Try Again",
+                                           "We could not confirm your email just now."));
+        }
+        order_pass_requested.store(true);
+        co_return co_await send_order_html(
+            route,
+            http::status::ok,
+            web_ui_order_confirmed(*confirmed, order_status_url(*confirmed)));
     }
 
     // GET /orders/<id>?token=...: the order's status, for whoever holds its link.
@@ -14282,23 +14376,27 @@ struct ApiServer::Impl {
         }
         for (const control::CloudOrder& order : *orders) {
             for (const std::string& recipient : order_email_recipients_due(order)) {
-                const Email email =
-                    order_email(options.order_sheet,
-                                options.regions,
-                                options.resend,
-                                order,
-                                recipient,
-                                recipient == "customer" ? order_status_url(order) : "");
-                const auto sent = send_resend_email(options.resend,
-                                                    email,
-                                                    "lake-order-" + order.id + "-" + order.state +
-                                                        "-" + recipient,
-                                                    http,
-                                                    options.resend_api_base);
+                // `confirm` for an unconfirmed order form's address (lake#1000), whose one email
+                // carries the confirmation link instead of the status link.
+                const std::string told = order_email_state(order, recipient);
+                const Email email = order_email(options.order_sheet,
+                                                options.regions,
+                                                options.resend,
+                                                order,
+                                                recipient,
+                                                recipient != "customer" ? std::string()
+                                                : told == "confirm" ? order_confirmation_url(order)
+                                                                    : order_status_url(order));
+                const auto sent =
+                    send_resend_email(options.resend,
+                                      email,
+                                      "lake-order-" + order.id + "-" + told + "-" + recipient,
+                                      http,
+                                      options.resend_api_base);
                 static_cast<void>(store.record_cloud_order_email(
                     {order.id,
                      recipient,
-                     order.state,
+                     told,
                      sent.has_value(),
                      sent ? std::string() : sent.error(),
                      order_email_retry_seconds(order.email_attempts + 1)}));

@@ -115,6 +115,11 @@ std::string web_ui_order_status(const OrderSheet& sheet,
                                 const Regions& regions,
                                 const control::CloudOrder& order,
                                 std::string_view checkout);
+// The order form's confirmation link opened (lake#1000): one button that posts `token` back to
+// /orders/<id>/confirm, so following the link alone confirms nothing.
+std::string web_ui_order_confirm(const control::CloudOrder& order, std::string_view token);
+// After the contact email is confirmed: the order went to support, and its status link.
+std::string web_ui_order_confirmed(const control::CloudOrder& order, std::string_view status_url);
 // A short page on the apex that says one thing (an order not found, too many orders).
 std::string web_ui_order_message(std::string_view title, std::string_view message);
 // The published price list the shared option links to: the list in force, or a sentence when none

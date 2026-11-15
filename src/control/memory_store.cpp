@@ -3921,6 +3921,7 @@ Result<CloudOrder> InMemoryStore::create_cloud_order(const NewCloudOrder& in) {
     order.organization_id = in.organization_id;
     order.email_error = utf8_prefix(in.email_error, 1024);
     cloud_orders_.push_back(order);
+    cloud_order_created_[order.id] = std::chrono::system_clock::now();
     cloud_order_event_locked(order.id,
                              "",
                              order.state,
@@ -4094,12 +4095,18 @@ Result<std::vector<CloudOrder>> InMemoryStore::claim_cloud_order_emails(int limi
     const auto now = std::chrono::system_clock::now();
     std::vector<CloudOrder*> due;
     for (CloudOrder& order : cloud_orders_) {
+        // lake#1000: an unconfirmed order form has one email due, the confirmation, and only
+        // until it is sent; nothing else goes to its address or to support.
+        const bool confirmed = cloud_order_contact_confirmed(order);
         const bool support =
+            confirmed &&
             (order.state == "submitted" || order.state == "paid" || order.state == "failed") &&
             order.support_emailed_state != order.state;
-        const bool customer = (order.state == "submitted" || order.state == "paid" ||
-                               order.state == "ready" || order.state == "failed") &&
-                              order.customer_emailed_state != order.state;
+        const bool customer =
+            confirmed ? (order.state == "submitted" || order.state == "paid" ||
+                         order.state == "ready" || order.state == "failed") &&
+                            order.customer_emailed_state != order.state
+                      : order.state == "submitted" && order.customer_emailed_state.empty();
         const auto retry = cloud_order_email_due_.find(order.id);
         if ((support || customer) &&
             (retry == cloud_order_email_due_.end() || retry->second <= now)) {
@@ -4118,6 +4125,62 @@ Result<std::vector<CloudOrder>> InMemoryStore::claim_cloud_order_emails(int limi
         claimed.push_back(*order);
     }
     return claimed;
+}
+
+Result<CloudOrder> InMemoryStore::confirm_cloud_order_email(const std::string& id,
+                                                            int max_age_seconds) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(cloud_orders_, id, &CloudOrder::id);
+    if (found == cloud_orders_.end()) {
+        return std::unexpected(StoreError{"not_found", "no order " + id});
+    }
+    if (!found->contact_email_confirmed_at.empty()) {
+        return *found;
+    }
+    const auto created = cloud_order_created_.find(id);
+    if (created != cloud_order_created_.end() &&
+        std::chrono::system_clock::now() - created->second >
+            std::chrono::seconds(std::max(max_age_seconds, 0))) {
+        return std::unexpected(StoreError{"expired", "the confirmation link has expired"});
+    }
+    found->contact_email_confirmed_at = now_iso8601();
+    found->updated_at = found->contact_email_confirmed_at;
+    cloud_order_event_locked(id, found->state, found->state, "lake", "contact email confirmed");
+    return *found;
+}
+
+Result<CloudOrderRecipientCounts>
+InMemoryStore::count_cloud_order_recipients(const std::string& email) {
+    const auto lower = [](std::string_view text) {
+        std::string out(text);
+        for (char& c : out) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return out;
+    };
+    const std::string address = lower(email);
+    const std::size_t at = address.rfind('@');
+    const std::string domain = at == std::string::npos ? std::string() : address.substr(at + 1);
+    std::lock_guard lock(mutex_);
+    const auto now = std::chrono::system_clock::now();
+    CloudOrderRecipientCounts counts;
+    for (const CloudOrder& order : cloud_orders_) {
+        const auto created = cloud_order_created_.find(order.id);
+        if (created == cloud_order_created_.end()) {
+            continue;
+        }
+        const std::string other = lower(order.contact_email);
+        const std::size_t other_at = other.rfind('@');
+        if (other == address && now - created->second <= std::chrono::hours(24)) {
+            ++counts.email_last_day;
+        }
+        if (!domain.empty() && other_at != std::string::npos &&
+            other.substr(other_at + 1) == domain &&
+            now - created->second <= std::chrono::hours(1)) {
+            ++counts.domain_last_hour;
+        }
+    }
+    return counts;
 }
 
 Result<void> InMemoryStore::record_cloud_order_email(const CloudOrderEmailOutcome& outcome) {

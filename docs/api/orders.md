@@ -66,7 +66,8 @@ apex path is the sheet, exactly as every path was the picker.
 | `POST` any other path with `region=<name>` | `302` to `https://<region host><path>?<query>` with the `lake_region` cookie, unchanged |
 | `GET /order/private-warehouse`, `/order/dedicated-cluster`, `/order/on-prem` | The offer's order form; `?location=<provider>:<region>`, a shared region name, or `other` preselects where it runs |
 | `GET /order/price-list` | The published price list in force this month (the `billing_plans` publication `price_list_for` picks), or a sentence when none is published |
-| `POST /order` (`application/x-www-form-urlencoded`, at most 32 KiB) | Fields `offer`, `path` (`checkout` or `order_form`), `location`, `contact_name`, `contact_email`, `company`, `details`, `quantity` and the hidden `website`. Pay: `302` to Stripe Checkout. Order form: `200` with the order id and the status link. Invalid: `400` with the form and each field's error. `413` over 32 KiB, `429` over the limits, `503` when the order cannot be recorded or the checkout cannot start (the order is then `cancelled` and the form offers the order form path) |
+| `POST /order` (`application/x-www-form-urlencoded`, at most 32 KiB) | Fields `offer`, `path` (`checkout` or `order_form`), `location`, `contact_name`, `contact_email`, `company`, `details`, `quantity` and the hidden `website`. Pay: `302` to Stripe Checkout. Order form: `200` with the order id and the status link; the contact email is sent a confirmation link (lake#1000). Invalid: `400` with the form and each field's error. `413` over 32 KiB, `429` over the limits, `503` when the order cannot be recorded or the checkout cannot start (the order is then `cancelled` and the form offers the order form path) |
+| `GET /orders/<id>/confirm?token=<token>`, `POST /orders/<id>/confirm` (`token` in the form) | An order form's confirmation (lake#1000, [email](#email)): `GET` shows one button, `POST` confirms the contact email and sends the order to support. `404` for a token that does not match, `410` after 7 days |
 | `GET /orders/<id>?token=<token>` | The order's status: its state in words, what was ordered, and the host once `ready`. `404` for a token that does not match. `checkout=cancelled` (Stripe's cancel URL) says the payment was not completed |
 
 `/billing/stripe/webhook` is not on the apex: Stripe's endpoint is the regional host of the Lake
@@ -116,6 +117,8 @@ The apex is anonymous, so the form cannot flood support:
   such a caller can cause. Which client address to trust is
   the ingress's decision: until it trusts Cloudflare's header from Cloudflare's ranges (https://github.com/oramasearch/orama-operator/issues/719),
   visitors behind one Cloudflare edge share a bucket.
+- **Per recipient** (lake#1000): at most three order forms an address a day and twenty a domain
+  an hour, and each mails its address only a confirmation ([email](#email)).
 - **Honeypot**: the form has a field named `website` that is off-screen and `aria-hidden`; people
   never fill it. A form that fills it is answered with a confirmation and nothing is recorded or
   sent (`lake_cloud_orders_refused_total{reason="honeypot"}`).
@@ -159,7 +162,8 @@ outside it.
     {"text": "SOC 2 compliant: ask for the report", "url": "mailto:support@orama.com?subject=SOC%202%20report"},
     {"text": "Source available, with access to the source code", "url": "mailto:support@orama.com?subject=Source%20access"}
   ],
-  "limits": {"orders_per_client_per_hour": 5, "orders_per_hour": 60}
+  "limits": {"orders_per_client_per_hour": 5, "orders_per_hour": 60,
+             "orders_per_email_per_day": 3, "orders_per_domain_per_hour": 20}
 }
 ```
 
@@ -260,8 +264,37 @@ words, sent from `LAKE_BRAND_EMAIL_FROM` with the brand's support address as Rep
 ([`../serving/brand.md`](../serving/brand.md#where-it-is-read), lake#1135). Lake's own brand sends
 exactly the email below.
 
+**An order form's address is confirmed first** (lake#1000, LSR-194, migration
+`0107_order_email_confirmation`). Anyone can type any address into the anonymous form, so until the
+person who sent it shows they read that address, lake sends it exactly one email, the
+confirmation, and tells support nothing:
+
+- The confirmation says only that an order form named the address, the order id, and the link
+  `https://<apex>/orders/<id>/confirm?token=<token>` (HMAC-SHA-256 under `LAKE_INSTANCE_KEK` over
+  the id, distinct from the status token, `order_confirmation_token`). No offer, price, field or
+  free text. Its idempotency key ends `-confirm-customer`, and it is recorded as
+  `customer_emailed_state = confirm`, so it goes once.
+- `GET` of the link shows one button; only its `POST` back to `/orders/<id>/confirm` confirms, so a
+  mail scanner that follows links confirms nothing. The link works for 7 days after the order
+  (`order_confirmation_max_age_seconds`); later the page says it expired (410) and nothing is
+  sent. A wrong token is a 404.
+- Confirming sets `contact_email_confirmed_at`, records one `submitted` to `submitted` event
+  (`contact email confirmed`) in the order's history and audit, and from then on the table below
+  applies: support gets every field (with `Email confirmed:`), the customer its copy.
+- **A checkout order needs no confirmation.** All its mail (paid, ready, failed) follows a payment
+  Stripe Checkout took from the person at the address lake handed Stripe, who sends its own
+  receipt there; a stranger cannot cause it without paying.
+- **Per-recipient limits**, whoever sends: at most `orders_per_email_per_day` order forms (default
+  3) may name one address (compared without case) in 24 hours, and `orders_per_domain_per_hour`
+  (default 20) one domain in an hour (`limits` in `LAKE_ORDER_SHEET`). Past either: `429`, nothing
+  recorded or sent (`lake_cloud_orders_refused_total{reason="recipient"|"domain"}`). They are
+  counted from `cloud_orders` in the control plane, so every replica sees the same; two orders sent
+  at the same instant may both pass. With the per-client and in-all limits above, they bound the
+  mail anyone can make lake send to an address to three confirmations a day.
+
 | State | Support (`LAKE_SUPPORT_EMAIL`) | Customer (the contact email) |
 |---|---|---|
+| `submitted`, not confirmed | — | The confirmation link only |
 | `submitted` | Every field and the order id; reply-to the customer | A copy, with the status link |
 | `paid` | Every field and the order id | Payment received, with the status link |
 | `ready` | — | Ready, with the host and the status link |
@@ -401,7 +434,7 @@ pre-Checkout delivery and invalid signatures. Stripe's field and event contracts
 ## Metrics
 
 `lake_cloud_orders_total{offer,path}` (orders recorded), `lake_cloud_orders_refused_total{reason}`
-(`honeypot`, `rate`, `size`) and `lake_cloud_order_emails_total{recipient,outcome}` (`sent`,
+(`honeypot`, `rate`, `size`, `recipient`, `domain`) and `lake_cloud_order_emails_total{recipient,outcome}` (`sent`,
 `failed`); [telemetry.md](../serving/telemetry.md).
 
 ## Not yet
@@ -430,7 +463,11 @@ pre-Checkout delivery and invalid signatures. Stripe's field and event contracts
   the memory store and in PostgreSQL (with orama-operator#635's own statements), and over HTTP the
   sheet, an order form recorded and emailed, a paid order through Checkout, the webhook and
   `ready`, a failed checkout, the honeypot, the rate limit, the size limit, a missing Resend key and
-  a retried email.
+  a retried email; the confirmation (lake#1000: `OrdersEmail.WhoIsToldAboutWhichState`,
+  `OrdersEmail.TheCustomersCopyCarriesNothingTheSenderTyped`, the store contract's confirmation and
+  recipient counts, `OrdersApex.AnOrderFormIsRecordedAndEmailedAndNeverProvisioned` through the
+  link, `OrdersApex.OneAddressIsMailedAtMostThreeConfirmationsADay`,
+  `OrdersConfig.PerRecipientLimitsAreConfigurable`).
 - By hand, with a local Lake (the apex host set to the loopback address so a browser can open it):
 
   ```

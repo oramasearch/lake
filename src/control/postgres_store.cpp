@@ -8669,7 +8669,9 @@ public:
         "coalesce(customer_emailed_state, ''), email_attempts, email_error, "
         "coalesce(to_char(email_retry_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "''), subscription_status, paid_through, entitlement_access_until, "
-        "subscription_event_created, entitlement_grace_seconds, entitlement_retry_invoice_id";
+        "subscription_event_created, entitlement_grace_seconds, entitlement_retry_invoice_id, "
+        "coalesce(to_char(contact_email_confirmed_at AT TIME ZONE 'UTC', "
+        "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '')";
 
     static CloudOrder cloud_order_row(const pqxx::row& row) {
         CloudOrder order;
@@ -8710,6 +8712,7 @@ public:
         order.entitlement.event_created = row[column++].as<std::int64_t>();
         order.entitlement.grace_seconds = row[column++].as<int>();
         order.entitlement.retry_invoice_id = text();
+        order.contact_email_confirmed_at = text();
         return order;
     }
 
@@ -9016,10 +9019,15 @@ public:
                 const pqxx::result rows = tx.exec_params(
                     std::string("UPDATE cloud_orders SET email_retry_at = now() + make_interval("
                                 "secs => $2) WHERE id IN (SELECT id FROM cloud_orders WHERE "
-                                "((state IN ('submitted', 'paid', 'failed') AND "
+                                // lake#1000: mail other than the confirmation goes only once the
+                                // address is confirmed (cloud_order_contact_confirmed).
+                                "((((path = 'checkout' OR contact_email_confirmed_at IS NOT NULL) "
+                                "AND ((state IN ('submitted', 'paid', 'failed') AND "
                                 "support_emailed_state IS DISTINCT FROM state) OR (state IN "
                                 "('submitted', 'paid', 'ready', 'failed') AND "
-                                "customer_emailed_state IS DISTINCT FROM state)) AND "
+                                "customer_emailed_state IS DISTINCT FROM state))) OR (path = "
+                                "'order_form' AND contact_email_confirmed_at IS NULL AND state = "
+                                "'submitted' AND coalesce(customer_emailed_state, '') = '')) AND "
                                 "(email_retry_at IS NULL OR email_retry_at <= now()) ORDER BY "
                                 "updated_at LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING ") +
                         cloud_order_columns,
@@ -9059,6 +9067,51 @@ public:
             }
             return {};
         });
+    }
+
+    Result<CloudOrder> confirm_cloud_order_email(const std::string& id,
+                                                 int max_age_seconds) override {
+        if (!uuid_text(id)) {
+            return std::unexpected(StoreError{"not_found", "no order " + id});
+        }
+        return with_tx<CloudOrder>([&](pqxx::work& tx) -> Result<CloudOrder> {
+            auto before = cloud_order_in(tx, id, true);
+            if (!before || !before->contact_email_confirmed_at.empty()) {
+                return before;
+            }
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE cloud_orders SET contact_email_confirmed_at = now() WHERE id = $1::uuid "
+                "AND contact_email_confirmed_at IS NULL AND created_at > now() - "
+                "make_interval(secs => $2) RETURNING id",
+                id,
+                std::max(max_age_seconds, 0));
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"expired", "the confirmation link has expired"});
+            }
+            cloud_order_event(
+                tx, id, before->state, before->state, "lake", "contact email confirmed");
+            return cloud_order_in(tx, id);
+        });
+    }
+
+    Result<CloudOrderRecipientCounts>
+    count_cloud_order_recipients(const std::string& email) override {
+        return with_tx<CloudOrderRecipientCounts>(
+            [&](pqxx::work& tx) -> Result<CloudOrderRecipientCounts> {
+                // The expressions are the indexes' (0107): the address without case, and the part
+                // after its last @.
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT (SELECT count(*) FROM cloud_orders WHERE lower(contact_email) = "
+                    "lower($1) AND created_at > now() - interval '24 hours'), (SELECT count(*) "
+                    "FROM cloud_orders WHERE substring(lower(contact_email) FROM '@([^@]*)$') = "
+                    "substring(lower($1) FROM '@([^@]*)$') AND created_at > now() - interval '1 "
+                    "hour')",
+                    email);
+                CloudOrderRecipientCounts counts;
+                counts.email_last_day = rows[0][0].as<int>();
+                counts.domain_last_hour = rows[0][1].as<int>();
+                return counts;
+            });
     }
 
     Result<std::vector<CloudOrderEvent>> unaudited_cloud_order_events(int limit) override {

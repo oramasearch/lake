@@ -741,6 +741,23 @@ struct CloudOrder {
     int email_attempts = 0;
     std::string email_error, email_retry_at;
     CloudOrderEntitlement entitlement;
+    // When the person who sent an order form proved they read its contact email by following the
+    // confirmation link (lake#1000, migration 0107); empty until then. Until it is set, the only
+    // email the order sends is the confirmation itself (docs/api/orders.md#email).
+    std::string contact_email_confirmed_at;
+};
+// Whether mail about the order may go to its contact email and reach support: a checkout order's
+// mail is only about a payment Stripe took from the person at that address (paid, ready, failed),
+// and an order form's address must be confirmed first (lake#1000).
+inline bool cloud_order_contact_confirmed(const CloudOrder& order) {
+    return order.path == "checkout" || !order.contact_email_confirmed_at.empty();
+}
+// How many orders name an address and its domain lately (lake#1000): the per-recipient limits on
+// the anonymous order form. `email_last_day` compares the whole address without case over the last
+// 24 hours; `domain_last_hour` the part after the last `@` over the last hour.
+struct CloudOrderRecipientCounts {
+    int email_last_day = 0;
+    int domain_last_hour = 0;
 };
 // A new order: `path` checkout starts it in `pending_payment`, order_form in `submitted`.
 struct NewCloudOrder {
@@ -2500,6 +2517,14 @@ public:
     virtual Result<std::vector<CloudOrder>> claim_cloud_order_emails(int limit,
                                                                      int lease_seconds) = 0;
     virtual Result<void> record_cloud_order_email(const CloudOrderEmailOutcome& outcome) = 0;
+    // Records that the order's contact email is confirmed (lake#1000), once: a second call answers
+    // the order unchanged. `expired` when the order was created more than `max_age_seconds` ago and
+    // is not confirmed yet; `not_found` for no such order. The first confirmation is one event
+    // (submitted to submitted, actor lake) in the order's history.
+    virtual Result<CloudOrder> confirm_cloud_order_email(const std::string& id,
+                                                         int max_age_seconds) = 0;
+    virtual Result<CloudOrderRecipientCounts>
+    count_cloud_order_recipients(const std::string& email) = 0;
     // Events not yet in the central audit log, oldest first, and marking them recorded.
     virtual Result<std::vector<CloudOrderEvent>> unaudited_cloud_order_events(int limit) = 0;
     virtual Result<void> mark_cloud_order_events_audited(const std::vector<std::int64_t>& ids) = 0;

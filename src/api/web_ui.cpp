@@ -840,9 +840,10 @@ std::string web_ui_order_received(const OrderSheet& sheet,
                                   std::string_view status_url) {
     std::string content = std::format(
         "<div class=\"hosted-card\"><p class=\"eyebrow\">Order {}</p><h1>Order Received</h1>"
-        "<p class=\"sub\">Thank you. Your order form has reached our support team, and a copy is "
-        "on its way to {}. We will be in touch; nothing is charged or set up until we have "
-        "spoken.</p>{}<p><a href=\"{}\">Your order's status</a></p></div>",
+        "<p class=\"sub\">Thank you. One step is left: we sent a confirmation link to {}. "
+        "Open it to confirm the address, and your order goes to our support team. Nothing is "
+        "charged or set up until we have spoken.</p>{}<p><a href=\"{}\">Your order's "
+        "status</a></p></div>",
         web_ui_escape(order.id),
         web_ui_escape(order.contact_email),
         order_summary(sheet, regions, order),
@@ -857,7 +858,11 @@ std::string web_ui_order_status(const OrderSheet& sheet,
     std::string title;
     std::string message;
     const std::string& state = order.state;
-    if (state == "submitted") {
+    if (state == "submitted" && !control::cloud_order_contact_confirmed(order)) {
+        title = "Confirm Your Email";
+        message = "We sent a confirmation link to the email address on the order. Your order goes "
+                  "to our support team once you open it.";
+    } else if (state == "submitted") {
         title = "Order Received";
         message = "Your order form reached our support team. We will be in touch; nothing is "
                   "charged or set up until we have spoken.";
@@ -903,6 +908,33 @@ std::string web_ui_order_status(const OrderSheet& sheet,
         extra,
         order_summary(sheet, regions, order));
     return apex_page("Lake — Order " + title, content);
+}
+
+std::string web_ui_order_confirm(const control::CloudOrder& order, std::string_view token) {
+    std::string content = std::format(
+        "<div class=\"hosted-card\"><p class=\"eyebrow\">Order {0}</p><h1>Confirm Your "
+        "Email</h1><p class=\"sub\">Confirm that {1} is your address, and your order goes to our "
+        "support team. If you did not send this order, close this page: nothing more is "
+        "sent.</p><form method=\"post\" action=\"/orders/{0}/confirm\"><input type=\"hidden\" "
+        "name=\"token\" value=\"{2}\"><p><button class=\"button button-primary\" "
+        "type=\"submit\">Confirm my email</button></p></form></div>",
+        web_ui_escape(order.id),
+        web_ui_escape(order.contact_email),
+        web_ui_escape(token));
+    return apex_page("Lake — Confirm Your Email", content);
+}
+
+std::string web_ui_order_confirmed(const control::CloudOrder& order, std::string_view status_url) {
+    std::string content = std::format(
+        "<div class=\"hosted-card\"><p class=\"eyebrow\">Order {}</p><h1>Email Confirmed</h1>"
+        "<p class=\"sub\" role=\"status\">Thank you. Your order is on its way to our support "
+        "team, and a copy to you. We will be in touch; nothing is charged or set up until we "
+        "have spoken.</p>{}</div>",
+        web_ui_escape(order.id),
+        status_url.empty()
+            ? std::string()
+            : "<p><a href=\"" + web_ui_escape(status_url) + "\">Your order's status</a></p>");
+    return apex_page("Lake — Email Confirmed", content);
 }
 
 std::string web_ui_order_message(std::string_view title, std::string_view message) {

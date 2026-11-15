@@ -22,6 +22,14 @@ A new migration still follows the rules below: idempotent SQL, its row in `schem
 new `*_guard` table created by the newest migration (`LakeManifest.TheGuardTableIsTheNewestMigrations`
 fails otherwise).
 
+`0107_order_email_confirmation` (lake#1000, LSR-194): `cloud_orders.contact_email_confirmed_at`,
+NULL until the person who sent an order form follows its confirmation link; until then the order
+mails its contact email only the confirmation and tells support nothing (a checkout order needs
+none). Order forms mailed before the migration count as confirmed, once. Two indexes serve the
+per-recipient limits (the address without case over a day, its domain over an hour). Additive;
+guard `order_email_confirmation_guard`; the operator vendors the schema and selects the guard
+before the binary rolls. See [orders](../api/orders.md#email).
+
 `0106_domain_claims` (lake#949) adds `domain_claims`, one row per custom-domain host across every
 account: who holds it and whether they proved control. See
 [Domain claims](#domain-claims-migration-0106_domain_claims). Additive; guard `domain_claims_guard`.
@@ -1303,7 +1311,8 @@ sheet's orders. It is the contract the Orama operator provisions from
 | `claimed_by` | `text`, nullable, ≤ 255 | **the operator** | Which operator took the order |
 | `claimed_at` | `timestamptz`, nullable | **the operator** | |
 | `organization_id` | `uuid`, nullable, no foreign key | lake (lake#832) | The organization the order belongs to when the person ordering is signed in and chooses one; null for anonymous orders, which is every order today |
-| `support_emailed_state`, `customer_emailed_state` | `text`, nullable | lake | The last state each recipient was emailed about |
+| `support_emailed_state`, `customer_emailed_state` | `text`, nullable | lake | The last state each recipient was emailed about; `confirm` for the customer's confirmation (lake#1000) |
+| `contact_email_confirmed_at` | `timestamptz`, nullable (`0107`) | lake (lake#1000) | When the person who sent an order form confirmed its contact email; until then the order mails only the confirmation |
 | `email_attempts` | `integer` ≥ 0, default 0 | lake | Failed attempts since the last delivery |
 | `email_error` | `text NOT NULL DEFAULT ''`, ≤ 1,024 | lake | The last failure, or `LAKE_RESEND_API_KEY is not set` |
 | `email_retry_at` | `timestamptz`, nullable | lake | When the order pass may try again (also its five-minute hold) |

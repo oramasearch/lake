@@ -466,6 +466,10 @@ public:
     apply_cloud_order_subscription(const CloudOrderSubscriptionEvent& event) override;
     Result<std::vector<CloudOrder>> claim_cloud_order_emails(int limit, int lease_seconds) override;
     Result<void> record_cloud_order_email(const CloudOrderEmailOutcome& outcome) override;
+    Result<CloudOrder> confirm_cloud_order_email(const std::string& id,
+                                                 int max_age_seconds) override;
+    Result<CloudOrderRecipientCounts>
+    count_cloud_order_recipients(const std::string& email) override;
     Result<std::vector<CloudOrderEvent>> unaudited_cloud_order_events(int limit) override;
     Result<void> mark_cloud_order_events_audited(const std::vector<std::int64_t>& ids) override;
     Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
@@ -769,6 +773,8 @@ private:
     std::vector<CloudOrder> cloud_orders_;
     std::vector<CloudOrderEvent> cloud_order_events_;
     std::map<std::string, std::chrono::system_clock::time_point> cloud_order_email_due_;
+    // When each order was created, for its confirmation expiry and the recipient limits.
+    std::map<std::string, std::chrono::system_clock::time_point> cloud_order_created_;
     void cloud_order_event_locked(const std::string& id,
                                   const std::string& from,
                                   const std::string& to,

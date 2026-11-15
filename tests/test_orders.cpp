@@ -312,6 +312,21 @@ TEST(OrdersConfig, OverridesMergeOverTheDefault) {
     EXPECT_FALSE(order_sheet_from_environment(R"({"enabled":false})")->enabled);
 }
 
+TEST(OrdersConfig, PerRecipientLimitsAreConfigurable) {
+    const auto defaults = order_sheet_from_environment("");
+    ASSERT_TRUE(defaults) << defaults.error();
+    EXPECT_EQ(defaults->orders_per_email_per_day, 3);
+    EXPECT_EQ(defaults->orders_per_domain_per_hour, 20);
+    const auto set = order_sheet_from_environment(
+        R"({"limits":{"orders_per_email_per_day":1,"orders_per_domain_per_hour":5}})");
+    ASSERT_TRUE(set) << set.error();
+    EXPECT_EQ(set->orders_per_email_per_day, 1);
+    EXPECT_EQ(set->orders_per_domain_per_hour, 5);
+    const auto zero = order_sheet_from_environment(R"({"limits":{"orders_per_email_per_day":0}})");
+    ASSERT_FALSE(zero);
+    EXPECT_NE(zero.error().find("orders_per_email_per_day"), std::string::npos);
+}
+
 TEST(OrdersConfig, InvalidValuesNameTheField) {
     const std::vector<std::pair<std::string, std::string>> cases{
         {"{", "LAKE_ORDER_SHEET is not valid JSON"},
@@ -498,6 +513,8 @@ TEST(OrdersForm, TheRateLimitIsPerClientAndInAll) {
 
 TEST(OrdersEmail, WhoIsToldAboutWhichState) {
     lake::control::CloudOrder order;
+    order.path = "order_form";
+    order.contact_email_confirmed_at = "2026-11-14T12:00:00Z";
     const auto due = [&](std::string state, std::string support = "", std::string customer = "") {
         order.state = std::move(state);
         order.support_emailed_state = std::move(support);
@@ -514,6 +531,19 @@ TEST(OrdersEmail, WhoIsToldAboutWhichState) {
     EXPECT_EQ(due("ready", "paid", "paid"), (List{"customer"}));
     EXPECT_EQ(due("failed", "paid", "paid"), (List{"support", "customer"}));
     EXPECT_EQ(due("cancelled"), List{});
+    EXPECT_EQ(order_email_state(order, "customer"), "cancelled");
+    // lake#1000: an order form whose address is not confirmed is due the confirmation alone,
+    // once; support is told nothing until it is confirmed.
+    order.contact_email_confirmed_at.clear();
+    EXPECT_EQ(due("submitted"), (List{"customer"}));
+    EXPECT_EQ(order_email_state(order, "customer"), "confirm");
+    EXPECT_EQ(due("submitted", "", "confirm"), List{});
+    EXPECT_EQ(due("ready"), List{});
+    EXPECT_EQ(due("failed"), List{});
+    // A checkout order's mail is about a payment Stripe took: it needs no confirmation.
+    order.path = "checkout";
+    EXPECT_EQ(due("paid"), (List{"support", "customer"}));
+    EXPECT_EQ(order_email_state(order, "customer"), "paid");
     EXPECT_EQ(order_email_retry_seconds(1), 60);
     EXPECT_EQ(order_email_retry_seconds(2), 120);
     EXPECT_EQ(order_email_retry_seconds(30), 3600);
@@ -538,6 +568,7 @@ TEST(OrdersEmail, SupportGetsEveryFieldAndTheCustomerTheStatusLink) {
     order.included_credit_cents = 400'000;
     order.state = "submitted";
     order.created_at = "2026-10-18T12:00:00Z";
+    order.contact_email_confirmed_at = "2026-10-18T12:05:00Z";
     const Email support = order_email(sheet, regions, settings, order, "support", "");
     EXPECT_EQ(support.to, std::vector<std::string>{"support@orama.com"});
     EXPECT_EQ(support.reply_to, "ada@example.com");
@@ -553,6 +584,7 @@ TEST(OrdersEmail, SupportGetsEveryFieldAndTheCustomerTheStatusLink) {
           std::string_view("Included usage credit: $4,000 USD"),
           std::string_view("Name: Ada Lovelace"),
           std::string_view("Email: ada@example.com"),
+          std::string_view("Email confirmed: 2026-10-18T12:05:00Z"),
           std::string_view("Company: Analytical Engines"),
           std::string_view("Two clusters, GPUs"),
           std::string_view("not paid and nothing is provisioned")}) {
@@ -598,6 +630,24 @@ TEST(OrdersEmail, TheCustomersCopyCarriesNothingTheSenderTyped) {
     order.included_credit_cents = 400'000;
     order.created_at = "2026-10-18T12:00:00Z";
     order.host = "acme.lake.live";
+    // lake#1000: before the address is confirmed, the one email it gets is the confirmation: the
+    // link and the order id, and nothing of the order or of what the sender typed.
+    const Email confirmation = order_email(
+        sheet, regions, settings, order, "customer", "https://lake.live/orders/x/confirm?token=c");
+    EXPECT_EQ(confirmation.to, std::vector<std::string>{"victim@example.com"});
+    EXPECT_NE(confirmation.subject.find("Confirm your email"), std::string::npos);
+    EXPECT_NE(confirmation.text.find("https://lake.live/orders/x/confirm?token=c"),
+              std::string::npos);
+    EXPECT_NE(confirmation.text.find("Order: 0b6f2c1e-1111-4222-8333-444455556666"),
+              std::string::npos);
+    for (const std::string_view absent : {std::string_view("phish.example"),
+                                          std::string_view("Dedicated Cluster"),
+                                          std::string_view("$10,000"),
+                                          std::string_view("Canada")}) {
+        EXPECT_EQ(confirmation.subject.find(absent), std::string::npos) << absent;
+        EXPECT_EQ(confirmation.text.find(absent), std::string::npos) << absent;
+    }
+    order.contact_email_confirmed_at = "2026-10-18T12:05:00Z";
     const std::string status = "https://lake.live/orders/x?token=t";
     for (const std::string state : {"submitted", "paid", "ready", "failed"}) {
         order.state = state;
@@ -1046,6 +1096,43 @@ void expect_order_contract(lake::control::Store& store) {
     ASSERT_TRUE(store.record_cloud_order_email({form->id, "customer", "submitted", true, "", 60}));
     EXPECT_EQ(store.get_cloud_order(form->id)->email_attempts, 0);
 
+    // lake#1000: the confirmation. A wrong id is not found; the first confirmation records the
+    // time and one event, a second answers the same; an order older than its link is expired.
+    EXPECT_TRUE(form->contact_email_confirmed_at.empty());
+    EXPECT_EQ(store.confirm_cloud_order_email(lake::control::new_uuid_v4(), 3600).error().code,
+              "not_found");
+    const auto confirmed = store.confirm_cloud_order_email(form->id, 3600);
+    ASSERT_TRUE(confirmed) << confirmed.error().message;
+    EXPECT_FALSE(confirmed->contact_email_confirmed_at.empty());
+    EXPECT_EQ(confirmed->state, "submitted");
+    EXPECT_EQ(store.confirm_cloud_order_email(form->id, 0)->contact_email_confirmed_at,
+              confirmed->contact_email_confirmed_at)
+        << "once confirmed, a second confirmation changes nothing";
+    const auto late = store.create_cloud_order({"on_prem",
+                                                "order_form",
+                                                "",
+                                                "",
+                                                "Ada",
+                                                "Ada@Example.com",
+                                                "",
+                                                "",
+                                                1,
+                                                0,
+                                                "usd",
+                                                0,
+                                                "",
+                                                ""});
+    ASSERT_TRUE(late) << late.error().message;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    EXPECT_EQ(store.confirm_cloud_order_email(late->id, 0).error().code, "expired");
+    // The per-recipient counts compare the address without case, and its domain.
+    const auto counts = store.count_cloud_order_recipients("ada@EXAMPLE.com");
+    ASSERT_TRUE(counts) << counts.error().message;
+    EXPECT_GE(counts->email_last_day, 2);
+    EXPECT_GE(counts->domain_last_hour, counts->email_last_day);
+    EXPECT_EQ(store.count_cloud_order_recipients("someone@elsewhere.test")->email_last_day, 0);
+    EXPECT_EQ(store.count_cloud_order_recipients("someone@elsewhere.test")->domain_last_hour, 0);
+
     // The operator's writes: provisioning, then ready with the host.
     ASSERT_TRUE(
         store.transition_cloud_order({paid.id, "paid", "provisioning", "operator", "claimed"}));
@@ -1056,7 +1143,8 @@ void expect_order_contract(lake::control::Store& store) {
     // Events reach the audit log once.
     auto events = store.unaudited_cloud_order_events(100);
     ASSERT_TRUE(events);
-    ASSERT_EQ(events->size(), 5U) << "two created, paid, provisioning, ready";
+    ASSERT_EQ(events->size(), 7U)
+        << "two created, paid, the confirmation, a third created, provisioning, ready";
     EXPECT_EQ(events->back().to_state, "ready");
     EXPECT_EQ(events->back().actor, "operator");
     std::vector<std::int64_t> ids;
@@ -1486,19 +1574,61 @@ TEST(OrdersApex, AnOrderFormIsRecordedAndEmailedAndNeverProvisioned) {
     // The status link on the page works.
     const std::string token = order_status_token(kek, id);
     EXPECT_NE(sent.body.find("/orders/" + id + "?token=" + token), std::string::npos);
-    // Support and the customer are emailed with the order id, once each.
+    // lake#1000: the address is not yet shown to be the sender's, so it gets one email, the
+    // confirmation link, and support hears nothing yet.
+    EXPECT_NE(sent.body.find("we sent a confirmation link to ada@example.com"), std::string::npos);
+    ASSERT_TRUE(rig.pass_until(
+        [&] { return rig.store->get_cloud_order(id)->customer_emailed_state == "confirm"; }));
+    rig.pass_until([] { return false; }); // more passes send nothing more
+    auto bodies = rig.resend.bodies();
+    ASSERT_EQ(bodies.size(), 1U);
+    EXPECT_EQ(bodies[0]["to"], json::array({"ada@example.com"}));
+    const std::string confirm_text = bodies[0]["text"].get<std::string>();
+    const std::string confirm_token = order_confirmation_token(kek, id);
+    const std::string confirm_path = "/orders/" + id + "/confirm?token=" + confirm_token;
+    EXPECT_NE(confirm_text.find("https://lake.live" + confirm_path), std::string::npos);
+    EXPECT_EQ(confirm_text.find("Bare metal"), std::string::npos) << "nothing the sender typed";
+    EXPECT_EQ(confirm_text.find("On-Prem"), std::string::npos) << "nothing of the order";
+    EXPECT_EQ(rig.store->get_cloud_order(id)->support_emailed_state, "");
+    // Following the link shows a button and confirms nothing; a wrong token is a 404.
+    const Response confirm_page = send(rig.port(), "GET", confirm_path, "lake.live");
+    EXPECT_EQ(confirm_page.status, 200);
+    EXPECT_NE(confirm_page.body.find("action=\"/orders/" + id + "/confirm\""), std::string::npos);
+    EXPECT_TRUE(rig.store->get_cloud_order(id)->contact_email_confirmed_at.empty());
+    const std::map<std::string, std::string> plain_form{
+        {"Content-Type", "application/x-www-form-urlencoded"}};
+    EXPECT_EQ(send(rig.port(),
+                   "POST",
+                   "/orders/" + id + "/confirm",
+                   "lake.live",
+                   plain_form,
+                   "token=" + token)
+                  .status,
+              404)
+        << "the status token does not confirm";
+    const Response confirmed = send(rig.port(),
+                                    "POST",
+                                    "/orders/" + id + "/confirm",
+                                    "lake.live",
+                                    plain_form,
+                                    "token=" + confirm_token);
+    ASSERT_EQ(confirmed.status, 200) << confirmed.body;
+    EXPECT_NE(confirmed.body.find("<h1>Email Confirmed</h1>"), std::string::npos);
+    EXPECT_FALSE(rig.store->get_cloud_order(id)->contact_email_confirmed_at.empty());
+    // Now support and the customer are emailed with the order id, once each.
     ASSERT_TRUE(rig.pass_until([&] {
         const auto now = rig.store->get_cloud_order(id);
         return now->support_emailed_state == "submitted" &&
                now->customer_emailed_state == "submitted";
     }));
-    const auto bodies = rig.resend.bodies();
-    ASSERT_EQ(bodies.size(), 2U);
-    EXPECT_EQ(bodies[0]["to"], json::array({"support@orama.com"}));
-    EXPECT_NE(bodies[0]["text"].get<std::string>().find("Order: " + id), std::string::npos);
-    EXPECT_NE(bodies[0]["text"].get<std::string>().find("Bare metal, H100s"), std::string::npos);
-    EXPECT_EQ(bodies[1]["to"], json::array({"ada@example.com"}));
-    EXPECT_NE(bodies[1]["text"].get<std::string>().find("https://lake.live/orders/" + id),
+    bodies = rig.resend.bodies();
+    ASSERT_EQ(bodies.size(), 3U);
+    EXPECT_EQ(bodies[1]["to"], json::array({"support@orama.com"}));
+    EXPECT_NE(bodies[1]["text"].get<std::string>().find("Order: " + id), std::string::npos);
+    EXPECT_NE(bodies[1]["text"].get<std::string>().find("Bare metal, H100s"), std::string::npos);
+    EXPECT_NE(bodies[1]["text"].get<std::string>().find("Email confirmed: "), std::string::npos);
+    EXPECT_EQ(bodies[2]["to"], json::array({"ada@example.com"}));
+    EXPECT_NE(bodies[2]["text"].get<std::string>().find("https://lake.live/orders/" + id),
               std::string::npos);
     // Every event reached the central audit log.
     ASSERT_TRUE(
@@ -1507,7 +1637,7 @@ TEST(OrdersApex, AnOrderFormIsRecordedAndEmailedAndNeverProvisioned) {
     filter.object = "cloud_order/" + id;
     const auto audited = rig.store->list_audit_events(filter);
     ASSERT_TRUE(audited);
-    ASSERT_EQ(audited->size(), 1U);
+    ASSERT_EQ(audited->size(), 2U) << "sent, then its email confirmed";
     EXPECT_EQ(audited->front().draft.kind, "cloud_order.submitted");
     EXPECT_EQ(audited->front().draft.principal, "lake");
     // The status page.
@@ -1643,6 +1773,49 @@ TEST(OrdersApex, OrderFormsCannotUseUpTheCheckoutCap) {
              "contact_name=Bo&contact_email=bo%40example.com&quantity=1");
     ASSERT_EQ(paid.status, 302) << paid.body;
     EXPECT_EQ(paid.headers.at("location"), "https://checkout.stripe.test/c/cs_test_1");
+}
+
+// lake#1000 (LSR-194): one address gets at most `orders_per_email_per_day` order forms' mail, from
+// whatever client sends them, and an order is mailed nothing but its confirmation until confirmed.
+TEST(OrdersApex, OneAddressIsMailedAtMostThreeConfirmationsADay) {
+    OrderRig rig(true, 100);
+    const auto order_for = [](std::string_view email) {
+        return "offer=on_prem&path=order_form&contact_name=Ada&contact_email=" +
+               std::string(email) + "&details=Bare+metal";
+    };
+    for (int i = 0; i < 3; ++i) {
+        auto headers = form_headers;
+        headers["X-Real-IP"] = "198.51.100." + std::to_string(20 + i);
+        EXPECT_EQ(send(rig.port(),
+                       "POST",
+                       "/order",
+                       "lake.live",
+                       headers,
+                       order_for("victim%40example.com"))
+                      .status,
+                  200)
+            << i;
+    }
+    auto fourth = form_headers;
+    fourth["X-Real-IP"] = "198.51.100.30";
+    const Response refused =
+        send(rig.port(), "POST", "/order", "lake.live", fourth, order_for("VICTIM%40example.com"));
+    EXPECT_EQ(refused.status, 429) << "the same address in another case";
+    EXPECT_NE(refused.body.find("this email address"), std::string::npos);
+    EXPECT_EQ(rig.store->unaudited_cloud_order_events(10)->size(), 3U) << "nothing recorded";
+    EXPECT_EQ(
+        send(rig.port(), "POST", "/order", "lake.live", fourth, order_for("ada%40example.com"))
+            .status,
+        200)
+        << "another address of the domain still has its budget";
+    // Three confirmations and one for the other address; nothing else, and nothing to support.
+    rig.pass_until([] { return false; });
+    const auto bodies = rig.resend.bodies();
+    ASSERT_EQ(bodies.size(), 4U);
+    for (const auto& body : bodies) {
+        EXPECT_NE(body["subject"].get<std::string>().find("Confirm your email"), std::string::npos);
+        EXPECT_NE(body["to"], json::array({"support@orama.com"}));
+    }
 }
 
 TEST(OrdersApex, AbuseIsRefused) {
