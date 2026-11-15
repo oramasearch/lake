@@ -47,6 +47,12 @@ every page and API call is resolved by `context_for` as before.
    one (a page loaded before lake#1163) signs in unbound; any session event of the account ends an
    unbound browser session. No Clerk configuration changes: the default session token exists on
    every instance.
+   **The template token's `azp` must be one of this Lake's origins** (LSR-012, lake#921): its
+   `LAKE_EXTERNAL_ORIGIN`, `https://<LAKE_PUBLIC_HOST>`, an alias, a region's host, the apex, or the
+   origin the request reached. Another product that shares the Clerk instance (Cloud v1's dashboard
+   did) can mint an `aud: lake` template token in its own pages, and Clerk sets `azp` to that page's
+   origin, so such a token, or one with no `azp`, is refused (`azp is not one of this Lake's
+   origins`).
    A refused token is logged as one `clerk_sign_in_refused` line: the reason (for example
    `aud does not name lake`, `expired (exp …, now …)`, `key … is not in the JWKS`), the issuer,
    audience and JWKS URL lake expected, and the token's `alg`, `kid`, `iss`, `aud`, `azp`, `iat`,
