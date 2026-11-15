@@ -16,6 +16,7 @@ import {
   mergeReadings,
   rangeOf,
   stackSeries,
+  csvCell,
   toCsv,
   toLimit,
   usageLink,
@@ -217,4 +218,13 @@ test("only the operator is offered the storage limit, and the form never starts 
   assert.equal(firstLimitDimension([{ dimension: "storage" }], true), "storage");
   assert.equal(firstLimitDimension([{ dimension: "storage" }], false), "");
   assert.equal(firstLimitDimension([], false), "");
+});
+
+test("a name a person chose stays literal text in the CSV (LSR-201, lake#1007)", () => {
+  assert.equal(csvCell("=HYPERLINK(\"https://example.test\")"), `"'=HYPERLINK(""https://example.test"")"`);
+  assert.equal(csvCell("+1"), "'+1");
+  assert.equal(csvCell("-2"), "'-2");
+  assert.equal(csvCell("@SUM(A1)"), "'@SUM(A1)");
+  assert.equal(csvCell("Home"), "Home");
+  assert.equal(csvCell(-3), "-3", "a number is written as it is");
 });
