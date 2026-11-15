@@ -28,7 +28,7 @@ Everything else here is not implemented yet. This page plans the moves that
 [workspace records](workspace-records.md) does not cover: the bytes on lake's store volume
 (liquid stores, search indexes, the registry, the transparency log), the two repository tables
 that sit beside them, and lake's operational telemetry. It states what each item is today, what it
-is under the umbrella rule, where its bytes live, how it moves, and the decisions taken. The rule is in [workspace-data-plane.md](workspace-data-plane.md): everything goes in a
+is under the workspace rule, where its bytes live, how it moves, and the decisions taken. The rule is in [workspace-data-plane.md](workspace-data-plane.md): everything goes in a
 workspace Zetta except multitenancy, dispatch and billing.
 
 ## Decisions
@@ -44,9 +44,9 @@ where cascade was chosen over refusal.
 | S4 | #383 | Split the registry? | **Yes.** Tenant OCI repositories (`<space>/<name>`, `<space>/cache/<name>`) move to the workspace; npm, Python, debuginfod and legacy one-component OCI stay with the instance. | Move everything, renaming instance packages. |
 | S5 | #383 | Where do a tenant image's blobs live? | **In the workspace's liquid store** as SHA-256 objects; manifests and tags are conditional records. | A separate area of the object capability. |
 | S6 | #383 | Do image addresses change? | **No.** `<space>/<name>` stays, through a content-free central route (account and name to workspace). | The workspace in the path. |
-| S7 | #382 | Do the transparency log, TUF and timestamp evidence stay with the instance? | **Yes**, named as an instance-level exception in the umbrella rule. | One log per workspace; the lake Zetta. |
+| S7 | #382 | Do the transparency log, TUF and timestamp evidence stay with the instance? | **Yes**, named as an instance-level exception in the workspace rule. | One log per workspace; the lake Zetta. |
 | S8 | #381 | Where does a workspace's search index live? | **Beside its liquid store**, as sealed objects, rebuilt rather than copied. | Zetta full-text over a workspace table; a lake-local cache. |
-| S9 | #384 | Are lake's process metrics and request logs workspace data? | **No: instance operations**, named as an exception in the umbrella rule. Logs carry route patterns, not raw paths; each workspace gets its own request series in its Zetta. | Every request's metrics and log line in its workspace Zetta. |
+| S9 | #384 | Are lake's process metrics and request logs workspace data? | **No: instance operations**, named as an exception in the workspace rule. Logs carry route patterns, not raw paths; each workspace gets its own request series in its Zetta. | Every request's metrics and log line in its workspace Zetta. |
 | S10 | #315 | What of the `repositories` row moves? | **Only `description`** (and later settings) to `lake_repositories`; the row stays as routing. | Name and visibility too. |
 | S11 | #319 | Move or drop `repository_refs`? | **Dropped.** | Move it as a cache. |
 | S12 | all | What does deleting a workspace do to its repositories and images? | **Cascade** (lake#514): deleting a workspace deletes its repositories (live and tombstoned, cutting retention short) and its tenant images. Retained snapshots (S13) are the only copy left. | Refuse while the workspace holds repositories or images (the recommendation). |
@@ -347,7 +347,7 @@ observer sees the same tree; its checkpoint is signed by the instance, and its e
 statements by design. TUF metadata and timestamp evidence protect that one log.
 
 **Target (S7).** Stays at `LAKE_STORE_ROOT/<instance>/log/` on lake's store volume, under the
-root lock. The umbrella rule names it as an exception: the instance's public commitment.
+root lock. The workspace rule names it as an exception: the instance's public commitment.
 **Done** (lake#382, PR #519): the audit row in
 [workspace-data-plane.md](workspace-data-plane.md#storage-audit) classifies it as instance exception
 S7. The two checks that belonged with it:
@@ -587,7 +587,7 @@ liquid; `updated_at` is gone.
 | 14 | lake#380 | `ZettaObjectBackend`, per-workspace leases and lazy open, encryption, `move_workspace_store`, and `remove_space_store` for the account's old store once every workspace is switched ([API](../api/workspace-store.md#removing-the-accounts-store)). **Implemented** (migration `0067`) | 1–7, liquid#332 (merged) |
 | 15 | lake#381 | Search beside the workspace store, rebuilt (S8). **Implemented** (no migration) | lake#380 |
 
-The umbrella rule's exceptions for S7 and S9 are already in the bridge `CLAUDE.md`.
+The workspace rule names the exceptions for S7 and S9.
 
 ## Changing this plan
 

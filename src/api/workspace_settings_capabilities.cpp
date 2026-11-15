@@ -2,7 +2,7 @@
 // the model every agent turn of the workspace calls through Lake's model gateway, chosen among the
 // served chat models; unset means default_agent_model (gpt-6.1-sol). The settings are workspace
 // data, so they are one sealed record in the workspace's Zetta (`lake_workspace_settings`), never
-// a row of lake's Postgres (the bridge's multitenancy rule).
+// a row of lake's Postgres (the multitenancy rule).
 
 #include "lake/api/workspace_settings.hpp"
 

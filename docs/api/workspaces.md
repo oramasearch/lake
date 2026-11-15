@@ -169,7 +169,7 @@ the default is `gpt-6.1-sol`.
 - **Where.** The settings are workspace data, so they are one sealed record in the workspace's Zetta,
   collection `lake_workspace_settings`, key `workspace`, found by the account
   ([workspace-records.md](../architecture/workspace-records.md)). Nothing of them is in lake's Postgres
-  (the bridge's multitenancy rule). The record carries who changed it last (`set_by`) and
+  (the multitenancy rule). The record carries who changed it last (`set_by`) and
   when (`updated_at`); the change is audited in the workspace's own log with the previous and new model.
 
 `get_workspace_settings` answers:

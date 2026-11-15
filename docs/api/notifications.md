@@ -15,7 +15,7 @@ capabilities and pass ([below](#adding-a-resource-kind-lake1209)).
 
 ## Where it lives
 
-Both are workspace data (umbrella rule: everything goes in the workspace Zetta), so both are sealed
+Both are workspace data (workspace rule: everything goes in the workspace Zetta), so both are sealed
 records in the workspace Zetta of the resource's workspace, found by the resource's account
 ([workspace records](../architecture/workspace-records.md)). Lake's Postgres gains nothing; there
 is no migration and nothing for the operator to vendor.
