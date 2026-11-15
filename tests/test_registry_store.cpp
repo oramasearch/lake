@@ -635,6 +635,56 @@ TEST(RegistryStore, ABuildPushTokenWritesOnlyItsOwnTargetAndCache) {
     EXPECT_EQ(upload("tenant-one/cache/service").status, 202U);
 }
 
+// lake#952: a methodology run's credential pulls the run's build image only when the build is the
+// run's own workspace's, not merely its customer's.
+TEST(RegistryStore, AMethodologyRunPullsOnlyABuildOfItsOwnWorkspace) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    rig.route(rig.one, rig.beta, "model");
+    const std::string config = "{\"architecture\":\"amd64\"}";
+    rig.push_image("tenant-one/model", "b1", config, {"model layer"});
+    const auto build = rig.store->create_build({.customer_id = rig.one,
+                                                .workspace_id = rig.beta,
+                                                .repository = "model-source",
+                                                .revision = "main",
+                                                .target = "lake.example.test/tenant-one/model:b1"});
+    ASSERT_TRUE(build) << build.error().message;
+    const auto basic = [](const std::string& user, const std::string& secret) {
+        const std::string pair = user + ":" + secret;
+        std::string encoded(((pair.size() + 2) / 3) * 4, '\0');
+        const int size = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(encoded.data()),
+                                         reinterpret_cast<const unsigned char*>(pair.data()),
+                                         static_cast<int>(pair.size()));
+        encoded.resize(static_cast<std::size_t>(size));
+        return "Basic " + encoded;
+    };
+    const auto run_in = [&](const std::string& workspace) {
+        const auto run = rig.store->create_methodology_run({.customer_id = rig.one,
+                                                            .workspace_id = workspace,
+                                                            .methodology_id = "m-952",
+                                                            .mode = "train",
+                                                            .build_id = build->id,
+                                                            .runtime_image = "runtime:1",
+                                                            .cpu_millis = 100,
+                                                            .memory_bytes = 1 << 20,
+                                                            .timeout_seconds = 60});
+        EXPECT_TRUE(run) << run.error().message;
+        const std::string credential = "lmr." + run->id + ".secret-952";
+        EXPECT_TRUE(rig.store->put_methodology_run_status(
+            run->id,
+            {.phase = "Running",
+             .credential_sha256 = lake::control::identity_crypto::sha256_hex(credential)}));
+        return basic("methodology-run", credential);
+    };
+    const std::string elsewhere = run_in(rig.alpha);
+    const std::string own = run_in(rig.beta);
+    Reply refused =
+        exchange(rig.port(), "GET", "/v2/tenant-one/model/manifests/b1", {}, {}, elsewhere);
+    EXPECT_NE(refused.status, 200U) << refused.body;
+    Reply pulled = exchange(rig.port(), "GET", "/v2/tenant-one/model/manifests/b1", {}, {}, own);
+    EXPECT_EQ(pulled.status, 200U) << pulled.body;
+}
+
 TEST(RegistryStore, AChunkedUploadLandsInTheStoreAndAWrongDigestIsRefused) {
     RegistryRig rig;
     ASSERT_NO_FATAL_FAILURE(rig.SetUp());

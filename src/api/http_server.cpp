@@ -11869,7 +11869,9 @@ struct ApiServer::Impl {
             const auto build = options.store->get_build(run->build_id);
             const std::string image =
                 build ? build_target_image(build->target, customer->name) : std::string();
-            if (!build || build->customer_id != customer->id || image.empty() ||
+            // The build is the run's own workspace's (lake#952), not only its customer's.
+            if (!build || build->customer_id != customer->id || run->workspace_id.empty() ||
+                build->workspace_id != run->workspace_id || image.empty() ||
                 repository != customer->name + "/" + image) {
                 return {RegistryAccess::Denied};
             }
@@ -11892,7 +11894,8 @@ struct ApiServer::Impl {
             const auto build = options.store->get_build(deployment->build_id);
             const std::string image =
                 build ? build_target_image(build->target, customer->name) : std::string();
-            if (!build || build->customer_id != customer->id || image.empty() ||
+            if (!build || build->customer_id != customer->id || deployment->workspace_id.empty() ||
+                build->workspace_id != deployment->workspace_id || image.empty() ||
                 repository != customer->name + "/" + image) {
                 return {RegistryAccess::Denied};
             }
