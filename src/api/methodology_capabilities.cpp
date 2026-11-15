@@ -1603,6 +1603,8 @@ liquid::runtime::task<ApiResult> validate_methodology(const json& input, ApiCont
         {{"findings", findings}, {"ready", true}, {"run", queued.value["run"]}});
 }
 
+std::string quoted_table(const std::string& dataset);
+
 liquid::runtime::task<ApiResult> run_methodology(const json& input, ApiContext& context) {
     const std::string customer_id = input.at("customer_id");
     const std::string workspace_id = input.at("workspace_id");
@@ -1630,8 +1632,10 @@ liquid::runtime::task<ApiResult> run_methodology(const json& input, ApiContext& 
                           "/id");
     }
     const std::string dataset = input.at("dataset");
-    if (dataset.find('.') == std::string::npos) {
-        co_return refused("invalid_input", "dataset is <database>.<table>", "/dataset");
+    if (quoted_table(dataset).empty()) {
+        co_return refused("invalid_input",
+                          "dataset is <database>.<table>, letters, digits, '_' and single '-'",
+                          "/dataset");
     }
     auto checked =
         settled_api(co_await checked_entry_code(context, customer_id, workspace_id, entry));
@@ -2167,11 +2171,23 @@ std::expected<control::MethodologyRun, ApiResult> own_run(ApiContext& context,
 }
 
 std::string quoted_table(const std::string& dataset) {
-    // The engine's SQL subset takes database.table names as they are; refuse anything else.
+    // The engine's SQL subset takes database.table names as they are; refuse anything else. Each
+    // component starts with a letter, digit or '_' and never holds "--", which starts a comment in
+    // the engine's SQL and would hide the LIMIT and OFFSET that follow (LSR-191, lake#997).
     const bool plain = std::ranges::all_of(dataset, [](unsigned char c) {
         return std::isalnum(c) != 0 || c == '_' || c == '.' || c == '-';
     });
-    return plain && std::ranges::count(dataset, '.') == 1 ? dataset : std::string();
+    if (!plain || std::ranges::count(dataset, '.') != 1 || dataset.contains("--")) {
+        return {};
+    }
+    const auto dot = dataset.find('.');
+    for (const std::string_view part :
+         {std::string_view(dataset).substr(0, dot), std::string_view(dataset).substr(dot + 1)}) {
+        if (part.empty() || part.front() == '-' || part.back() == '-') {
+            return {};
+        }
+    }
+    return dataset;
 }
 
 liquid::runtime::task<ApiResult> methodology_run_input(const json& input, ApiContext& context) {
@@ -2260,6 +2276,10 @@ liquid::runtime::task<ApiResult> methodology_run_input(const json& input, ApiCon
                 co_return failed(page.error());
             }
             rows = page->value("rows", json::array());
+            // A second cap on what came back, whatever the statement did (LSR-191).
+            if (rows.is_array() && rows.size() > static_cast<std::size_t>(wanted)) {
+                rows.erase(rows.begin() + wanted, rows.end());
+            }
             for (const json& column : page->value("columns", json::array())) {
                 if (column.is_string()) {
                     columns.push_back(column.get<std::string>());

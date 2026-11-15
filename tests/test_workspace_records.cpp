@@ -6786,6 +6786,14 @@ TEST_P(WorkspaceRecordStores, MethodologiesAreTheWorkspacesOwnAndOramasStayReadO
     const auto no_target =
         t.call(first, "run_methodology", in(first, 0, {{"id", id}, {"dataset", "sales.payers"}}));
     EXPECT_EQ(no_target.error.path, "/target");
+    // LSR-191 (lake#997): a dataset name cannot carry SQL comment syntax past the paging clauses.
+    for (const char* hostile : {"sales.payers--", "sales.payers-- x", "sales.--payers", "-sales.payers",
+                                "sales..payers", "sales.payers.x"}) {
+        const auto refused = t.call(first,
+                                    "run_methodology",
+                                    in(first, 0, {{"id", id}, {"dataset", hostile}, {"target", "late"}}));
+        EXPECT_EQ(refused.error.path, "/dataset") << hostile;
+    }
     const auto training = t.call(first,
                                  "run_methodology",
                                  in(first,
