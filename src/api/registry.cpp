@@ -14,6 +14,7 @@
 #include "lake/api/audit_routing.hpp"
 #include "lake/api/white_label.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/agent_runs.hpp"
 #include "lake/control/store.hpp"
 #include "lake/transparency/log.hpp"
 
@@ -949,6 +950,206 @@ std::optional<ApiResult> agent_input_refusal(const Capability& entry,
     return std::nullopt;
 }
 
+// ------------------------------------------------------------------------------------------------
+// A launch's dataset work area (LSR-181 companion, lake#1055, docs/api/agent-launches.md#a-runs-
+// dataset-work-area). A custom Python entrypoint holds its launch credential and can call Lake
+// directly, so the work area agent-runtime applies to its model tools is enforced here too.
+
+std::optional<std::string> string_field(const nlohmann::json& input, const char* key) {
+    if (!input.is_object()) {
+        return std::nullopt;
+    }
+    const auto found = input.find(key);
+    if (found == input.end() || !found->is_string()) {
+        return std::nullopt;
+    }
+    return found->get<std::string>();
+}
+
+// The capability a call reaches and its input: workspace_query's and workspace_act's
+// `capability` and `input`, or the call itself.
+std::pair<std::string, const nlohmann::json*> reached_call(const Capability& entry,
+                                                           const nlohmann::json& input) {
+    static const nlohmann::json empty = nlohmann::json::object();
+    if (entry.name == "workspace_query" || entry.name == "workspace_act") {
+        const auto inner = input.is_object() ? input.find("input") : input.end();
+        return {string_field(input, "capability").value_or(std::string()),
+                input.is_object() && inner != input.end() ? &*inner : &empty};
+    }
+    return {entry.name, &input};
+}
+
+// The dataset a get_dataset input names, as <database>/<name>: `dataset` qualified as
+// `<database>/<name>` or `<database>.<name>`, or bare with `database` beside it or, without one,
+// in `datasets`. Nothing when the two disagree or a part is malformed.
+std::optional<std::string> named_dataset(const nlohmann::json& input) {
+    const auto dataset = string_field(input, "dataset");
+    if (!dataset || dataset->empty()) {
+        return std::nullopt;
+    }
+    const auto database = string_field(input, "database");
+    const bool qualified = dataset->find_first_of("/.") != std::string::npos;
+    if (qualified) {
+        const auto canonical = control::canonical_dataset(*dataset);
+        if (!canonical || (database && !database->empty() &&
+                           canonical->substr(0, canonical->find('/')) != *database)) {
+            return std::nullopt;
+        }
+        return canonical;
+    }
+    return control::canonical_dataset(database && !database->empty() ? *database + "/" + *dataset
+                                                                     : "datasets/" + *dataset);
+}
+
+std::string work_area_text(const std::vector<std::string>& area) {
+    if (area.empty()) {
+        return "no dataset";
+    }
+    std::string text;
+    for (const std::string& dataset : area) {
+        text += (text.empty() ? "" : ", ") + dataset;
+    }
+    return text;
+}
+
+// A get_dataset call inside the work area names its database explicitly, so the engine cannot
+// resolve a bare name to a table of that name in another database.
+const nlohmann::json& work_area_input(const Capability& capability,
+                                      const nlohmann::json& input,
+                                      const ApiContext& context,
+                                      nlohmann::json& resolved) {
+    if (!control::dataset_work_area(context.scopes)) {
+        return input;
+    }
+    const auto [reached, inner] = reached_call(capability, input);
+    if (reached != "get_dataset") {
+        return input;
+    }
+    const auto dataset = named_dataset(*inner);
+    if (!dataset) {
+        return input;
+    }
+    nlohmann::json pinned = *inner;
+    pinned["database"] = dataset->substr(0, dataset->find('/'));
+    pinned["dataset"] = dataset->substr(dataset->find('/') + 1);
+    if (inner == &input) {
+        resolved = std::move(pinned);
+    } else {
+        resolved = input;
+        resolved["input"] = std::move(pinned);
+    }
+    return resolved;
+}
+
+// Why a call with a dataset-confined credential leaves its work area, or nothing. Only what can
+// be shown to stay inside is allowed: describing the API, listing datasets (the answer is filtered
+// to the work area), reading one of its datasets, reading the agent's own record, and reading the
+// one revision of the repository its definition is pinned to. Everything else, index searches
+// included (an index names a bare source table, which proves no database), is refused before any
+// engine read. Capabilities that verify their own credential (the model gateway, usage reports)
+// are not workspace reads and are left to their own checks.
+std::optional<ApiResult>
+work_area_refusal(const Capability& entry, const nlohmann::json& input, ApiContext& context) {
+    const auto area = control::dataset_work_area(context.scopes);
+    if (!area || !entry.requires_auth) {
+        return std::nullopt;
+    }
+    const auto [reached, inner] = reached_call(entry, input);
+    const std::string confined = "this agent works only on " + work_area_text(*area);
+    if (reached == "workspace_openapi" || reached == "list_datasets") {
+        return std::nullopt;
+    }
+    if (reached == "get_dataset") {
+        const auto dataset = named_dataset(*inner);
+        if (dataset && std::ranges::find(*area, *dataset) != area->end()) {
+            return std::nullopt;
+        }
+        return ApiResult::failure("unauthorized",
+                                  confined + "; " + string_field(*inner, "dataset").value_or("") +
+                                      " is outside its work area",
+                                  "/dataset");
+    }
+    if (reached == "get_agent" && context.store) {
+        const std::string& session = context.credential_session_id;
+        std::string agent_id;
+        if (context.credential_kind == "agent_launch" && session.starts_with("launch:")) {
+            if (const auto launch = context.store->get_agent_launch(session.substr(7))) {
+                agent_id = launch->agent_id;
+            }
+        } else if (context.credential_kind == "agent_schedule" &&
+                   session.starts_with("schedule:")) {
+            if (const auto schedule = context.store->get_agent_cron_schedule(session.substr(9))) {
+                agent_id = schedule->agent_id;
+            }
+        }
+        if (!agent_id.empty() && string_field(*inner, "id") == agent_id) {
+            return std::nullopt;
+        }
+    }
+    if ((reached == "repository_tree" || reached == "repository_file")) {
+        if (const auto source = control::agent_definition_source(context.scopes)) {
+            const auto named =
+                string_field(*inner, "repository_id")
+                    .value_or(string_field(*inner, "id")
+                                  .value_or(string_field(*inner, "repository").value_or("")));
+            const auto ref =
+                string_field(*inner, "ref").value_or(string_field(*inner, "revision").value_or(""));
+            if (named == source->first && ref == source->second) {
+                return std::nullopt;
+            }
+        }
+    }
+    return ApiResult::failure("unauthorized",
+                              confined + "; " + (reached.empty() ? entry.name : reached) +
+                                  " cannot be shown to stay inside that work area");
+}
+
+// A dataset-confined answer carries only the work area: list_datasets keeps only its datasets
+// (and nothing else of the answer), and a get_dataset answer must be the dataset that was asked
+// for, in the database asked for.
+void confine_answer(const Capability& entry,
+                    const nlohmann::json& input,
+                    const ApiContext& context,
+                    ApiResult& result) {
+    const auto area = control::dataset_work_area(context.scopes);
+    if (!area || !result.ok) {
+        return;
+    }
+    const auto [reached, inner] = reached_call(entry, input);
+    const auto identity = [](const nlohmann::json& dataset) -> std::optional<std::string> {
+        const auto name = string_field(dataset, "name").has_value()
+                              ? string_field(dataset, "name")
+                              : string_field(dataset, "dataset");
+        if (!name) {
+            return std::nullopt;
+        }
+        return control::canonical_dataset(string_field(dataset, "database").value_or("datasets") +
+                                          "/" + *name);
+    };
+    if (reached == "list_datasets") {
+        nlohmann::json kept = nlohmann::json::array();
+        const auto listed =
+            result.value.is_object() ? result.value.find("datasets") : result.value.end();
+        if (result.value.is_object() && listed != result.value.end() && listed->is_array()) {
+            for (const nlohmann::json& dataset : *listed) {
+                const auto id = identity(dataset);
+                if (id && std::ranges::find(*area, *id) != area->end()) {
+                    kept.push_back(dataset);
+                }
+            }
+        }
+        result.value = {{"datasets", std::move(kept)}};
+    } else if (reached == "get_dataset") {
+        const auto id = result.value.is_object() ? identity(result.value) : std::nullopt;
+        if (!id || id != named_dataset(*inner)) {
+            result = ApiResult::failure("unauthorized",
+                                        "the workspace answered a dataset outside this agent's "
+                                        "work area (" +
+                                            work_area_text(*area) + ")");
+        }
+    }
+}
+
 const nlohmann::json& workspace_path_input(const Capability& capability,
                                            const nlohmann::json& input,
                                            const ApiContext& context,
@@ -1110,6 +1311,14 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
                 state.proceed = false;
                 return state;
             }
+        }
+    }
+    // A launch's dataset work area holds for every call its credential makes (lake#1055).
+    if (context.authorized) {
+        if (auto refused = work_area_refusal(entry, input, context)) {
+            state.result = std::move(*refused);
+            state.proceed = false;
+            return state;
         }
     }
     if (context.store &&
@@ -1679,8 +1888,11 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
     const nlohmann::json& workspace_input =
         workspace_path_input(*capability, *canonical, context, workspace_resolved_input);
     nlohmann::json task_resolved_input;
-    const nlohmann::json& call_input =
+    const nlohmann::json& task_input =
         agent_task_input(*capability, workspace_input, context, task_resolved_input);
+    nlohmann::json area_resolved_input;
+    const nlohmann::json& call_input =
+        work_area_input(*capability, task_input, context, area_resolved_input);
 
     const DepthGuard registry_depth(context);
     CallState state = prepare_call(capability, call_input, context);
@@ -1699,6 +1911,7 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
         } catch (const std::exception& error) {
             state.result = ApiResult::failure("store_error", error.what());
         }
+        confine_answer(*capability, call_input, context, state.result);
         point_at_named_field(state.result, call_input);
         state.result.duration_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
@@ -1768,8 +1981,11 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
     const nlohmann::json& workspace_input =
         workspace_path_input(*capability, *canonical, context, workspace_resolved_input);
     nlohmann::json task_resolved_input;
-    const nlohmann::json& call_input =
+    const nlohmann::json& task_input =
         agent_task_input(*capability, workspace_input, context, task_resolved_input);
+    nlohmann::json area_resolved_input;
+    const nlohmann::json& call_input =
+        work_area_input(*capability, task_input, context, area_resolved_input);
 
     const DepthGuard registry_depth(context);
     CallState state = prepare_call(capability, call_input, context);
@@ -1818,6 +2034,7 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
         } catch (const std::exception& error) {
             state.result = ApiResult::failure("store_error", error.what());
         }
+        confine_answer(*capability, call_input, context, state.result);
         point_at_named_field(state.result, call_input);
         state.result.duration_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)

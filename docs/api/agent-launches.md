@@ -87,6 +87,43 @@ same routing read the audit uses to place a call's event. Verify:
 Verify: `AgentRuns.ARunsKeyCarriesTheReadsOfItsAgentsSkillsAndNoChange` and
 `AgentRuns.EverySkillLakeOffersIsOneAgentRuntimeDefines` (tests/test_workspaces.cpp).
 
+### A run's dataset work area
+
+LSR-181 companion ([lake#1055](https://github.com/oramasearch/lake/issues/1055)). agent-runtime
+confines its model tools to an agent's work area (agent-runtime#23), but a custom Python
+entrypoint holds the launch credential and can call Lake directly, so Lake enforces a dataset work
+area on the credential itself:
+
+- **It is stored with the row, once.** An agent whose `work_area` is `{kind: "dataset", detail:
+  "<id>[, <id>...]"}` gets one scope `dataset:<database>/<name>` per dataset on its launch, schedule
+  or conversation service when lake stores it (`control::dataset_work_area_scopes`), and the row's
+  scopes never change. `<database>/<name>` and `<database>.<name>` are the same dataset; a bare
+  `<name>` is `datasets/<name>`, Lake's default database. An empty or malformed dataset work area
+  gives the one scope `dataset:`, which confines the run to no dataset. An agent whose definition
+  is in a Lake repository also gets `agent_definition:<repository id>@<revision>`. No migration:
+  the scopes are the row's existing `scopes`. A launch or schedule made before this change keeps
+  its scopes until it is made again.
+- **Only what can be shown to stay inside is allowed**, at dispatch (`work_area_refusal` in
+  `src/api/registry.cpp`), for named capabilities and for the generic `workspace_query`,
+  `workspace_act` and `workspace_sql` routes, and so for `/workspaces/<customer>/zetta/v1/...`,
+  which calls them: `workspace_openapi`; `list_datasets`, whose answer keeps only the work area's
+  datasets and nothing else; `get_dataset` of one of its datasets, sent to the engine with its
+  database named (a bare name never resolves to another database's table), and refused unless the
+  answer is that dataset; `get_agent` of the run's own agent; and `repository_tree` /
+  `repository_file` of its definition's repository at the pinned revision. Every other call, index
+  searches and global search included (an index names a bare source table, which proves no
+  database), is `unauthorized` before any engine read: *this agent works only on
+  `<datasets>`; `<capability>` cannot be shown to stay inside that work area*. The model gateway
+  and usage reports verify their own credential and are not affected.
+
+Verify: `AgentWorkArea.ADatasetWorkAreaBecomesCanonicalScopes` and
+`Streams.ADatasetConfinedLaunchCredentialStaysInItsWorkArea` (tests/test_streams.cpp).
+
+Not enforced by Lake: the engine's own reads of a dataset inside a `workspace_act` capability
+(for example a run started on an allowed table that joins another) are refused today only because
+every action is refused in a dataset work area; allowing actions there needs the engine to report
+which datasets an action reads (an index's database-qualified source, zetta).
+
 ## Schedules
 
 A Python agent may have **any number of cron schedules**, and **each is its own Kubernetes

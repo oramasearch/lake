@@ -1,12 +1,13 @@
 #pragma once
 
 #include <chrono>
-#include <expected>
 #include <cstdint>
+#include <expected>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <liquid/runtime.hpp>
@@ -70,8 +71,29 @@ const std::vector<AgentSkill>& agent_skills();
 std::vector<std::string> agent_launch_scopes_for(const std::vector<std::string>& skills);
 
 // The same, from an agent record's `skills` (anything that is not an array of strings grants
-// nothing beyond agent_launch_scopes).
+// nothing beyond agent_launch_scopes), plus its dataset work area (dataset_work_area_scopes).
 std::vector<std::string> agent_launch_scopes_for(const nlohmann::json& agent);
+
+// A dataset work area on a launch's, schedule's or service's credential (LSR-181 companion,
+// lake#1055). An agent whose `work_area` is `{kind: "dataset", detail: "<id>[, <id>...]"}` gets
+// one scope `dataset:<database>/<name>` per dataset, stored with the row's scopes when it is made
+// and never changed. `<database>/<name>` and `<database>.<name>` are the same dataset; a bare
+// `<name>` is `datasets/<name>`, Lake's default database, never a table of that name elsewhere.
+// A dataset work area that is empty or names anything malformed gives the one scope `dataset:`,
+// which confines the run to no dataset at all. Any other work area gives no scope.
+inline constexpr std::string_view dataset_work_area_scope = "dataset:";
+std::vector<std::string> dataset_work_area_scopes(const nlohmann::json& agent);
+// A confined agent whose definition is in a Lake repository (`definition: {source: "lake",
+// repository_id, revision}`) also gets `agent_definition:<repository id>@<revision>`, so it may
+// read that one revision of that repository to load itself (agent_definition_source reads it back).
+inline constexpr std::string_view agent_definition_scope = "agent_definition:";
+std::optional<std::pair<std::string, std::string>>
+agent_definition_source(const std::vector<std::string>& scopes);
+// `<database>/<name>` for a dataset id in any of those forms, or nothing when it is malformed.
+std::optional<std::string> canonical_dataset(std::string_view id);
+// The datasets a credential's scopes confine it to (each `<database>/<name>`), or nullopt when
+// the scopes carry no dataset work area. An empty list confines it to nothing.
+std::optional<std::vector<std::string>> dataset_work_area(const std::vector<std::string>& scopes);
 
 // A schedule's cron expression (docs/api/agent-launches.md): the five fields a Kubernetes CronJob
 // takes (minute, hour, day of month, month, day of week), or one of @hourly, @daily, @weekly,

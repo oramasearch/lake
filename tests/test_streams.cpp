@@ -19,6 +19,7 @@
 #include "postgres_fixture.hpp"
 #include "repository_test_support.hpp"
 #include "stream_fixture.hpp"
+#include "lake/control/agent_runs.hpp"
 
 namespace {
 using nlohmann::json;
@@ -304,6 +305,82 @@ TEST_F(Streams, LaunchCredentialIsBoundThroughObjectsAndRunsNoUnnamedAction) {
     EXPECT_NE(acted.error.message.find("does not grant the workspace action delete_project"),
               std::string::npos)
         << acted.error.message;
+}
+
+// LSR-181 companion (lake#1055): an agent's dataset work area becomes scopes on its launch
+// credential, in one canonical form, and a malformed one confines the run to nothing.
+TEST(AgentWorkArea, ADatasetWorkAreaBecomesCanonicalScopes) {
+    using lake::control::dataset_work_area;
+    using lake::control::dataset_work_area_scopes;
+    const json agent{
+        {"skills", json::array({"search"})},
+        {"work_area",
+         {{"kind", "dataset"}, {"detail", "public/accounts, public.accounts, orders"}}},
+        {"definition", {{"source", "lake"}, {"repository_id", "repo-1"}, {"revision", "abc123"}}}};
+    const auto scopes = lake::control::agent_launch_scopes_for(agent);
+    const auto area = dataset_work_area(scopes);
+    ASSERT_TRUE(area);
+    EXPECT_EQ(*area, (std::vector<std::string>{"public/accounts", "datasets/orders"}));
+    const auto source = lake::control::agent_definition_source(scopes);
+    ASSERT_TRUE(source);
+    EXPECT_EQ(source->first, "repo-1");
+    EXPECT_EQ(source->second, "abc123");
+
+    for (const json& detail : {json(""), json("public/"), json("a/b/c"), json(7)}) {
+        const auto none = dataset_work_area(
+            dataset_work_area_scopes({{"work_area", {{"kind", "dataset"}, {"detail", detail}}}}));
+        ASSERT_TRUE(none) << detail.dump();
+        EXPECT_TRUE(none->empty()) << detail.dump() << " confines the run to no dataset";
+    }
+    EXPECT_FALSE(dataset_work_area(lake::control::agent_launch_scopes_for(
+        json{{"work_area", {{"kind", "workspace"}, {"detail", ""}}}})));
+}
+
+// LSR-181 companion (lake#1055): a launch credential confined to a dataset work area reaches,
+// called directly as custom Python can, only that work area: another database's table of the same
+// name, an index search, a generic workspace call and another repository are refused before any
+// engine read.
+TEST_F(Streams, ADatasetConfinedLaunchCredentialStaysInItsWorkArea) {
+    lake::control::NewAgentLaunch row;
+    row.customer_id = customer;
+    row.agent_id = "a-1";
+    row.agent_name = "Searcher";
+    row.mode = "job";
+    row.trigger = "manual";
+    row.scopes = lake::control::agent_launch_scopes_for(
+        json{{"skills", json::array({"search"})},
+             {"work_area", {{"kind", "dataset"}, {"detail", "allowed_public/accounts"}}},
+             {"definition",
+              {{"source", "lake"}, {"repository_id", "definition-repo"}, {"revision", "r1"}}}});
+    row.workspace_id = workspace->id;
+    const auto launch = store->create_agent_launch(row);
+    ASSERT_TRUE(launch) << launch.error().message;
+    context.session_credential = true;
+    context.operator_credential = false;
+    context.credential_kind = "agent_launch";
+    context.credential_session_id = "launch:" + launch->id;
+    context.scopes = launch->scopes;
+    context.scopes.push_back("list_streams");
+
+    const auto refused = [&](const std::string& name, json args) {
+        args["customer_id"] = customer;
+        const auto result = call(name, std::move(args));
+        EXPECT_EQ(result.error.code, "unauthorized") << name;
+        EXPECT_NE(result.error.message.find("allowed_public/accounts"), std::string::npos)
+            << result.error.message;
+    };
+    refused("workspace_query",
+            {{"capability", "get_dataset"}, {"input", {{"dataset", "restricted/accounts"}}}});
+    refused("workspace_query",
+            {{"capability", "get_dataset"},
+             {"input", {{"dataset", "accounts"}, {"database", "restricted"}}}});
+    // A bare name is Lake's default database, never a table of that name elsewhere.
+    refused("workspace_query",
+            {{"capability", "get_dataset"}, {"input", {{"dataset", "accounts"}}}});
+    refused("workspace_query", {{"capability", "search"}, {"input", {{"query", "x"}}}});
+    refused("workspace_sql", {{"sql", "SELECT 1"}});
+    refused("list_streams", json::object());
+    refused("repository_tree", {{"id", "definition-repo"}, {"ref", "main"}});
 }
 
 TEST_F(Streams, DeletedAppsAndExpiredBuildsAreReapedWithoutTouchingLiveTopics) {

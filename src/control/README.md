@@ -148,6 +148,8 @@ which the registry enforces at dispatch. See `docs/api/agent-launches.md`.
 (lake#985): a confined decision allows only an object whose full parent chain reaches the confined
 customer, with every repository on it in the confined workspace (`inside_confinement`);
 `fresh_cache_like` keeps the confinement for a re-check. See `docs/api/policy.md`.
+`skills.json`), and the scopes of its dataset work area (`dataset_work_area_scopes`, lake#1055),
+which the registry enforces at dispatch. See `docs/api/agent-launches.md`.
 Stores carry the workspace they belong to (migration `0044_store_workspaces`, lake#465). Both
 stores record it on `create_store` and filter `list_stores` by it; `WorkspaceService::store` and
 `delete_store` treat another workspace's store as `not_found`. See
