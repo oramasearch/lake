@@ -238,8 +238,9 @@ found by the application, with the five-minute lifetime as the collection's rete
 adds the code's instants and revision; `store.hpp` no longer declares
 `create_/consume_application_authorization_code` (the retired table is dropped by `0070`).
 `agent_task_proxy.hpp` declares task credentials by reference (lake#871): the `X-Lake-Agent-Task`
-header, `AgentBusKey` (an agent and the workspace its bus credential is bound to) and
-`agent_task_principal`.
+header, `AgentBusKey` (an agent and the workspace its bus credential is bound to),
+`agent_task_principal`, and `AgentBusCredentials` (LAKE_AGENT_BUS_DIR re-read when it changes;
+`zetta_workspace.hpp`'s `WorkspaceConfig::agent_bus_credentials` holds it).
 `agent_task_records.hpp` holds what was written for an agent task in its workspace (lake#374,
 lake#375): the codec (one record per task, keyed by it and found by its space) with the request,
 the agent's latest message, its answer and the finished phase. `record_agent_task_content` writes

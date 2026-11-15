@@ -427,6 +427,11 @@ nlohmann::json operator_manifest() {
              "the database could not be reached within the wait"}}}}},
         {"stripe", {{"webhook_events", events}, {"products", products}}},
         {"environment", variables},
+        // What this image supports that the operator switches on (additive under version 1).
+        // agent_bus_workspace_credentials: a LAKE_AGENT_BUS_DIR file `<agent>.<workspace id>` is a
+        // bus credential bound to that workspace, and the directory is re-read when it changes
+        // (lake#871, docs/api/agent-bus.md); orama-operator#1176 runs per-workspace agents on it.
+        {"features", json::array({"agent_bus_workspace_credentials"})},
     };
 }
 

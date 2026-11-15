@@ -140,7 +140,15 @@ an agent process that serves it alone. With it, `receive_agent_tasks` lists only
 tasks, a claim or event for another workspace's task is `forbidden`, `record_model_usage` accepts
 only that workspace's tasks, `X-Lake-Agent-Task` opens only that workspace's tasks, and every
 claim is by reference whatever it asks. Starting the per-workspace process and mounting its
-credential is the operator's part.
+credential is the operator's part (https://github.com/oramasearch/orama-operator/pull/1176), which
+it does only for an image whose `lake manifest` lists the feature `agent_bus_workspace_credentials`.
+
+**Lake re-reads `LAKE_AGENT_BUS_DIR` when it changes** (`control::AgentBusCredentials`), so the
+operator adds or removes a workspace's credential without restarting lake. Each bus-credential
+lookup compares the directory's modification time and the target of Kubernetes' `..data` link
+(which a Secret update swaps) with the last read, and reads the files again when either differs:
+a file added is accepted, and a file removed stops working, on the first request after the change
+reaches the directory. The kubelet's own delay in updating a mounted Secret still applies.
 
 The service token (`LAKE_AGENT_SERVICE_TOKEN`) is never a bus credential, and no user-created agent
 holds it (agent-runtime#14). Lake presents it only to the library agents. To a person's service
@@ -462,8 +470,8 @@ described above.
 
 - The library agents still claim `in_body`: each moves to `credentials: by_reference` in its own
   repository (agent-runtime's bus client first), and then Lake drops the in-body mode (lake#871).
-- The operator does not yet run a per-workspace agent process with a workspace-bound bus
-  credential (lake#871).
+- The operator's per-workspace agent process, gated on the manifest feature, is in
+  https://github.com/oramasearch/orama-operator/pull/1176 (lake#871).
 
 - Custom Python agents on `agent-runtime` still answer within the call.
 - Streaming subscriptions (SSE) replace the long poll when Zetta ships them.

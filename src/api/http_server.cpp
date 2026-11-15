@@ -9562,7 +9562,12 @@ struct ApiServer::Impl {
         if (bearer.empty() || !options.workspaces) {
             return {};
         }
-        for (const auto& [name, token] : options.workspaces->config().agent_bus_tokens) {
+        // LAKE_AGENT_BUS_DIR as it is now, re-read when it changed (lake#871): a workspace's
+        // credential the operator removed stops working on the next request.
+        const auto& config = options.workspaces->config();
+        const auto reloaded =
+            config.agent_bus_credentials ? config.agent_bus_credentials->current() : nullptr;
+        for (const auto& [name, token] : reloaded ? *reloaded : config.agent_bus_tokens) {
             if (constant_time_equal(bearer, token)) {
                 found = name;
             }

@@ -290,7 +290,8 @@ drops.
 `agent_task_proxy.cpp` resolves a library agent's bus credential plus `X-Lake-Agent-Task` to the
 principal of a task running on that agent, so a task claimed by reference is never handed its
 credential, and splits a `LAKE_AGENT_BUS_DIR` file name into the agent and its bound workspace
-(lake#871).
+(lake#871). Its `AgentBusCredentials` re-reads that directory whenever its modification time or
+`..data` link changes, so a credential added or removed takes effect on the next request.
 `agent_task_records.cpp` keeps what was written for an agent task in its workspace (lake#374,
 lake#375). The stores keep only the dispatch half: `create_agent_task` inserts no body (and takes
 the caller's `id` and `parent_task_id`), `record_agent_task_event` moves the phase and clears lake's

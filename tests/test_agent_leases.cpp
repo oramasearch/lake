@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <thread>
 
@@ -535,6 +536,57 @@ TEST(AgentBusKeys, AFileNameNamesTheAgentAndItsBoundWorkspace) {
     EXPECT_EQ(bound.agent, "agent-project");
     EXPECT_EQ(bound.workspace_id, "0b6c3c1e-8d7a-4f5e-9a8b-1c2d3e4f5a6b");
     EXPECT_TRUE(bound.bound());
+}
+
+// The operator adds and removes a workspace's bound credential without restarting lake: each
+// lookup re-reads LAKE_AGENT_BUS_DIR when it changed, and a removed file stops working at once.
+TEST(AgentBusKeys, TheDirectoryIsReReadWhenItChanges) {
+    const auto dir = lake::test::fixture_path("agent-bus-" + lake::control::new_uuid_v4());
+    std::filesystem::create_directories(dir);
+    // Moves the directory's time on, as adding or removing an entry does, so the test does not
+    // depend on the file system's time resolution.
+    const auto touch = [&] {
+        std::filesystem::last_write_time(dir,
+                                         std::filesystem::last_write_time(dir) + 1s);
+    };
+    std::ofstream(dir / "agent-project") << "shared-token";
+    lake::control::AgentBusCredentials credentials(dir.string());
+    auto tokens = credentials.current();
+    ASSERT_EQ(tokens->size(), 1U);
+    EXPECT_EQ(tokens->at("agent-project"), "shared-token");
+    EXPECT_EQ(credentials.current(), tokens) << "unchanged: not read again";
+
+    const std::string bound = "agent-project.0b6c3c1e-8d7a-4f5e-9a8b-1c2d3e4f5a6b";
+    std::ofstream(dir / bound) << "bound-token";
+    touch();
+    tokens = credentials.current();
+    ASSERT_EQ(tokens->size(), 2U);
+    EXPECT_EQ(tokens->at(bound), "bound-token");
+
+    std::filesystem::remove(dir / bound);
+    touch();
+    tokens = credentials.current();
+    EXPECT_EQ(tokens->size(), 1U);
+    EXPECT_FALSE(tokens->contains(bound)) << "a removed credential stops working at once";
+
+    // A Kubernetes Secret update swaps the `..data` link; that alone is a change.
+    std::filesystem::remove(dir / "agent-project");
+    for (const char* version : {"..2026_11_14_a", "..2026_11_14_b"}) {
+        std::filesystem::create_directories(dir / version);
+        std::ofstream(dir / version / "agent-project") << std::string("token-") + version;
+    }
+    std::filesystem::create_directory_symlink("..2026_11_14_a", dir / "..data");
+    std::filesystem::create_symlink("..data/agent-project", dir / "agent-project");
+    touch();
+    EXPECT_EQ(credentials.current()->at("agent-project"), "token-..2026_11_14_a");
+    const auto mtime = std::filesystem::last_write_time(dir);
+    std::filesystem::remove(dir / "..data");
+    std::filesystem::create_directory_symlink("..2026_11_14_b", dir / "..data");
+    std::filesystem::last_write_time(dir, mtime);
+    EXPECT_EQ(credentials.current()->at("agent-project"), "token-..2026_11_14_b");
+
+    EXPECT_TRUE(lake::control::AgentBusCredentials("").current()->empty());
+    std::filesystem::remove_all(dir);
 }
 
 TEST(AgentLeaseConfig, ParsesPerAgentBoundsAndRejectsInvalidConfiguration) {

@@ -1,6 +1,45 @@
 #include "lake/control/agent_task_proxy.hpp"
 
+#include <filesystem>
+#include <format>
+#include <system_error>
+
+#include "lake/control/zetta_workspace.hpp"
+
 namespace lake::control {
+
+AgentBusCredentials::AgentBusCredentials(std::string directory)
+    : directory_(std::move(directory)), tokens_(std::make_shared<const Tokens>()) {}
+
+std::string AgentBusCredentials::signature() const {
+    if (directory_.empty()) {
+        return {};
+    }
+    std::error_code error;
+    const auto modified = std::filesystem::last_write_time(directory_, error);
+    if (error) {
+        return "absent";
+    }
+    std::string signature =
+        std::format("{}", modified.time_since_epoch().count());
+    const auto data = std::filesystem::read_symlink(std::filesystem::path(directory_) / "..data",
+                                                    error);
+    if (!error) {
+        signature += "\n" + data.string();
+    }
+    return signature;
+}
+
+std::shared_ptr<const AgentBusCredentials::Tokens> AgentBusCredentials::current() {
+    const std::string now = signature();
+    std::lock_guard lock(mutex_);
+    if (!read_ || now != signature_) {
+        tokens_ = std::make_shared<const Tokens>(read_agent_bus_tokens(directory_));
+        signature_ = now;
+        read_ = true;
+    }
+    return tokens_;
+}
 
 AgentBusKey agent_bus_key(std::string_view name) {
     const std::size_t dot = name.find('.');

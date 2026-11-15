@@ -1,5 +1,8 @@
 #pragma once
 
+#include <map>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 
@@ -33,6 +36,31 @@ struct AgentBusKey {
 
 // Splits a LAKE_AGENT_BUS_DIR file name at its first '.'. Agent keys hold no '.'.
 AgentBusKey agent_bus_key(std::string_view name);
+
+// LAKE_AGENT_BUS_DIR, re-read whenever it changes, so the operator adds or removes a workspace's
+// bound credential without restarting lake. Every lookup compares the directory's signature (its
+// modification time, and the target of Kubernetes' `..data` link, which a Secret update swaps)
+// with the last one read, and reads the files again when it differs: a file added is accepted, and
+// a file removed stops working, on the next request after the change reaches the directory. A
+// file edited in place without either changing is not noticed; Kubernetes never writes that way.
+class AgentBusCredentials {
+public:
+    using Tokens = std::map<std::string, std::string>;
+
+    explicit AgentBusCredentials(std::string directory);
+
+    // The credentials as the directory holds them now (file name to token).
+    std::shared_ptr<const Tokens> current();
+
+private:
+    std::string signature() const;
+
+    std::string directory_;
+    std::mutex mutex_;
+    std::string signature_;
+    bool read_ = false;
+    std::shared_ptr<const Tokens> tokens_;
+};
 
 // The principal of the task `task_id` for one request of the agent `caller`: the same principal
 // the task's own credential resolves to, including the stored claim digest that every call's lease

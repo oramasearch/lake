@@ -102,6 +102,7 @@ Prints one JSON document, `manifest_version` 1:
 | `stripe.webhook_events` | the Stripe events this version handles, sorted (18 today), replacing the operator's `lakeStripeWebhookEvents` |
 | `stripe.products` | `{id, name}` of each Stripe product lake bills under (`lake_usage`, `lake_private_warehouse`, `lake_dedicated_cluster`), replacing `lakePaymentProducts` |
 | `environment` | `{name, required, secret, description}` for every variable lake reads, sorted by name |
+| `features` | what this image supports that the operator switches on, additive under version 1. `agent_bus_workspace_credentials`: a `LAKE_AGENT_BUS_DIR` file `<agent>.<workspace id>` is a bus credential bound to that workspace, and lake re-reads the directory when it changes, so adding or removing one needs no restart (lake#871; orama-operator#1176 runs per-workspace agents only for an image that lists it). `LakeManifest.ListsTheFeaturesTheOperatorSwitchesOn` checks it |
 
 `required` marks what a Lake run by the operator cannot work without: `LAKE_CONTROL_DB_URI`,
 `LAKE_ADMIN_TOKEN`, `LAKE_INSTANCE_KEK`, `LAKE_STORE_ROOT`, `LAKE_PUBLIC_HOST` and

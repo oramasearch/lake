@@ -883,7 +883,9 @@ decides which sign-in capabilities the registry's `gate_instance_sign_in` refuse
 
 `http_server.cpp`'s `context_for` resolves a library agent's bus credential sent with
 `X-Lake-Agent-Task: <task id>` to that task's principal (task credentials by reference, lake#871),
-and records the workspace a bound bus credential (`<agent>.<workspace id>`) serves. The bus
+and records the workspace a bound bus credential (`<agent>.<workspace id>`) serves. It checks the
+bearer against `LAKE_AGENT_BUS_DIR` as the directory is now (`AgentBusCredentials`).
+`manifest.cpp` lists the feature `agent_bus_workspace_credentials` in `lake manifest`. The bus
 capabilities in `workspace_capabilities.cpp` and `reporter_of` in `usage_capabilities.cpp` refuse a
 bound credential every task outside its workspace, and `claim_agent_task` answers no credential
 when it claims by reference. See [agent-bus.md](../../docs/api/agent-bus.md#task-credentials-by-reference-lake871).

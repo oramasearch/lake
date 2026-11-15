@@ -124,7 +124,9 @@ adoption, schema reapplication, the partial expiry index, and duration bounds wi
 The Streams task-credential fixture takes a real claim before making calls. It also checks task
 credentials by reference (lake#871): a `by_reference` claim answers no credential, the task opens
 only for its own agent while it runs, and a workspace-bound bus credential reaches only its
-workspace. See [agent-bus.md](../docs/api/agent-bus.md).
+workspace, and `AgentBusKeys.TheDirectoryIsReReadWhenItChanges` that credentials added, removed or
+swapped by a Secret update take effect without a restart. See
+[agent-bus.md](../docs/api/agent-bus.md).
 
 `HttpResponseIsolation.AskOramaSaysWhoIsWorkingOnALongTurn` (lake#451) runs a real Ask Orama
 claim, a delegation with its turn key, and the subagent's progress and result, and follows the turn
