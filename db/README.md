@@ -111,7 +111,7 @@ paid-through/access deadlines, event ordering and grace to cloud orders. A uniqu
 subscription to one order; `cloud_order_desired_state` evaluates entitlement at read time.
 Apply before the new binary. The operator must vendor the schema, select
 `cloud_order_entitlements_guard`, register the new events and implement suspension before order
-provisioning is enabled. See [orders](../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
+provisioning is enabled. See [orders](../docs/api/orders.md#recurring-entitlement-lake972).
 
 Migration `0091_account_deletion` (lake#810) adds `users.deleted_at`, set by `delete_account` when
 an account is deleted (its email and display name are erased in the same statement), and the guard
