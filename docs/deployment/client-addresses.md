@@ -125,6 +125,10 @@ global budgets still hold such a caller.
   `HttpServer.AuthenticationClientBudgetIgnoresForwardedHeadersFromAnUntrustedPeer` sends 100 failed
   recoveries, each with a new `X-Real-IP`. From an untrusted peer the 101st is `rate_limited`; from
   a trusted one a new address still has its budget.
+- `OrdersApex.ForwardingHeadersFromAnUntrustedPeerNeverMakeAFreshBucket` (`tests/test_orders.cpp`,
+  lake#1006, LSR-200): with `none` on the main listener, ten orders from one peer, each with a new
+  `X-Real-IP` and `X-Forwarded-For`, are one client past its limit; the proxy listener still
+  counts a new visitor.
 - `HttpServer.ForwardedHeadersAreBelievedOnlyOnTheProxyListener`: with `none` on the main listener,
   100 rotated addresses on the proxy port are 100 clients, 100 on the main port are one (the 101st
   is `rate_limited`), and both listeners serve `/healthz`.

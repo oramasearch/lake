@@ -31,6 +31,7 @@
 
 #include "lake/api/billing.hpp"
 #include "lake/api/capabilities.hpp"
+#include "lake/api/client_address.hpp"
 #include "lake/api/orders.hpp"
 #include "lake/api/regions.hpp"
 #include "lake/api/registry.hpp"
@@ -1294,7 +1295,9 @@ struct OrderRig {
     explicit OrderRig(bool with_resend = true,
                       int per_client = 5,
                       bool billing = true,
-                      int per_hour = 60) {
+                      int per_hour = 60,
+                      std::string_view trusted_proxies = "",
+                      bool proxy_listener = false) {
         ServerOptions options;
         options.port = 0;
         options.store = store;
@@ -1309,6 +1312,10 @@ struct OrderRig {
         }
         options.resend_http = resend.http();
         options.order_pass_interval = std::chrono::milliseconds(0);
+        options.trusted_proxies = *lake::api::parse_trusted_proxies(trusted_proxies);
+        if (proxy_listener) {
+            options.proxy_port = 0;
+        }
         server = std::make_unique<ApiServer>(options);
         EXPECT_TRUE(server->start()) << server->reason();
     }
@@ -1688,6 +1695,33 @@ TEST(OrdersApex, AbuseIsRefused) {
                                 order + "&details=" + std::string(40 * 1024, 'x'));
     EXPECT_EQ(large.status, 413);
     EXPECT_EQ(rig.store->unaudited_cloud_order_events(10)->size(), 3U);
+}
+
+// lake#1006 (LSR-200): hosted code that reaches lake directly (a workspace pod on the main port)
+// cannot rotate X-Real-IP or X-Forwarded-For into fresh order buckets. Its peer is not a trusted
+// proxy, so every order counts against its own address: the per-client limit holds and the
+// in-all budget is never used up by it. Only the proxy listener, which only the ingress reaches,
+// names a client address.
+TEST(OrdersApex, ForwardingHeadersFromAnUntrustedPeerNeverMakeAFreshBucket) {
+    OrderRig rig(true, 2, true, 60, "none", true);
+    ASSERT_NE(rig.server->proxy_port(), 0);
+    const std::string order = "offer=on_prem&path=order_form&contact_name=Ada&contact_email=ada%40"
+                              "example.com&details=Bare+metal";
+    int accepted = 0;
+    for (int i = 0; i < 10; ++i) {
+        auto rotated = form_headers;
+        rotated["X-Real-IP"] = "198.51.100." + std::to_string(i + 1);
+        rotated["X-Forwarded-For"] = "203.0.113." + std::to_string(i + 1);
+        const int status = send(rig.port(), "POST", "/order", "lake.live", rotated, order).status;
+        EXPECT_TRUE(status == 200 || status == 429) << status;
+        accepted += status == 200 ? 1 : 0;
+    }
+    EXPECT_EQ(accepted, 2) << "ten rotated addresses from one peer are one client";
+    // Through the proxy listener the same header is the ingress's word: a new visitor.
+    auto visitor = form_headers;
+    visitor["X-Real-IP"] = "198.51.100.200";
+    EXPECT_EQ(
+        send(rig.server->proxy_port(), "POST", "/order", "lake.live", visitor, order).status, 200);
 }
 
 TEST(OrdersApex, WithoutTheResendKeyTheOrderIsKeptAndItsEmailWaits) {
