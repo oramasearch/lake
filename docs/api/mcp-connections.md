@@ -74,8 +74,10 @@ hold the call: the transport stops reading as soon as the answer is in.
 **Addresses.** The server URL is `https://` (no user name, no fragment, at most 2048 bytes). Every
 address its name resolves to must be public: loopback, private (RFC 1918, unique local), link-local
 (the cloud metadata address `169.254.169.254` included), carrier-grade NAT, multicast and reserved
-addresses are refused, also through IPv4-mapped and NAT64 IPv6, so a connection cannot reach Lake's
-own network (its Postgres, the workspace Zettas). The check runs on the addresses actually
+addresses are refused, also through IPv4-mapped, NAT64 and 6to4 IPv6, so a connection cannot reach
+Lake's own network (its Postgres, the workspace Zettas). An IPv6 address is public only inside
+global unicast (`2000::/3`), never Teredo, benchmarking, ORCHID or documentation space (LSR-265,
+lake#1008), so IPv4-compatible, local-use NAT64 and site-local forms are refused too. The check runs on the addresses actually
 connected to, after resolution, so a name that resolves to a private address is refused however it
 was spelled. A Lake started with `LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1` (local development and tests
 only, never a deployment) also reaches loopback and private addresses, and plain `http://` to
@@ -310,6 +312,10 @@ Optional, per connection (Steve's design in lake#652):
   The connection records it (`agent_id`). The workspace engine must accept `mcp:<slug>` skills
   ([zetta](https://github.com/oramasearch/zetta) PR from this epic). It runs on demand, on a
   schedule (`schedule_agent`), or from its input stream.
+- **No stream Lake writes itself** is a connection's topic (LSR-190, lake#996): `agent-*`,
+  `app-events.*`, `build-events.*`, `run-metrics.*`, `study-events.*` and `inbox:*` are refused for
+  `input_topic`, `output_topic` and `notifications_topic`, the same rule streams and agent triggers
+  use (`system_stream_name`).
 - **Input stream** (`input_topic`, needs the agent): a workspace topic (Train → Streams). Each new
   event starts a job of the agent (`launch_agent`, mode `job`) with
   `{connection_id, connection, topic, sequence, event}` as its input, the way the agent bus hands
