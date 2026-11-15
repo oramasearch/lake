@@ -353,6 +353,48 @@ TEST_F(Streams, ReadsWritesDeletesAndCreatorOwnershipUseSpacePolicy) {
     context.operator_credential = true;
     EXPECT_TRUE(call("delete_stream", drop).ok);
 }
+// LSR-119 (lake#986): a workspace's agent-events carry each turn's answer, which is the person's
+// who asked. A member reads the events of their own turns only, browsing or selecting a task.
+TEST_F(Streams, AgentEventsShowAMemberOnlyTheirOwnTurns) {
+    lake::control::WorkspaceAgentBus events(workspace->service.get(), customer, workspace->id);
+    ASSERT_TRUE(liquid::runtime::block_on(events.create_topic("agent-events")).value());
+    lake::control::AgentTask mine_row;
+    mine_row.customer_id = customer;
+    mine_row.agent = "agent-ask-orama";
+    mine_row.kind = "test";
+    mine_row.workspace_id = workspace->id;
+    mine_row.requested_by_user_id = "user-ada";
+    auto theirs_row = mine_row;
+    theirs_row.requested_by_user_id = "user-grace";
+    const auto mine = store->create_agent_task(mine_row);
+    const auto theirs = store->create_agent_task(theirs_row);
+    ASSERT_TRUE(mine && theirs);
+    ASSERT_TRUE(liquid::runtime::block_on(events.publish(
+        "agent-events", {{"task_id", mine->id}, {"reply", "ada's answer"}}, mine->id)).value());
+    ASSERT_TRUE(liquid::runtime::block_on(events.publish(
+        "agent-events", {{"task_id", theirs->id}, {"reply", "grace's answer"}}, theirs->id)).value());
+
+    const auto object = store->find_policy_object("customer", customer);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(store->create_grant({"reader", object->id, "read", "test-attestation", "admin", ""}));
+    context.operator_credential = false;
+    context.acting_identity = "reader";
+    context.acting_user_id = "user-ada";
+    const auto browsed = call("browse_stream", input("agent-events"));
+    ASSERT_TRUE(browsed.ok) << browsed.error.message;
+    EXPECT_NE(browsed.value.dump().find("ada's answer"), std::string::npos);
+    EXPECT_EQ(browsed.value.dump().find("grace's answer"), std::string::npos);
+    auto selected = input("agent-events");
+    selected["task"] = theirs->id;
+    EXPECT_EQ(call("browse_stream", selected).error.code, "not_found");
+
+    context.acting_identity = "admin";
+    context.acting_user_id.clear();
+    context.operator_credential = true;
+    EXPECT_NE(call("browse_stream", input("agent-events")).value.dump().find("grace's answer"),
+              std::string::npos);
+}
+
 TEST_F(Streams, AgentDocumentationIncludesEveryStreamToolAndConfirmationGuidance) {
     const auto groups = lake::api::agent_docs::tool_groups(registry);
     const auto group = std::ranges::find(groups, "Streams", &lake::api::agent_docs::Group::title);
