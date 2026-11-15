@@ -1952,9 +1952,13 @@ public:
     // Every organization and team membership held by one user principal, newest first.
     virtual Result<std::vector<Membership>> list_user_memberships(const std::string& user_id,
                                                                   int limit) = 0;
-    // Pending, unexpired invitations addressed to an email address or to one of the handles.
+    // Pending, unexpired invitations addressed to the user `user_id`: to the user's email address,
+    // only when that address is verified, or to one of the handles. An account an SSO provider or
+    // SCIM provisioned holds an address its identity provider asserted and nobody verified (lake
+    // has no domain proof for a connection), so email invitations never reach it (lake#1297); it
+    // is invited by handle, or an administrator accepts on its behalf.
     virtual Result<std::vector<Invitation>>
-    list_invitee_invitations(const std::string& email,
+    list_invitee_invitations(const std::string& user_id,
                              const std::vector<std::string>& handles,
                              int limit) = 0;
 

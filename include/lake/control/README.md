@@ -103,7 +103,9 @@ See [the lease contract](../../../docs/api/agent-bus.md).
 
 `store.hpp` declares `NewOrganizationSpace`, `ConvertPersonalSpace` and their `OrganizationSpace`
 result for organizations a person runs, plus `list_user_memberships` and
-`list_invitee_invitations`. See [organizations.md](../../../docs/api/organizations.md).
+`list_invitee_invitations`, which takes the user and matches `email` invitations only to a verified
+address: never for an account SSO or SCIM provisioned (lake#1297). See
+[organizations.md](../../../docs/api/organizations.md).
 
 `workspace_records.hpp` declares `WorkspaceRecords` (append, list, get, conditional put,
 remove and update of sealed records in one workspace Zetta's record store) and `RecordSet<Codec>`, the typed collection every table that moves into a

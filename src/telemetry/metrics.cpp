@@ -486,11 +486,11 @@ public:
                     [&] { return store_->list_user_memberships(user_id, limit); });
     }
     control::Result<std::vector<control::Invitation>>
-    list_invitee_invitations(const std::string& email,
+    list_invitee_invitations(const std::string& user_id,
                              const std::vector<std::string>& handles,
                              int limit) override {
         return call("list_invitee_invitations",
-                    [&] { return store_->list_invitee_invitations(email, handles, limit); });
+                    [&] { return store_->list_invitee_invitations(user_id, handles, limit); });
     }
     control::Result<control::PolicyObject>
     create_policy_object(const control::NewPolicyObject& value) override {

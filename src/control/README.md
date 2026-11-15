@@ -133,9 +133,12 @@ token purposes. Memory and PostgreSQL stores insert queued rows, retain operator
 notify `lake_builds` on create/cancel. See `docs/control-plane/builds.md`.
 
 Both stores implement `create_organization_space` and `convert_personal_space` as one transaction
-each, list a user's memberships and the invitations addressed to an email or handles, and keep an
-organization-scope membership's grant on the organization's own space in step with the membership.
-See `docs/api/organizations.md`.
+each, list a user's memberships and the invitations addressed to the user's verified email or
+handles, and keep an organization-scope membership's grant on the organization's own space in step
+with the membership. See `docs/api/organizations.md`. An account with a SCIM user record (SCIM or
+just-in-time SSO provisioned it) has no verified email: `list_invitee_invitations` matches no
+`email` invitation to it, and Clerk sign-in never links to it by address (lake#1297,
+`docs/api/sso.md`).
 Agent launches and cron schedules carry the workspace that holds their agent (migration
 `0043_agent_launch_workspaces`, lake#442). Both stores filter launch, schedule and scheduled-run
 lists by it. `expire_unstarted_agent_launches` withdraws, with a `stop_reason`, a launch the

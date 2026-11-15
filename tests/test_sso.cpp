@@ -311,6 +311,76 @@ TEST(Scim, UserUpdateGroupReplacementAndDeactivationRevokeSessions) {
     EXPECT_EQ(logs.value.at("items").front().at("operation"), "deactivate");
 }
 
+// lake#1297: an SSO or SCIM account's address is whatever its identity provider asserted, and lake
+// has no domain proof for a connection, so it is never verified. An organization that controls a
+// provider could otherwise provision someone else's address and receive the invitations meant for
+// them, or have that person's Clerk sign-in linked to the provisioned account.
+TEST(Scim, AProvisionedAddressReachesNoEmailInvitationAndLinksNoClerkSignIn) {
+    SsoSurface surface;
+    const ApiResult attacker =
+        surface.call("create_organization", {{"display_name", "Provider organization"}});
+    ASSERT_TRUE(attacker.ok) << attacker.error.message;
+    const ApiResult provider = surface.call(
+        "register_sso_provider",
+        provider_input(attacker.value.at("id"), "stub-claims", "oidc", "https://claims.example"));
+    ASSERT_TRUE(provider.ok) << provider.error.message;
+    const std::string provider_id = provider.value.at("id");
+    ASSERT_TRUE(surface
+                    .call("upsert_scim_user",
+                          {{"provider_id", provider_id},
+                           {"external_id", "claimed"},
+                           {"email", "Victim@Example.com"},
+                           {"display_name", "Not the victim"},
+                           {"taap_id", "taap:1:ed25519:claimed"},
+                           {"active", true}})
+                    .ok);
+    const auto scim = surface.store.get_scim_user(provider_id, "claimed");
+    ASSERT_TRUE(scim) << scim.error().message;
+    const auto provisioned = surface.store.get_user(scim->user_id);
+    ASSERT_TRUE(provisioned) << provisioned.error().message;
+    ASSERT_EQ(provisioned->email, "Victim@Example.com");
+
+    const ApiResult other =
+        surface.call("create_organization", {{"display_name", "Inviting organization"}});
+    ASSERT_TRUE(other.ok) << other.error.message;
+    const ApiResult invitation = surface.call("create_invitation",
+                                              {{"organization_id", other.value.at("id")},
+                                               {"invitee_type", "email"},
+                                               {"invitee", "victim@example.com"},
+                                               {"role", "admin"},
+                                               {"expires_at", "2999-01-01T00:00:00Z"}});
+    ASSERT_TRUE(invitation.ok) << invitation.error.message;
+    const std::string invitation_id = invitation.value.at("id");
+
+    // As the provisioned account: the invitation is neither listed nor joinable.
+    surface.context.operator_credential = false;
+    surface.context.authorized = true;
+    surface.context.acting_identity = provisioned->taap_id;
+    surface.context.acting_user_id = provisioned->id;
+    const ApiResult mine = surface.call("list_invitations");
+    ASSERT_TRUE(mine.ok) << mine.error.message;
+    EXPECT_TRUE(mine.value.at("items").empty());
+    const ApiResult joined = surface.call("join_organization", {{"invitation_id", invitation_id}});
+    EXPECT_EQ(joined.error.code, "unauthorized");
+    const auto pending = surface.store.list_invitee_invitations(provisioned->id, {}, 10);
+    ASSERT_TRUE(pending);
+    EXPECT_TRUE(pending->empty()) << "the store applies the rule, whoever asks";
+
+    // Clerk verified this address for the person who owns it; their sign-in gets an account of
+    // its own instead of the provisioned one.
+    lake::control::ClerkIdentity clerk;
+    clerk.subject = "user_victim";
+    clerk.email = "victim@example.com";
+    clerk.display_name = "Victim";
+    clerk.custodial_taap_id = "taap:1:ed25519:victim";
+    clerk.custodial_public_key = "victim-public-key";
+    clerk.custodial_wrapped_seed = "victim-wrapped-seed";
+    const auto signed_up = surface.store.provision_clerk_user(clerk);
+    ASSERT_TRUE(signed_up) << signed_up.error().message;
+    EXPECT_FALSE(signed_up->linked);
+    EXPECT_NE(signed_up->user_id, provisioned->id);
+}
+
 // lake#870: principal ids are TAAP ids; `admin` belongs to the admin token alone.
 TEST(PrincipalIds, OnlyTaapIdentitiesAreValid) {
     using lake::control::valid_principal_id;

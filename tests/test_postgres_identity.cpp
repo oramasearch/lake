@@ -766,6 +766,31 @@ TEST(PostgresIdentity, SsoFederationAndScimDeactivation) {
                                                   {{"department", "identity"}}});
     ASSERT_TRUE(updated) << updated.error().message;
     EXPECT_EQ(updated->user_id, created->user_id);
+    // lake#1297: the provisioned address is the provider's unverified claim, so an email
+    // invitation to it does not reach the account, and a Clerk sign-in with it is not linked.
+    const auto invitation = store->create_invitation({organization->id,
+                                                      "",
+                                                      "email",
+                                                      "sso-user-" + suffix + "@example.test",
+                                                      "member",
+                                                      "2999-01-01T00:00:00Z",
+                                                      "taap:1:ed25519:sso-org-" + suffix,
+                                                      "invite-" + suffix});
+    ASSERT_TRUE(invitation) << invitation.error().message;
+    const auto reached = store->list_invitee_invitations(created->user_id, {}, 10);
+    ASSERT_TRUE(reached) << reached.error().message;
+    EXPECT_TRUE(reached->empty());
+    lake::control::ClerkIdentity clerk;
+    clerk.subject = "user_sso_" + suffix;
+    clerk.email = "sso-user-" + suffix + "@example.test";
+    clerk.custodial_taap_id = "taap:1:ed25519:clerk-" + suffix;
+    clerk.custodial_public_key = "clerk-public-key-" + suffix;
+    clerk.custodial_wrapped_seed = "clerk-wrapped-seed-" + suffix;
+    const auto clerk_user = store->provision_clerk_user(clerk);
+    if (clerk_user) {
+        EXPECT_FALSE(clerk_user->linked);
+        EXPECT_NE(clerk_user->user_id, created->user_id);
+    } // else: the address is taken (users_email_lower_key), so no account is made; never a link.
     const auto users = store->list_scim_users(provider->id, 100);
     ASSERT_TRUE(users) << users.error().message;
     ASSERT_EQ(users->size(), 1);

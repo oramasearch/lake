@@ -3071,11 +3071,22 @@ public:
             });
     }
 
-    Result<std::vector<Invitation>> list_invitee_invitations(const std::string& email,
+    Result<std::vector<Invitation>> list_invitee_invitations(const std::string& user_id,
                                                              const std::vector<std::string>& handles,
                                                              int limit) override {
         return with_tx<std::vector<Invitation>>(
             [&](pqxx::work& tx) -> Result<std::vector<Invitation>> {
+                // The user's address counts only when it is verified: never for an account an SSO
+                // provider or SCIM provisioned, whose address its identity provider asserted
+                // (lake#1297). An unknown user, or one without an address, matches no email.
+                std::string email;
+                const pqxx::result user = tx.exec_params(
+                    "SELECT coalesce(u.email, '') FROM users u WHERE u.id::text = $1 "
+                    "AND NOT EXISTS (SELECT 1 FROM scim_users s WHERE s.user_id = u.id)",
+                    user_id);
+                if (!user.empty()) {
+                    email = user[0][0].as<std::string>();
+                }
                 pqxx::params params;
                 params.append(email);
                 std::string handle_list;
@@ -9692,10 +9703,13 @@ public:
             result.user_id = rows[0][0].as<std::string>();
         } else {
             // Clerk verified this address, so an existing lake account with it is the same
-            // person: link it rather than create a second account.
+            // person: link it rather than create a second account. Never an account an SSO
+            // provider or SCIM provisioned: its address is only its identity provider's claim
+            // (lake#1297).
             if (!in.email.empty()) {
                 rows = tx.exec_params("SELECT id::text FROM users WHERE pool_id = 'lake' "
-                                      "AND lower(email) = lower($1)",
+                                      "AND lower(email) = lower($1) AND NOT EXISTS "
+                                      "(SELECT 1 FROM scim_users s WHERE s.user_id = users.id)",
                                       in.email);
             }
             if (!rows.empty()) {

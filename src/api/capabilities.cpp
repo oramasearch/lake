@@ -5704,9 +5704,11 @@ void register_repository_capabilities(Registry& registry) {
         }});
 }
 
-// The pending invitations addressed to the signed-in person: their email, or the handle of a
-// personal space they hold. Each item carries the organization's display name, which the
-// invitee cannot otherwise read before joining.
+// The pending invitations addressed to the signed-in person: their verified email, or the handle of
+// a personal space they hold. The store decides whether the email counts: an SSO or SCIM account's
+// address was asserted by its identity provider and never verified, so it matches no email
+// invitation (lake#1297). Each item carries the organization's display name, which the invitee
+// cannot otherwise read before joining.
 ApiResult own_invitations(ApiContext& ctx, int limit) {
     const auto user = ctx.store->get_user(ctx.acting_user_id);
     if (!user) {
@@ -5718,7 +5720,7 @@ ApiResult own_invitations(ApiContext& ctx, int limit) {
             handles.push_back(customer.name);
         }
     }
-    const auto rows = ctx.store->list_invitee_invitations(user->email, handles, limit);
+    const auto rows = ctx.store->list_invitee_invitations(user->id, handles, limit);
     if (!rows) {
         return from_store_error(rows.error());
     }

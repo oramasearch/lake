@@ -131,7 +131,7 @@ public:
     Result<OrganizationSpace> convert_personal_space(const ConvertPersonalSpace&) override;
     Result<std::vector<Membership>> list_user_memberships(const std::string& user_id,
                                                           int limit) override;
-    Result<std::vector<Invitation>> list_invitee_invitations(const std::string& email,
+    Result<std::vector<Invitation>> list_invitee_invitations(const std::string& user_id,
                                                              const std::vector<std::string>& handles,
                                                              int limit) override;
     Result<PolicyObject> create_policy_object(const NewPolicyObject&) override;
@@ -578,6 +578,9 @@ public:
                                       const std::string& subject) override;
     // provision_clerk_user under the lock.
     Result<ClerkUserProvisioned> clerk_user_locked(const ClerkIdentity&);
+    // Whether an SSO provider or SCIM provisioned this account (it has a SCIM user record), so its
+    // email is the identity provider's unverified assertion (lake#1297).
+    bool provisioned_by_identity_provider_locked(const std::string& user_id) const;
     Result<AccountIdentity> account_identity(const std::string& user_id) override;
     Result<ManagedKey> managed_key(const std::string& user_id) override;
     Result<void> create_identity_link_challenge(const IdentityLinkChallenge&) override;

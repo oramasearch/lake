@@ -298,6 +298,10 @@ request-body limit. They stream to disk up to `LAKE_MAX_REGISTRY_BLOB_BYTES`, va
 ranges, and verify the digest from the completed file; [`builds.md`](builds.md) and
 [`../serving/http.md`](../serving/http.md) own the operational contract.
 
+lake#1297: [`organizations.md`](organizations.md), [`sso.md`](sso.md) and [`clerk.md`](clerk.md)
+say that an SSO or SCIM account's address is never verified, so no `email` invitation reaches it and
+no Clerk sign-in links to it by address.
+
 [`services.md`](services.md), [`storage.md`](storage.md) and [`workspaces.md`](workspaces.md)
 list `LAKE_SERVICE_CONNECTION_URL`, with which lake asks the operator for one connection at a time
 instead of reading the mounted `LAKE_SERVICE_DIR` (orama-operator#773,
