@@ -450,6 +450,12 @@ trial is dispatched once however many callers read the experiment.
   run is queued, and a trial whose run ended without a result is ended. They answer `runner` (each
   waiting trial with its `methodology_run`) and `methodology_runs` (every trial's run: `trial`,
   `number`, `run_id`, `phase`, `message`).
+- A read never acts for the reader (LSR-195, lake#1001). `get_experiment` by someone who may only
+  read the account (no `write` grant) changes nothing: no run is queued, no trial is ended and no run
+  is stopped. By someone who may change the account's experiments, it reconciles for the person who
+  started the experiment: the runs it queues name the starter, it uses only the image already built
+  (never starts a build), and a trial whose methodology cannot be prepared waits instead of being
+  stopped. `stop_experiment_trial` queues the next trial the same way.
 - `stop_experiment` stops the runs of its trials that have not finished their code;
   `stop_experiment_trial` stops that trial's run. An experiment that ended runs nothing more.
 
@@ -477,8 +483,9 @@ trial is dispatched once however many callers read the experiment.
 `WorkspaceRecordStores.MethodologiesAreTheWorkspacesOwnAndOramasStayReadOnly` also starts an
 experiment on the methodology: two trials queued as training runs of its validated image, read again
 without a second run, a result reported with the experiment and trial and the third trial queued for
-the person who started it, a failed run ending its trial with the reason, and the experiment's stop
-stopping the rest. `frontend/tests/experiment-methodologies.test.ts` covers the drawer's choices.
+the person who started it, a read by a member who may only read queuing and stopping nothing, a
+failed run ending its trial with the reason on the owner's read, and the experiment's stop stopping
+the rest. `frontend/tests/experiment-methodologies.test.ts` covers the drawer's choices.
 
 ## How to verify
 

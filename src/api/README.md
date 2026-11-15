@@ -434,7 +434,9 @@ template with the reason. See `docs/api/methodologies.md`.
 engine `run` that answers `runner_required` to `run_methodology`. An experiment over a workspace
 methodology's parameters (lake#689) runs each trial the engine admits as a training run of it:
 `methodology_experiments.hpp` (`current_experiment`, `stop_experiment_runs`) is what
-`experiment_capabilities.cpp` calls on start, read and stop; a trial's run is claimed once in the
+`experiment_capabilities.cpp` calls on start, read and stop (a read by a member who may only read
+reconciles nothing; one who may write reconciles for the experiment's starter, from the image already
+built: `ExperimentReconcile`, lake#1001); a trial's run is claimed once in the
 sealed `lake_methodology_trials` record, and `methodology_run_output` reports its result with the
 engine's `study` and `trial`. See `docs/api/methodologies.md#experiments`.
 

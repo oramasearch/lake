@@ -180,7 +180,8 @@ authorized engine contract and an opt-in browser fixture. `frontend/tests/experi
 the chart transformations in `frontend/src/pages/experiments/transforms.ts` without a browser, and
 `frontend/tests/experiment-methodologies.test.ts` the Start an Experiment choices for a workspace
 methodology (lake#689); the methodology case in `test_workspace_records.cpp` runs such an
-experiment's trials end to end.
+experiment's trials end to end, including a read by a member who may only read that queues and
+stops nothing (lake#1001).
 Independent response validation also uses these fixtures. See
 [API](../docs/api/experiments.md) and [UI](../docs/ui/experiments.md) contracts.
 
