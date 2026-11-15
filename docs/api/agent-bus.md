@@ -124,6 +124,9 @@ lands. The at-most-one-receive-per-minute deployment acceptance is not claimed b
 ## Delegated turns
 
 An agent that delegates calls `agent_turn` with its own task credential (Ask Orama's `delegate`).
+**Delegation attenuates** (LSR-013, lake#922): a turn asked for with any agent credential holds only
+the scopes that credential holds, plus `get_agent_task`, so no agent can mint a turn with more
+authority than its own. A confirmation carried by an agent's turn is refused (lake#989).
 Lake then records the asking task's ID as `parent_task_id` in the delegated task's body and reports
 the delegated turn on the asking turn (lake#451), so whoever follows the asking turn sees which
 agent is working without following a second task:

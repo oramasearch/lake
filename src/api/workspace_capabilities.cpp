@@ -7571,6 +7571,15 @@ void register_agent_run_capabilities(Registry& registry) {
                 if (asking) {
                     body["parent_task_id"] = asking->id;
                 }
+                // A turn an agent asks for never holds more than the asking agent does (LSR-013,
+                // lake#922): delegation attenuates. Its scopes are the ones the caller's own
+                // credential carries, plus reading its own task, which every turn needs.
+                if (context.credential_kind.starts_with("agent_")) {
+                    std::erase_if(scopes, [&](const std::string& scope) {
+                        return scope != "get_agent_task" &&
+                               std::ranges::find(context.scopes, scope) == context.scopes.end();
+                    });
+                }
                 control::AgentTask asked{.id = planned_task_id.empty() ? control::new_uuid_v4()
                                                                        : planned_task_id,
                                          .customer_id = customer_id,
