@@ -3916,15 +3916,21 @@ public:
                 if (refs->empty()) {
                     output.git["status"] = "empty";
                 } else {
-                    static std::atomic<unsigned long> export_number{0};
-                    const std::filesystem::path target =
-                        std::filesystem::temp_directory_path() /
-                        ("lake-export-" + repository_id + "-" + std::to_string(++export_number));
+                    // A private (0700), unpredictable folder per export: no other request can
+                    // name it, so it is never a source for another tenant's import (lake#925).
+                    std::string folder_template =
+                        (std::filesystem::temp_directory_path() / "lake-export-XXXXXX").string();
+                    if (::mkdtemp(folder_template.data()) == nullptr) {
+                        return std::unexpected(
+                            SyncStoreError{"store_unavailable", "cannot create the export folder", "export"});
+                    }
+                    const std::filesystem::path folder = folder_template;
+                    const std::filesystem::path target = folder / "git";
                     const auto exported = liquid::runtime::block_on(
                         liquid::export_git(*(*state)->subject, target, refs->front().name));
                     if (!exported) {
                         std::error_code ignored;
-                        std::filesystem::remove_all(target, ignored);
+                        std::filesystem::remove_all(folder, ignored);
                         return std::unexpected(error_of(exported.error()));
                     }
                     output.git = {{"requested", true},
@@ -3952,7 +3958,7 @@ public:
                              {"contents", base64_encode(contents)}});
                     }
                     std::error_code ignored;
-                    std::filesystem::remove_all(target, ignored);
+                    std::filesystem::remove_all(folder, ignored);
                 }
             }
         }
@@ -9484,6 +9490,7 @@ struct ApiServer::Impl {
         ctx.privacy_url = options.privacy_url;
         ctx.sign_in_sso_provider = options.sign_in_sso_provider;
         ctx.sealing_public_key = options.sealing_public_key;
+        ctx.git_import_root = options.git_import_root;
         ctx.transcriber = transcriber;
         ctx.mcp_http = mcp_http;
         ctx.mcp_allow_private_addresses = options.mcp_allow_private_addresses;

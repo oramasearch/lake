@@ -1,6 +1,8 @@
 #include "lake/api/capabilities.hpp"
 
+#include <algorithm>
 #include <expected>
+#include <filesystem>
 #include <map>
 #include <string>
 #include <string_view>
@@ -62,11 +64,72 @@ json wrap_replacements(const json& workflow) {
     return output;
 }
 
+std::expected<std::filesystem::path, std::string>
+git_import_checkout(std::string_view root, std::string_view customer_id, std::string_view relative) {
+    // Read lexically, before any filesystem access: a relative path of plain names, under the
+    // customer's own folder of the staging root (lake#925). Never an absolute path, `..`, `.`,
+    // an empty name or a backslash.
+    if (relative.empty() || relative.size() > 1024 || relative.front() == '/' ||
+        relative.find('\\') != std::string_view::npos ||
+        relative.find('\0') != std::string_view::npos) {
+        return std::unexpected("git_directory is a relative path under this account's staging folder");
+    }
+    std::size_t start = 0;
+    while (start <= relative.size()) {
+        const std::size_t end = std::min(relative.find('/', start), relative.size());
+        const std::string_view name = relative.substr(start, end - start);
+        if (name.empty() || name == "." || name == "..") {
+            return std::unexpected(
+                "git_directory is a relative path under this account's staging folder");
+        }
+        start = end + 1;
+    }
+    if (customer_id.empty() || customer_id.find('/') != std::string_view::npos ||
+        customer_id == "." || customer_id == "..") {
+        return std::unexpected("customer_id cannot name a staging folder");
+    }
+    const std::filesystem::path base = std::filesystem::path(root) / std::string(customer_id);
+    const std::filesystem::path checkout = base / std::string(relative);
+    // A symbolic link inside the folder must not lead out of it.
+    std::error_code error;
+    const auto real_base = std::filesystem::weakly_canonical(base, error);
+    if (error) {
+        return std::unexpected("this account has no staging folder");
+    }
+    const auto real_checkout = std::filesystem::weakly_canonical(checkout, error);
+    if (error) {
+        return std::unexpected("git_directory does not exist in this account's staging folder");
+    }
+    const auto [base_end, checkout_at] =
+        std::mismatch(real_base.begin(), real_base.end(), real_checkout.begin(), real_checkout.end());
+    if (base_end != real_base.end()) {
+        return std::unexpected("git_directory leaves this account's staging folder");
+    }
+    if (!std::filesystem::is_directory(real_checkout, error)) {
+        return std::unexpected("git_directory does not exist in this account's staging folder");
+    }
+    return real_checkout;
+}
+
 liquid::runtime::task<ApiResult> import_github_repository(const json& input,
                                                           ApiContext& context) {
     if (!context.store || !context.sync_store) {
         co_return ApiResult::failure("store_unavailable",
                                   "control and repository stores are required");
+    }
+    // The checkout is read only from the caller's own folder of the staging root, never from a
+    // server path the caller chose (lake#925).
+    if (context.git_import_root.empty()) {
+        co_return ApiResult::failure("unavailable",
+                                     "this lake has no Git import staging root (LAKE_GIT_IMPORT_ROOT)",
+                                     "/git_directory");
+    }
+    const std::string customer_for_checkout = input.at("customer_id");
+    const auto checkout = git_import_checkout(context.git_import_root,
+                                              customer_for_checkout,
+                                              input.at("git_directory").get<std::string>());
+    if (!checkout) {
+        co_return ApiResult::failure("invalid_input", checkout.error(), "/git_directory");
     }
     const json& recording = input.at("recording");
     const auto workspace = repository_workspace(context, input);
@@ -85,7 +148,7 @@ liquid::runtime::task<ApiResult> import_github_repository(const json& input,
     const auto history = co_await blocking_call(
         [&] {
             return context.sync_store->import_git(created->customer_id, created->id,
-                                                  input.at("git_directory"));
+                                                  checkout->string());
         },
         [](std::string message) -> SyncStoreResult<RepositoryGitImport> {
             return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});

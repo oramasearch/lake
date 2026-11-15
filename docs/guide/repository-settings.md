@@ -141,8 +141,9 @@ changes its own.
 
 `POST /v1/import_github_repository` (MCP `import_github_repository`) imports a Git history together
 with GitHub's issues, comments, pull requests, review comments and workflow files. Send
-`customer_id`, `workspace_id`, the new `name`, `git_directory` (a Git checkout the Lake server can
-read) and `recording`: the GitHub REST responses for `repository`, `issues`, `issue_comments`,
+`customer_id`, `workspace_id`, the new `name`, `git_directory` (a Git checkout
+in your account's folder of the server's staging root, `LAKE_GIT_IMPORT_ROOT/<customer_id>/`, as a
+relative path; [github-import.md](../api/github-import.md#input)) and `recording`: the GitHub REST responses for `repository`, `issues`, `issue_comments`,
 `pulls`, `review_comments` and `workflows`, collected beforehand. Lake makes no call to GitHub
 itself, and no GitHub credential is stored.
 

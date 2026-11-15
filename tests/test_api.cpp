@@ -4615,7 +4615,7 @@ TEST(Repositories, BelongToOneWorkspaceOfTheirSpace) {
                                     {{"customer_id", ada},
                                      {"workspace_id", foreign->id},
                                      {"name", "example"},
-                                     {"git_directory", "/recorded/example.git"},
+                                     {"git_directory", "example.git"},
                                      {"recording", json::object()}});
     EXPECT_EQ(github.error.code, "invalid_input");
     EXPECT_EQ(github.error.path, "/customer_id");
@@ -5146,14 +5146,21 @@ TEST(GitHubImport, MapsRecordedIssuesReviewsAndWorkflowReport) {
                         "github-import-recording.json");
     ASSERT_TRUE(input.good());
     const json recording = json::parse(input);
+    // The checkout is read from the customer's own folder of the staging root (lake#925).
+    const std::filesystem::path root = std::filesystem::temp_directory_path() /
+                                       ("lake-import-" + lake::control::new_uuid_v4());
+    const std::string customer_id = customer.value["id"];
+    std::filesystem::create_directories(root / customer_id / "example.git");
+    surface.ctx.git_import_root = root.string();
     const ApiResult imported = surface.call(
         "import_github_repository",
         {{"customer_id", customer.value["id"]},
          {"workspace_id", surface.workspace(customer.value["id"])},
          {"name", "example"},
-         {"git_directory", "/recorded/example.git"},
+         {"git_directory", "example.git"},
          {"recording", recording}});
     ASSERT_TRUE(imported.ok) << imported.error.message;
+    std::filesystem::remove_all(root);
     EXPECT_EQ(imported.value["fidelity"]["format"], "github_import_fidelity/1");
     EXPECT_EQ(imported.value["fidelity"]["workflows"][0]["wrap_replacements"][0]["replacement"],
               "liquid wrap");
@@ -5165,6 +5172,52 @@ TEST(GitHubImport, MapsRecordedIssuesReviewsAndWorkflowReport) {
                   .value["items"]
                   .size(),
               1);
+}
+
+// import_github_repository reads only a checkout in the caller's own folder of the staging root:
+// never a server path the caller chose, another customer's folder, or a link out (lake#925).
+TEST(GitHubImport, ReadsOnlyTheCallersStagingFolder) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const std::string customer_id = customer.value["id"];
+    const auto import_from = [&](const std::string& directory) {
+        return surface.call("import_github_repository",
+                            {{"customer_id", customer_id},
+                             {"workspace_id", surface.workspace(customer_id)},
+                             {"name", "example-" + lake::control::new_uuid_v4().substr(0, 8)},
+                             {"git_directory", directory},
+                             {"recording", json::object()}});
+    };
+    // No staging root: the import is not offered.
+    EXPECT_EQ(import_from("example.git").error.code, "unavailable");
+
+    const std::filesystem::path root = std::filesystem::temp_directory_path() /
+                                       ("lake-import-" + lake::control::new_uuid_v4());
+    std::filesystem::create_directories(root / customer_id / "example.git");
+    std::filesystem::create_directories(root / "someone-else" / "theirs.git");
+    std::filesystem::create_symlink(root / "someone-else", root / customer_id / "link");
+    surface.ctx.git_import_root = root.string();
+    for (const std::string refused : {std::string("/tmp/lake-export-1"),
+                                      (root / customer_id / "example.git").string(),
+                                      std::string("../someone-else/theirs.git"),
+                                      std::string("example.git/../../someone-else/theirs.git"),
+                                      std::string("./example.git"),
+                                      std::string("a//b"),
+                                      std::string("link/theirs.git"),
+                                      std::string("missing.git")}) {
+        const ApiResult result = import_from(refused);
+        EXPECT_EQ(result.error.code, "invalid_input") << refused;
+        EXPECT_EQ(result.error.path, "/git_directory") << refused;
+    }
+    EXPECT_TRUE(import_from("example.git").ok);
+    std::filesystem::remove_all(root);
 }
 
 TEST(Forge, ReleaseRetainsVerifiedArtifactAttestations) {

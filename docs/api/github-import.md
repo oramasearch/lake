@@ -10,8 +10,17 @@ than implying lossless conversion.
 
 ## Input
 
-The action accepts destination `customer_id`, `workspace_id` and `name`, a local
-`git_directory`, and a `recording` object. The new repository belongs to `workspace_id`, a live
+The action accepts destination `customer_id`, `workspace_id` and `name`, a
+`git_directory`, and a `recording` object.
+
+**Where the checkout is read from (lake#925).** `git_directory` is a relative path inside the
+customer's own folder of the staging root, `LAKE_GIT_IMPORT_ROOT/<customer_id>/<git_directory>`,
+never a server path the caller chooses. It is checked by its text before any filesystem access: an
+absolute path, `..`, `.`, an empty name or a backslash is `invalid_input` at `/git_directory`. Then
+the resolved folder, symbolic links followed, must still lie inside the customer's folder and exist.
+With no `LAKE_GIT_IMPORT_ROOT` the capability answers `unavailable`. The deployment integration
+that fetches the checkout writes it there. An export's temporary Git folder is private (`0700`) and
+named at random (`mkdtemp`), and is never under the staging root. The new repository belongs to `workspace_id`, a live
 workspace of the customer's account (lake#315); a missing or unknown one is `invalid_input` at
 `/workspace_id`. The recording has `repository`, `issues`, `issue_comments`, `pulls`,
 `review_comments`, and `workflows` arrays copied from GitHub API responses. Tests use the
