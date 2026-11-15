@@ -221,6 +221,13 @@ reference and carries the rule's reason verbatim; for example,
 `branch protection rejects a non-fast-forward update to main`. The registry refuses an anonymous
 or unauthorized push before invoking the reference evaluator.
 
+**The rules apply to every write that advances a branch, not only a push** (LSR-015, lake#924).
+Drive uploads, folder and file changes, restores and conflict resolutions, methodology edits, model
+uploads and store writes all pass the branch they advance and its rules to
+`repository_write_authorizer`. That evaluates them as a fast-forward by the acting person, under the
+same lock as the write, before the path checks. A write whose rules cannot be read is refused. Before
+lake#924 these writes bypassed every rule, including `allowed_pushers`.
+
 The rules, and the reviews or releases a rule asks for, are read from the repository's workspace
 once, before the push starts (`load_branch_protection`): the push itself runs synchronously inside
 the repository store, so it evaluates that snapshot rather than call the workspace from inside it.

@@ -1332,15 +1332,43 @@ json drive_input_schema(bool path_required) {
 RepositoryWriteAuthorizer
 repository_write_authorizer(const control::Repository& repository,
                             const std::vector<RepositoryWriteOperation>& operations,
-                            ApiContext& context) {
+                            ApiContext& context,
+                            std::string ref,
+                            BranchProtectionLoad protection) {
     std::vector<RepositoryWriteOperation> paths;
     for (const auto& operation : operations) {
         paths.push_back(
             {.kind = operation.kind, .path = operation.path, .source_path = operation.source_path});
     }
-    return [repository, paths = std::move(paths), &context](const auto& entries) {
+    return [repository, paths = std::move(paths), &context, ref = std::move(ref),
+            protection = std::move(protection)](const auto& entries) -> SyncStoreResult<void> {
+        // The branch's rules first, as a push's reference update (lake#924): a direct write adds
+        // one change on top of the branch, so it is a fast-forward by the acting person.
+        if (!protection) {
+            return std::unexpected(SyncStoreError{
+                "unavailable", "branch protection could not be read: " + protection.error().message});
+        }
+        const BranchRefUpdate update{.name = ref, .old_head = std::nullopt, .new_head = {},
+                                     .fast_forward = true};
+        if (auto evaluated = evaluate_branch_protection(*context.store,
+                                                        context.acting_identity,
+                                                        context.authorization_cache,
+                                                        *protection,
+                                                        update);
+            !evaluated) {
+            return std::unexpected(evaluated.error());
+        }
         return authorize_drive_operations(repository, entries, paths, context);
     };
+}
+
+BranchProtectionLoad branch_protection_blocking(ApiContext& context,
+                                                const control::Repository& repository) {
+    auto loaded = liquid::runtime::block_on(load_branch_protection(context, repository));
+    if (!loaded) {
+        return std::unexpected(SyncStoreError{"unavailable", loaded.error().message});
+    }
+    return std::move(*loaded);
 }
 
 void register_drive_capabilities(Registry& registry) {
@@ -1514,7 +1542,7 @@ void register_drive_capabilities(Registry& registry) {
             }
             std::vector<RepositoryWriteOperation> operations{
                 {.kind = RepositoryWriteKind::Folder, .path = target}};
-            auto authorize = repository_write_authorizer(repository, operations, context);
+            auto authorize = repository_write_authorizer(repository, operations, context, input.at("ref"), branch_protection_blocking(context, repository));
             return committed_drive_change(
                 repository,
                 "drive.folder.created",
@@ -1618,7 +1646,7 @@ void register_drive_capabilities(Registry& registry) {
                 uploaded += operation.contents.size();
             }
             record_workspace_transfer(context, repository->workspace_id, uploaded, 0);
-            auto authorize = repository_write_authorizer(*repository, operations, context);
+            auto authorize = repository_write_authorizer(*repository, operations, context, input.at("ref"), branch_protection_blocking(context, *repository));
             return committed_drive_change(
                 *repository,
                 "drive.files.uploaded",
@@ -1686,7 +1714,7 @@ void register_drive_capabilities(Registry& registry) {
             std::vector<RepositoryWriteOperation> operations{
                 {.kind = RepositoryWriteKind::Moved, .path = destination, .source_path = source}};
             auto authorize =
-                [&, check = repository_write_authorizer(repository, operations, context)](
+                [&, check = repository_write_authorizer(repository, operations, context, input.at("ref"), branch_protection_blocking(context, repository))](
                     const std::vector<RepositoryTreeEntry>& tree) -> SyncStoreResult<void> {
                 if (const auto allowed = check(tree); !allowed) {
                     return allowed;
@@ -1767,7 +1795,7 @@ void register_drive_capabilities(Registry& registry) {
                                                  ? RepositoryWriteKind::DeletedFolder
                                                  : RepositoryWriteKind::DeletedFile;
             std::vector<RepositoryWriteOperation> operations{{.kind = kind, .path = path}};
-            auto authorize = repository_write_authorizer(repository, operations, context);
+            auto authorize = repository_write_authorizer(repository, operations, context, input.at("ref"), branch_protection_blocking(context, repository));
             return committed_drive_change(
                 repository,
                 "drive.path.deleted",
@@ -2016,7 +2044,7 @@ void register_drive_capabilities(Registry& registry) {
                 conflict_id,
                 resolution,
                 std::move(blob),
-                repository_write_authorizer(*repository, operations, context));
+                repository_write_authorizer(*repository, operations, context, "main", branch_protection_blocking(context, *repository)));
             if (!resolved) {
                 return sync_error(resolved.error());
             }
@@ -2070,7 +2098,7 @@ void register_drive_capabilities(Registry& registry) {
                 repository->id,
                 input.at("change_id"),
                 input.at("path"),
-                repository_write_authorizer(*repository, operations, context));
+                repository_write_authorizer(*repository, operations, context, "main", branch_protection_blocking(context, *repository)));
             if (!restored) {
                 return sync_error(restored.error());
             }

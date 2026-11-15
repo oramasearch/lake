@@ -393,11 +393,23 @@ struct FileChange {
 };
 
 // Commits the changes to the folder on `main`; answers the new change id.
+// The branch rules of `repository`, read before a methodology write (lake#924).
+liquid::runtime::task<BranchProtectionLoad> methodology_protection(ApiContext& context,
+                                                                   const control::Repository& repository) {
+    auto loaded = co_await load_branch_protection(context, repository);
+    if (!loaded) {
+        co_return std::unexpected(SyncStoreError{"unavailable", loaded.error().message});
+    }
+    co_return std::move(*loaded);
+}
+
+// `protection`: the repository's branch rules, read by the caller before the write (lake#924).
 std::expected<std::string, ApiResult> commit_files(ApiContext& context,
                                                    const control::Repository& repository,
                                                    const std::string& folder,
                                                    const std::vector<FileChange>& changes,
-                                                   const std::string& message) {
+                                                   const std::string& message,
+                                                   BranchProtectionLoad protection) {
     std::vector<RepositoryWriteOperation> operations;
     for (std::size_t index = 0; index < changes.size(); ++index) {
         const auto path = control::methodology_path(folder, changes[index].path);
@@ -425,7 +437,8 @@ std::expected<std::string, ApiResult> commit_files(ApiContext& context,
         }
         operations.push_back(std::move(operation));
     }
-    auto authorize = repository_write_authorizer(repository, operations, context);
+    auto authorize =
+        repository_write_authorizer(repository, operations, context, "main", std::move(protection));
     const auto committed = context.sync_store->commit_repository_files(repository.customer_id,
                                                                        repository.id,
                                                                        "main",
@@ -1136,8 +1149,12 @@ liquid::runtime::task<ApiResult> create_methodology(const json& input, ApiContex
             co_return created.error();
         }
         repository = *created;
-        auto committed = commit_files(
-            context, repository, folder, changes, "Create the methodology " + probe.manifest->name);
+        auto committed = commit_files(context,
+                                      repository,
+                                      folder,
+                                      changes,
+                                      "Create the methodology " + probe.manifest->name,
+                                      co_await methodology_protection(context, repository));
         if (!committed) {
             co_return committed.error();
         }
@@ -1323,7 +1340,8 @@ liquid::runtime::task<ApiResult> update_methodology(const json& input, ApiContex
                                       *repository,
                                       folder,
                                       changes,
-                                      input.value("message", std::string("Edit the methodology")));
+                                      input.value("message", std::string("Edit the methodology")),
+                                      co_await methodology_protection(context, *repository));
         if (!committed) {
             co_return committed.error();
         }
@@ -1479,7 +1497,12 @@ liquid::runtime::task<ApiResult> duplicate_methodology(const json& input, ApiCon
         co_return repository.error();
     }
     auto committed =
-        commit_files(context, *repository, "", changes, "Duplicate " + id + " as " + name);
+        commit_files(context,
+                     *repository,
+                     "",
+                     changes,
+                     "Duplicate " + id + " as " + name,
+                     co_await methodology_protection(context, *repository));
     if (!committed) {
         co_return committed.error();
     }

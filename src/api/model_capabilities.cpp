@@ -892,7 +892,9 @@ void register_model_capabilities(Registry& registry) {
             }
             record_workspace_transfer(context, repository->workspace_id, uploaded, 0);
             auto authorize =
-                [check = repository_write_authorizer(*repository, operations, context),
+                [check = repository_write_authorizer(*repository, operations, context,
+                                                     input.value("revision", "main"),
+                                                     branch_protection_blocking(context, *repository)),
                  expected = std::move(expected_blobs)](
                     const std::vector<RepositoryTreeEntry>& entries) -> SyncStoreResult<void> {
                 for (const auto& [path, blob] : expected) {
