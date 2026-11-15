@@ -969,6 +969,11 @@ std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_vie
         if (notice.foreign) {
             return notice;
         }
+        // An invoice marked paid without a payment never activates an order (lake#1033).
+        if (invoice_event && object.value("paid_out_of_band", false)) {
+            notice.provider_status = "paid_out_of_band";
+            return notice;
+        }
         control::CloudOrderSubscriptionEvent update;
         update.provider = "stripe";
         update.event_id = notice.event_id;
@@ -1028,7 +1033,12 @@ std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_vie
     if (notice.event_type.starts_with("invoice.")) {
         notice.foreign = foreign_object(object, "lake_customer_id", instance);
     }
-    if (notice.event_type == "invoice.paid") {
+    if (notice.event_type == "invoice.paid" && object.value("paid_out_of_band", false)) {
+        // Marked paid in Stripe without a payment (LSR-140, lake#1033): anything else holding a
+        // key for this account can do that, so the invoice stays due and the notice is recorded
+        // for an operator to review.
+        notice.provider_status = "paid_out_of_band";
+    } else if (notice.event_type == "invoice.paid") {
         notice.state = "paid";
         notice.provider_status = "paid";
     } else if (notice.event_type == "invoice.voided") {
