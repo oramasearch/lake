@@ -268,7 +268,9 @@ the new `url`.
 so one MCP client configured for Lake reaches Lake and what the workspace connected. Off by
 default, per connection. The schemas are the server's; Lake changes only the name, adds the
 connection's name to the description and sets `readOnlyHint` from the person's decision and
-`openWorldHint: true`. Lake's own capability names never hold `__`.
+`openWorldHint: true`. Lake's own capability names never hold `__`. A `tools/call` of such a name is held to what `tools/list` requires (LSR-187, lake#993): with no Lake
+credential, or from a person who may not read the workspace, it is refused before the workspace's
+connection records are opened.
 
 A `tools/call` of `<prefix>__<tool>` runs through `read_mcp_tool` or `call_mcp_tool` as the caller,
 so it is authorized, audited (`via: reexport`) and metered as theirs, and answers the server's own

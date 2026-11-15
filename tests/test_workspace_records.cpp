@@ -4158,6 +4158,27 @@ TEST_P(WorkspaceRecordStores, McpConnectionsLiveInTheirWorkspaceAndKeepTheirToke
                                       mcp_context,
                                       "test"));
     EXPECT_TRUE(json::parse(**missing)["result"]["isError"].get<bool>());
+    // LSR-187 (lake#993): no credential, or a person of another space, reaches nothing.
+    {
+        auto anonymous = t.context(first);
+        anonymous.authorized = false;
+        anonymous.acting_identity.clear();
+        auto other_space = t.context(second);
+        for (auto* caller : {&anonymous, &other_space}) {
+            caller->path_workspace_id = home;
+            const auto refused = liquid::runtime::block_on(lake::api::mcp_dispatch_async(
+                t.registry,
+                {{"jsonrpc", "2.0"},
+                 {"id", 4},
+                 {"method", "tools/call"},
+                 {"params", {{"name", "ticket_desk__echo"}, {"arguments", {{"text", "x"}}}}}},
+                *caller,
+                "test"));
+            ASSERT_TRUE(refused && *refused);
+            EXPECT_TRUE(json::parse(**refused)["result"]["isError"].get<bool>())
+                << (caller == &anonymous ? "anonymous" : "another space");
+        }
+    }
 
     // A refused token marks the connection as needing sign-in.
     server.required_bearer = "rotated-elsewhere";

@@ -2896,8 +2896,18 @@ liquid::runtime::task<json> call_exported_mcp_tool(const Registry& registry,
     if (context.store == nullptr || workspace_id.empty() || split == std::string::npos) {
         co_return refused("no such tool: " + name);
     }
+    // A caller with no Lake credential, or one who may not read this workspace, never reaches the
+    // workspace's connection records (LSR-187, lake#993): tools/call is held to what tools/list
+    // already requires.
+    if (!context.authorized) {
+        co_return refused("this call needs a Lake credential");
+    }
     const auto workspace = context.store->get_workspace(workspace_id);
     if (!workspace) {
+        co_return refused("no such tool: " + name);
+    }
+    if (auto denied = authorize_read(
+            json{{"customer_id", workspace->customer_id}, {"workspace_id", workspace_id}}, context)) {
         co_return refused("no such tool: " + name);
     }
     const std::string prefix = name.substr(0, split);
