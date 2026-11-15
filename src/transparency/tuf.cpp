@@ -150,6 +150,17 @@ Result<void> verify_key(const std::string& key_id, const json& key) {
         !key.at("keyval").at("public").is_string()) {
         return std::unexpected(Error{"invalid_input", "TUF keys must be Ed25519 public keys"});
     }
+    // A key object carries only the TUF members, so one public key cannot be given a second id by
+    // adding a member (LSR-199, lake#1005).
+    for (const auto& [member, value] : key.items()) {
+        if (member != "keytype" && member != "scheme" && member != "keyval" &&
+            member != "keyid_hash_algorithms") {
+            return std::unexpected(Error{"invalid_input", "TUF key has an unknown member: " + member});
+        }
+    }
+    if (key.at("keyval").size() != 1) {
+        return std::unexpected(Error{"invalid_input", "TUF keyval holds only the public key"});
+    }
     const auto expected_id = sha256(key.dump());
     if (!expected_id) {
         return std::unexpected(expected_id.error());
@@ -207,7 +218,10 @@ verify_threshold(const json& document, const json& trusted_root, std::string_vie
     if (threshold == 0 || threshold > allowed.size()) {
         return std::unexpected(Error{"invalid_input", "trusted root role threshold is invalid"});
     }
+    // Counted by distinct public key, not by key id: one key listed under two ids signs once
+    // (LSR-199, lake#1005).
     std::set<std::string> counted;
+    std::set<std::vector<unsigned char>> counted_keys;
     const std::string body = document.at("signed").dump();
     for (const json& signature : document.at("signatures")) {
         if (!signature.is_object() || !signature.contains("keyid") ||
@@ -226,9 +240,12 @@ verify_threshold(const json& document, const json& trusted_root, std::string_vie
         }
         if (signature_valid(key, body, signature.at("sig").get<std::string>())) {
             counted.insert(key_id);
+            if (const auto public_key = decode_hex(key.at("keyval").at("public").get<std::string>())) {
+                counted_keys.insert(*public_key);
+            }
         }
     }
-    if (counted.size() < threshold) {
+    if (counted_keys.size() < threshold) {
         return std::unexpected(
             Error{"invalid_input",
                   std::string(role) + " metadata does not meet its signature threshold"});
