@@ -3956,6 +3956,20 @@ verified_confirmed_proposal(const json& input, ApiContext& context, std::string_
             "open it.",
             "/context/confirm_public");
     }
+    // The proposal's secret references are checked here, as the person confirming it, with their
+    // own get_secret_mount and read_secret (lake#891). The confirmed turn then needs no secret
+    // read: create_app accepts exactly these references from it after a server-side check that each
+    // mount still belongs to the workspace.
+    auto secrets = co_await check_proposed_app_secret_references(
+        app, input.at("workspace_id").get<std::string>(), context);
+    if (!secrets) {
+        co_return ApiResult::failure("store_error", secrets.error().message);
+    }
+    if (*secrets) {
+        ApiResult refused = std::move(**secrets);
+        refused.error.path = "/context/confirmed_proposal/app" + refused.error.path;
+        co_return refused;
+    }
     co_return ApiResult::success(std::move(proposal));
 }
 

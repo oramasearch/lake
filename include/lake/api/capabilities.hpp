@@ -87,6 +87,13 @@ void register_application_capabilities(Registry& registry);
 void register_agent_capabilities(Registry& registry);
 void register_platform_capabilities(Registry& registry);
 void register_web_app_capabilities(Registry& registry);
+// The secret references in a proposed app's `env` (lake#891, docs/api/web-apps.md#secret-
+// environment), checked with the caller's own credential as create_app checks them: each mount
+// readable and in `workspace_id`, each secret live with its field. agent_turn runs it as the person
+// confirming an Application Agent proposal, so the confirmed turn needs no secret read of its own.
+// Answers the refusal, or nothing.
+liquid::runtime::task<std::optional<ApiResult>> check_proposed_app_secret_references(
+    const nlohmann::json& app, const std::string& workspace_id, ApiContext& context);
 // When a resource fails (lake#1207, docs/api/notifications.md): list_notifications,
 // dismiss_notification, get_auto_fix and set_auto_fix, general over the resource kind (`app` now,
 // `agent` with lake#1209), and repair_app and change_app, which start Application Agent turns of

@@ -4177,6 +4177,89 @@ TEST(AgentRuns, AFailedRolloutRecordsOneNotificationForThePersonWhoDeployedIt) {
     }
 }
 
+// lake#891: a confirmed Application Agent turn creates an app with the Lake secret the person
+// named. agent_turn checks the proposal's references as the person confirming it, so the turn
+// holds no secret read; create_app accepts from it exactly the references its confirmed proposal
+// carries, after checking server-side that each mount belongs to the workspace.
+TEST(AgentRuns, AConfirmedApplicationAgentTurnCreatesAnAppWithTheSecretThePersonNamed) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-application", "http://application:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+
+    const auto mount = r.call("create_secret_mount", {{"name", "application"}});
+    ASSERT_TRUE(mount.ok) << mount.error.message;
+    const std::string mount_id = mount.value["id"];
+    ASSERT_TRUE(r.call("put_secret",
+                       {{"mount_id", mount_id},
+                        {"name", "database"},
+                        {"value", {{"DATABASE_URL", "postgres://app:pw-app@db/app"}}}})
+                    .ok);
+    const std::string reference = "lake-secret://" + mount_id + "/database#DATABASE_URL";
+
+    // Proposes, then the person confirms; answers the confirmed turn's credential.
+    const auto propose = [&](const json& env) {
+        const auto started =
+            r.call("agent_turn", {{"agent", "agent-application"}, {"message", "Build reports"}});
+        EXPECT_TRUE(started.ok) << started.error.message;
+        const std::string task_id = started.value["task_id"];
+        const json proposal{{"kind", "proposal"},
+                            {"confirm", true},
+                            {"files", json::array()},
+                            {"app", {{"name", "agent-reports"}, {"mode", "image"}, {"env", env}}}};
+        EXPECT_TRUE(
+            r.set_task_status(task_id,
+                              "Succeeded",
+                              "",
+                              "",
+                              {{"ok", true}, {"reply", "Review it."}, {"result", proposal}}));
+        return r.call("agent_turn",
+                      {{"agent", "agent-application"},
+                       {"message", "Confirm and deploy the reviewed proposal."},
+                       {"proposal_task_id", task_id},
+                       {"proposal_sha256", lake::api::agent_proposal_digest(proposal)},
+                       {"context", {{"confirmed_proposal", proposal}}}});
+    };
+
+    // A reference the person's own reads cannot satisfy is refused when they confirm.
+    const auto missing = propose(
+        {{"DATABASE_URL", {{"secret", "lake-secret://" + mount_id + "/database#PASSWORD"}}}});
+    EXPECT_FALSE(missing.ok);
+    EXPECT_EQ(missing.error.code, "not_found");
+    EXPECT_EQ(missing.error.path, "/context/confirmed_proposal/app/env/DATABASE_URL/secret");
+
+    const auto confirmed = propose({{"DATABASE_URL", {{"secret", reference}}}});
+    ASSERT_TRUE(confirmed.ok) << confirmed.error.message;
+    const auto turn = r.task(confirmed.value["task_id"]);
+    ASSERT_TRUE(turn);
+    for (const std::string_view capability : {"read_secret", "get_secret_mount", "list_secrets"}) {
+        EXPECT_EQ(std::ranges::find(turn->scopes, capability), turn->scopes.end()) << capability;
+    }
+    const std::string credential = "lat." + turn->id + ".00112233445566778899aabbccddeeff";
+    ASSERT_TRUE(r.store.claim_agent_task(
+        turn->id, "agent-application", lake::control::identity_crypto::sha256_hex(credential)));
+    const auto principal = r.store.context_for(credential);
+    ASSERT_TRUE(principal);
+    json create_input{{"name", "agent-reports"},
+                      {"mode", "image"},
+                      {"image", pinned_image("reports:first")},
+                      {"framework", "container"},
+                      {"port", 8080},
+                      {"host", nullptr},
+                      {"env", {{"DATABASE_URL", {{"secret", reference}}}}}};
+
+    // A reference the person did not confirm is checked with the turn's own credential: refused.
+    json unconfirmed = create_input;
+    unconfirmed["env"] = {{"OTHER_URL", {{"secret", reference}}}};
+    EXPECT_FALSE(r.call_as(*principal, "create_app", unconfirmed).ok)
+        << "only the key the person confirmed";
+
+    const auto created = r.call_as(*principal, "create_app", create_input);
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_EQ(created.value["secret_env_refs"]["DATABASE_URL"], reference);
+    EXPECT_EQ(created.value.dump().find("pw-app"), std::string::npos);
+}
+
 TEST(AgentRuns, ARepairTurnProposesThenWritesOnlyThatAppOnceConfirmed) {
     AgentRuns r;
     auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
