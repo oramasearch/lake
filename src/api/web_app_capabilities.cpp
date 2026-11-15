@@ -402,10 +402,17 @@ liquid::runtime::task<std::optional<ApiResult>> check_secret_references(
 
 // A binding names a live service by id or, for agents and people, by its unique name in the
 // customer. The stored binding is always the id.
-std::optional<control::ManagedService>
-bound_service(const std::string& reference, const std::string& customer_id, ApiContext& context) {
+// Only a service of the app's own workspace can be bound (lake#945): its connection is that
+// workspace's, and an app of another workspace must never receive its credential.
+std::optional<control::ManagedService> bound_service(const std::string& reference,
+                                                     const std::string& customer_id,
+                                                     const std::string& workspace_id,
+                                                     ApiContext& context) {
     if (auto service = context.store->get_service(reference);
         service && service->customer_id == customer_id && service->desired == "present") {
+        if (service->workspace_id != workspace_id) {
+            return std::nullopt;
+        }
         return *service;
     }
     auto listed = context.store->list_services(customer_id);
@@ -414,7 +421,8 @@ bound_service(const std::string& reference, const std::string& customer_id, ApiC
     }
     std::optional<control::ManagedService> found;
     for (const control::ManagedService& service : *listed) {
-        if (service.desired != "present" || service.name != reference) {
+        if (service.desired != "present" || service.name != reference ||
+            service.workspace_id != workspace_id) {
             continue;
         }
         if (found) {
@@ -425,8 +433,35 @@ bound_service(const std::string& reference, const std::string& customer_id, ApiC
     return found;
 }
 
-std::expected<json, ApiResult>
-normalized_bindings(const json& value, const std::string& customer_id, ApiContext& context) {
+// Binding a service hands the app that service's connection credential, which
+// service_connection gives only to an administrator of the account (lake#945): a binding needs the
+// same right. Empty: allowed.
+std::optional<ApiResult> service_binding_refused(const std::string& customer_id, ApiContext& context) {
+    if (context.operator_credential) {
+        return std::nullopt;
+    }
+    const auto object = context.store->find_policy_object("customer", customer_id);
+    if (!object) {
+        return ApiResult::failure(object.error().code, object.error().message);
+    }
+    const auto decision = control::authorize(
+        *context.store, context.acting_identity, object->id, "admin", context.authorization_cache);
+    if (!decision) {
+        return ApiResult::failure(decision.error().code, decision.error().message);
+    }
+    if (!decision->allowed) {
+        return ApiResult::failure(
+            "unauthorized",
+            "binding a service gives the app its credential: only an administrator of the account may",
+            "/bindings/services");
+    }
+    return std::nullopt;
+}
+
+std::expected<json, ApiResult> normalized_bindings(const json& value,
+                                                   const std::string& customer_id,
+                                                   const std::string& workspace_id,
+                                                   ApiContext& context) {
     if (!value.is_object()) {
         return std::unexpected(
             ApiResult::failure("invalid_input", "bindings must be an object", "/bindings"));
@@ -449,16 +484,22 @@ normalized_bindings(const json& value, const std::string& customer_id, ApiContex
         return std::unexpected(ApiResult::failure(
             "invalid_input", "bindings.services must be an array", "/bindings/services"));
     }
+    if (!services.empty()) {
+        if (auto refused = service_binding_refused(customer_id, context)) {
+            return std::unexpected(*refused);
+        }
+    }
     for (const json& service_id : services) {
         if (!service_id.is_string()) {
             return std::unexpected(ApiResult::failure(
                 "invalid_input", "service ids must be strings", "/bindings/services"));
         }
-        auto service = bound_service(service_id.get<std::string>(), customer_id, context);
+        auto service =
+            bound_service(service_id.get<std::string>(), customer_id, workspace_id, context);
         if (!service) {
             return std::unexpected(ApiResult::failure(
                 "not_found",
-                "no such service in this account (use a live service's id or unique name)",
+                "no such service in this app's workspace (use a live service's id or unique name)",
                 "/bindings/services"));
         }
         if (std::ranges::find(output["services"], json(service->id)) == output["services"].end()) {
@@ -805,8 +846,10 @@ void register_web_app_capabilities(Registry& registry) {
             if (!host) {
                 co_return host.error();
             }
-            auto bindings = normalized_bindings(
-                input.value("bindings", json::object()), input.at("customer_id"), context);
+            auto bindings = normalized_bindings(input.value("bindings", json::object()),
+                                                input.at("customer_id"),
+                                                input.at("workspace_id"),
+                                                context);
             if (!bindings) {
                 co_return bindings.error();
             }
@@ -1250,12 +1293,17 @@ void register_web_app_capabilities(Registry& registry) {
             if (!app) {
                 co_return app.error();
             }
-            auto service =
-                bound_service(input.at("service_id").get<std::string>(), app->customer_id, context);
+            if (auto refused = service_binding_refused(app->customer_id, context)) {
+                co_return *refused;
+            }
+            auto service = bound_service(input.at("service_id").get<std::string>(),
+                                         app->customer_id,
+                                         app->workspace_id,
+                                         context);
             if (!service) {
                 co_return ApiResult::failure(
                     "not_found",
-                    "no such service in this account (use a live service's id or unique name)");
+                    "no such service in this app's workspace (use a live service's id or unique name)");
             }
             json services = app->bindings.value("services", json::array());
             if (std::ranges::find(services, json(service->id)) == services.end()) {
