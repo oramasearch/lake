@@ -245,6 +245,11 @@ Repositories carry the workspace they belong to (migration `0051_repository_work
 Both stores refuse `create_repository` without a live workspace of the repository's space and
 filter `list_repositories` by an optional workspace; `transfer_repository` is gone from the store
 interface because the routing trigger keeps a repository's space fixed.
+A service names no workspace or one of its own customer's (migration
+`0111_service_workspace_routing`, lake#1301): Postgres refuses any other with the triggers
+`service_workspace_routing` and `workspace_service_routing`, and `InMemoryStore::create_service`
+refuses it the same way (`invalid_input`). See
+[services](../../docs/control-plane/services.md#workspace-routing).
 Repository usage lives in workspace Zettas (lake#348, lake#349, `metering.cpp`), as does the
 ledger of charged app traffic hours (`record_metered_app_hour`, lake#661). Both stores read the
 operator's `app_transfer` rows (migration `0081`, numbers only; `add_app_transfer` is the operator's

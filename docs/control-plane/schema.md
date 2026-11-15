@@ -22,6 +22,18 @@ A new migration still follows the rules below: idempotent SQL, its row in `schem
 new `*_guard` table created by the newest migration (`LakeManifest.TheGuardTableIsTheNewestMigrations`
 fails otherwise).
 
+`0111_service_workspace_routing` (lake#1301,
+[orama-operator#781](https://github.com/oramasearch/orama-operator/issues/781)) adds the triggers
+`service_workspace_routing` on `services` and `workspace_service_routing` on `workspaces`. A
+service's `workspace_id` is NULL or a workspace of the service's own `customer_id`, checked on
+insert and on any update of either column; a workspace's `zetta_service_id` is NULL or a service of
+its own customer, and a workspace cannot move to another customer while services of its customer
+name it. Refusals are `23514`. Status writes and withdrawals are never checked. Rows that already
+disagree are reported as warnings once, not changed. No table or column changes; guard
+`service_workspace_routing_guard`; the operator must vendor this schema and select the guard before
+the image rolls. Numbered after the open `0106` (lake#1295), `0107` to `0109` (lake#1296) and `0110`
+(lake#1300). See [services](services.md#workspace-routing).
+
 `0109_principal_ids` (lake#872) adds `users_taap_id_format` and `organizations_taap_id_format`:
 a `taap_id` is NULL or `taap:` and printable ASCII, at most 512 characters, the rule every creation
 path already applies (`valid_principal_id`). `NOT VALID`, so rows from before lake#870 are not

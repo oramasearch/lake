@@ -6143,6 +6143,41 @@ TEST(Workspaces, AProjectKeepsItsDecisionBesideItsDescription) {
     EXPECT_TRUE(r.sent("get_project").is_null());
 }
 
+// The memory store refuses what Postgres's service_workspace_routing trigger refuses (0111,
+// lake#1301): a service named into another customer's workspace, or one that does not exist,
+// even when the caller skipped WorkspaceService's own check.
+TEST(Workspaces, TheMemoryStoreNeverRoutesAServiceToAnotherCustomersWorkspace) {
+    lake::control::InMemoryStore store;
+    std::vector<std::string> customers;
+    std::vector<std::string> workspaces;
+    for (const std::string who : {"mine", "theirs"}) {
+        const auto user = store.create_user({"taap:route-" + who, who + "@example.com", "Routing"});
+        ASSERT_TRUE(user) << user.error().message;
+        const auto customer = store.create_customer({"individual", user->id, "", "route-" + who});
+        ASSERT_TRUE(customer) << customer.error().message;
+        const auto workspace = store.create_workspace({customer->id, "home", "dev", ""});
+        ASSERT_TRUE(workspace) << workspace.error().message;
+        customers.push_back(customer->id);
+        workspaces.push_back(workspace->id);
+    }
+    lake::control::NewManagedService service{customers[0], "postgres", "crm", "taap:x"};
+    service.workspace_id = workspaces[1];
+    const auto crossed = store.create_service(service);
+    ASSERT_FALSE(crossed);
+    EXPECT_EQ(crossed.error().code, "invalid_input");
+    service.workspace_id = lake::control::new_uuid_v4();
+    EXPECT_EQ(store.create_service(service).error().code, "invalid_input") << "no such workspace";
+    service.workspace_id = workspaces[0];
+    const auto own = store.create_service(service);
+    ASSERT_TRUE(own) << own.error().message;
+    EXPECT_EQ(own->workspace_id, workspaces[0]);
+    const auto unassigned = store.create_service({customers[0], "postgres", "legacy", "taap:x"});
+    ASSERT_TRUE(unassigned) << "a service may still name no workspace";
+    const auto listed = store.list_services(customers[1]);
+    ASSERT_TRUE(listed);
+    EXPECT_TRUE(std::ranges::none_of(*listed, [](const auto& row) { return row.kind == "postgres"; }));
+}
+
 // list_services states the status the Services page shows, and says why a service that cannot
 // progress on its own is stuck (lake#452).
 TEST(Workspaces, ListServicesSaysEachServicesStatusAndWhy) {

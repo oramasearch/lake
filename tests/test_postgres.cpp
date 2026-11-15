@@ -1420,6 +1420,130 @@ TEST(PostgresServices, CreateListAndWithdrawFollowTheContract) {
     EXPECT_TRUE(listed_with(crm->id)) << "other services are unaffected";
 }
 
+// lake#1301 (orama-operator#781): migration 0111 refuses a service whose workspace belongs to
+// another customer, however the row is written, and a workspace whose Zetta service or customer
+// would disagree with its services. Status writes and withdrawals are never checked.
+TEST(PostgresServices, AServiceIsNeverRoutedToAnotherCustomersWorkspace) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    std::vector<std::string> customers;
+    std::vector<lake::control::Workspace> workspaces;
+    for (const std::string who : {"mine", "theirs"}) {
+        const auto user = store->create_user({"taap:1:ed25519:route-" + who + "-" + suffix,
+                                              "route-" + who + "-" + suffix + "@example.com",
+                                              "Routing"});
+        ASSERT_TRUE(user) << user.error().message;
+        const auto customer =
+            store->create_customer({"individual", user->id, "", "route-" + who + "-" + suffix});
+        ASSERT_TRUE(customer) << customer.error().message;
+        const auto workspace = store->create_workspace({customer->id, "home", "dev", ""});
+        ASSERT_TRUE(workspace) << workspace.error().message;
+        customers.push_back(customer->id);
+        workspaces.push_back(*workspace);
+    }
+    const std::string& mine = customers[0];
+    const std::string& theirs_workspace = workspaces[1].id;
+
+    // The store's own insert: refused by the trigger, behind lake's own caller check.
+    lake::control::NewManagedService crossed{mine, "postgres", "crossed", "taap:x"};
+    crossed.workspace_id = theirs_workspace;
+    const auto refused = store->create_service(crossed);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "invalid_input") << refused.error().message;
+
+    lake::control::NewManagedService own{mine, "postgres", "crm", "taap:x"};
+    own.workspace_id = workspaces[0].id;
+    const auto crm = store->create_service(own);
+    ASSERT_TRUE(crm) << crm.error().message;
+    const auto unassigned = store->create_service({mine, "postgres", "legacy", "taap:x"});
+    ASSERT_TRUE(unassigned) << "a service may still name no workspace: "
+                            << unassigned.error().message;
+
+    pqxx::connection connection(uri);
+    const auto refuses = [&](const std::string& sql, const std::string& id,
+                             const std::string& value) {
+        EXPECT_THROW(([&] {
+                         pqxx::work tx(connection);
+                         tx.exec_params(sql, id, value);
+                         tx.commit();
+                     })(),
+                     pqxx::check_violation)
+            << sql;
+    };
+    // Raw writes are refused too: moving a service to another customer's workspace, or the
+    // service to another customer while it names this one's workspace.
+    refuses("UPDATE services SET workspace_id = $2::uuid WHERE id = $1::uuid", crm->id,
+            theirs_workspace);
+    refuses("UPDATE services SET customer_id = $2::uuid WHERE id = $1::uuid", crm->id,
+            customers[1]);
+    refuses("UPDATE services SET workspace_id = $2::uuid WHERE id = $1::uuid", unassigned->id,
+            theirs_workspace);
+    // From the workspace's side: its Zetta service must be its customer's, and it cannot move to
+    // another customer while services of this one name it.
+    refuses("UPDATE workspaces SET zetta_service_id = $2::uuid WHERE id = $1::uuid",
+            workspaces[0].id, workspaces[1].zetta_service_id);
+    refuses("UPDATE workspaces SET customer_id = $2::uuid WHERE id = $1::uuid", workspaces[0].id,
+            customers[1]);
+    {
+        // Naming a workspace of the same customer, or none, is allowed (rolled back here).
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE services SET workspace_id = $2::uuid WHERE id = $1::uuid",
+                       unassigned->id, workspaces[0].id);
+        tx.exec_params("UPDATE services SET workspace_id = NULL WHERE id = $1::uuid", crm->id);
+    }
+
+    // Status writes (the operator's service_status row) and withdrawals touch neither routing
+    // column.
+    {
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO service_status (service_id, phase, message) "
+                       "VALUES ($1::uuid, 'Ready', 'service ready')",
+                       crm->id);
+        tx.exec_params("UPDATE services SET updated_at = now() WHERE id = $1::uuid", crm->id);
+        tx.commit();
+    }
+    const auto withdrawn = store->withdraw_service(crm->id);
+    ASSERT_TRUE(withdrawn) << withdrawn.error().message;
+    EXPECT_EQ(store->get_service(crm->id)->workspace_id, workspaces[0].id);
+
+    {
+        pqxx::work tx(connection);
+        EXPECT_FALSE(tx.exec("SELECT 1 FROM schema_migrations "
+                             "WHERE version = '0111_service_workspace_routing'")
+                         .empty());
+        EXPECT_FALSE(
+            tx.exec("SELECT to_regclass('service_workspace_routing_guard')")[0][0].is_null());
+        EXPECT_EQ(tx.exec("SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgname IN "
+                          "('service_workspace_routing', 'workspace_service_routing')")[0][0]
+                      .as<int>(),
+                  2);
+    }
+
+    // Applying the migration again, unrecorded and then recorded, keeps the rows and the checks.
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0111_service_workspace_routing");
+    ASSERT_NE(start, std::string::npos);
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        if (pass == 0) {
+            tx.exec("DELETE FROM schema_migrations WHERE version = '0111_service_workspace_routing'");
+        }
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        tx.commit();
+    }
+    EXPECT_EQ(store->get_service(crm->id)->workspace_id, workspaces[0].id);
+    refuses("UPDATE services SET workspace_id = $2::uuid WHERE id = $1::uuid", unassigned->id,
+            theirs_workspace);
+}
+
 // lake#1228: restart_app writes restart_generation, the column the operator renders on the pod
 // template; any other change leaves it.
 // lake#987 (LSR-120), against either store: an account at LAKE_WORKSPACES_PER_CUSTOMER live

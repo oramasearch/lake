@@ -20,7 +20,7 @@ workspace model and decision 45's request stream.
 |---|---|
 | `id` | uuid, the service's identity everywhere (label `orama.cloud/service-id`) |
 | `customer_id` | the owning customer |
-| `workspace_id` | owning `workspaces.id`; added by migration 0039 for namespace routing |
+| `workspace_id` | owning `workspaces.id`; added by migration 0039 for namespace routing. NULL or a workspace of the same `customer_id` ([workspace routing](#workspace-routing), migration 0111) |
 | `kind` | `zetta`, `postgres`, `kafka`, `clickhouse`, `tidb`, `cassandra`, `valkey` (migration `0025_service_catalog`) `sqlite` (migration `0026_sqlite_services`), `duckdb` or `polars` (migration `0027_analytics_services`) |
 | `name` | the customer's name for it, `^[a-z][a-z0-9-]{0,30}$`, unique per customer among live services |
 | `slug` | Kubernetes suffix, `svc-<12 hex of id>`, or `ws-<12 hex of workspace id>` for a primary workspace Zetta |
@@ -41,6 +41,26 @@ workspace model and decision 45's request stream.
 
 A row with `desired = 'absent'` and phase `Deleted` is history: lake hides it and the operator
 skips it.
+
+### Workspace routing
+
+The operator places a service in the namespace of the workspace its `workspace_id` names. Since
+migration `0111_service_workspace_routing` (lake#1301,
+[orama-operator#781](https://github.com/oramasearch/orama-operator/issues/781)) the database
+refuses, with `23514` (`invalid_input` from the store), however the row is written:
+
+- a service whose `workspace_id` names a workspace of another customer, on insert or on any
+  update of `workspace_id` or `customer_id` (trigger `service_workspace_routing`);
+- a workspace whose `zetta_service_id` names a service of another customer, or a workspace moved
+  to another customer while services of its customer name it (trigger
+  `workspace_service_routing`).
+
+A NULL `workspace_id` (a service from before 0039 still waiting for a selection) is allowed.
+Status writes and withdrawals touch neither column and are never checked. Rows that already
+disagreed when the migration ran are reported as warnings, not changed. `WorkspaceService` checks
+the same thing before the store is called, and the in-memory store mirrors the trigger. The
+operator checks it again on its side (its row listings join `workspaces` on the row's customer).
+Guard `service_workspace_routing_guard`.
 
 ## What the operator does
 

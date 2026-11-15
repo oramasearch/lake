@@ -33,6 +33,15 @@ not pass through it, so a replaced key stops signing in. Additive; numbered afte
 `0109`. Apply before the new binary: the operator vendors the schema, selects the guard, and grants
 Lake's runtime role `SELECT, INSERT, UPDATE` on the table. See
 [identity](../docs/api/identity.md#signing-in-with-a-taap-key-the-key-must-be-the-identitys) and
+Migration `0111_service_workspace_routing` (lake#1301, orama-operator#781) adds the triggers
+`service_workspace_routing` (a service's `workspace_id` is NULL or a workspace of its own customer)
+and `workspace_service_routing` (a workspace's `zetta_service_id` is NULL or a service of its own
+customer, and a workspace cannot move to another customer while its services name it), so no write
+can route one account's service into another account's workspace. Rows that already disagree are
+reported as warnings, not changed. No table changes; guard `service_workspace_routing_guard`.
+Numbered after the open `0106` (lake#1295), `0107` to `0109` (lake#1296) and `0110` (lake#1300).
+The operator vendors the schema and selects the guard before the image rolls. See
+[services](../docs/control-plane/services.md#workspace-routing) and
 [schema.md](../docs/control-plane/schema.md).
 Migration `0105_agent_model_prices` (lake#1230) seeds the `model_tokens` rates of the gpt-6.x models
 the gateway now serves and the long-context classes `<model>@long/input` and `<model>@long/output`
