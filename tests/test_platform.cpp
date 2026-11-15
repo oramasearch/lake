@@ -649,6 +649,33 @@ TEST_F(PlatformFixture, ReadRoleCannotWriteAndDeployRoleIsRequiredForDomains) {
                          {"host", "www.example.test"},
                          {"tls", "acme"}});
     EXPECT_TRUE(domain.ok) << domain.error.message;
+
+    // None of this Lake's own names can be claimed (lake#949): its host, the zone it is in, an
+    // alias, and the apps wildcard, in any case.
+    context.public_host = "lake-dev.platform.test";
+    context.host_aliases = {"lake.other.test"};
+    context.apps_wildcard = "*.apps.platform.test";
+    for (const char* platform : {"lake-dev.platform.test",
+                                 "login.lake-dev.platform.test",
+                                 "login.platform.test",
+                                 "Platform.Test",
+                                 "lake.other.test",
+                                 "a.lake.other.test",
+                                 "someone.apps.platform.test"}) {
+        const ApiResult refused = call_async("create_domain",
+                                             {{"repository_id", repository.id},
+                                              {"environment", "production"},
+                                              {"host", platform},
+                                              {"tls", "acme"}});
+        EXPECT_FALSE(refused.ok) << platform;
+        EXPECT_EQ(refused.error.path, "/host") << platform;
+    }
+    EXPECT_TRUE(call_async("create_domain",
+                           {{"repository_id", repository.id},
+                            {"environment", "production"},
+                            {"host", "other.test"},
+                            {"tls", "acme"}})
+                    .ok);
 }
 
 // A lake without the platform mirror answers its reads and writes `not_supported` (501), which a

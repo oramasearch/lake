@@ -9440,6 +9440,7 @@ struct ApiServer::Impl {
         ctx.agent_caller = options.agent_caller.get();
         ctx.agent_bus = options.agent_bus.get();
         ctx.apps_wildcard = options.apps_wildcard;
+        ctx.host_aliases = options.host_aliases;
         ctx.apps_runtime_image = options.apps_runtime_image;
         ctx.methodology_runtime_image = options.methodology_runtime_image;
         ctx.mcp_runner_image = options.mcp_runner_image;

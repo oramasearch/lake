@@ -48,7 +48,7 @@ All capabilities resolve the repository's local `environment` policy object and 
 | `environment_logs` | `read` | `repository_id`, `environment`, optional `since`, `limit`, `direction` | `{items: [{ts,pod,container,line}], next_since}` |
 | `set_environment_env` | `write` | `repository_id`, `environment`, `key`, `value` | appended row identity |
 | `unset_environment_env` | `write` | `repository_id`, `environment`, `key` | appended tombstone identity |
-| `create_domain` | `deploy` | `repository_id`, `environment`, `host`, `tls` | pending domain request; `tls` is `acme` or `provided` |
+| `create_domain` | `deploy` | `repository_id`, `environment`, `host`, `tls` | pending domain request; `tls` is `acme` or `provided`. A host that is one of this Lake's own names is `invalid_input` at `/host` (lake#949): equal to or below its public host, the zone that host is in, an alias (`LAKE_HOST_ALIASES`) or the apps wildcard. Proof of control and uniqueness across tenants are not yet checked ([lake#949](https://github.com/oramasearch/lake/issues/949)) |
 | `delete_domain` | `deploy` | `repository_id`, `environment`, `host` | pending domain tombstone |
 
 Environment values are plain configuration only. Before appending, Lake runs libliquid's inline
