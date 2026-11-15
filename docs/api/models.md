@@ -138,7 +138,7 @@ trained one. The engine's page is zetta `docs/ml/model-import.md`.
   - a random-forest or decision-tree classifier (averaged probabilities, not a logistic link);
   - categorical splits, and exponential objectives.
 
-  The random-forest classifier is [lake#697](https://github.com/oramasearch/lake/issues/697).
+  The random-forest classifier is lake#697.
 
 **Download.** `export_model` is a named engine read: `read` on the account, recorded as
 `export_model` in the workspace's audit. It answers a model version's weights as a file:

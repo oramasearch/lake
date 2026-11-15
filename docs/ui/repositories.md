@@ -55,7 +55,7 @@ joins its rule list with signed refusal events by repository; it does not infer 
 current rules. **Every signed-in reader of the repository sees the Protection tab and its rules**
 (lake#777); it used to be the operator's alone, because the page read the instance audit and failed
 for anyone else. The refusals come from `audit` on the repository's workspace, which the account's
-administrators may read (lake#18, PR https://github.com/oramasearch/lake/pull/897) as well as the
+administrators may read (lake#18, PR lake#897) as well as the
 operator; to anyone else the page shows the rules and says the administrators can see the
 refusals, instead of failing.
 

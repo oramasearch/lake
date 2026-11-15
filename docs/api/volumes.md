@@ -1,8 +1,8 @@
 # Volumes: workspace storage and snapshots
 
-lake ([lake#512](https://github.com/oramasearch/lake/issues/512)) moves each
+lake (lake#512) moves each
 workspace's liquid store, tenant images and search index onto its workspace Zetta's volume
-([lake#380](https://github.com/oramasearch/lake/issues/380)). That volume has to grow with the
+(lake#380). That volume has to grow with the
 workspace, and on a one-node workspace it is the only copy, so it is snapshotted on a schedule.
 Lake's own store volume (the transparency log, TUF and the instance registry) is snapshotted the
 same way.
@@ -10,9 +10,9 @@ same way.
 Lake holds only desired state and the operator's observations, in its control PostgreSQL
 (migration `0069_workspace_volumes`, [schema](../control-plane/schema.md#workspace-volumes-migration-0069_workspace_volumes)).
 The Orama operator does the work: it grows each claim of the workspace's `OramaZettaCluster`
-in place ([orama-operator#259](https://github.com/oramasearch/orama-operator/issues/259)) and takes
+in place (orama-operator#259) and takes
 CSI `VolumeSnapshot`s through a `VolumeSnapshotClass` with `deletionPolicy: Retain`
-([orama-operator#260](https://github.com/oramasearch/orama-operator/issues/260)). It never talks to
+(orama-operator#260). It never talks to
 a workspace Zetta.
 
 ## Capabilities

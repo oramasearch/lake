@@ -1,23 +1,23 @@
 # Workspace Store
 
-Refs [lake#380](https://github.com/oramasearch/lake/issues/380),
+Refs lake#380,
 [plan](workspace-storage-plan.md#lake380-the-liquid-store).
 
 **Status: implemented in the source tree; not deployed; no workspace on dev is switched.** A switched
 workspace's repositories (and with them its Drive, models and datasets) are served from one liquid
 store in its workspace Zetta, on Zetta's object capability
-([zetta#1005](https://github.com/oramasearch/zetta/issues/1005), zetta `docs/data/object-store.md`,
+(zetta#1005, zetta `docs/data/object-store.md`,
 live on dev Zetta). It needs liquid at or after `8955519`, which writes each index run once
-([liquid#332](https://github.com/oramasearch/liquid/issues/332)); an earlier liquid's index merge
+(liquid#332); an earlier liquid's index merge
 rewrote a finished run in place, which Zetta refuses. It also needs liquid at or after `88c5ef4`, which
-pins [corosio#13](https://github.com/oramasearch/corosio/pull/13): the backend fans held puts out
+pins corosio#13: the backend fans held puts out
 through a range `when_all`, and an earlier corosio read 8 bytes before the first posted continuation,
 which crashed the store's run thread when that read fell off a page
-([lake#604](https://github.com/oramasearch/lake/issues/604)). Since
-[lake#543](https://github.com/oramasearch/lake/issues/543) it opens a workspace store only on a
+(lake#604). Since
+lake#543 it opens a workspace store only on a
 one-node workspace Zetta that reports `object_log_prefix_durability` 1 or later: a Zetta image built
-with [zetta#1237](https://github.com/oramasearch/zetta/pull/1237), which reports
-[zetta#1235](https://github.com/oramasearch/zetta/issues/1235)'s prefix durability and the
+with zetta#1237, which reports
+zetta#1235's prefix durability and the
 incarnation. `dev-5f70b306` has zetta#1235 but reports neither, and is refused
 ([Durability check and incarnation](#durability-check-and-incarnation-lake543),
 [deploy order](#deploy-order-lake543)).
@@ -100,7 +100,7 @@ Zetta can also, without the cipher noticing:
 Liquid notices some of these (its pack scan stops at a torn tail, and every chunk is checked against
 its digest), but an older `packs/objects.meta`, `index/MANIFEST` or `LIQUID_REPO` reads as an older,
 valid store. Detecting them needs a manifest anchored outside the workspace Zetta, a follow-up:
-[lake#522](https://github.com/oramasearch/lake/issues/522). Truncation inside a block is detected
+lake#522. Truncation inside a block is detected
 (`corrupt`).
 
 A random 96-bit nonce per block keeps the collision bound under 2⁻³² for up to 2³² blocks (256 TiB of
@@ -132,7 +132,7 @@ answered before the next is sent), and holds small puts and buffered appends unt
 needs them sent first. The bucket's log therefore holds a prefix of liquid's issue order, and a
 crash keeps such a prefix (Zetta truncates its log at the first torn frame), never a later write
 without an earlier one. That is the order liquid relies on between barriers; its contract does not
-state it yet ([liquid#344](https://github.com/oramasearch/liquid/issues/344)).
+state it yet (liquid#344).
 
 Since lake#535 no write asks Zetta to fsync. Liquid's `barrier()` sends nothing, and the store is
 made durable once per store operation, by lake, before it answers: `make_durable()` sends what is
@@ -144,7 +144,7 @@ What "a crash keeps a prefix" covers: a crash of the lake process or of the Zett
 one-node workspace Zetta (every workspace today). A power loss of the workspace Zetta's node does
 not, yet: across a segment roll a later segment's pages can reach the disk while an earlier
 segment's unsynced tail does not, so a later write can survive without an earlier one
-([zetta#1235](https://github.com/oramasearch/zetta/issues/1235)). With `rf` above 1 each key has
+(zetta#1235). With `rf` above 1 each key has
 its own primary, so Zetta gives no order across keys; the `:barrier`'s durability still holds.
 
 **Deploy gate: zetta#1235, enforced since lake#543 through the capability zetta#1237 reports.** Before lake#535 every write was fsynced before the next was sent, so
@@ -176,7 +176,7 @@ before applying it ([Durability check and incarnation](#durability-check-and-inc
 ### Durability check and incarnation (lake#543)
 
 Zetta reports two things in its object answers since
-[zetta#1237](https://github.com/oramasearch/zetta/pull/1237) (zetta `docs/data/object-store.md`,
+zetta#1237 (zetta `docs/data/object-store.md`,
 "Durability format and incarnation"):
 
 - `object_log_prefix_durability`, in the lease and `:barrier` answers: `1` is zetta#1235's prefix
@@ -271,7 +271,7 @@ records anything about the operation elsewhere (a repository row, a switch, an i
   as `packs/objects.meta` and removes the staging, and every prefix of the PUT of `objects.meta`
   alone is a prefix of those three. The key's tails go after the next sync.
 - **Liquid's journal.** A checkpoint ends with the removal of `LIQUID_JOURNAL` and no barrier after
-  it ([liquid#343](https://github.com/oramasearch/liquid/issues/343)), and a reopen prefers the
+  it (liquid#343), and a reopen prefers the
   journal while it exists. The removal is sent at once and made durable by the sync before lake
   answers the commit, so an acknowledged commit is never reverted by a journal that comes back.
   Liquid's next barrier would not do it: it sends nothing, and the next operation may never come.
@@ -460,7 +460,7 @@ is never resumed, so its response and its audit event are lost; the count is log
 (`abandoned_store_tasks`) and counted (`lake_abandoned_store_tasks_total`).
 
 **Clients and 503.** liquid's sync client does not retry a 503, nor read `Retry-After`:
-[liquid#340](https://github.com/oramasearch/liquid/issues/340). Until it does, a `liquid push` or
+liquid#340. Until it does, a `liquid push` or
 `pull` refused during a move or a lease hand-off must be rerun.
 
 `.lake-owner.lock` still covers the volume's instance data and the account stores.
@@ -614,7 +614,7 @@ contract asks.
   them as `images_in_workspace_stores_bytes`, not again in `images_bytes`.
 - Lake runs no liquid collector on workspace stores, but one would keep image blobs: each is
   rooted by a liquid lease for a century when it is stored (a durable pin is
-  [liquid#342](https://github.com/oramasearch/liquid/issues/342)).
+  liquid#342).
 - Deleting a workspace removes its search index objects (when its store is open) and then closes its
   store and releases its lease before the deletion is reported
   (`WorkspaceContent::close_workspace_store`), waiting for an open in progress on the workspace's
@@ -690,7 +690,7 @@ is one PUT with no tail (an index run was a PUT, a tail PUT and later two DELETE
 identical manifest is not sent; stale tails are removed beside the next barrier's writes. Sending
 an interval's writes concurrently saved a further 23 round trips, but a crash could then keep any
 subset of them, which liquid does not promise to survive
-([liquid#344](https://github.com/oramasearch/liquid/issues/344)); they are sent in order, and
+(liquid#344); they are sent in order, and
 that costs about 300 ms per one-file commit at 10 ms.
 
 **The floor is one round trip per write.** Every write must be answered before the next is sent
@@ -783,7 +783,7 @@ What was cut, and why it is safe:
 What is left is liquid's: 4 writes per object stored and, on a repository with history, the
 directory lease renewals and index merges. Fewer of them need liquid: an object batch per
 operation and one manifest publication per index flush
-([liquid#341](https://github.com/oramasearch/liquid/issues/341)), and renewing a directory's lease
+(liquid#341), and renewing a directory's lease
 only when its retention changes or nears expiry rather than at every checkpoint. At dev's 2 ms round
 trip a one-file commit should now cost about its request count times the round trip plus one fsync:
 about 0.25 to 0.3 s for dev's 104 requests. The measurement on dev belongs in the deployment record
@@ -924,7 +924,7 @@ below the server's 32 request workers (`LAKE_HTTP_WORKERS`, [lake#534](../servin
 ## Not yet
 
 - The copy's precondition of fresh snapshots of the workspace volume and of lake's store volume
-  ([orama-operator#260](https://github.com/oramasearch/orama-operator/issues/260)) is not enforced.
+  (orama-operator#260) is not enforced.
   Migration `0069` added the snapshot desired state (`volume_snapshot_policies`) and the operator's
   `volume_snapshot_status`, but `move_workspace_store` does not request a snapshot or wait for one
   to be ready yet. The move never writes the account store.

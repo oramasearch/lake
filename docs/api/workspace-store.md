@@ -1,6 +1,6 @@
 # Moving a Workspace's Repositories into Its Store
 
-Refs [lake#380](https://github.com/oramasearch/lake/issues/380). The design is
+Refs lake#380. The design is
 [architecture/workspace-store.md](../architecture/workspace-store.md); the decisions are in the
 [plan](../architecture/workspace-storage-plan.md#lake380-the-liquid-store).
 
@@ -44,7 +44,7 @@ A transfer report has `repository_id`, `absent` (the account store never held it
   reopens the workspace store before the next use, which liquid's recovery requires. Run `copy`
   again.
 - The plan's precondition of a fresh snapshot of the workspace volume and of lake's store volume
-  ([orama-operator#260](https://github.com/oramasearch/orama-operator/issues/260)) is not checked:
+  (orama-operator#260) is not checked:
   the snapshot desired state exists (migration `0069`), but the move does not request a snapshot or
   wait for one yet. Make sure recent snapshots exist before `copy`.
 - A repository created in a switched workspace is created in its store at creation. One created

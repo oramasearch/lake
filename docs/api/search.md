@@ -367,7 +367,7 @@ build/tests/lake-tests --gtest_also_run_disabled_tests \
   later change. `rebuild_search_index` as its own capability is not built; `reindex_artifacts` of
   each repository, or a wiped index, rebuilds.
 - Rollback of a workspace's index objects by the workspace Zetta is not detected, as for the store
-  ([lake#522](https://github.com/oramasearch/lake/issues/522)); a rollback reads as an older index.
+  (lake#522); a rollback reads as an older index.
 
 ## Change
 

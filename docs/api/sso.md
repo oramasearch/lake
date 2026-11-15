@@ -188,8 +188,8 @@ also set (a Lake signs in through Clerk or through the customer's provider, neve
 - **Users must be provisioned through SCIM for now.** A first sign-in creates a user only with
   just-in-time provisioning and a TAAP id in the sign-in, which a person from the customer's IdP
   does not carry. Minting a managed key for such a person, as a Clerk sign-in does, is
-  [lake#1166](https://github.com/oramasearch/lake/issues/1166). Enterprise OIDC also waits for
-  [lake#1022](https://github.com/oramasearch/lake/issues/1022) on Postgres; SAML works.
+  lake#1166. Enterprise OIDC also waits for
+  lake#1022 on Postgres; SAML works.
 
 The runbook, with the Clerk alternative, is
 [`clerk.md`](clerk.md). Tests:

@@ -145,7 +145,7 @@ columns are left out of the first model**: zetta v0.5.0's `train_model` takes no
 `run` capability's dataset contract does), and the website's model answers come from the rows search
 returns, so a feature the rows do not hold could not be answered. Once `train_model` takes one,
 dates can become features measured from the snapshot date
-([zetta#1494](https://github.com/oramasearch/zetta/issues/1494)).
+(zetta#1494).
 
 **The training copy.** When the dataset trains as it is (every input usable or left out by the
 engine itself, the column to predict already 0/1, a unique column naming the rows), `train_model`

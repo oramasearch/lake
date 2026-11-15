@@ -223,7 +223,7 @@ change; check the charts in both themes after it.
 Deployment acceptance must separately start a real experiment on the live site, observe real trial
 curves, compare two real runs with smoothing and log scale, and exercise promotion confirmation.
 
-Experiment deletion is deferred to [Zetta #1158](https://github.com/oramasearch/zetta/issues/1158),
+Experiment deletion is deferred to Zetta #1158,
 as agreed for lake#303. The engine contract has no deletion operation, so the pages have no delete
 control, not even a disabled one, and lake has no local-only hiding. Add the registered REST/MCP
 operation and its UI control together once the engine contract exists.

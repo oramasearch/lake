@@ -2,8 +2,8 @@
 
 How a workspace becomes a locked-down sandbox with only declared paths, end to end: what a person
 does in Lake, what Lake records and where, what the operator enforces, and what carries the bytes.
-Epic: [lake#724](https://github.com/oramasearch/lake/issues/724) (Lake's half),
-[orama-operator#437](https://github.com/oramasearch/orama-operator/issues/437) (the operator's).
+Epic: lake#724 (Lake's half),
+orama-operator#437 (the operator's).
 
 Related pages:
 - **The design and its decisions (D1–D8)**: the operator's

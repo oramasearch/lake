@@ -191,7 +191,7 @@ for it.
 When the checkpoint is not there (the image is not yet pulled, could not be copied, or an agent
 names a directory that holds no checkpoint), `chat` and `agent_run` answer `engine_error` with
 *the agent's model checkpoint is not in this workspace: `<dir>` has no tokenizer.json …* instead
-of the engine's tokenizer error ([#799](https://github.com/oramasearch/lake/issues/799)). An agent
+of the engine's tokenizer error (#799). An agent
 created before the default moved from `/var/lib/zetta/models/base-agent` keeps that path; update it
 to `runtime: native` with an empty `model` to move it to the base model's place.
 

@@ -1,6 +1,6 @@
 # Developer tunnel credentials
 
-Lake [#730](https://github.com/oramasearch/lake/issues/730) adds recipient-only client
+Lake #730 adds recipient-only client
 certificate delivery to the [network capabilities](network.md), implementing Lake's part of
 the operator's secure-networking contract, section 11.1. This does not claim a deployed relay or
 end-to-end session termination exercise.

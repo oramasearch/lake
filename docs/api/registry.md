@@ -35,7 +35,7 @@ repository references the object, so a known tenant digest cannot be read throug
 ## Media types and isolation
 
 The registry answers on the console's origin, so the bytes it serves must never become a page
-there ([lake#930](https://github.com/oramasearch/lake/issues/930)). A manifest that is valid JSON
+there (lake#930). A manifest that is valid JSON
 can also be markup; served as `text/html`, it would run as the console.
 
 - **Lake chooses a manifest's media type.** A manifest push (`PUT /v2/<repository>/manifests/<reference>`,
@@ -66,7 +66,7 @@ browsers never render it as a document.
 
 ## Where a tenant image lives
 
-The registry splits ([lake#383](https://github.com/oramasearch/lake/issues/383)
+The registry splits (lake#383
 phase A). A tenant OCI repository, `<space>/<name>` or `<space>/cache/<name>`, belongs to one
 workspace. npm, Python, debuginfod and legacy one-component OCI repositories stay with the instance,
 as a named exception: one instance-wide namespace with public reads.
@@ -107,7 +107,7 @@ as a named exception: one instance-wide namespace with public reads.
   blob read and the image byte count read only the tags; a blob `GET` lists every tag of its
   repository.
 - **Blobs are objects of the workspace's liquid store** (phase B;
-  [lake#380](https://github.com/oramasearch/lake/issues/380), [workspace-store.md](../architecture/workspace-store.md)).
+  lake#380, [workspace-store.md](../architecture/workspace-store.md)).
   Liquid names an object by its own hash (BLAKE3 in a workspace store) and the store is encrypted
   below liquid, so the SHA-256 a client sends finds the blob through its record: `lake_oci_blobs`
   holds, per blob the account pushed into the workspace, its digest, size and `object` (the liquid
@@ -130,13 +130,13 @@ as a named exception: one instance-wide namespace with public reads.
   record that names another object than the one a verified push just stored names other bytes (or
   none the store holds): the push rewrites it at the revision read. If the old object was rooted, the
   record keeps it in `superseded`: liquid's lease API cannot release a root by its object, so those
-  roots wait for [liquid#342](https://github.com/oramasearch/liquid/issues/342).
+  roots wait for liquid#342.
 - **Image blobs are liquid roots.** Nothing in liquid refers to an image blob; only its record
   does. Each stored blob is rooted with a liquid lease for a century (`store::lease_root`), so a
   liquid collection of the workspace store keeps it. The record says so (`rooted`), and a re-push
   of an object its record already names as rooted adds no second lease; the copy roots, once, an
   object in place that was stored before lake rooted image blobs (`rooted` in its answer). A durable pin API is
-  [liquid#342](https://github.com/oramasearch/liquid/issues/342). A manifest pushed into the workspace may reference only blobs recorded
+  liquid#342. A manifest pushed into the workspace may reference only blobs recorded
   there (otherwise OCI `400 MANIFEST_BLOB_UNKNOWN`), with the sizes the records hold, so knowing
   another account's or another workspace's digest does not publish its layer.
 - **Pulls stream from the store.** A tenant blob is served only when a tag of the requested

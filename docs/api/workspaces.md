@@ -146,7 +146,7 @@ Zetta capability.
 
 ## Settings
 
-**Issue:** [lake#1230](https://github.com/oramasearch/lake/issues/1230) · **Code:**
+**Issue:** lake#1230 · **Code:**
 `src/api/workspace_settings_capabilities.cpp`, `src/control/workspace_settings.cpp` · **Tests:**
 `Stores/WorkspaceRecordStores.AWorkspaceChoosesItsAgentModelAmongTheServedChatModels`,
 `ModelCompletion.AnAgentTurnCallsItsWorkspacesModelAndUnsetMeansGpt61Sol`
@@ -214,7 +214,7 @@ The Data list requests only `database` and `name` through
 partitions and samples belong to the dataset detail page, whose sample uses `LIMIT 20`.
 Connections, the projected dataset list, generators, Lake services and storage are independent
 reads in one concurrent batch. Zetta currently materializes dataset summaries before SQL
-projection, so [zetta#1195](https://github.com/oramasearch/zetta/issues/1195) still needs to remove
+projection, so zetta#1195 still needs to remove
 its row/file scans; this change reduces response and rendering work, not that upstream scan.
 
 Methodologies lists no longer fetch the solutions catalogue; methodology details still do.
@@ -245,8 +245,8 @@ solution operating-state batch remains concurrent and reuses that run result.
 ## Deletion
 
 Deleting a workspace cascades
-([lake#514](https://github.com/oramasearch/lake/issues/514)). It cannot be undone: the workspace
-Zetta's volume snapshots ([orama-operator#260](https://github.com/oramasearch/orama-operator/issues/260))
+(lake#514). It cannot be undone: the workspace
+Zetta's volume snapshots (orama-operator#260)
 are the only copy left.
 
 **What is destroyed.** `delete_workspace {dry_run: true}` and the confirmation on `/workspaces`
@@ -264,7 +264,7 @@ list it, with `counts` (`repositories`, `live_repositories`, `tombstoned_reposit
   takes no step of its own for it;
 - its apps (desired `deleted`) and its unfinished builds (desired `cancelled`);
 - its tenant images: every repository routed to it in `oci_repository_routes`
-  ([lake#383](https://github.com/oramasearch/lake/issues/383), state `routed`), whose manifests and
+  (lake#383, state `routed`), whose manifests and
   tags go with its Zetta; and what the instance registry still holds from before that split,
   `<space>/<name>` and `<space>/cache/<name>` for each of its apps and each image its builds target
   (state `tagged`), unless an app or build of another live workspace of the account uses the name.
@@ -305,12 +305,12 @@ and answers the recorded deletion; the dry run of a deleted workspace answers th
 
 The repositories' content stays in the account's liquid store until the collector reclaims it, as
 for any tombstone whose retention has ended. A workspace whose repositories moved into its own store
-([lake#380](https://github.com/oramasearch/lake/issues/380), [workspace-store.md](workspace-store.md))
+(lake#380, [workspace-store.md](workspace-store.md))
 has that store closed and its bucket lease released before lake reports the deletion complete
 (`WorkspaceContent::close_workspace_store` in `include/lake/api/workspace_deletion.hpp`, set by the
 HTTP server to `SyncStore::close_workspace_store`), and the operator's deletion of the namespace and
 volume destroys the bytes. Tenant image routes are deleted in the transaction
-([lake#383](https://github.com/oramasearch/lake/issues/383) phase A); their blobs move into the
+(lake#383 phase A); their blobs move into the
 workspace's store, and go with it, in phase B.
 
 **Result.** `delete_workspace` answers the workspace's row (desired `deleted`) and `deletion`:
@@ -506,7 +506,7 @@ Status: checked on 2026-10-01 against the dev cluster (lake `36679e1`, workspace
   with a lake key and the `workspace_id`. The review called a published model this way from
   outside the cluster. Unpublishing stops those calls.
 - Workspace reads time out after 15 seconds and actions after 60. Run reports load:
-  `get_run_report` answers since https://github.com/oramasearch/zetta/issues/1007 was fixed.
+  `get_run_report` answers since zetta#1007 was fixed.
 
 ## Pipeline Work Budgets
 

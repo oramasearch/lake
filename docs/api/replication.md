@@ -111,7 +111,7 @@ procedure explicitly.
 
 ## Peers and the replication credential
 
-Lake issue [#915](https://github.com/oramasearch/lake/issues/915) (a security review finding):
+Lake issue #915 (a security review finding):
 `replicate_repository` is authorized as `admin` on the repository, which every sign-up holds on its
 own repositories, and it used to send the instance credential to whatever `source_url` the caller
 named, with the admin token as the default credential. A repository owner could point it at their

@@ -2,7 +2,7 @@
 
 **Status: plan, 2026-09-26.** The pipeline is a central object in lake and Zetta: it is fully
 visible, displayable and changeable, and lake has full feature parity with Zetta. Tracking:
-https://github.com/oramasearch/lake/issues/185.
+lake#185.
 
 lake delegates Design, Train and Ship to the customer's own Zetta cluster, its workspace
 ([`../api/workspaces.md`](../api/workspaces.md)). Parity means every capability Zetta offers a
@@ -110,11 +110,11 @@ statements stay out of reach.
 
 | Phase | Issue |
 |---|---|
-| Tracking | https://github.com/oramasearch/lake/issues/185 |
-| 1 — the pipeline page | https://github.com/oramasearch/lake/issues/180 |
-| 2 — data | https://github.com/oramasearch/lake/issues/181 |
-| 3 — models and search | https://github.com/oramasearch/lake/issues/182 |
-| 4 — agents | https://github.com/oramasearch/lake/issues/183 |
-| 5 — operations | https://github.com/oramasearch/lake/issues/184 |
+| Tracking | lake#185 |
+| 1 — the pipeline page | lake#180 |
+| 2 — data | lake#181 |
+| 3 — models and search | lake#182 |
+| 4 — agents | lake#183 |
+| 5 — operations | lake#184 |
 
 Each closes with the PR that ships it and the browser proof.

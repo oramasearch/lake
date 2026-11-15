@@ -40,7 +40,7 @@ The implementation follows the [TUF specification](https://theupdateframework.gi
 Lake consumes liquid's public transparency client, checkpoint-trust, tile, inclusion, and
 consistency verification APIs from the pinned submodule.
 RFC 3161 and RFC 4998 evidence verification is tracked in
-[`oramasearch/liquid#210`](https://github.com/oramasearch/liquid/issues/210).
+`oramasearch/liquid#210`.
 
 ## Storage
 
@@ -114,7 +114,7 @@ available for a later stronger freshness policy; air-gapped publication requires
 
 Historical checkpoints remain byte-for-byte readable and replicable. They have no `issued_at`
 and cannot satisfy a finite `max_checkpoint_age_seconds`. Liquid admission enforcement is owned
-by [liquid#290](https://github.com/oramasearch/liquid/issues/290): an absent bound disables freshness;
+by liquid#290: an absent bound disables freshness;
 a positive bound rejects missing or over-age time; zero is invalid policy; times over 60 seconds
 in the future are refused. The Lake change supplies authenticated time, not admission policy.
 
@@ -162,7 +162,7 @@ accept caller-supplied signature bytes. This binds the evidence object to a chec
 accepted by the configured witness and anchoring mode.
 
 Complete client verification of the DER record, TSA trust, signature imprint, and renewal links is
-tracked in [`oramasearch/liquid#210`](https://github.com/oramasearch/liquid/issues/210).
+tracked in `oramasearch/liquid#210`.
 
 ## Metadata contract
 

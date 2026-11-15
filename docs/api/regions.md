@@ -20,7 +20,7 @@ not supported; both are planned follow-up work.
 
 Lake has no region setting of its own. The Orama operator sets these environment variables on the
 Lake Deployment only when the `LakeSet` member has a region
-(https://github.com/oramasearch/orama-operator/issues/512):
+(orama-operator#512):
 
 | Variable | Example | Meaning |
 |---|---|---|

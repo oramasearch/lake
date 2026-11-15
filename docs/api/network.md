@@ -1,6 +1,6 @@
 # Network Capabilities
 
-Lake issue [#728](https://github.com/oramasearch/lake/issues/728) exposes the secure-networking
+Lake issue #728 exposes the secure-networking
 control plane through the capability registry. The same definitions produce REST operations in
 OpenAPI and MCP tools, so validation, authorization, audit and response shapes do not vary by
 transport. The desired and observed rows are defined by
@@ -94,8 +94,8 @@ revoked.
 
 Decision D1 keeps tunnel sessions and network activity in the workspace Zetta, not in the
 `0084_network` tables. The producing and reading interface is tracked by
-[zetta#1281](https://github.com/oramasearch/zetta/issues/1281), and the live grant/connect/revoke
-flow by [lake#730](https://github.com/oramasearch/lake/issues/730). Until that provider is
+zetta#1281, and the live grant/connect/revoke
+flow by lake#730. Until that provider is
 available, `list_network_tunnel_sessions` and `network_activity` authorize normally and return
 empty `sessions`/`events` arrays with `available: false` and `pending: "zetta#1281"`. Their
 scoped provider interface does not invent a second source of network history. See

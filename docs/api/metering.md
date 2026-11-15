@@ -214,7 +214,7 @@ never count one service twice, samples every live workspace on its maintenance t
 ### Resources
 
 **Status: implemented (lake#643), not deployed; needs
-[orama-operator#288](https://github.com/oramasearch/orama-operator/pull/288), which vendors the
+orama-operator#288, which vendors the
 schema and reports the resources.**
 Compute is metered by the resources each workload is **scheduled with**: each container's request,
 or its limit where it has none, as Kubernetes admitted it (a namespace's default request included).
@@ -326,12 +326,12 @@ Decided, and not named in `not_measured`:
 - Calls that name no workspace (sign-in, account, identity, billing) are the control plane, not a
   workspace's usage.
 - Lake's own pods and the library agents' pods belong to no workspace; their model tokens are the
-  workspace's ([lake#248](https://github.com/oramasearch/lake/issues/248)).
+  workspace's (lake#248).
 - Lake's sealed records in a workspace (audit, task records, the usage series themselves) are
   lake's bookkeeping and are not storage; transcripts count by their text.
 - The instance package registry (npm, Python, debuginfod, one-component OCI) belongs to the
   instance; whether a publisher's packages are its usage is
-  [lake#662](https://github.com/oramasearch/lake/issues/662).
+  lake#662.
 
 ### What is metered where
 

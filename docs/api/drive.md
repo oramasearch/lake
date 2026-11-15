@@ -149,7 +149,7 @@ offers the left value, right value, an available reviewed proposal, or prepared 
 and goes through `resolve_conflict`; it does not edit Liquid state directly.
 
 The consumer sync client, three-tree reconciliation, `liquid history <path>`, and first-class
-local conflict values belong to [liquid #195](https://github.com/oramasearch/liquid/issues/195).
+local conflict values belong to liquid #195.
 Lake uses the push and pull protocol documented in [`sync.md`](sync.md).
 
 ## Verification

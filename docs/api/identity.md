@@ -256,7 +256,7 @@ document and is refused; the honest initial document signs in.
 
 ### Signing in with a TAAP key: the key must be the identity's
 
-Lake issue [#917](https://github.com/oramasearch/lake/issues/917) (a security review
+Lake issue #917 (a security review
 finding): liquid's `verify_document` checks only that a document is signed by the key it carries
 and that its identifier ends with the fingerprint it claims. A document carrying a registered
 person's identifier with the caller's own key passed, its assertion verified with that key, and
@@ -300,10 +300,10 @@ tests) now gives an account the identifier of a bound document, as PostgreSQL do
 document still gets the account an identifier of its own, never the one it claims.
 
 Related: liquid's own `verify()` fell back to whatever key the caller supplied when no chain was
-stored locally ([liquid#383](https://github.com/oramasearch/liquid/issues/383), fixed in
-[liquid#448](https://github.com/oramasearch/liquid/pull/448)). This check does not depend on it:
+stored locally (liquid#383, fixed in
+liquid#448). This check does not depend on it:
 Lake binds the key itself before calling `verify`. Lake's companion change for liquid#448,
-[lake#1021](https://github.com/oramasearch/lake/pull/1021), moves this call to liquid's carried-chain
+lake#1021, moves this call to liquid's carried-chain
 `verify(actor, chain, ...)`, passing the same documents.
 
 To verify: `TaapSignIn.MemoryStoreBindsTheKeyToTheRegisteredIdentity` and
@@ -495,7 +495,7 @@ carries only `algorithm`, `signing_key_identifier`, `signing_key_label`, `signat
 
 Enterprise OIDC flows (`start_sso_oidc`, providers `sso-<id>`) carry a `taap_id`, not a document, to
 `sign_in_sso`; caller-chosen TAAP ids there are tracked in
-[lake#872](https://github.com/oramasearch/lake/issues/872). The in-memory store binds no document (it
+lake#872. The in-memory store binds no document (it
 gives each new user a random identity), so it needs no proof.
 
 The hosted application pages and the console run the same two steps: a sign-up or OAuth form that

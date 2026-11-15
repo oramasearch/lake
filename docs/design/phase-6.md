@@ -1,6 +1,6 @@
 # Phase 6 design: lake
 
-> Epic: https://github.com/oramasearch/lake/issues/11. Decisions that shape this page (bridge
+> Epic: lake#11. Decisions that shape this page (bridge
 > `docs/decisions.md`): §6 planes (Postgres control plane, Zetta data plane), §10 Phase 6 starts
 > now in parallel, §11 auth as a service in scope, §12 clean secrets API, §13 SOC 2.
 > Specification: liquid `docs/features/18-lake-service.md`, `19-identity.md`,

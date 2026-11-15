@@ -1,6 +1,6 @@
 # Network Control Plane
 
-Lake issue [#727](https://github.com/oramasearch/lake/issues/727) implements the desired state in
+Lake issue #727 implements the desired state in
 section 11 of the operator's [secure-networking contract](https://github.com/oramasearch/orama-operator/blob/dev/docs/infrastructure/secure-networking.md#11-the-contract-between-lake-and-the-operator).
 Migration `0084_network` creates the eight contract tables and `network_guard`, column for column.
 This is source-tree support; operator adoption and deployment are separate.
@@ -51,7 +51,7 @@ Credential rotation is an ordinary desired-generation change with an unchanged c
 until `observed_generation` catches up. The operator replaces the per-connection role credential and
 rewrites the same workspace secret. Withdrawal advances generation with `desired = 'absent'`; the
 operator drops the role, revokes the delivered credential and then reports `Deleted`. The operator's
-native Postgres role and grant enforcement remains [orama-operator#469](https://github.com/oramasearch/orama-operator/issues/469).
+native Postgres role and grant enforcement remains orama-operator#469.
 
 Every insert, update or delete of a desired table emits `NOTIFY lake_network, '<row UUID>'` in
 the same transaction. Rollbacks emit nothing. Status writes emit nothing. Polling remains the

@@ -1,10 +1,10 @@
 # The model gateway
 
-**Issue:** [lake#248](https://github.com/oramasearch/lake/issues/248), part of the metering epic
-[lake#658](https://github.com/oramasearch/lake/issues/658) · **Code:** `include/lake/api/model_gateway.hpp`,
+**Issue:** lake#248, part of the metering epic
+lake#658 · **Code:** `include/lake/api/model_gateway.hpp`,
 `src/api/model_gateway.cpp`, `model_completion` in `src/api/usage_capabilities.cpp`, the
 `/openai/v1/*` routes in `src/api/http_server.cpp`; the workspace's model in
-`src/api/workspace_settings_capabilities.cpp` ([lake#1230](https://github.com/oramasearch/lake/issues/1230))
+`src/api/workspace_settings_capabilities.cpp` (lake#1230)
 · **Tests:** `tests/test_model_gateway.cpp`
 
 Every model call an agent makes for a workspace goes through Lake. Lake sends it to the model
@@ -65,7 +65,7 @@ launched on agent-runtime runs in its workspace's namespace with `LAKE_URL` set 
 lands there. The workspace in the path must be the run's own: a call naming another is `unauthorized`
 (403) before the provider is called, and one naming a workspace that does not exist is `not_found`
 (404). That is the only way such an agent reaches a model: its pod holds no provider key
-([orama-operator#779](https://github.com/oramasearch/orama-operator/issues/779)).
+(orama-operator#779).
 
 The path is `/openai/v1/`, not `/v1/`, because `/v1/<name>` is the capability registry's
 ([README](README.md)). Like the OCI registry at `/v2/` and the Hub routes at `/api/models/`, the
@@ -154,7 +154,7 @@ provider has finished it. None of the agents stream today.
 
 ### Tools on the gpt-6 models
 
-**Issue:** [lake#1245](https://github.com/oramasearch/lake/issues/1245) · **Code:**
+**Issue:** lake#1245 · **Code:**
 `responses_for_tools_models`, `chat_goes_to_responses`, `chat_request_as_responses`,
 `responses_answer_as_chat` and `ResponsesChatStream` in `src/api/model_gateway.cpp`; the call in
 `model_completion` (`src/api/usage_capabilities.cpp`).

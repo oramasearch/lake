@@ -92,7 +92,7 @@ reserved, and the confirmed turn receives the same validation as every other cal
 
 The operator owns the separate existing-record check: before publishing DNS, it must refuse a host
 that already has a DNS record it does not own and report the conflict through App status. That
-behavior belongs to the [`LakeApp` controller](https://github.com/oramasearch/orama-operator/issues/193);
+behavior belongs to the `LakeApp` controller (orama-operator#193);
 Lake does not probe or replace DNS records.
 
 Changing `auth` to `none` requires `confirm_public: true`, and so does creating an app with `auth`

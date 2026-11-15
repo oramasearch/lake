@@ -78,7 +78,7 @@ using StoreBrowser =
 
 // The issue that added browsing each bucket and filesystem provider (lake#664).
 inline constexpr std::string_view store_browse_issue =
-    "https://github.com/oramasearch/lake/issues/664";
+    "lake#664";
 
 // Why no store of this type opens as a drive (a volume, whose contents belong to the service that
 // mounts it; anything but a bucket or a filesystem), or empty.

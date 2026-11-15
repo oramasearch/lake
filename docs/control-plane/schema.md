@@ -1019,7 +1019,7 @@ with ([`../api/metering.md#resources`](../api/metering.md#resources)):
 
 Nothing is dropped; idempotent (the primary key is dropped and added again on every run); guard
 `workload_resources_guard`. The operator vendors the schema, selects that guard and fills the table
-in its own pull request ([orama-operator#288](https://github.com/oramasearch/orama-operator/pull/288))
+in its own pull request (orama-operator#288)
 before a lake with this change is rolled. `OperatorContract.*` prepares that pull request's
 statements against this schema.
 
@@ -1074,7 +1074,7 @@ repositories, as untrusted code ([`../api/methodologies.md#runs`](../api/methodo
 Nothing about the run's content is kept here: its parameters, data, metrics, log and artifact live in
 the workspace Zetta. Nothing is dropped; idempotent; guard `methodology_runs_guard`. The operator
 vendors the schema, selects that guard and runs the pods in its own pull request
-([orama-operator#291](https://github.com/oramasearch/orama-operator/issues/291)) before a lake with this
+(orama-operator#291) before a lake with this
 change is rolled.
 
 ## Store mounts migration
@@ -1114,7 +1114,7 @@ rolled; on an older schema lake's sample names app traffic as unread and records
 
 ## Methodology run queue migration
 
-`0082_methodology_run_queue` ([orama-operator#293](https://github.com/oramasearch/orama-operator/issues/293))
+`0082_methodology_run_queue` (orama-operator#293)
 adds the phase `Queued` to `methodology_run_status.phase`. The operator writes it, with a message
 saying why, while it holds a run back: its workspace already has
 `spec.methodologies.maxConcurrentRunsPerWorkspace` runs staging, running or collecting (oldest run
@@ -1126,7 +1126,7 @@ change.
 
 ## Methodology deployments migration
 
-`0083_methodology_deployments` ([lake#690](https://github.com/oramasearch/lake/issues/690)) serves a
+`0083_methodology_deployments` (lake#690) serves a
 workspace methodology's model from Ship → Models. `methodology_deployments` holds one row per
 deployment (lake writes it when the model is published and notifies `lake_services`): the workspace
 methodology, the engine's model id, the training run and image build whose image serves it, the
@@ -1322,7 +1322,7 @@ schema and selects that guard before a lake with this change is rolled.
 
 `0089_cloud_orders` (lake#831, [`../api/orders.md`](../api/orders.md)) records the apex order
 sheet's orders. It is the contract the Orama operator provisions from
-(https://github.com/oramasearch/orama-operator/issues/634); the names below are fixed.
+(orama-operator#634); the names below are fixed.
 
 `cloud_orders`, one row per order, kept (a billing record):
 

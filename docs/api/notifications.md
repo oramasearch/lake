@@ -10,7 +10,7 @@ agent can also change the resource from more instructions.
 The mechanism is **general over the resource kind**. A notification and a repair record name a
 `resource_kind` and a `resource_id`. Apps (`app`, repaired by the Application Agent) are the only
 kind today; custom agents built in Agent Factory (`agent`, repaired by agent-creator) are
-[lake#1209](https://github.com/oramasearch/lake/issues/1209), which plugs into the same records,
+lake#1209, which plugs into the same records,
 capabilities and pass ([below](#adding-a-resource-kind-lake1209)).
 
 ## Where it lives
