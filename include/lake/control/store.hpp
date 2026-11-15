@@ -355,6 +355,10 @@ struct PasswordSignIn {
 };
 struct TaapSignIn {
     std::string pool_id, taap_id, assertion_id, device_name;
+    // The verified chain's document hashes, oldest first (VerifiedTaapSignIn::chain_hashes). The
+    // store refuses a chain that does not pass through the head it recorded for taap_id, and
+    // records a longer chain's head (lake#1024).
+    std::vector<std::string> chain_hashes;
 };
 struct MfaEnrollment {
     std::string secret;

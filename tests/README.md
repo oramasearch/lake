@@ -346,6 +346,11 @@ Postgres cases mint a response-only key, verify its current-profile `delegation/
 find it by dispatcher identity, attribute a signed drip to the durable agent, reject a modified
 body, and reject the key after expiry.
 
+`TaapSignIn.MemoryStoreBindsTheKeyToTheRegisteredIdentity` and
+`TaapSignIn.PostgresStoreBindsTheKeyToTheRegisteredIdentity` (`test_own_identity.cpp`) also keep
+the first key aside, rotate, sign in with the chain, and show the first key alone is then refused
+on both stores (lake#1024).
+
 `IdentityExit.PostgresProvesIdentityPkiAndDynamicSecrets` is the issue #4 acceptance scenario. It
 uses a real pinned-libliquid identity and Postgres rows to prove replay-resistant TAAP sign-in, an
 application PKCE authorization-code flow with relying-party JWKS verification, agent certificate

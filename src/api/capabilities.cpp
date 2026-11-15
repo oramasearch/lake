@@ -3642,7 +3642,8 @@ void register_identity_capabilities(Registry& registry) {
                 context.store->sign_in_taap({pool_id,
                                              verified->taap_id,
                                              verified->assertion_id,
-                                             input.value("device_name", "taap-key")}),
+                                             input.value("device_name", "taap-key"),
+                                             verified->chain_hashes}),
                 context));
         }});
     registry.add(

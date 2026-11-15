@@ -25,6 +25,14 @@ or hour (`late`, what the usage recorder still held), and the guard `retained_us
 numbered after the open `0106` (lake#1295) and `0107`. Apply before the new binary: with billing on, a
 Lake without the tables refuses every workspace deletion. See
 [billing](../docs/api/billing.md#a-deleted-workspaces-usage) and
+Migration `0110_taap_chain_heads` (lake#1024) adds `taap_chain_heads`: per TAAP identifier that
+signs in (a registered identity or a linked own identity), the head of its newest verified rotation
+chain (SHA-256 of the newest document's canonical CBOR) and the chain's length, with the guard
+`taap_chain_heads_guard`. `sign_in_taap` records a longer chain's head and refuses a chain that does
+not pass through it, so a replaced key stops signing in. Additive; numbered after the open `0106` to
+`0109`. Apply before the new binary: the operator vendors the schema, selects the guard, and grants
+Lake's runtime role `SELECT, INSERT, UPDATE` on the table. See
+[identity](../docs/api/identity.md#signing-in-with-a-taap-key-the-key-must-be-the-identitys) and
 [schema.md](../docs/control-plane/schema.md).
 Migration `0105_agent_model_prices` (lake#1230) seeds the `model_tokens` rates of the gpt-6.x models
 the gateway now serves and the long-context classes `<model>@long/input` and `<model>@long/output`

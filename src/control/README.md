@@ -90,6 +90,10 @@ filters and event-ID cursors before the limit in both stores. The test regressio
 rules are in `docs/build/testing.md`; the public query contract is in `docs/api/audit.md`.
 `audit::Filter` also selects newest-first order and leaves out the successful events of named
 actions, and `Store::principal_names` names TAAP identities, in both stores (lake#445).
+`sign_in_taap` keeps each rotated TAAP identifier's chain head (`taap_chain_heads` on PostgreSQL,
+`taap_chain_heads_` in memory) from `TaapSignIn::chain_hashes`, and refuses a chain that does not
+pass through it, so a replaced key stops signing in (lake#1024,
+[identity](../../docs/api/identity.md#signing-in-with-a-taap-key-the-key-must-be-the-identitys)).
 
 PostgreSQL session authentication uses a unique public lookup UUID and constant-time SHA-256
 verification of one random bearer. Legacy sessions are invalidated by migration `0022_session_lookup`.

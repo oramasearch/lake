@@ -849,6 +849,12 @@ void expect_taap_sign_in_binds_the_key(lake::control::Store& store,
     }
 
     // A rotation the old key signed is bound: the new key signs in with the chain, not without.
+    // The first key is kept aside (a copy of the victim's liquid home taken before the rotation),
+    // as a leaked first key would be.
+    std::filesystem::copy(home / "victim", home / "victim-first-key",
+                          std::filesystem::copy_options::recursive);
+    Person first_key = person_at(home / "victim-first-key");
+    ASSERT_EQ(first_key.document, victim.document);
     liquid::identity_document successor;
     {
         LiquidHome scope(home / "victim");
@@ -871,6 +877,23 @@ void expect_taap_sign_in_binds_the_key(lake::control::Store& store,
     ASSERT_TRUE(with_chain.ok) << with_chain.error.message;
     EXPECT_EQ(store.context_for(with_chain.value.value("secret", ""))->user_id,
               victim_session.acting_user_id);
+
+    // lake#1024: that sign-in recorded the chain's head, so the replaced first key, alone, no
+    // longer signs in; the current key with the chain still does.
+    ApiContext replaced_visitor;
+    const ApiResult replaced_key = harness.call(
+        "sign_in_taap", sign_in_taap_input(first_key.signer, victim.document), replaced_visitor);
+    EXPECT_FALSE(replaced_key.ok) << "a replaced key signed in after the rotation was recorded";
+    EXPECT_EQ(replaced_key.error.code, "unauthorized");
+    EXPECT_NE(replaced_key.error.message.find("rotated"), std::string::npos)
+        << replaced_key.error.message;
+    EXPECT_FALSE(replaced_key.value.contains("secret"));
+    const ApiResult again_with_chain =
+        harness.call("sign_in_taap",
+                     sign_in_taap_input(
+                         victim.signer, successor_document, {victim.document, successor_document}),
+                     rotated_visitor);
+    EXPECT_TRUE(again_with_chain.ok) << again_with_chain.error.message;
 
     // A successor that declares the old key compromised and is signed only by the new key passes
     // liquid's verify_chain, but nothing the old key signed binds it: refused.

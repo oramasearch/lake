@@ -5329,3 +5329,22 @@ ALTER TABLE organizations ADD CONSTRAINT organizations_taap_id_format
     CHECK (taap_id IS NULL OR (taap_id ~ '^taap:[!-~]+$' AND length(taap_id) <= 512)) NOT VALID;
 CREATE TABLE IF NOT EXISTS principal_ids_guard (applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0109_principal_ids') ON CONFLICT DO NOTHING;
+
+-- 0110_taap_chain_heads (lake#1024): the newest verified head of each TAAP identity's rotation
+-- chain, recorded by sign_in_taap when a sign-in presents a longer valid identity_chain than the
+-- one recorded. A later sign-in whose chain does not pass through the recorded head (the first key
+-- alone after a rotation, or a fork of the chain) is refused, so a replaced key stops signing in.
+-- One row per identifier that signs in: a registered identity (identity_documents) or a linked own
+-- identity (identity_links). Hashes are SHA-256 (hex) of each document's canonical CBOR.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS taap_chain_heads (
+    taap_id      text        PRIMARY KEY,
+    user_id      uuid        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    head_hash    text        NOT NULL CHECK (head_hash ~ '^[0-9a-f]{64}$'),
+    chain_length integer     NOT NULL CHECK (chain_length BETWEEN 2 AND 64),
+    updated_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS taap_chain_heads_user_idx ON taap_chain_heads (user_id);
+
+CREATE TABLE IF NOT EXISTS taap_chain_heads_guard (applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0110_taap_chain_heads') ON CONFLICT DO NOTHING;

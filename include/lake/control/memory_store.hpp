@@ -877,6 +877,9 @@ private:
     };
     std::vector<PasswordCredential> passwords_;
     std::set<std::string> taap_assertions_;
+    // Each rotated TAAP identifier's recorded chain head: its hash and the chain's length
+    // (lake#1024, the PostgreSQL store's taap_chain_heads).
+    std::map<std::string, std::pair<std::string, std::size_t>> taap_chain_heads_;
     std::vector<PasskeyCredential> passkeys_;
     std::vector<OAuthCredential> oauth_credentials_;
     // user id -> the TAAP identity lake minted for a Clerk sign-in (custodial_identities).
