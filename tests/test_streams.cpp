@@ -187,6 +187,36 @@ TEST_F(Streams, TaskCredentialCannotSelectAnotherWorkspaceInTheSameSpace) {
     EXPECT_EQ(events->front().draft.details.value("acting_agent", ""), "agent-project");
 }
 
+// LSR-009 (lake#918): a launch's credential, like a task's, acts only in the workspace it was made
+// for, whichever workspace a call names.
+TEST_F(Streams, LaunchCredentialCannotSelectAnotherWorkspaceInTheSameSpace) {
+    const auto second = workspace->add(store, customer, "second");
+    lake::control::NewAgentLaunch row;
+    row.customer_id = customer;
+    row.agent_id = "a-1";
+    row.agent_name = "Watcher";
+    row.mode = "job";
+    row.trigger = "manual";
+    row.scopes = {"list_streams"};
+    row.workspace_id = workspace->id;
+    const auto launch = store->create_agent_launch(row);
+    ASSERT_TRUE(launch) << launch.error().message;
+    context.session_credential = true;
+    context.operator_credential = false;
+    context.credential_kind = "agent_launch";
+    context.credential_session_id = "launch:" + launch->id;
+    context.scopes = {"list_streams"};
+    const auto refused = call("list_streams", {{"customer_id", customer}, {"workspace_id", second}});
+    EXPECT_EQ(refused.error.code, "unauthorized");
+    EXPECT_NE(refused.error.message.find("another workspace"), std::string::npos);
+    // A schedule's credential naming a launch that is not its own matches no workspace.
+    context.credential_kind = "agent_schedule";
+    context.credential_session_id = "schedule:missing";
+    EXPECT_EQ(call("list_streams", {{"customer_id", customer}, {"workspace_id", workspace->id}})
+                  .error.code,
+              "unauthorized");
+}
+
 TEST_F(Streams, DeletedAppsAndExpiredBuildsAreReapedWithoutTouchingLiveTopics) {
     const auto app = store->create_web_app({.customer_id = customer, .workspace_id = workspace->id,
         .name = "deleted-app", .mode = "image", .image = "app:v1", .host = "deleted.test"});

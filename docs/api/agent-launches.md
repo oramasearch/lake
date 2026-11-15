@@ -37,8 +37,10 @@ older than five minutes.
 per launch, `lal.<launch id>.<secret>`, puts it in a Secret owned by the Job or Deployment, and
 writes only its SHA-256 (`credential_sha256`). lake's stores resolve such a bearer by comparing
 digests in constant time (`context_for`): it acts as the person who launched it, limited to the
-launch's `scopes`. A launch that is stopped (`desired = absent`) or not yet reported has no usable
-credential.
+launch's `scopes`, **and only in the launch's own workspace** (LSR-009, lake#918): a call that
+names, or is routed to (`/w/<id>/`), any other workspace is `unauthorized`, whichever account of the
+person it is in. The same holds for a schedule's credential and a task's. A launch that is stopped
+(`desired = absent`) or not yet reported has no usable credential.
 
 **A run's scopes follow its agent's skills** (agent-runtime#7). `control::agent_launch_scopes_for`
 reads the agent record's `skills` when lake stores the launch, schedule or conversation service,
