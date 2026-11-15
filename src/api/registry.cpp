@@ -953,15 +953,17 @@ std::optional<ApiResult> authentication_failure(const Capability& entry, ApiCont
     return std::nullopt;
 }
 
-
 // The workspace an agent's task, launch or schedule credential was made for (lake#918): nullopt
-// for any other credential, and "" (matching no workspace) when the row cannot be read.
-static std::optional<std::string> credential_workspace(const ApiContext& context) {
+// for any other credential, and "" (matching no workspace) when its row cannot be read.
+std::optional<std::string> bound_agent_workspace(const ApiContext& context) {
     const auto id_after = [&](std::string_view prefix) -> std::string {
         return context.credential_session_id.starts_with(prefix)
                    ? context.credential_session_id.substr(prefix.size())
                    : std::string();
     };
+    if (context.store == nullptr) {
+        return std::nullopt;
+    }
     if (context.credential_kind == "agent_task") {
         const auto task = context.store->get_agent_task(id_after("task:"));
         return task ? task->workspace_id : std::string();
@@ -1121,7 +1123,7 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         // A task, launch or schedule credential acts only in the workspace it was made for
         // (LSR-009, lake#918), whichever workspace the call names.
         if (state.proceed) {
-            if (const auto bound = credential_workspace(context);
+            if (const auto bound = bound_agent_workspace(context);
                 bound && *bound != context.workspace_id) {
                 state.result = ApiResult::failure(
                     "unauthorized", "this agent credential belongs to another workspace");
@@ -1134,11 +1136,29 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         }
     }
     if (state.proceed && !context.path_workspace_id.empty()) {
-        if (const auto bound = credential_workspace(context);
+        if (const auto bound = bound_agent_workspace(context);
             bound && *bound != context.path_workspace_id) {
             state.result = ApiResult::failure(
                 "unauthorized", "this agent credential belongs to another workspace");
             state.proceed = false;
+        }
+    }
+    // LSR-009 (lake#918): an agent's task, launch or schedule credential reaches only its own
+    // workspace through the object its input names too (a repository, app, build, application or
+    // secret mount), whose workspace a handler derives in its body rather than from workspace_id.
+    // A public repository stays readable, as it is to anyone. This complements the binding of the
+    // workspace a call names and of the /w/<id>/ route (lake#1286).
+    if (state.proceed && context.authorized) {
+        if (const auto bound = bound_agent_workspace(context)) {
+            const NamedObjectWorkspace named = named_object_workspace(&entry, input, context);
+            if (!named.workspace_id.empty() && named.workspace_id != *bound &&
+                !(named.public_repository && entry.kind == CapabilityKind::Read)) {
+                state.result = ApiResult::failure(
+                    "unauthorized",
+                    "this agent credential belongs to another workspace than the one " +
+                        entry.name + " would act in");
+                state.proceed = false;
+            }
         }
     }
     return state;

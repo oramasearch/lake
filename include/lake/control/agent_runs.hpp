@@ -46,6 +46,14 @@ inline const std::vector<std::string> agent_launch_scopes{"workspace_query",
                                                           "read_mcp_tool",
                                                           "call_mcp_tool"};
 
+// The engine actions a run's code calls directly, by Lake's names (agent-runtime#11, *Direct
+// actions*): check_pipeline and start_run (skill train), generate_dataset (generate-data), decide
+// and record_outcome (call-api); the engine's own policy governs them. A launch's or schedule's
+// `workspace_act` runs these and the actions its scopes name, nothing else (LSR-009, lake#918):
+// every other change is a proposal a person confirms.
+inline const std::vector<std::string> agent_run_direct_actions{
+    "check_pipeline", "start_run", "generate_dataset", "decide", "record_outcome"};
+
 // A skill a person may grant an agent (agent-runtime#7), vendored from agent-runtime's skills.json
 // by tools/agents/vendor-agent-skills.py into src/control/agent_skills.cpp: its name, the label
 // the Agent Factory and the agent pages show, and the Lake reads it grants. A skill's changes are
