@@ -1,6 +1,6 @@
 # Source tree layout
 
-One binary, a few libraries, and the rules from `CLAUDE.md` about which translation units may
+One binary, a few libraries, and the rules from `CONTRIBUTING.md` about which translation units may
 name third parties. `lake-core` is HTTP-free; `src/api/http_server.cpp` and
 `src/control/postgres_store.cpp` are the two files that know Beast2/Boost.JSON and libpqxx
 respectively.

@@ -1,4 +1,4 @@
-// The version lives in three places (root CLAUDE.md, *Cutting a release*): `project(lake VERSION)`
+// The version lives in three places (CONTRIBUTING.md, *Cutting a release*): `project(lake VERSION)`
 // in CMakeLists.txt, `version_string()` in src/version.cpp and `current_version()` in
 // include/lake/version.hpp. These tests read each from the code, never repeating the number, and
 // require that the version has its release page in docs/releases/, indexed in its README.

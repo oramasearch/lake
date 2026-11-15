@@ -158,8 +158,8 @@ and the 2026-10-18 UX review's fixes), what it does not include, and its known i
 [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md) covers secure networking, regions, the managed
 key and own identity, Clerk webhooks, the agents' names and Ask Orama's home. [`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md), the
 first tagged release, lists every feature, capability, web app page and guide.
-[`docs/releases/README.md`](docs/releases/README.md) is the index, and `CLAUDE.md` has the steps for
-cutting one.
+[`docs/releases/README.md`](docs/releases/README.md) is the index, and [`CONTRIBUTING.md`](CONTRIBUTING.md) has the
+steps for cutting one.
 
 ## Deployment status
 
@@ -193,6 +193,7 @@ describes the Network section each workspace has in the console (lake#729), and 
 
 [`CLAUDE.md`](CLAUDE.md) contains contributor instructions. [`AGENTS.md`](AGENTS.md) restates the
 rules used by repository agents. [`SECURITY.md`](SECURITY.md) says how to report a vulnerability.
+[`CONTRIBUTING.md`](CONTRIBUTING.md) contains contributor instructions.
 
 ## Licence
 

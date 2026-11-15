@@ -14,7 +14,7 @@ described below are implemented by lake issues #16 and #19 in migration
 `0004_organizations_policy`; identity core is implemented in migration `0007_identity_core`.
 Everything
 else below is added to that shape and keeps its rules
-(`CLAUDE.md`: one adapter TU, one registry, one auth check, trailing 404, pages never do what
+(`CONTRIBUTING.md`: one adapter TU, one registry, one auth check, trailing 404, pages never do what
 the API cannot).
 
 **Web UI status: repository browsing is implemented in lake #9.** Repository lists, refs,

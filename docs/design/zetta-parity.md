@@ -97,7 +97,7 @@ statements stay out of reach.
 - **One registry.** Each capability joins the `workspace_query` / `workspace_act` allow-lists
   (`src/api/workspace_capabilities.cpp`), so it is authorized on the customer and audited before it
   reaches Zetta, and REST and MCP get it with the page.
-- **Pure renderers, forms, no client JavaScript** (lake `CLAUDE.md`). The graph is SVG laid out on
+- **Pure renderers, forms, no client JavaScript** (lake `CONTRIBUTING.md`). The graph is SVG laid out on
   the server.
 - **Every page is proven in the browser** (`tools/e2e/README.md`); the walkthrough
   grows a step per phase.

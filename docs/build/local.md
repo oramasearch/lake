@@ -14,7 +14,7 @@
 - A checkout of `zetta-bridge`. `LAKE_ZETTA_SOURCE_DIR` is required and must name its
   `modules/zetta` directory; lake compiles the client transport and its runtime event
   implementation from it and links them to its own Boost.HTTP, Beast2, Capy and Corosio targets,
-  so the binary carries one networking stack. `CLAUDE.md` names the one authorized checkout.
+  so the binary carries one networking stack. `CONTRIBUTING.md` names the one authorized checkout.
   The target also compiles that checkout's `src/core/runtime.cpp`, which supplies the transport's
   synchronized asynchronous event definitions; it does not link the engine or change the pin.
 - Submodules. Clone with `--recurse-submodules` or run `git submodule update --init --recursive`
@@ -124,4 +124,4 @@ server cleanly; the routes it serves are in [`../serving/http.md`](../serving/ht
 A change to the toolchain or to a required dependency updates this page, the `Dockerfile`
 and [`container-image.md`](container-image.md) in the same change. Before
 finishing any change, `cmake --build build && ctest --test-dir build` must be green and the
-binary smoke-tested by hand, as `CLAUDE.md` requires.
+binary smoke-tested by hand, as `CONTRIBUTING.md` requires.
