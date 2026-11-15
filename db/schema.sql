@@ -4760,67 +4760,11 @@ ALTER TABLE billing_invoice_lines ADD CONSTRAINT billing_invoice_lines_class_che
 CREATE TABLE IF NOT EXISTS model_token_prices_guard (
     applied_at timestamptz NOT NULL DEFAULT now()
 );
--- The default gateway models' token prices (Steve, 2026-10-23): OpenAI's published standard
--- price per million tokens, https://developers.openai.com/api/docs/pricing, read 2026-10-23,
--- plus 30%, in millionths of a US dollar per 1,000,000 tokens (docs/api/billing.md#rates):
---   gpt-5.5                 $5.00 in, $30.00 out  ->  6500000 / 39000000 (under 272K context)
---   gpt-5                   $1.25 in, $10.00 out  ->  1625000 / 13000000
---   gpt-4o                  $2.50 in, $10.00 out  ->  3250000 / 13000000
---   text-embedding-3-small  $0.02 in, no output   ->    26000 /    26000 (an embedding reports
---                                                       no output tokens; the gateway needs both)
--- Applied once, the first time this migration runs, on a fresh and an existing control plane
--- alike. Publications are kept as published, so a new one is written for this UTC month: the
--- rates of the list in force now (none on a fresh instance) plus these. A list published for a
--- later month gets them too. A rate an operator already published for one of these classes is
--- never replaced. A list in another currency is left for the operator.
-DO $model_token_prices$
-DECLARE
-    this_month        text := to_char(now() AT TIME ZONE 'UTC', 'YYYYMM');
-    seeded_id         text := 'usage-' || to_char(now() AT TIME ZONE 'UTC', 'YYYYMM') || '-' ||
-                              lpad(floor(extract(epoch FROM clock_timestamp()) * 1000000)
-                                       ::bigint::text, 17, '0');
-    in_force_id       text;
-    in_force_currency text;
-    seed_classes      text[] := ARRAY['gpt-5.5/input', 'gpt-5.5/output',
-                                      'gpt-5/input', 'gpt-5/output',
-                                      'gpt-4o/input', 'gpt-4o/output',
-                                      'text-embedding-3-small/input',
-                                      'text-embedding-3-small/output'];
-    seed_micros       bigint[] := ARRAY[6500000, 39000000,
-                                        1625000, 13000000,
-                                        3250000, 13000000,
-                                        26000,
-                                        26000];
-BEGIN
-    IF EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0095_model_token_prices') THEN
-        RETURN;
-    END IF;
-    SELECT p.id, p.currency INTO in_force_id, in_force_currency FROM billing_plans p
-     WHERE p.id ~ '^usage-[0-9]{6}-[0-9]{17}$' AND substr(p.id, 7, 6) <= this_month
-     ORDER BY p.id DESC LIMIT 1;
-    IF in_force_currency IS NULL OR in_force_currency = 'USD' THEN
-        INSERT INTO billing_plans (id, name, description, currency)
-        VALUES (seeded_id, 'Usage',
-                'Usage price list from ' || substr(this_month, 1, 4) || '-' ||
-                    substr(this_month, 5, 2),
-                'USD');
-        INSERT INTO billing_plan_prices (plan_id, dimension, class, unit_micros, per, included)
-        SELECT seeded_id, pp.dimension, pp.class, pp.unit_micros, pp.per, pp.included
-          FROM billing_plan_prices pp WHERE pp.plan_id = in_force_id;
-        INSERT INTO billing_plan_prices (plan_id, dimension, class, unit_micros, per)
-        SELECT seeded_id, 'model_tokens', s.class, s.unit_micros, 1000000
-          FROM unnest(seed_classes, seed_micros) AS s(class, unit_micros)
-            ON CONFLICT DO NOTHING;
-    END IF;
-    INSERT INTO billing_plan_prices (plan_id, dimension, class, unit_micros, per)
-    SELECT p.id, 'model_tokens', s.class, s.unit_micros, 1000000
-      FROM billing_plans p
-     CROSS JOIN unnest(seed_classes, seed_micros) AS s(class, unit_micros)
-     WHERE p.id ~ '^usage-[0-9]{6}-[0-9]{17}$' AND substr(p.id, 7, 6) > this_month
-       AND p.currency = 'USD'
-        ON CONFLICT DO NOTHING;
-END
-$model_token_prices$;
+-- No prices are seeded. Each instance publishes its own model rates with `set_price_list`
+-- (docs/api/model-gateway.md#configuration). With billing on, a model with no published input and output
+-- rate is refused before the provider is called; with billing off it is served and not billed. An
+-- instance that applied this migration while it still seeded rates keeps the list it published:
+-- this file never rewrites a price list.
 INSERT INTO schema_migrations (version) VALUES ('0095_model_token_prices') ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------------------------
@@ -5135,80 +5079,6 @@ INSERT INTO schema_migrations (version) VALUES ('0104_app_restarts') ON CONFLICT
 CREATE TABLE IF NOT EXISTS agent_model_prices_guard (
     applied_at timestamptz NOT NULL DEFAULT now()
 );
--- Steve, 2026-10-26: OpenAI's published standard price per million tokens,
--- https://developers.openai.com/api/docs/pricing and the model pages, read 2026-10-26, plus 30%,
--- in millionths of a US dollar per 1,000,000 tokens:
---   gpt-6.1-sol    $2.00 in, $10.00 out  ->  2600000 / 13000000;  long  5200000 / 19500000
---   gpt-6.1-terra  $1.00 in,  $5.00 out  ->  1300000 /  6500000;  long  2600000 /  9750000
---   gpt-6-astra   $10.00 in, $50.00 out  -> 13000000 / 65000000;  long 26000000 / 97500000
---   gpt-6-luna     $0.10 in,  $0.50 out  ->   130000 /   650000;  long   260000 /   975000
---   gpt-5.5        (0095's rates)                                ;  long 13000000 / 58500000
--- Cached input is billed as input (OpenAI charges 5% of it) and cache writes (1.25x input) as input
--- at 1.3x, so both are covered. The same rules as 0095: applied once, the first time this migration
--- runs, on a fresh and an existing control plane alike; a new publication for this UTC month with
--- the rates of the list in force plus these; a list for a later month gets them too; a rate an
--- operator already published for one of these classes is never replaced; a list in another currency
--- is left for the operator.
-DO $agent_model_prices$
-DECLARE
-    this_month        text := to_char(now() AT TIME ZONE 'UTC', 'YYYYMM');
-    seeded_id         text := 'usage-' || to_char(now() AT TIME ZONE 'UTC', 'YYYYMM') || '-' ||
-                              lpad(floor(extract(epoch FROM clock_timestamp()) * 1000000)
-                                       ::bigint::text, 17, '0');
-    in_force_id       text;
-    in_force_currency text;
-    seed_classes      text[] := ARRAY['gpt-6.1-sol/input', 'gpt-6.1-sol/output',
-                                      'gpt-6.1-sol@long/input', 'gpt-6.1-sol@long/output',
-                                      'gpt-6.1-terra/input', 'gpt-6.1-terra/output',
-                                      'gpt-6.1-terra@long/input', 'gpt-6.1-terra@long/output',
-                                      'gpt-6-astra/input', 'gpt-6-astra/output',
-                                      'gpt-6-astra@long/input', 'gpt-6-astra@long/output',
-                                      'gpt-6-luna/input', 'gpt-6-luna/output',
-                                      'gpt-6-luna@long/input', 'gpt-6-luna@long/output',
-                                      'gpt-5.5@long/input', 'gpt-5.5@long/output'];
-    seed_micros       bigint[] := ARRAY[2600000, 13000000,
-                                        5200000, 19500000,
-                                        1300000, 6500000,
-                                        2600000, 9750000,
-                                        13000000, 65000000,
-                                        26000000, 97500000,
-                                        130000, 650000,
-                                        260000, 975000,
-                                        13000000, 58500000];
-BEGIN
-    IF EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0105_agent_model_prices') THEN
-        RETURN;
-    END IF;
-    SELECT p.id, p.currency INTO in_force_id, in_force_currency FROM billing_plans p
-     WHERE p.id ~ '^usage-[0-9]{6}-[0-9]{17}$' AND substr(p.id, 7, 6) <= this_month
-     ORDER BY p.id DESC LIMIT 1;
-    IF in_force_currency IS NULL OR in_force_currency = 'USD' THEN
-        -- One microsecond later than the list in force when both were written in the same
-        -- microsecond (0095 and this block in one transaction on a fresh instance).
-        IF in_force_id IS NOT NULL AND seeded_id <= in_force_id THEN
-            seeded_id := 'usage-' || this_month || '-' ||
-                         lpad((substr(in_force_id, 14)::bigint + 1)::text, 17, '0');
-        END IF;
-        INSERT INTO billing_plans (id, name, description, currency)
-        VALUES (seeded_id, 'Usage',
-                'Usage price list from ' || substr(this_month, 1, 4) || '-' ||
-                    substr(this_month, 5, 2),
-                'USD');
-        INSERT INTO billing_plan_prices (plan_id, dimension, class, unit_micros, per, included)
-        SELECT seeded_id, pp.dimension, pp.class, pp.unit_micros, pp.per, pp.included
-          FROM billing_plan_prices pp WHERE pp.plan_id = in_force_id;
-        INSERT INTO billing_plan_prices (plan_id, dimension, class, unit_micros, per)
-        SELECT seeded_id, 'model_tokens', s.class, s.unit_micros, 1000000
-          FROM unnest(seed_classes, seed_micros) AS s(class, unit_micros)
-            ON CONFLICT DO NOTHING;
-    END IF;
-    INSERT INTO billing_plan_prices (plan_id, dimension, class, unit_micros, per)
-    SELECT p.id, 'model_tokens', s.class, s.unit_micros, 1000000
-      FROM billing_plans p
-     CROSS JOIN unnest(seed_classes, seed_micros) AS s(class, unit_micros)
-     WHERE p.id ~ '^usage-[0-9]{6}-[0-9]{17}$' AND substr(p.id, 7, 6) > this_month
-       AND p.currency = 'USD'
-        ON CONFLICT DO NOTHING;
-END
-$agent_model_prices$;
+-- No prices are seeded, as in 0095: each instance publishes the gpt-6.x and `@long` rates with
+-- `set_price_list`, and a list published while this migration still seeded rates is kept.
 INSERT INTO schema_migrations (version) VALUES ('0105_agent_model_prices') ON CONFLICT DO NOTHING;

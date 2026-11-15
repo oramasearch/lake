@@ -68,6 +68,6 @@ session event ends only that browser, with `clerk_session_binding_guard`; and `0
 (lake#1228): the generation an app's last restart wrote, which the operator puts on the pod template
 ([web apps](web-apps.md#restart)), with `app_restarts_guard`.
 session event ends only that browser, with `clerk_session_binding_guard`; and
-`0105_agent_model_prices` (lake#1230): the gpt-6.x and long-context model token rates, with
-`agent_model_prices_guard`.
+`0105_agent_model_prices` (lake#1230): the gpt-6.x and long-context model token classes (no
+prices seeded), with `agent_model_prices_guard`.
 [Schema](schema.md#authentication-attempts-migration-0098_authentication_attempts) describes shared password/MFA attempt budgets (lake#966).

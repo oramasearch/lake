@@ -359,37 +359,12 @@ TEST(ModelCompletion, BillingRequiresBothPositiveExactModelPricesBeforeDispatch)
     EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-5.5/output"}}), 300);
 }
 
-// The default gateway models' token prices the schema seeds (migration 0095, Steve 2026-10-23):
-// OpenAI's published standard price, https://developers.openai.com/api/docs/pricing read
-// 2026-10-23, plus 30%, in millionths of a dollar per million tokens (docs/api/billing.md#rates).
-struct SeededModelPrice {
-    const char* model;
-    std::uint64_t input;
-    std::uint64_t output;
-};
-// The gpt-6.x models follow from migration 0105 (Steve 2026-10-26, the same page read 2026-10-26).
-constexpr SeededModelPrice seeded_model_prices[] = {
-    {"gpt-6.1-sol", 2'600'000, 13'000'000},      // $2.00 / $10.00
-    {"gpt-6.1-terra", 1'300'000, 6'500'000},     // $1.00 / $5.00
-    {"gpt-6-astra", 13'000'000, 65'000'000},     // $10.00 / $50.00
-    {"gpt-6-luna", 130'000, 650'000},            // $0.10 / $0.50
-    {"gpt-5.5", 6'500'000, 39'000'000},          // $5.00 / $30.00
-    {"gpt-5", 1'625'000, 13'000'000},            // $1.25 / $10.00
-    {"gpt-4o", 3'250'000, 13'000'000},           // $2.50 / $10.00
-    {"text-embedding-3-small", 26'000, 26'000}}; // $0.02, no output tokens
-
-// The long-context rates of migration 0105: a prompt over 272,000 input tokens is priced by OpenAI
-// at 2x input and 1.5x output, plus 30%.
-constexpr SeededModelPrice seeded_long_prices[] = {{"gpt-6.1-sol", 5'200'000, 19'500'000},
-                                                   {"gpt-6.1-terra", 2'600'000, 9'750'000},
-                                                   {"gpt-6-astra", 26'000'000, 97'500'000},
-                                                   {"gpt-6-luna", 260'000, 975'000},
-                                                   {"gpt-5.5", 13'000'000, 58'500'000}};
-
-// A fresh control plane (the schema applied to an empty PostgreSQL database, as the operator
-// applies it) can make a model call with billing on, for every default model, and the bill prices
-// the call's input and output at the seeded rates.
-TEST(ModelCompletion, ASeededInstanceCallsTheDefaultModelsWithBillingOnAtTheSeededPrices) {
+// A fresh control plane (the schema applied to an empty PostgreSQL database, as `lake migrate`
+// applies it) has no price list: the schema seeds no rates (docs/api/model-gateway.md#configuration).
+// With billing on, every default model is refused before the provider is called. Once the instance
+// publishes its own rates with set_price_list (illustrative rates here), the model is served and
+// the bill prices the call at the published rates.
+TEST(ModelCompletion, AFreshInstanceRefusesEveryModelWithBillingOnUntilItPublishesPrices) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
@@ -407,45 +382,36 @@ TEST(ModelCompletion, ASeededInstanceCallsTheDefaultModelsWithBillingOnAtTheSeed
         std::format("{:04}-{:02}", int(today.year()), unsigned(today.month()));
     const auto listed = rig.registry.call("price_list", {{"period", period}}, admin);
     ASSERT_TRUE(listed.ok) << listed.error.message;
-    ASSERT_TRUE(listed.value["list"].is_object()) << listed.value.dump();
-    const auto rate = [&](const std::string& name) -> json {
-        for (const json& price : listed.value["list"]["prices"]) {
-            if (price["dimension"] == "model_tokens" && price["class"] == name) {
-                return price;
-            }
-        }
-        return nullptr;
-    };
-    for (const auto& seeded : seeded_model_prices) {
-        SCOPED_TRACE(seeded.model);
-        EXPECT_TRUE(
-            lake::api::gateway_model_allowed(rig.admin().model_gateway_models, seeded.model));
-        const json input = rate(std::string(seeded.model) + "/input");
-        const json output = rate(std::string(seeded.model) + "/output");
-        ASSERT_TRUE(input.is_object());
-        ASSERT_TRUE(output.is_object());
-        EXPECT_EQ(input["unit_micros"], seeded.input);
-        EXPECT_EQ(output["unit_micros"], seeded.output);
-        EXPECT_EQ(input["per"], 1'000'000);
-        EXPECT_EQ(output["per"], 1'000'000);
+    EXPECT_TRUE(listed.value["list"].is_null()) << listed.value.dump();
+    for (const auto& model : lake::api::default_gateway_models()) {
+        SCOPED_TRACE(model.name);
         auto context = rig.admin();
-        EXPECT_TRUE(lake::api::validate_gateway_model(seeded.model, context));
+        EXPECT_FALSE(lake::api::validate_gateway_model(model.name, context));
     }
-    EXPECT_EQ(std::size(seeded_model_prices), lake::api::default_gateway_models().size());
-    for (const auto& seeded : seeded_long_prices) {
-        SCOPED_TRACE(std::string(seeded.model) + "@long");
-        EXPECT_TRUE(lake::api::has_long_context_rate(seeded.model));
-        const json input = rate(std::string(seeded.model) + "@long/input");
-        const json output = rate(std::string(seeded.model) + "@long/output");
-        ASSERT_TRUE(input.is_object());
-        ASSERT_TRUE(output.is_object());
-        EXPECT_EQ(input["unit_micros"], seeded.input);
-        EXPECT_EQ(output["unit_micros"], seeded.output);
-    }
-
-    // A gpt-5.5 call answered with 1,200 input and 300 output tokens (chat_answer).
     const auto task = rig.task(rig.home, "agent-project");
     auto context = rig.task_context(task);
+    const auto refused = rig.call(chat(), context);
+    EXPECT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "invalid_input");
+    EXPECT_EQ(refused.error.path, "/request/model");
+    EXPECT_EQ(rig.fake.calls(), 0U) << "an unpriced model never reaches the provider";
+
+    // The instance publishes its own gpt-5.5 rates, the long-context ones included.
+    const json prices = json::array({
+        {{"dimension", "model_tokens"}, {"class", "gpt-5.5/input"}, {"unit_micros", 1'000'000},
+         {"per", 1'000'000}},
+        {{"dimension", "model_tokens"}, {"class", "gpt-5.5/output"}, {"unit_micros", 4'000'000},
+         {"per", 1'000'000}},
+        {{"dimension", "model_tokens"}, {"class", "gpt-5.5@long/input"}, {"unit_micros", 2'000'000},
+         {"per", 1'000'000}},
+        {{"dimension", "model_tokens"}, {"class", "gpt-5.5@long/output"},
+         {"unit_micros", 6'000'000}, {"per", 1'000'000}}});
+    auto published = liquid::runtime::block_on(
+        rig.registry.call_async("set_price_list", {{"prices", prices}}, admin));
+    ASSERT_TRUE(published);
+    ASSERT_TRUE(published->ok) << published->error.code << ": " << published->error.message;
+
+    // A gpt-5.5 call answered with 1,200 input and 300 output tokens (chat_answer).
     const auto answered = rig.call(chat(), context);
     ASSERT_TRUE(answered.ok) << answered.error.code << ": " << answered.error.message;
     EXPECT_EQ(rig.fake.calls(), 1U);
@@ -469,12 +435,12 @@ TEST(ModelCompletion, ASeededInstanceCallsTheDefaultModelsWithBillingOnAtTheSeed
     ASSERT_TRUE(input.is_object()) << preview.value.dump();
     ASSERT_TRUE(output.is_object()) << preview.value.dump();
     EXPECT_EQ(input["quantity"], 1200);
-    EXPECT_EQ(input["unit_micros"], 6'500'000);
+    EXPECT_EQ(input["unit_micros"], 1'000'000);
     EXPECT_EQ(input["per"], 1'000'000);
-    EXPECT_EQ(input["amount_micros"], 7'800) << "1,200 tokens at $6.50 a million";
+    EXPECT_EQ(input["amount_micros"], 1'200) << "1,200 tokens at $1.00 a million";
     EXPECT_EQ(output["quantity"], 300);
-    EXPECT_EQ(output["unit_micros"], 39'000'000);
-    EXPECT_EQ(output["amount_micros"], 11'700) << "300 tokens at $39.00 a million";
+    EXPECT_EQ(output["unit_micros"], 4'000'000);
+    EXPECT_EQ(output["amount_micros"], 1'200) << "300 tokens at $4.00 a million";
 }
 
 TEST(RecordModelUsage, UnpricedReportsCannotPoisonABilledAccountsLedger) {

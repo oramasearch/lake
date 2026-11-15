@@ -199,39 +199,16 @@ export const LIST_RATES: { dimension: string; class?: string; unit_micros: numbe
   { dimension: "predictions", unit_micros: 10_000, per: 1000 },
   { dimension: "searches", unit_micros: 10_000, per: 1000 },
   { dimension: "model_tokens", unit_micros: 9_000_000, per: 1_000_000 },
-  // The default gateway models (migration 0095_model_token_prices, Steve 2026-10-23): OpenAI's
-  // published price per million tokens (https://developers.openai.com/api/docs/pricing, read
-  // 2026-10-23) plus 30%. An embedding reports no output tokens; the gateway needs both rates.
-  { dimension: "model_tokens", class: "gpt-5.5/input", unit_micros: 6_500_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-5.5/output", unit_micros: 39_000_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-5/input", unit_micros: 1_625_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-5/output", unit_micros: 13_000_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-4o/input", unit_micros: 3_250_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-4o/output", unit_micros: 13_000_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "text-embedding-3-small/input", unit_micros: 26_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "text-embedding-3-small/output", unit_micros: 26_000, per: 1_000_000 },
-  // The gpt-6.x models and long-context rates (migration 0105_agent_model_prices, lake#1230, Steve
-  // 2026-10-26): the same page read 2026-10-26, plus 30%. A prompt over 272,000 input tokens is
-  // priced by OpenAI at 2x input and 1.5x output, so it is billed at `<model>@long/...`.
-  { dimension: "model_tokens", class: "gpt-6.1-sol/input", unit_micros: 2_600_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-6.1-sol/output", unit_micros: 13_000_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-6.1-sol@long/input", unit_micros: 5_200_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-6.1-sol@long/output", unit_micros: 19_500_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-6.1-terra/input", unit_micros: 1_300_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-6.1-terra/output", unit_micros: 6_500_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-6.1-terra@long/input", unit_micros: 2_600_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-6.1-terra@long/output", unit_micros: 9_750_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-6-astra/input", unit_micros: 13_000_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-6-astra/output", unit_micros: 65_000_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-6-astra@long/input", unit_micros: 26_000_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-6-astra@long/output", unit_micros: 97_500_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-6-luna/input", unit_micros: 130_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-6-luna/output", unit_micros: 650_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-6-luna@long/input", unit_micros: 260_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-6-luna@long/output", unit_micros: 975_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-5.5@long/input", unit_micros: 13_000_000, per: 1_000_000 },
-  { dimension: "model_tokens", class: "gpt-5.5@long/output", unit_micros: 58_500_000, per: 1_000_000 },
   { dimension: "volumes", unit_micros: 200_000, per: 2_628_000 },
+];
+
+/** The served models' token classes the editor offers an empty row for when nothing is published.
+ * Lake ships no model rates (docs/api/model-gateway.md#configuration): with billing on, a model is
+ * refused until its input and output rates (and, for gpt-6.x and gpt-5.5, its `@long` rates) are
+ * published, so the operator fills in its own. */
+export const MODEL_CLASSES: string[] = [
+  ...["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-luna", "gpt-5.5"].flatMap((m) => [`${m}/input`, `${m}/output`, `${m}@long/input`, `${m}@long/output`]),
+  ...["gpt-5", "gpt-4o", "text-embedding-3-small"].flatMap((m) => [`${m}/input`, `${m}/output`]),
 ];
 
 /** One row of the price list editor, in a person's numbers: the rate in the currency ("0.04") for
@@ -248,7 +225,8 @@ export function rowTitle(row: Pick<RateRow, "dimension" | "class">): string {
 }
 
 /** Rows from a published list, or the defaults when none exists. Preserve named model directions
- * and GPU classes; only GPUs have offered default classes. Unpriced rows start empty, and retired
+ * and GPU classes; GPUs have offered default classes, and with no list the served models' classes
+ * are offered empty. Unpriced rows start empty, and retired
  * dimensions are not carried over. */
 export function rateRows(prices: Pick<Price, "dimension" | "class" | "unit_micros" | "per">[] | null | undefined): RateRow[] {
   const from = prices ?? LIST_RATES;
@@ -261,7 +239,7 @@ export function rateRows(prices: Pick<Price, "dimension" | "class" | "unit_micro
     rows.push(row(d.name, ""));
     if (!d.classes && d.name !== "model_tokens") continue;
     const named = from.flatMap((p) => p.dimension === d.name && p.class ? [p.class] : []);
-    const offered = d.classes ? GPU_CLASSES : [];
+    const offered = d.classes ? GPU_CLASSES : prices ? [] : MODEL_CLASSES;
     for (const name of [...new Set([...offered, ...named])]) rows.push(row(d.name, name));
   }
   return rows;

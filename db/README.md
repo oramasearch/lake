@@ -5,12 +5,11 @@ applies it to `LAKE_CONTROL_DB_URI` in one transaction under an advisory lock, a
 `PostgresSchema` Job does; `lake manifest` reports its latest migration and guard tables
 (lake#1119, [operator-interface.md](../docs/deployment/operator-interface.md)). Once
 orama-operator#936 consumes them, a new migration needs no operator vendoring.
-Migration `0105_agent_model_prices` (lake#1230) seeds the `model_tokens` rates of the gpt-6.x models
-the gateway now serves and the long-context classes `<model>@long/input` and `<model>@long/output`
-(also for gpt-5.5), OpenAI's standard price plus 30% read 2026-10-26, by `0095`'s rules (once; a new
-publication for this month; an operator's rate kept; another currency left alone). No table changes;
-guard `agent_model_prices_guard`. Apply before the new binary, or a Lake with billing on refuses those
-models. See [billing](../docs/api/billing.md#rates) and [schema.md](../docs/control-plane/schema.md).
+Migration `0105_agent_model_prices` (lake#1230) names the long-context classes `<model>@long/input`
+and `<model>@long/output` of the gpt-6.x models the gateway now serves (also for gpt-5.5). It seeds no
+prices: each instance publishes them with `set_price_list`, and a Lake with billing on refuses a model
+until they are published. No table changes; guard `agent_model_prices_guard`. See
+[billing](../docs/api/billing.md#rates) and [schema.md](../docs/control-plane/schema.md).
 Migration `0103_clerk_session_binding` (lake#1163) adds the nullable `sessions.clerk_session_id` (the
 Clerk session a browser sign-in came from, from the signed `sid` of Clerk's default session token),
 the index `sessions_clerk_session_id_idx` and the guard `clerk_session_binding_guard`. A Clerk session
@@ -49,9 +48,9 @@ schema and select the guard. See [billing.md](../docs/api/billing.md#balance) an
 
 Migration `0095_model_token_prices` (LSR-095, lake#961) permits exact `<model>/input` and
 `<model>/output` classes for `model_tokens` prices and frozen invoice lines. Existing GPU-style
-classes retain their constraints. It seeds the default gateway models' input and output prices
-once (OpenAI's published price plus 30%) as a new publication for the current month, on a fresh and
-an existing instance. The operator must vendor this schema and select
+classes retain their constraints. It seeds no prices: each instance publishes its own model rates
+with `set_price_list`, and an instance that applied it while it still seeded rates keeps the list it
+published, because the schema never rewrites a price list. The operator must vendor this schema and select
 `model_token_prices_guard` before the new binary is deployed; the operator is not changed here.
 See [model-gateway.md](../docs/api/model-gateway.md#configuration).
 Migration `0094_clerk_revocation` (lake#948, LSR-085) adds `clerk_user_states` (ordered upstream
