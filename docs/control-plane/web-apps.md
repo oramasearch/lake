@@ -37,7 +37,8 @@ Workspace assignment and event-client cutover are tracked in
 | `framework, port, replicas, host, auth` | Lake |
 | `bindings_json, env_json, secret_env_refs, desired, generation` | Lake |
 | `restart_generation` | Lake ([restart](#restart)) |
-| `token_hashes_json` | operator; Lake may only clear it for rotation |
+| `token_generation` | Lake ([token rotation](#token-rotation)) |
+| `token_hashes_json`, `token_hashes_generation` | operator; Lake clears `token_hashes_json` to rotate only while `token_hashes_generation` is NULL ([token rotation](#token-rotation)) |
 | `phase, url, ready, message, observed_generation` | operator |
 | `updated_at` | both |
 
@@ -72,6 +73,38 @@ nothing. The operator reads the column tolerantly (absent before the migration r
 operator side is orama-operator's LakeApp `spec.sync.restartGeneration`.
 
 `get_app` answers `restart_generation`. A stopped app's Restart starts it, as before.
+
+### Token rotation
+
+Detaching an app's Zetta rotates its tokens (`set_app_zetta_binding`, `WebAppPatch::rotate_tokens`).
+Decided under Steve's 2026-11-14 delegation (lake#1070): rotation is desired state that the
+operator acknowledges, and Lake stops writing the operator's column. Migration
+`0112_app_token_generation` adds:
+
+- `token_generation` (Lake, default 0): the generation of tokens Lake wants. Rotation increments it.
+- `token_hashes_generation` (operator, NULL until it reports): the generation of the hashes in
+  `token_hashes_json`, written with them.
+
+A hash verifies only while `token_hashes_generation` equals `token_generation`
+(`WebApp::tokens_current`, checked in `web_app_token_purpose` on every call), so rotation still
+revokes every token in the same transaction, the image pull included, until the operator writes
+hashes for the new generation.
+
+**Gated on what the operator reports.** While `token_hashes_generation` is NULL the operator
+predates this change: hashes verify as before, and rotation also clears `token_hashes_json`, the
+old behaviour that such an operator needs to mint again. Once the operator writes a generation
+for an app, Lake never writes that app's `token_hashes_json` again. The operator half:
+
+1. Read `token_generation` and `token_hashes_generation` with each app. Mint new tokens when
+   `token_hashes_generation` is NULL, below `token_generation`, or the hashes are empty, and write
+   `token_hashes_json` and `token_hashes_generation = token_generation` in one statement,
+   conditioned on `token_generation` still being the value read.
+2. Write `token_hashes_generation` on every app it reconciles, existing ones included, so no app
+   stays on the NULL path.
+3. Only then revoke `UPDATE (token_hashes_json)` on `apps` from `lake_runtime`.
+
+An operator rolled back to one that reports no generation leaves a rotated app without a valid
+token until it is upgraded again: it fails closed, never open.
 
 The binding contract is:
 

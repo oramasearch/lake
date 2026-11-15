@@ -245,7 +245,12 @@ public:
     Result<WebApp> create_web_app(const NewWebApp&) override;
     Result<WebApp> update_web_app(const std::string& id, const WebAppPatch&) override;
     Result<void> purge_deleted_web_apps() override;
-    Result<void> set_web_app_token_hashes(const std::string& id, nlohmann::json hashes);
+    // What the operator writes for an app's tokens (lake#1070): the hashes and, from an operator
+    // that acknowledges rotation, the token generation they are. nullopt keeps the generation as
+    // it is, which is what an operator from before migration 0112 does.
+    Result<void> set_web_app_token_hashes(const std::string& id,
+                                          nlohmann::json hashes,
+                                          std::optional<std::int64_t> generation = std::nullopt);
     // What the operator writes back after reconciling a desired row. Tests and local demos call
     // this directly; the production operator updates the same columns in Postgres.
     Result<void> set_web_app_status(const std::string& id,

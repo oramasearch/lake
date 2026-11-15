@@ -688,7 +688,15 @@ TEST(WebApps, OperatorHashesRestrictEveryPurposeAndRotationRevokesOldTokens) {
     ASSERT_TRUE(apps.store->update_web_app(id, revoke));
     EXPECT_FALSE(apps.store->context_for("operator-events"));
     EXPECT_TRUE(apps.store->get_web_app(id)->token_hashes.empty());
-    ASSERT_TRUE(apps.store->set_web_app_token_hashes(id, hashes));
+    // An operator that acknowledges the token generation (lake#1070): rotation leaves its hashes
+    // alone, and the generation it has not acknowledged yet revokes them at once.
+    ASSERT_TRUE(apps.store->set_web_app_token_hashes(id, hashes, 1));
+    EXPECT_TRUE(apps.store->context_for("operator-events"));
+    ASSERT_TRUE(apps.store->update_web_app(id, revoke));
+    EXPECT_EQ(apps.store->get_web_app(id)->token_generation, 2);
+    EXPECT_EQ(apps.store->get_web_app(id)->token_hashes, hashes);
+    EXPECT_FALSE(apps.store->context_for("operator-events"));
+    ASSERT_TRUE(apps.store->set_web_app_token_hashes(id, hashes, 2));
     ASSERT_TRUE(apps.call("delete_app", {{"app_id", id}, {"confirm", "reports"}}).ok);
     EXPECT_FALSE(apps.store->context_for("operator-source"));
     EXPECT_FALSE(apps.store->context_for("operator-zetta"));

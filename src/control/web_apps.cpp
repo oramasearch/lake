@@ -40,7 +40,8 @@ std::expected<secrets_crypto::Key, std::string> web_app_session_key(std::string_
 } // namespace
 
 std::optional<std::string> web_app_token_purpose(const WebApp& app, std::string_view digest) {
-    if (digest.size() != 64 || app.phase == "Deleted") {
+    // A rotation the operator has not acknowledged yet revokes every token at once (lake#1070).
+    if (digest.size() != 64 || app.phase == "Deleted" || !app.tokens_current()) {
         return std::nullopt;
     }
     std::optional<std::string> matched;

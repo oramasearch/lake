@@ -417,3 +417,7 @@ docs/api/platform.md#custom-domains): the question and answer codecs (`encode_tx
 `decode_txt_answer`), `/etc/resolv.conf`'s name servers, and `lookup_txt`, one bounded UDP question
 per server with a TCP retry when the answer is truncated. POSIX sockets only; `verify_domain` runs it
 on the blocking pool. Both stores keep the claims (`domain_claims`, migration `0106_domain_claims`).
+App token rotation is desired state (lake#1070): `update_web_app` with `rotate_tokens` increments
+`apps.token_generation` and clears `token_hashes_json` only for an app whose operator reports no
+`token_hashes_generation`; `web_app_token_purpose` (`web_apps.cpp`) refuses every hash while the
+two generations differ. See [web-apps.md](../../docs/control-plane/web-apps.md#token-rotation).

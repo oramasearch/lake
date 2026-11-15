@@ -1507,7 +1507,12 @@ Result<WebApp> InMemoryStore::update_web_app(const std::string& id, const WebApp
         found->source_entrypoint = *patch.source_entrypoint;
     }
     if (patch.rotate_tokens) {
-        found->token_hashes = nlohmann::json::object();
+        // As the PostgreSQL store (lake#1070): the next generation, and the hashes cleared only
+        // for an operator that reports no generation.
+        ++found->token_generation;
+        if (!found->token_hashes_generation) {
+            found->token_hashes = nlohmann::json::object();
+        }
     }
     if (patch.image) {
         found->image = *patch.image;
@@ -1549,13 +1554,18 @@ Result<void> InMemoryStore::purge_deleted_web_apps() {
     return {};
 }
 
-Result<void> InMemoryStore::set_web_app_token_hashes(const std::string& id, nlohmann::json hashes) {
+Result<void> InMemoryStore::set_web_app_token_hashes(const std::string& id,
+                                                     nlohmann::json hashes,
+                                                     std::optional<std::int64_t> generation) {
     std::lock_guard lock(mutex_);
     const auto app = std::ranges::find(web_apps_, id, &WebApp::id);
     if (app == web_apps_.end()) {
         return std::unexpected(StoreError{"not_found", "no app " + id});
     }
     app->token_hashes = std::move(hashes);
+    if (generation) {
+        app->token_hashes_generation = generation;
+    }
     return {};
 }
 

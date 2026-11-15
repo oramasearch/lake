@@ -5435,3 +5435,19 @@ CREATE TABLE IF NOT EXISTS service_workspace_routing_guard (
 );
 INSERT INTO schema_migrations (version) VALUES ('0111_service_workspace_routing')
     ON CONFLICT DO NOTHING;
+
+-- 0112_app_token_generation (lake#1070, docs/control-plane/web-apps.md#token-rotation): app token
+-- rotation becomes desired state. Lake writes `token_generation` (the generation of tokens it
+-- wants) and the operator writes `token_hashes_generation` (the generation of the hashes in
+-- `token_hashes_json`) with the hashes. A hash verifies only while the two are equal, so rotation
+-- revokes at once without Lake writing the operator's column. NULL: the operator has not
+-- reported one yet (an operator from before this change), and Lake then keeps clearing the
+-- hashes on rotation as before. Additive.
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS token_generation bigint NOT NULL DEFAULT 0
+    CHECK (token_generation >= 0);
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS token_hashes_generation bigint
+    CHECK (token_hashes_generation IS NULL OR token_hashes_generation >= 0);
+CREATE TABLE IF NOT EXISTS app_token_generation_guard (
+    applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0112_app_token_generation') ON CONFLICT DO NOTHING;

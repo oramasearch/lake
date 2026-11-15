@@ -376,3 +376,6 @@ there is no instance-wide ceiling. See [the contract](../../../docs/api/identity
 across accounts; `conflict` for another environment), `get_domain_claim`, `verify_domain_claim` (only
 the claim's own token) and `release_domain_claim`. `dns_txt.hpp` is the TXT lookup verify_domain
 uses.
+`web_apps.hpp`'s `WebApp` carries `token_generation` and `token_hashes_generation` (migration
+`0112`, lake#1070); `tokens_current` says whether the operator's hashes are the generation Lake
+wants. The memory store's `set_web_app_token_hashes` takes the generation an operator acknowledges.

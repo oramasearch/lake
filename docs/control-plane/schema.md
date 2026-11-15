@@ -1617,3 +1617,12 @@ account-wide session events) leaves it working; `revoke_browser_key` ends it, an
 `desired` is `deleted` ends its keys. Additive: the table, its index and `browser_keys_guard`.
 Apply before the new binary: the schema through `0102` reaches the control database first (lake's
 `lake migrate`, or the operator's vendored copy).
+
+## App token generation (migration `0112_app_token_generation`)
+
+lake#1070. `apps.token_generation bigint NOT NULL DEFAULT 0` (Lake writes it; rotation increments
+it) and `apps.token_hashes_generation bigint` (the operator writes it with `token_hashes_json`;
+NULL until an operator that acknowledges rotation reports). An app token verifies only while the
+two are equal or the operator's is NULL. Guard `app_token_generation_guard`. Additive; the operator
+vendors the schema and selects the guard before the image rolls. See
+[web-apps.md](web-apps.md#token-rotation).
