@@ -201,6 +201,15 @@ The secret is never answered after `create_webhook`: `list_webhooks` and `export
 it out, and a webhook imported from an archive without one signs with a new random secret
 ([export](export.md#what-an-archive-never-carries), LSR-024).
 
+**Who reads a webhook (lake#1314).** A receiver URL is often a credential itself: a chat
+incoming-webhook URL, or a CI trigger with a token in its path. `list_webhooks` and
+`list_webhook_deliveries` therefore need `write` on the repository, the same as `create_webhook`,
+`deliver_webhook` and `retry_webhook_delivery`; a reader is `unauthorized`, and neither is open to
+anonymous readers of a public repository. `export_repository` leaves webhooks and their deliveries
+out of the archive of a caller without `write`. Verify with
+`Forge.OnlyWritersReadWebhooksAndTheirDeliveries` and
+`Export.AnArchiveCarriesNoWebhookSecretAndGrantsOnlyForAnAdministrator` (`tests/test_api.cpp`).
+
 The sender is an injected service at the API boundary so the registry and its tests do not perform
 network I/O. The HTTP service supplies that sender in deployment. If a sender is unavailable, the
 attempt is retained as a failed delivery and can be retried when delivery is configured.

@@ -219,11 +219,30 @@ liquid::runtime::task<ApiResult> export_repository(const json& input, ApiContext
     if (!records) {
         co_return forge_records_failure(records.error());
     }
+    // A webhook's receiver URL is often a credential, and its deliveries carry signed payloads:
+    // `list_webhooks` and `list_webhook_deliveries` need write, so the archive of a caller without
+    // write on the repository carries neither (lake#1314).
+    const auto repository_object = context.store->find_policy_object("repository", repository->id);
+    if (!repository_object) {
+        co_return store_error(repository_object.error());
+    }
+    const auto writes = control::authorize(*context.store,
+                                           context.acting_identity,
+                                           repository_object->id,
+                                           "write",
+                                           context.authorization_cache);
+    if (!writes) {
+        co_return store_error(writes.error());
+    }
     json forge_values = json::array();
     for (const control::ForgeRecord& record : *records) {
-        if (record.kind != "export" && record.kind != "github_import") {
-            forge_values.push_back(exported_forge_record(record));
+        if (record.kind == "export" || record.kind == "github_import") {
+            continue;
         }
+        if (!writes->allowed && (record.kind == "webhook" || record.kind == "webhook_delivery")) {
+            continue;
+        }
+        forge_values.push_back(exported_forge_record(record));
     }
     const auto portable = co_await blocking_call(
         [&] {

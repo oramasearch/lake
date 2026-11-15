@@ -72,6 +72,10 @@ otherwise (LSR-024, lake#933):
 - **No webhook signing secret.** A `webhook` record keeps its `url` and `events` and loses
   `secret`, as `list_webhooks` answers it. Whoever held the secret could sign deliveries the
   receiver accepts as lake's.
+- **Webhooks only for a writer.** A receiver URL is often a credential, and `list_webhooks` and
+  `list_webhook_deliveries` need `write` (lake#1314), so the `webhook` and `webhook_delivery`
+  records are in the archive only when the caller has write on the repository (the operator
+  credential included).
 - **Grants only for an administrator.** `list_grants` needs `admin`, so `grants` is the
   repository's direct grants only when the caller has admin on the repository (the operator
   credential included); for any other caller it is an empty array.
@@ -84,8 +88,8 @@ its secrets and keeps them on import.
 ## API
 
 `POST /v1/export_repository` accepts `repository_id` and optional `include_git`. It requires
-repository read access and returns `{archive, record}`, with webhook secrets left out and grants
-only for a repository administrator (see above). The durable `export` record retains the
+repository read access and returns `{archive, record}`, with webhook secrets left out, webhooks
+only for a repository writer and grants only for a repository administrator (see above). The durable `export` record retains the
 manifest and whether Git was requested; the returned archive is the download payload.
 
 `POST /v1/import_repository` accepts `customer_id`, `workspace_id`, destination `name`, and

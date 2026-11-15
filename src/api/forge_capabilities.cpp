@@ -731,12 +731,17 @@ void add_create(Registry& registry,
                    }});
 }
 
+// A list of one kind of the repository's forge records. Most need `read` and authorize it in the
+// handler (anonymously too, when public); a list that answers configuration only the people who
+// manage it may see passes `write`, which the registry checks before the handler (lake#1314).
 void add_list(Registry& registry,
               std::string name,
               std::string title,
               std::string kind,
-              bool allows_anonymous_public_read = false) {
+              bool allows_anonymous_public_read = false,
+              std::string action = "read") {
     std::string description = forge_description(name);
+    const bool reads = action == "read";
     registry.add(Capability{
         .name = std::move(name),
         .title = std::move(title),
@@ -745,10 +750,10 @@ void add_list(Registry& registry,
         .output_schema = records_schema(),
         .kind = CapabilityKind::Read,
         .object = "repository",
-        .action = "read",
+        .action = std::move(action),
         .resolve_object = repository_object,
-        .authorizes_candidates = true,
-        .allows_anonymous_public_read = allows_anonymous_public_read,
+        .authorizes_candidates = reads,
+        .allows_anonymous_public_read = reads && allows_anonymous_public_read,
         .async_handler = [kind = std::move(kind)](const json& input, ApiContext& context) {
             return list_records(kind, input, context);
         }});
@@ -1259,7 +1264,9 @@ void register_forge_capabilities(Registry& registry) {
                 {"events", {{"type", "array"}}},
                 {"secret", {{"type", "string"}}}},
                json::array({"url", "events", "secret"}));
-    add_list(registry, "list_webhooks", "List webhooks", "webhook");
+    // A receiver URL is often a credential itself (lake#1314): only those who can create a webhook
+    // read them, and the deliveries with their signed payloads.
+    add_list(registry, "list_webhooks", "List webhooks", "webhook", false, "write");
 
     registry.add(Capability{
         .name = "deliver_webhook",
@@ -1287,7 +1294,8 @@ void register_forge_capabilities(Registry& registry) {
                    .action = "write",
                    .resolve_object = repository_object,
                    .async_handler = retry_webhook_delivery});
-    add_list(registry, "list_webhook_deliveries", "List webhook deliveries", "webhook_delivery");
+    add_list(registry, "list_webhook_deliveries", "List webhook deliveries", "webhook_delivery",
+             false, "write");
     add_list(registry, "list_exports", "List exports", "export");
 
     registry.add(Capability{

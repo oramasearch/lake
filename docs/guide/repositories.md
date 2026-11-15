@@ -144,8 +144,8 @@ repository. Someone who can only write to it cannot change who may read it.
 - MCP: `set_repository_visibility`.
 
 Making a repository public lets anyone read its files, changes, issues, reviews and releases
-without signing in. Webhooks, branch protection evidence and the Drive view still need a signed-in
-reader.
+without signing in. Branch protection evidence and the Drive view still need a signed-in reader,
+and webhooks someone who can write to the repository.
 
 ## Rename a Repository
 
