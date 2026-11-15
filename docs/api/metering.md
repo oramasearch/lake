@@ -379,7 +379,9 @@ period, added up across the workspaces; a reading's periods without data are `nu
 bills the dimension (false for the detail dimensions `instances`, `build_compute` and
 `run_compute`).
 `workspaces[]` says which workspaces were read and why one was not; a workspace that could not be
-read never counts as zero. It needs `read` on the customer and is audited centrally as
+read never counts as zero. Without `workspace_ids`, the account's deleted workspaces are added from
+the usage kept when each was deleted, each listed with `deleted: true` (lake#988,
+[billing.md](billing.md#a-deleted-workspaces-usage)); its points are at day resolution. It needs `read` on the customer and is audited centrally as
 `metering.usage_over_time.read`. The existing `metering_usage` is unchanged.
 
 ### Limits
@@ -398,7 +400,9 @@ per UTC calendar month and warns without refusing anything. Lake is priced by us
 (lake#635, [billing.md](billing.md#usage-only-lake635)); enforcing a limit is an extension point.
 
 `usage_limits {customer_id}` answers each limit with what is used (storage: the repository bytes
-the quota is enforced against; any other: this month's total across the account's workspaces),
+the quota is enforced against; any other: this month's total across the account's workspaces,
+deleted ones included through their retained usage,
+[billing.md](billing.md#a-deleted-workspaces-usage)),
 `percent`, `state` (`ok`, `warning` from `warn_percent`, default 80, `over` from 100%, or
 `not_measured`), `enforced` and `period` (`now` or `month`), and a `warnings` sentence for each one
 warning or over. It needs `read` on the customer and is audited as `metering.limits.read`.

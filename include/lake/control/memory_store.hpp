@@ -403,6 +403,14 @@ public:
     mcp_exported_dispatch(const std::string& workspace_id) override;
     Result<std::vector<AppTransfer>> app_transfer(const std::string& since_hour) override;
     Result<void> add_app_transfer(const AppTransfer& row) override;
+    Result<void> retain_workspace_usage(const RetainedUsageSet& set,
+                                        const std::vector<RetainedUsagePoint>& points) override;
+    Result<void> add_retained_usage(const RetainedUsagePoint& point) override;
+    Result<std::vector<RetainedUsagePoint>> retained_usage(const std::string& customer_id,
+                                                           std::int64_t from_ms,
+                                                           std::int64_t to_ms) override;
+    Result<std::vector<RetainedUsageSet>>
+    retained_usage_sets(const std::string& customer_id) override;
     Result<BillingPlan> put_billing_plan(const BillingPlan& plan) override;
     Result<Invoice> create_invoice(const Invoice& invoice) override;
     Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) override;
@@ -754,6 +762,8 @@ private:
     // By (workspace, connection).
     std::map<std::pair<std::string, std::string>, McpConnectionDispatch> mcp_connection_dispatch_;
     std::map<std::pair<std::string, std::string>, AppTransfer> app_transfer_; // (hour, app)
+    std::map<std::string, RetainedUsageSet> retained_usage_sets_;             // by workspace
+    std::vector<RetainedUsagePoint> retained_usage_;
     std::vector<Invoice> invoices_;
     std::map<std::pair<std::string, std::string>, std::string> billing_provider_customers_;
     std::set<std::pair<std::string, std::string>> payment_events_;

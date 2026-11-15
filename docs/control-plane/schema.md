@@ -22,6 +22,16 @@ A new migration still follows the rules below: idempotent SQL, its row in `schem
 new `*_guard` table created by the newest migration (`LakeManifest.TheGuardTableIsTheNewestMigrations`
 fails otherwise).
 
+`0108_retained_usage` (lake#988, LSR-121) adds `retained_usage_sets` (one row per deleted
+workspace: its account and the window `[from_at, to_at)` read) and `retained_usage` (that
+workspace's quantities: `source` `rollup` or `late`, `dimension`, `labels` as a JSON object of at
+most `kind`, `class` and `model`, `at`, `value`, `gauge`; primary key `(workspace_id, source,
+dimension, labels, at)`). Billing records are multitenancy (decision 56): no content, no object id.
+`delete_workspace` writes the rollup before the cascade where billing is on and refuses the deletion
+when it cannot; `usage_over_time` adds the rows for deleted workspaces. Additive; guard
+`retained_usage_guard`; the operator must vendor the schema and select the guard before the binary
+rolls. See [billing](../api/billing.md#a-deleted-workspaces-usage).
+
 `0107_order_email_confirmation` (lake#1000, LSR-194): `cloud_orders.contact_email_confirmed_at`,
 NULL until the person who sent an order form follows its confirmation link; until then the order
 mails its contact email only the confirmation and tells support nothing (a checkout order needs

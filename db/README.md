@@ -17,6 +17,13 @@ confirmation link), marks order forms mailed before it as confirmed (once), and 
 `cloud_orders_contact_email_idx` and `cloud_orders_contact_domain_idx` for the per-recipient limits;
 guard `order_email_confirmation_guard`. Additive; numbered after the open `0106` (lake#949). Apply
 before the new binary, which reads the column. See [orders](../docs/api/orders.md#email) and
+Migration `0108_retained_usage` (lake#988, LSR-121) adds `retained_usage_sets` and `retained_usage`:
+the usage a deleted workspace consumed that no issued invoice billed, as content-free quantities by
+dimension, `kind`/`class`/`model` and day (`rollup`, written by `delete_workspace` before the cascade)
+or hour (`late`, what the usage recorder still held), and the guard `retained_usage_guard`. Additive;
+numbered after the open `0106` (lake#1295) and `0107`. Apply before the new binary: with billing on, a
+Lake without the tables refuses every workspace deletion. See
+[billing](../docs/api/billing.md#a-deleted-workspaces-usage) and
 [schema.md](../docs/control-plane/schema.md).
 Migration `0105_agent_model_prices` (lake#1230) seeds the `model_tokens` rates of the gpt-6.x models
 the gateway now serves and the long-context classes `<model>@long/input` and `<model>@long/output`

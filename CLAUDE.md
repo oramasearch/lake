@@ -536,6 +536,12 @@ lake's own platform credentials, environment variables of the hosting platform (
 Orama's deployments; `spec.env` with a `secretKeyRef` on the dev cluster), never a user's secret
 store; without them, the manual provider, said on the Billing page and in `viewer`/`server_info`. Not deployed; the operator must vendor the schema
 and select `payment_provider_guard`. See `docs/api/billing.md#stripe`.
+Deleting a workspace keeps its unbilled usage first (lake#988, LSR-121, migration
+`0108_retained_usage`): with billing on, `delete_workspace` reads the workspace's usage since the
+account's last issued invoice and writes it as content-free quantities (`retained_usage`), refusing
+the deletion when it cannot; bills, `usage_over_time` and the model-token limit add it, and the
+recorder adds what it still held. Not deployed; the operator must vendor the schema and select
+`retained_usage_guard`. See [`docs/api/billing.md#a-deleted-workspaces-usage`](docs/api/billing.md#a-deleted-workspaces-usage).
 Compute is priced as CPU, RAM, GPU and GPU memory (lake#643, migration `0075_workload_resources`):
 the Orama operator writes `workload_resources`, what each workload (a workspace engine, service,
 store, app, image build, agent launch) is scheduled with (requests, or limits without requests;
@@ -1056,6 +1062,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
   `order_email_confirmation_guard` in the source tree, versioned by content hash).
+  `retained_usage_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

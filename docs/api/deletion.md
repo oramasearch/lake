@@ -12,7 +12,10 @@ OpenAPI, MCP), and each:
   does ([workspaces.md](workspaces.md#deletion));
 - is protected in Lake Console by a typed confirmation where the item lives, the dialog listing
   what goes from the dry run first ([../ui/deletion.md](../ui/deletion.md));
-- removes a workspace's data from its workspace Zetta; nothing of it is left behind.
+- removes a workspace's data from its workspace Zetta; nothing of it is left behind. Where billing
+  is on, `delete_workspace` first keeps the workspace's unbilled usage as content-free quantities
+  ([billing.md](billing.md#a-deleted-workspaces-usage), lake#988), and refuses the deletion when it
+  cannot.
 
 | Capability | Input | What goes | Log | Contract |
 |---|---|---|---|---|

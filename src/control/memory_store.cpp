@@ -2832,6 +2832,86 @@ Result<void> InMemoryStore::add_app_transfer(const AppTransfer& row) {
     return {};
 }
 
+namespace {
+bool retained_point_valid(const RetainedUsagePoint& point) {
+    return !point.workspace_id.empty() && !point.dimension.empty() &&
+           point.dimension.size() <= 64 && (point.source == "rollup" || point.source == "late") &&
+           point.value >= 0 && nlohmann::json(point.labels).dump().size() <= 1024;
+}
+} // namespace
+
+Result<void> InMemoryStore::retain_workspace_usage(const RetainedUsageSet& set,
+                                                   const std::vector<RetainedUsagePoint>& points) {
+    if (set.workspace_id.empty() || set.customer_id.empty() || set.to_ms <= set.from_ms) {
+        return std::unexpected(StoreError{"invalid_input", "not a retained usage window"});
+    }
+    for (const RetainedUsagePoint& point : points) {
+        if (!retained_point_valid(point) || point.source != "rollup" ||
+            point.workspace_id != set.workspace_id) {
+            return std::unexpected(StoreError{"invalid_input", "not a retained usage point"});
+        }
+    }
+    std::lock_guard lock(mutex_);
+    const auto workspace = std::ranges::find(workspaces_, set.workspace_id, &Workspace::id);
+    if (workspace == workspaces_.end() || workspace->customer_id != set.customer_id) {
+        return std::unexpected(StoreError{"not_found", "no such workspace in this account"});
+    }
+    std::erase_if(retained_usage_, [&](const RetainedUsagePoint& point) {
+        return point.workspace_id == set.workspace_id && point.source == "rollup";
+    });
+    retained_usage_.insert(retained_usage_.end(), points.begin(), points.end());
+    RetainedUsageSet stored = set;
+    stored.retained_at = now_iso8601();
+    retained_usage_sets_[set.workspace_id] = stored;
+    return {};
+}
+
+Result<void> InMemoryStore::add_retained_usage(const RetainedUsagePoint& point) {
+    if (!retained_point_valid(point) || point.source != "late" || point.gauge) {
+        return std::unexpected(StoreError{"invalid_input", "not a late counter value"});
+    }
+    std::lock_guard lock(mutex_);
+    if (!retained_usage_sets_.contains(point.workspace_id)) {
+        return std::unexpected(StoreError{"not_found", "the workspace has no retained usage"});
+    }
+    for (RetainedUsagePoint& stored : retained_usage_) {
+        if (stored.workspace_id == point.workspace_id && stored.source == "late" &&
+            stored.dimension == point.dimension && stored.labels == point.labels &&
+            stored.at_ms == point.at_ms) {
+            stored.value += point.value;
+            return {};
+        }
+    }
+    retained_usage_.push_back(point);
+    return {};
+}
+
+Result<std::vector<RetainedUsagePoint>> InMemoryStore::retained_usage(
+    const std::string& customer_id, std::int64_t from_ms, std::int64_t to_ms) {
+    std::lock_guard lock(mutex_);
+    std::vector<RetainedUsagePoint> rows;
+    for (const RetainedUsagePoint& point : retained_usage_) {
+        const auto set = retained_usage_sets_.find(point.workspace_id);
+        if (set != retained_usage_sets_.end() && set->second.customer_id == customer_id &&
+            point.at_ms >= from_ms && point.at_ms < to_ms) {
+            rows.push_back(point);
+        }
+    }
+    return rows;
+}
+
+Result<std::vector<RetainedUsageSet>>
+InMemoryStore::retained_usage_sets(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<RetainedUsageSet> rows;
+    for (const auto& [id, set] : retained_usage_sets_) {
+        if (set.customer_id == customer_id) {
+            rows.push_back(set);
+        }
+    }
+    return rows;
+}
+
 Result<void> InMemoryStore::put_workload_resources(const WorkloadResources& row) {
     static const std::set<std::string> kinds{
         "workspace", "service", "store", "app", "build", "agent_launch", "agent_cron_run",

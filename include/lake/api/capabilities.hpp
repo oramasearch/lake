@@ -30,6 +30,15 @@ void register_metering_capabilities(Registry& registry);
 // Usage over time (lake#564, docs/api/metering.md#usage-over-time): usage_over_time,
 // usage_limits, set_usage_limit and record_model_usage.
 void register_usage_capabilities(Registry& registry);
+// Before delete_workspace removes a workspace's records (lake#988, LSR-121,
+// docs/api/billing.md#a-deleted-workspaces-usage): flushes the usage recorder, reads every usage
+// dimension of the workspace from the first day no issued invoice covers (the month after the
+// account's latest invoice that is not void, else the workspace's creation, at most 400 days, the
+// series' retention) through today, a point a day, and writes it as the workspace's retained
+// usage in one store transaction. A repeated call replaces it. It fails, and the deletion must not
+// go ahead, when the workspace's usage cannot be read in full or cannot be written.
+liquid::runtime::task<std::expected<void, ApiResult>>
+retain_deleted_workspace_usage(ApiContext& context, const control::Workspace& workspace);
 // Queues every build result of the space's repositories that finished in or after the UTC hour
 // `since_hour` ("YYYY-MM-DDTHH:00:00Z") for its repository's workspace records, as a
 // metering_usage read does (docs/api/metering.md#build-records); a result already recorded is

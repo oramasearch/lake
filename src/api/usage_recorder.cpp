@@ -455,6 +455,7 @@ liquid::runtime::task<void> UsageRecorder::flush() {
         // and flush, off the request path.
         std::string customer_id;
         bool gone = store_ == nullptr || workspaces_ == nullptr;
+        bool deleted = false;
         if (!gone) {
             const auto workspace = store_->get_workspace(workspace_id);
             if (!workspace) {
@@ -470,13 +471,48 @@ liquid::runtime::task<void> UsageRecorder::flush() {
                 }
             } else if (workspace->desired == "deleted") {
                 gone = true;
+                deleted = true;
             } else {
                 customer_id = workspace->customer_id;
             }
         }
         if (gone) {
             for (const auto& [name, values] : metrics) {
-                count(delta.dropped_workspace_deleted, values.size());
+                // A deleted workspace's counter values still count on its bill (lake#988): they
+                // are added to the usage delete_workspace retained for it, as `late` points.
+                // Readings are not (the rollup holds the workspace's last), and without a
+                // retained set (billing off, or a workspace deleted before migration 0108)
+                // there is nowhere to keep them.
+                std::size_t dropped = values.size();
+                if (deleted && name == usage_metric) {
+                    dropped = 0;
+                    for (const auto& [key, value] : values) {
+                        control::RetainedUsagePoint point{.workspace_id = workspace_id,
+                                                          .source = "late",
+                                                          .at_ms = std::get<2>(key),
+                                                          .value =
+                                                              static_cast<double>(value.value)};
+                        const nlohmann::json labels =
+                            nlohmann::json::parse(std::get<3>(key), nullptr, false);
+                        if (labels.is_object()) {
+                            for (const auto& [label, text] : labels.items()) {
+                                if (!text.is_string()) {
+                                    continue;
+                                }
+                                if (label == "dimension") {
+                                    point.dimension = text.get<std::string>();
+                                } else if (label == "kind" || label == "class" ||
+                                           label == "model") {
+                                    point.labels[label] = text.get<std::string>();
+                                }
+                            }
+                        }
+                        if (point.dimension.empty() || !store_->add_retained_usage(point)) {
+                            ++dropped;
+                        }
+                    }
+                }
+                count(delta.dropped_workspace_deleted, dropped);
             }
             continue;
         }

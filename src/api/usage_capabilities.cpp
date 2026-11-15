@@ -18,6 +18,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -884,23 +885,36 @@ std::vector<std::string> unreported_workloads(control::Store& store,
 }
 
 // What usage_over_time needs about a request: the account, its chosen live workspaces, the
-// dimensions and the periods.
+// dimensions and the periods. `deleted` are the account's deleted workspaces whose retained
+// usage (migration 0108, lake#988) the reading adds: every one when no workspace is chosen, so a
+// bill and the model-token limit still count what a deleted workspace consumed.
 struct UsageQuery {
     std::string customer_id;
     std::vector<control::Workspace> workspaces;
+    std::vector<control::Workspace> deleted;
     std::set<std::string> dimensions;
     Periods periods;
 };
 
-// The reading itself, shared by usage_over_time and usage_limits.
+// The labels a retained point keeps: what billing and the breakdowns by kind and model read.
+// Content-free names only, never an object's id (lake#988).
+bool retained_label(const std::string& name) {
+    return name == "kind" || name == "class" || name == "model";
+}
+
+// The reading itself, shared by usage_over_time and usage_limits. `retained` is filled only when
+// read_usage is asked for it: each series' values, one point a period, with only the labels
+// retained_label keeps, for delete_workspace's rollup (lake#988).
 struct UsageReading {
     json dimensions = json::array();
     json workspaces = json::array();
     json not_measured = json::array();
     std::map<std::string, double> totals; // dimension -> total
+    std::vector<control::RetainedUsagePoint> retained;
 };
 
-liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQuery& query) {
+liquid::runtime::task<UsageReading>
+read_usage(ApiContext& context, const UsageQuery& query, bool retain = false) {
     UsageReading reading;
     Accumulator accumulator(query.periods);
     const Periods& periods = query.periods;
@@ -1126,6 +1140,108 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
         }
     }
 
+    // Deleted workspaces (lake#988): the usage delete_workspace retained for each before its
+    // records went, added as if read from its Zetta. Unreadable, each is listed `measured: false`,
+    // so a bill is not issued without it; a workspace deleted inside the window with no retained
+    // usage (deleted before migration 0108, or with billing off) is said in `not_measured`.
+    if (!query.deleted.empty() && context.store) {
+        std::map<std::string, const control::Workspace*> deleted;
+        for (const control::Workspace& workspace : query.deleted) {
+            deleted[workspace.id] = &workspace;
+            names[workspace.id] = workspace.name;
+        }
+        const auto sets = context.store->retained_usage_sets(query.customer_id);
+        const auto points = context.store->retained_usage(query.customer_id, from_ms, to_ms);
+        std::set<std::string> retained;
+        if (sets) {
+            for (const control::RetainedUsageSet& set : *sets) {
+                retained.insert(set.workspace_id);
+            }
+        }
+        if (points) {
+            for (const control::RetainedUsagePoint& point : *points) {
+                if (!deleted.contains(point.workspace_id) || !wants(point.dimension)) {
+                    continue;
+                }
+                accumulator.add(
+                    point.dimension, point.workspace_id, point.labels, point.at_ms, point.value);
+            }
+        }
+        for (const control::Workspace& workspace : query.deleted) {
+            const bool read = sets && points;
+            const bool kept = retained.contains(workspace.id);
+            if (!read) {
+                const std::string message = "its retained usage could not be read: " +
+                                            (sets ? points.error().message : sets.error().message);
+                reading.workspaces.push_back({{"workspace_id", workspace.id},
+                                              {"name", workspace.name},
+                                              {"deleted", true},
+                                              {"measured", false},
+                                              {"message", message}});
+                reading.not_measured.push_back("Deleted workspace " + workspace.name + ": " +
+                                               message);
+                continue;
+            }
+            if (kept) {
+                reading.workspaces.push_back({{"workspace_id", workspace.id},
+                                              {"name", workspace.name},
+                                              {"deleted", true},
+                                              {"measured", true},
+                                              {"message", ""}});
+                continue;
+            }
+            const auto deleted_at = utc_ms(workspace.updated_at);
+            if (deleted_at && *deleted_at >= from_ms) {
+                reading.not_measured.push_back(
+                    "Deleted workspace " + workspace.name +
+                    ": no usage was retained when it was deleted (deleted before migration "
+                    "0108_retained_usage, or with billing off), so its usage is not included "
+                    "(lake#988).");
+            }
+        }
+    }
+
+    // delete_workspace's rollup (lake#988): each series' values per period, with only the labels
+    // a retained point keeps, added together where dropping the other labels joins two series (a
+    // counter) or keeping the latest reading (a gauge).
+    if (retain) {
+        std::map<std::tuple<std::string, std::string, std::int64_t>, control::RetainedUsagePoint>
+            joined;
+        for (const auto& [key, series] : accumulator.series()) {
+            std::map<std::string, std::string> labels;
+            for (const auto& [name, value] : series.labels) {
+                if (retained_label(name) && !value.empty()) {
+                    labels[name] = value;
+                }
+            }
+            const std::string labels_text = json(labels).dump();
+            for (std::size_t index = 0; index < series.line.values.size(); ++index) {
+                const auto& value = series.line.values[index];
+                if (!value || *value < 0) {
+                    continue;
+                }
+                const std::int64_t at = periods.starts[index];
+                auto [found, inserted] = joined.try_emplace(
+                    {series.dimension, labels_text, at},
+                    control::RetainedUsagePoint{.workspace_id = series.workspace_id,
+                                                .source = "rollup",
+                                                .dimension = series.dimension,
+                                                .labels = labels,
+                                                .at_ms = at,
+                                                .value = 0,
+                                                .gauge = series.gauge});
+                // A gauge's series are distinct kinds after the labels it keeps, so its value is
+                // that kind's reading; a counter's joined series add up.
+                found->second.value = series.gauge && !inserted
+                                          ? std::max(found->second.value, *value)
+                                          : found->second.value + *value;
+            }
+        }
+        for (auto& [key, point] : joined) {
+            reading.retained.push_back(std::move(point));
+        }
+    }
+
     for (const UsageDimension& dimension : usage_dimensions()) {
         if (!wants(dimension.name)) {
             continue;
@@ -1309,6 +1425,12 @@ std::expected<UsageQuery, ApiResult> usage_query(const json& input, ApiContext& 
         std::ranges::stable_sort(query.workspaces, [](const auto& left, const auto& right) {
             return left.name < right.name;
         });
+        // The whole account includes what its deleted workspaces consumed (lake#988).
+        for (const control::Workspace& row : *rows) {
+            if (row.desired == "deleted") {
+                query.deleted.push_back(row);
+            }
+        }
     }
     if (input.contains("dimensions")) {
         const json& names = input.at("dimensions");
@@ -1412,6 +1534,9 @@ liquid::runtime::task<ApiResult> limits_of(const std::string& customer_id, ApiCo
             for (const control::Workspace& row : *rows) {
                 if (row.desired != "deleted") {
                     query.workspaces.push_back(row);
+                } else {
+                    // A deleted workspace's retained usage still counts this month (lake#988).
+                    query.deleted.push_back(row);
                 }
             }
         }
@@ -1661,6 +1786,9 @@ liquid::runtime::task<std::optional<ApiResult>> model_limit_refusal(const std::s
             for (const control::Workspace& row : *rows) {
                 if (row.desired != "deleted") {
                     query.workspaces.push_back(row);
+                } else {
+                    // A deleted workspace's retained usage still counts this month (lake#988).
+                    query.deleted.push_back(row);
                 }
             }
         }
@@ -1938,6 +2066,91 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
 }
 
 } // namespace
+
+liquid::runtime::task<std::expected<void, ApiResult>>
+retain_deleted_workspace_usage(ApiContext& context, const control::Workspace& workspace) {
+    using Retained = std::expected<void, ApiResult>;
+    const auto failed = [](ApiResult result) {
+        return Retained(std::unexpected(std::move(result)));
+    };
+    if (!context.store || !context.workspaces) {
+        co_return failed(ApiResult::failure(
+            "store_unavailable", "the workspace's usage cannot be read, so it is not deleted"));
+    }
+    // What the request path still holds goes to the workspace Zetta first, so the read has it.
+    if (context.usage_recorder != nullptr) {
+        static_cast<void>(co_await context.usage_recorder->flush());
+    }
+    const std::int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch())
+                                    .count();
+    const std::int64_t retention_floor =
+        period_floor(now_ms - UsageRecorder::retention_ms, Granularity::day);
+    // The first month no issued invoice covers: the month after the latest that is not void.
+    std::int64_t from_ms =
+        period_floor(utc_ms(workspace.created_at).value_or(retention_floor), Granularity::month);
+    const auto invoices = context.store->list_invoices(workspace.customer_id);
+    if (!invoices) {
+        co_return failed(ApiResult::failure(
+            "store_unavailable",
+            "the account's invoices could not be read, so the workspace is not deleted: " +
+                invoices.error().message));
+    }
+    for (const control::Invoice& invoice : *invoices) {
+        if (invoice.state == "void") {
+            continue;
+        }
+        if (const auto start = utc_ms(invoice.period + "-01")) {
+            from_ms = std::max(from_ms, period_after(*start, Granularity::month));
+        }
+    }
+    from_ms = std::max(from_ms, retention_floor);
+    const std::int64_t to_ms =
+        period_after(period_floor(now_ms, Granularity::day), Granularity::day);
+    if (from_ms >= to_ms) {
+        // Everything it used is on an issued invoice already (one dated ahead of today).
+        from_ms = period_floor(now_ms, Granularity::day);
+    }
+    auto periods = periods_of(from_ms, to_ms, Granularity::day);
+    if (!periods) {
+        co_return failed(std::move(periods.error()));
+    }
+    UsageQuery query;
+    query.customer_id = workspace.customer_id;
+    query.workspaces.push_back(workspace);
+    for (const UsageDimension& dimension : usage_dimensions()) {
+        query.dimensions.insert(std::string(dimension.name));
+    }
+    query.periods = std::move(*periods);
+    auto read = co_await read_usage(context, query, true);
+    if (!read) {
+        co_return failed(
+            ApiResult::failure("store_unavailable",
+                               "the workspace's usage could not be read, so it is not deleted: " +
+                                   read.error().message));
+    }
+    for (const json& entry : read->workspaces) {
+        if (!entry.value("measured", true)) {
+            co_return failed(ApiResult::failure(
+                "store_unavailable",
+                "the workspace's usage could not be read in full, so it is not deleted (its bill "
+                "would miss it); retry: " +
+                    entry.value("message", std::string())));
+        }
+    }
+    const control::RetainedUsageSet set{.workspace_id = workspace.id,
+                                        .customer_id = workspace.customer_id,
+                                        .from_ms = query.periods.starts.front(),
+                                        .to_ms = query.periods.end};
+    const auto written = context.store->retain_workspace_usage(set, read->retained);
+    if (!written) {
+        co_return failed(ApiResult::failure(
+            "store_unavailable",
+            "the workspace's usage could not be kept for its bill, so it is not deleted: " +
+                written.error().message));
+    }
+    co_return Retained{};
+}
 
 void record_workspace_transfer(const ApiContext& context,
                                const std::string& workspace_id,

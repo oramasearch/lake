@@ -7498,6 +7498,150 @@ public:
         return {};
     }
 
+    // Migration 0108 (lake#988): a deleted workspace's unbilled usage, content-free.
+    static std::map<std::string, std::string> retained_labels(const std::string& text) {
+        std::map<std::string, std::string> labels;
+        const nlohmann::json parsed = nlohmann::json::parse(text, nullptr, false);
+        if (parsed.is_object()) {
+            for (const auto& [name, value] : parsed.items()) {
+                if (value.is_string()) {
+                    labels[name] = value.get<std::string>();
+                }
+            }
+        }
+        return labels;
+    }
+
+    Result<void> retain_workspace_usage(const RetainedUsageSet& set,
+                                        const std::vector<RetainedUsagePoint>& points) override {
+        for (const RetainedUsagePoint& point : points) {
+            if (point.source != "rollup" || point.workspace_id != set.workspace_id) {
+                return std::unexpected(StoreError{"invalid_input", "not a rollup point"});
+            }
+        }
+        auto written = with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            const pqxx::result found =
+                tx.exec_params("SELECT 1 FROM workspaces WHERE id = $1::uuid AND customer_id = "
+                               "$2::uuid FOR UPDATE",
+                               set.workspace_id,
+                               set.customer_id);
+            if (found.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no such workspace in this account"});
+            }
+            tx.exec_params(
+                "INSERT INTO retained_usage_sets (workspace_id, customer_id, from_at, to_at) "
+                "VALUES ($1::uuid, $2::uuid, to_timestamp($3::double precision / 1000), "
+                "to_timestamp($4::double precision / 1000)) ON CONFLICT (workspace_id) DO UPDATE "
+                "SET from_at = EXCLUDED.from_at, to_at = EXCLUDED.to_at, retained_at = now()",
+                set.workspace_id,
+                set.customer_id,
+                set.from_ms,
+                set.to_ms);
+            tx.exec_params(
+                "DELETE FROM retained_usage WHERE workspace_id = $1::uuid AND source = 'rollup'",
+                set.workspace_id);
+            for (const RetainedUsagePoint& point : points) {
+                tx.exec_params(
+                    "INSERT INTO retained_usage (workspace_id, customer_id, source, dimension, "
+                    "labels, at, value, gauge) VALUES ($1::uuid, $2::uuid, 'rollup', $3, $4, "
+                    "to_timestamp($5::double precision / 1000), $6, $7) ON CONFLICT (workspace_id, "
+                    "source, dimension, labels, at) DO UPDATE SET value = EXCLUDED.value",
+                    set.workspace_id,
+                    set.customer_id,
+                    point.dimension,
+                    nlohmann::json(point.labels).dump(),
+                    point.at_ms,
+                    point.value,
+                    point.gauge);
+            }
+            return true;
+        });
+        if (!written) {
+            return std::unexpected(written.error());
+        }
+        return {};
+    }
+
+    Result<void> add_retained_usage(const RetainedUsagePoint& point) override {
+        if (point.source != "late" || point.gauge) {
+            return std::unexpected(StoreError{"invalid_input", "not a late counter value"});
+        }
+        auto written = with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            const pqxx::result added = tx.exec_params(
+                "INSERT INTO retained_usage (workspace_id, customer_id, source, dimension, labels, "
+                "at, value, gauge) SELECT s.workspace_id, s.customer_id, 'late', $2, $3, "
+                "to_timestamp($4::double precision / 1000), $5, false FROM retained_usage_sets s "
+                "WHERE s.workspace_id = $1::uuid ON CONFLICT (workspace_id, source, dimension, "
+                "labels, at) DO UPDATE SET value = retained_usage.value + EXCLUDED.value",
+                point.workspace_id,
+                point.dimension,
+                nlohmann::json(point.labels).dump(),
+                point.at_ms,
+                point.value);
+            if (added.affected_rows() == 0) {
+                return std::unexpected(
+                    StoreError{"not_found", "the workspace has no retained usage"});
+            }
+            return true;
+        });
+        if (!written) {
+            return std::unexpected(written.error());
+        }
+        return {};
+    }
+
+    Result<std::vector<RetainedUsagePoint>> retained_usage(const std::string& customer_id,
+                                                           std::int64_t from_ms,
+                                                           std::int64_t to_ms) override {
+        return with_tx<std::vector<RetainedUsagePoint>>(
+            [&](pqxx::work& tx) -> Result<std::vector<RetainedUsagePoint>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT workspace_id::text, source, dimension, labels, "
+                    "(extract(epoch FROM at) * 1000)::bigint, value, gauge FROM retained_usage "
+                    "WHERE customer_id = $1::uuid AND at >= to_timestamp($2::double precision / "
+                    "1000) AND at < to_timestamp($3::double precision / 1000) ORDER BY "
+                    "workspace_id, at",
+                    customer_id,
+                    from_ms,
+                    to_ms);
+                std::vector<RetainedUsagePoint> out;
+                for (const auto& row : rows) {
+                    out.push_back({.workspace_id = row[0].as<std::string>(),
+                                   .source = row[1].as<std::string>(),
+                                   .dimension = row[2].as<std::string>(),
+                                   .labels = retained_labels(row[3].as<std::string>()),
+                                   .at_ms = row[4].as<std::int64_t>(),
+                                   .value = row[5].as<double>(),
+                                   .gauge = row[6].as<bool>()});
+                }
+                return out;
+            });
+    }
+
+    Result<std::vector<RetainedUsageSet>>
+    retained_usage_sets(const std::string& customer_id) override {
+        return with_tx<std::vector<RetainedUsageSet>>(
+            [&](pqxx::work& tx) -> Result<std::vector<RetainedUsageSet>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT workspace_id::text, customer_id::text, (extract(epoch FROM from_at) * "
+                    "1000)::bigint, (extract(epoch FROM to_at) * 1000)::bigint, " +
+                        utc_column("retained_at") +
+                        " FROM retained_usage_sets WHERE customer_id = $1::uuid ORDER BY "
+                        "workspace_id",
+                    customer_id);
+                std::vector<RetainedUsageSet> out;
+                for (const auto& row : rows) {
+                    out.push_back({row[0].as<std::string>(),
+                                   row[1].as<std::string>(),
+                                   row[2].as<std::int64_t>(),
+                                   row[3].as<std::int64_t>(),
+                                   row[4].as<std::string>()});
+                }
+                return out;
+            });
+    }
+
     static std::string invoice_columns() {
         return "id::text, number, customer_id::text, period, plan_id, plan_name, currency, "
                "total_micros, state, provider, provider_reference, instructions, note, " +

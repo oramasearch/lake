@@ -21,6 +21,7 @@
 #include "agent_task_records_api.hpp"
 #include "feature_planning.hpp"
 #include "lake/api/agent_stream_triggers.hpp"
+#include "lake/api/billing.hpp"
 #include "lake/api/datasets.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/pipeline.hpp"
@@ -8840,8 +8841,14 @@ void register_agent_bus_capabilities(Registry& registry) {
 // destroyed; otherwise one store transaction deletes the workspace and what it holds, and
 // finish_workspace_deletion removes what lives outside PostgreSQL. A repeated call for a deleted
 // workspace resumes an unfinished deletion and answers the recorded one.
+//
+// Where billing is on, a live workspace is deleted only once its unbilled usage is retained
+// (lake#988, LSR-121, docs/api/billing.md#a-deleted-workspaces-usage): the asynchronous handler
+// runs retain_deleted_workspace_usage first and passes `usage_retained`; any other path is
+// refused, so no deletion can drop what an issued bill has not counted yet.
 static ApiResult delete_workspace_cascading(const json& input, ApiContext& context,
-                                            const control::Workspace& row) {
+                                            const control::Workspace& row,
+                                            bool usage_retained = false) {
     const bool dry_run = input.value("dry_run", false);
     const bool confirmed = input.contains("confirm") && input.at("confirm") == row.name;
     if (!confirmed && (!dry_run || input.contains("confirm"))) {
@@ -8868,6 +8875,11 @@ static ApiResult delete_workspace_cascading(const json& input, ApiContext& conte
         (*plan)["dry_run"] = true;
         context.audit_details["counts"] = plan->at("counts");
         return ApiResult::success(std::move(*plan));
+    }
+    if (row.desired != "deleted" && !usage_retained && billing_registered(context.registry)) {
+        return ApiResult::failure("conflict",
+                                  "the workspace's usage must be kept for its bill before it is "
+                                  "deleted; call delete_workspace through the API");
     }
     control::WorkspaceDeletionRequest request{.workspace_id = row.id,
                                               .requested_by = context.acting_identity};
@@ -9014,6 +9026,36 @@ void register_workspace_capabilities(Registry& registry) {
                 }
                 const auto updated = context.store->update_workspace(row->id, patch);
                 return updated ? ApiResult::success(control::workspace_json(*updated, operator_view(context))) : store_failure(updated.error());
+            },
+            // delete_workspace reads the workspace's usage before the cascade (lake#988).
+            .async_handler = !deleting ? AsyncCapabilityHandler{}
+                                       : [](const json& input, ApiContext& context)
+                                             -> liquid::runtime::task<ApiResult> {
+                const auto row = context.store->get_workspace(input.at("workspace_id"));
+                if (!row || row->customer_id != input.at("customer_id").get<std::string>()) {
+                    co_return ApiResult::failure(
+                        "invalid_input", "workspace_id is not in this account", "/workspace_id");
+                }
+                const bool confirmed =
+                    input.contains("confirm") && input.at("confirm") == row->name;
+                bool retained = false;
+                if (row->desired != "deleted" && confirmed && !input.value("dry_run", false) &&
+                    billing_registered(context.registry)) {
+                    auto kept = co_await retain_deleted_workspace_usage(context, *row);
+                    if (!kept) {
+                        co_return ApiResult::failure("store_error", kept.error().message);
+                    }
+                    if (!*kept) {
+                        co_return std::move(kept->error());
+                    }
+                    retained = true;
+                }
+                // Read again: the workspace may have changed while its usage was read.
+                const auto current = context.store->get_workspace(row->id);
+                if (!current) {
+                    co_return store_failure(current.error());
+                }
+                co_return delete_workspace_cascading(input, context, *current, retained);
             }});
     }
     register_agent_run_capabilities(registry);

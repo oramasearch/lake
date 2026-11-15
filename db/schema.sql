@@ -5274,3 +5274,39 @@ CREATE TABLE IF NOT EXISTS order_email_confirmation_guard (
 );
 INSERT INTO schema_migrations (version) VALUES ('0107_order_email_confirmation')
     ON CONFLICT DO NOTHING;
+-- ---------------------------------------------------------------------------------------------
+-- 0108_retained_usage (lake#988, LSR-121, docs/api/billing.md#a-deleted-workspaces-usage): a
+-- deleted workspace's usage that no issued invoice has billed. delete_workspace reads it from the
+-- workspace Zetta before the cascade (billing on) and writes it here in one transaction, so the
+-- month's bill and the model-token limit still count it after the Zetta is gone. Billing records
+-- are multitenancy (decision 56): content-free quantities by dimension, the labels billing reads
+-- (`kind`, `class`, `model`) and a bucket start, never a row's content. `rollup`: what
+-- delete_workspace read, one point a day, replaced by a repeated delete; `late`: counter values
+-- the usage recorder still held, one point an hour, added. Numbered after the open 0106
+-- (lake#1295) and 0107. Additive.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS retained_usage_sets (
+    workspace_id uuid        PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+    customer_id  uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    from_at      timestamptz NOT NULL,
+    to_at        timestamptz NOT NULL,
+    retained_at  timestamptz NOT NULL DEFAULT now(),
+    CHECK (to_at > from_at)
+);
+CREATE INDEX IF NOT EXISTS retained_usage_sets_customer_idx ON retained_usage_sets (customer_id);
+CREATE TABLE IF NOT EXISTS retained_usage (
+    workspace_id uuid             NOT NULL
+        REFERENCES retained_usage_sets(workspace_id) ON DELETE CASCADE,
+    customer_id  uuid             NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    source       text             NOT NULL CHECK (source IN ('rollup', 'late')),
+    dimension    text             NOT NULL CHECK (length(dimension) BETWEEN 1 AND 64),
+    labels       text             NOT NULL DEFAULT '{}' CHECK (length(labels) <= 1024),
+    at           timestamptz      NOT NULL,
+    value        double precision NOT NULL CHECK (value >= 0),
+    gauge        boolean          NOT NULL DEFAULT false,
+    PRIMARY KEY (workspace_id, source, dimension, labels, at),
+    CHECK (source = 'rollup' OR NOT gauge)
+);
+CREATE INDEX IF NOT EXISTS retained_usage_customer_at_idx ON retained_usage (customer_id, at);
+CREATE TABLE IF NOT EXISTS retained_usage_guard (applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0108_retained_usage') ON CONFLICT DO NOTHING;

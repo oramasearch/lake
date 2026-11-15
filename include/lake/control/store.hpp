@@ -856,6 +856,27 @@ struct AppTransfer {
     std::uint64_t out_bytes = 0;
     std::string observed_at;
 };
+// The usage a deleted workspace consumed and no issued invoice has billed yet, kept centrally
+// before the workspace's records go (migration 0108_retained_usage, lake#988,
+// docs/api/billing.md#a-deleted-workspaces-usage). Content-free: a dimension, the labels billing
+// reads (`kind`, `class`, `model`), a bucket start and a quantity. `source` is `rollup` (what
+// delete_workspace read from the workspace Zetta, one point a day) or `late` (counter values the
+// usage recorder still held when the workspace was deleted, one point an hour, added).
+struct RetainedUsagePoint {
+    std::string workspace_id;
+    std::string source = "rollup";
+    std::string dimension;
+    std::map<std::string, std::string> labels;
+    std::int64_t at_ms = 0;
+    double value = 0;
+    bool gauge = false;
+};
+// One workspace's rollup: the window it covers, [from_ms, to_ms).
+struct RetainedUsageSet {
+    std::string workspace_id, customer_id;
+    std::int64_t from_ms = 0, to_ms = 0;
+    std::string retained_at;
+};
 struct Workspace {
     std::string id, customer_id, name, environment;
     std::string desired = "running";
@@ -2405,6 +2426,19 @@ public:
     // local demos.
     virtual Result<std::vector<AppTransfer>> app_transfer(const std::string& since_hour) = 0;
     virtual Result<void> add_app_transfer(const AppTransfer& row) = 0;
+    // A deleted workspace's unbilled usage (migration 0108, lake#988). retain_workspace_usage
+    // replaces the workspace's `rollup` points and its set in one transaction, so a repeated
+    // delete_workspace writes the same rollup again; `late` points are kept. add_retained_usage
+    // adds one `late` counter value to a workspace that has a set (not_found without one).
+    // retained_usage answers every point of the account's workspaces in [from_ms, to_ms), both
+    // sources; retained_usage_sets every set of the account.
+    virtual Result<void> retain_workspace_usage(const RetainedUsageSet& set,
+                                                const std::vector<RetainedUsagePoint>& points) = 0;
+    virtual Result<void> add_retained_usage(const RetainedUsagePoint& point) = 0;
+    virtual Result<std::vector<RetainedUsagePoint>>
+    retained_usage(const std::string& customer_id, std::int64_t from_ms, std::int64_t to_ms) = 0;
+    virtual Result<std::vector<RetainedUsageSet>>
+    retained_usage_sets(const std::string& customer_id) = 0;
     virtual Result<BillingPlan> put_billing_plan(const BillingPlan& plan) = 0;
     virtual Result<Invoice> create_invoice(const Invoice& invoice) = 0;
     virtual Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) = 0;

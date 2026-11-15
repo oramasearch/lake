@@ -853,6 +853,25 @@ public:
     control::Result<void> add_app_transfer(const control::AppTransfer& row) override {
         return call("add_app_transfer", [&] { return store_->add_app_transfer(row); });
     }
+    control::Result<void>
+    retain_workspace_usage(const control::RetainedUsageSet& set,
+                           const std::vector<control::RetainedUsagePoint>& points) override {
+        return call("retain_workspace_usage",
+                    [&] { return store_->retain_workspace_usage(set, points); });
+    }
+    control::Result<void> add_retained_usage(const control::RetainedUsagePoint& point) override {
+        return call("add_retained_usage", [&] { return store_->add_retained_usage(point); });
+    }
+    control::Result<std::vector<control::RetainedUsagePoint>> retained_usage(
+        const std::string& customer_id, std::int64_t from_ms, std::int64_t to_ms) override {
+        return call("retained_usage",
+                    [&] { return store_->retained_usage(customer_id, from_ms, to_ms); });
+    }
+    control::Result<std::vector<control::RetainedUsageSet>>
+    retained_usage_sets(const std::string& customer_id) override {
+        return call("retained_usage_sets",
+                    [&] { return store_->retained_usage_sets(customer_id); });
+    }
     control::Result<control::BillingPlan>
     put_billing_plan(const control::BillingPlan& plan) override {
         return call("put_billing_plan", [&] { return store_->put_billing_plan(plan); });
