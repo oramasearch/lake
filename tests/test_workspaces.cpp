@@ -3695,6 +3695,28 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
         {{"agent", "agent-experiments"}, {"message", "Tune this project"}});
     ASSERT_TRUE(project_delegated.ok) << project_delegated.error.message;
     EXPECT_EQ(r.task(project_delegated.value["task_id"])->kind, "experiment");
+    // An agent's credential never confirms a proposal or a promotion (lake#989): the turn is
+    // refused, or runs without the confirmation's write scopes.
+    const auto agent_confirmed = r.call_as(
+        *project_principal,
+        "agent_turn",
+        {{"agent", "agent-application"},
+         {"kind", "app"},
+         {"message", "deploy it"},
+         {"proposal_task_id", project_delegated.value["task_id"]},
+         {"context", {{"confirmed_proposal", {{"name", "x"}}}}}});
+    EXPECT_FALSE(agent_confirmed.ok);
+    EXPECT_EQ(agent_confirmed.error.code, "unauthorized") << agent_confirmed.error.message;
+    const auto agent_promoted = r.call_as(
+        *project_principal,
+        "agent_turn",
+        {{"agent", "agent-experiments"},
+         {"message", "promote"},
+         {"context", {{"confirmed_promotion", {{"confirm", true}, {"promotion", {{"trial", "t"}}}}}}}});
+    if (agent_promoted.ok) {
+        const auto& promoted_scopes = r.task(agent_promoted.value["task_id"])->scopes;
+        EXPECT_EQ(std::ranges::find(promoted_scopes, "promote_trial"), promoted_scopes.end());
+    }
 
     // A change to an existing pipeline: the agent is handed the graph, and a finished proposal
     // names the pipeline page where it is reviewed (lake#249).
