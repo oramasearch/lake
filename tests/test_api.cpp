@@ -7641,7 +7641,7 @@ TEST(ModelProvenance, SignedDatasetChainVerifiesAndTamperingIsRefused) {
         .at = at,
         .subject_kind = liquid::attestation_subject_kind::artifact,
         .slsa_provenance = liquid::slsa_provenance_v1{
-            .build_definition = {.build_type = "https://lake.orama.com/training/v1",
+            .build_definition = {.build_type = "https://lake.example.com/training/v1",
                                  .external_parameters = {{"train", "--epochs", "3"},
                                                          "/workspace",
                                                          {{"CUDA", "12.8"}}},
