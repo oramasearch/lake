@@ -258,6 +258,10 @@ std::string dataset_scope_header_value(const std::vector<std::string>& area) {
 }
 
 bool engine_checks_dataset_scope(std::string_view capability) {
+    return capability == "sql" || capability == "list_datasets" || capability == "get_dataset";
+}
+
+bool engine_must_enforce_dataset_scope(std::string_view capability) {
     return capability == "sql";
 }
 
@@ -675,22 +679,40 @@ liquid::runtime::task<ZettaControlResult<nlohmann::json>> WorkspaceService::call
         co_return workspace_failure<nlohmann::json>("workspace_not_ready",
                                                     "the workspace credential is not available");
     }
-    // A dataset-confined call (lake#1055) runs only on an engine that enforces the scope, carries
-    // it, and never touches the definitions cache: an answer kept for an unconfined call was
-    // never checked against this work area.
+    // A dataset-confined call (lake#1055) carries the scope to an engine that enforces it, and
+    // then never touches the definitions cache: an answer kept for an unconfined call was never
+    // checked against this work area. On an engine that does not, a call lake cannot prove inside
+    // on its own (sql) is refused and never sent; any other is one lake confines itself
+    // (registry.cpp) and is sent unscoped, as before.
     if (dataset_scope) {
         const std::string probe_key = nlohmann::json::array({found->id, found->generation,
                                                              workspace.endpoint}).dump();
         const auto enforced = co_await dataset_scope_enforced(probe_key, workspace.endpoint, token);
         if (!enforced || !*enforced) {
+            if (engine_must_enforce_dataset_scope(capability)) {
+                co_return workspace_failure<nlohmann::json>(
+                    "unauthorized",
+                    "this agent works only on " +
+                        (dataset_scope->empty() ? std::string("no dataset")
+                                                : dataset_scope_header_value(*dataset_scope)) +
+                        "; this workspace's engine cannot confine " + capability +
+                        " to a work area yet (it needs a Zetta that enforces " +
+                        std::string(dataset_scope_header) + "), so Lake does not send it");
+            }
+            dataset_scope.reset();
+        }
+    }
+    if (dataset_scope) {
+        // The engine places a scoped get_dataset only by its database (zetta#1519) and refuses a
+        // bare name; lake names the database on every confined get_dataset and never sends one
+        // without it.
+        if (capability == "get_dataset" &&
+            (!input.is_object() || !input.contains("database") || !input["database"].is_string() ||
+             input["database"].get_ref<const std::string&>().empty())) {
             co_return workspace_failure<nlohmann::json>(
                 "unauthorized",
-                "this agent works only on " +
-                    (dataset_scope->empty() ? std::string("no dataset")
-                                            : dataset_scope_header_value(*dataset_scope)) +
-                    "; this workspace's engine cannot confine " + capability +
-                    " to a work area yet (it needs a Zetta that enforces " +
-                    std::string(dataset_scope_header) + "), so Lake does not send it");
+                "this agent works only on " + dataset_scope_header_value(*dataset_scope) +
+                    "; name the dataset it reads with its database (<database>/<name>)");
         }
         auto scoped = co_await caller_->scoped_call(workspace.endpoint, token,
                                                     std::move(capability), read, std::move(input),

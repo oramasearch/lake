@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <format>
@@ -389,10 +390,11 @@ TEST_F(Streams, ADatasetConfinedLaunchCredentialStaysInItsWorkArea) {
     refused("repository_tree", {{"id", "definition-repo"}, {"ref", "main"}});
 }
 
-// lake#1055 (zetta#1515): a dataset-confined launch's query reaches a workspace Zetta that
-// enforces Zetta-Dataset-Scope, carrying the launch's work area; the calls Lake proves inside on
-// its own go without it, because the engine refuses under a scope every capability that does not
-// declare what it reads. A work area of no dataset has nothing to query.
+// lake#1055 (zetta#1515, zetta#1519): a dataset-confined launch's query, list_datasets and
+// get_dataset reach a workspace Zetta that enforces Zetta-Dataset-Scope carrying the launch's work
+// area; the other calls Lake proves inside on its own go without it, because the engine refuses
+// under a scope every capability that does not declare what it reads. A work area of no dataset
+// has nothing to query.
 TEST_F(Streams, ADatasetConfinedLaunchQueriesOnlyUnderTheEnginesDatasetScope) {
     const auto confine = [&](const std::string& detail) {
         lake::control::NewAgentLaunch row;
@@ -446,11 +448,35 @@ TEST_F(Streams, ADatasetConfinedLaunchQueriesOnlyUnderTheEnginesDatasetScope) {
     EXPECT_EQ(outside.error.code, "unauthorized");
     workspace->caller->responder = nullptr;
 
-    // list_datasets is proven by Lake (its answer filtered) and sent without the scope.
-    const std::size_t scoped = workspace->caller->scoped.size();
+    // zetta#1519: list_datasets and get_dataset carry the scope too (Lake still filters and
+    // checks their answers), and get_dataset goes with its database named.
     workspace->caller->answers["list_datasets"] = {{"datasets", json::array()}};
     EXPECT_TRUE(call("workspace_query",
                      {{"customer_id", customer}, {"capability", "list_datasets"}, {"input", json::object()}})
+                    .ok);
+    EXPECT_EQ(workspace->caller->scoped.back(),
+              (std::pair<std::string, std::string>{
+                  "list_datasets", "allowed_public/accounts, allowed_public/orders"}));
+    workspace->caller->answers["get_dataset"] = {{"name", "accounts"}, {"database", "allowed_public"}};
+    const auto read = call("workspace_query",
+                           {{"customer_id", customer},
+                            {"capability", "get_dataset"},
+                            {"input", {{"dataset", "allowed_public.accounts"}}}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(workspace->caller->scoped.back().first, "get_dataset");
+    json sent_get;
+    for (const auto& [capability, sent_input] : workspace->caller->calls) {
+        if (capability == "get_dataset") {
+            sent_get = sent_input;
+        }
+    }
+    EXPECT_EQ(sent_get.value("database", std::string()), "allowed_public");
+    EXPECT_EQ(sent_get.value("dataset", std::string()), "accounts");
+    // get_agent is not declared by the engine, so it goes without the scope.
+    const std::size_t scoped = workspace->caller->scoped.size();
+    workspace->caller->answers["get_agent"] = {{"id", "a-1"}};
+    EXPECT_TRUE(call("workspace_query",
+                     {{"customer_id", customer}, {"capability", "get_agent"}, {"input", {{"id", "a-1"}}}})
                     .ok);
     EXPECT_EQ(workspace->caller->scoped.size(), scoped);
 

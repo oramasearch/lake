@@ -1453,10 +1453,19 @@ TEST(Workspaces, DatasetScopeHelpersNameTheWorkAreaAndTheEnginesRefusal) {
     EXPECT_EQ(dataset_scope_header_value({"public/accounts", "datasets/orders"}),
               "public/accounts, datasets/orders");
     EXPECT_EQ(dataset_scope_header_value({}), "");
-    EXPECT_TRUE(lake::control::engine_checks_dataset_scope("sql"));
-    for (const char* lake_proven : {"list_datasets", "get_dataset", "get_agent", "openapi.json",
-                                    "search", "run"}) {
-        EXPECT_FALSE(lake::control::engine_checks_dataset_scope(lake_proven)) << lake_proven;
+    // sql (zetta#1515), list_datasets and get_dataset (zetta#1519) declare their reads.
+    for (const char* checked : {"sql", "list_datasets", "get_dataset"}) {
+        EXPECT_TRUE(lake::control::engine_checks_dataset_scope(checked)) << checked;
+    }
+    EXPECT_TRUE(lake::control::engine_must_enforce_dataset_scope("sql"));
+    EXPECT_FALSE(lake::control::engine_must_enforce_dataset_scope("list_datasets"))
+        << "lake confines list_datasets itself";
+    EXPECT_FALSE(lake::control::engine_must_enforce_dataset_scope("get_dataset"))
+        << "lake confines get_dataset itself";
+    // Still refused under a scope by the engine, so never sent with the header.
+    for (const char* undeclared : {"get_agent", "openapi.json", "search", "score", "explain",
+                                   "analyze_dataset", "plan_features", "run", "server_info"}) {
+        EXPECT_FALSE(lake::control::engine_checks_dataset_scope(undeclared)) << undeclared;
     }
     EXPECT_TRUE(lake::control::dataset_scope_refusal(
         {"unauthorized", "outside", "", {{"dataset_scope", "a.b"}, {"datasets_read", nullptr}}}));
@@ -1500,6 +1509,12 @@ TEST(Workspaces, ADatasetScopedCallRunsOnlyWhereTheEngineEnforcesTheScope) {
     const std::size_t probes = w.caller->scoped.size();
     EXPECT_FALSE(scoped("sql", {{"statement", "SELECT 1"}}));
     EXPECT_EQ(w.caller->scoped.size(), probes);
+    // A call lake confines on its own (list_datasets, get_dataset) is still sent there, unscoped,
+    // as before zetta#1519.
+    w.caller->value = {{"datasets", json::array()}};
+    ASSERT_TRUE(scoped("list_datasets", json::object()));
+    EXPECT_EQ(sent("list_datasets"), 1);
+    EXPECT_EQ(w.caller->scoped.size(), probes) << "sent without the header";
 
     // An engine that enforces it (a new address, so a new probe): the call carries the work area.
     w.caller->enforces_dataset_scope = true;
@@ -1509,6 +1524,21 @@ TEST(Workspaces, ADatasetScopedCallRunsOnlyWhereTheEngineEnforcesTheScope) {
     EXPECT_EQ(sent("sql"), 1);
     EXPECT_EQ(w.caller->scoped.back(),
               (std::pair<std::string, std::string>{"sql", "public/accounts, datasets/orders"}));
+    // zetta#1519: list_datasets and get_dataset carry the scope too; get_dataset names its
+    // database, since the engine refuses a bare name under a scope.
+    w.caller->value = {{"datasets", json::array()}};
+    ASSERT_TRUE(scoped("list_datasets", json::object()));
+    EXPECT_EQ(w.caller->scoped.back(),
+              (std::pair<std::string, std::string>{"list_datasets",
+                                                   "public/accounts, datasets/orders"}));
+    w.caller->value = {{"name", "accounts"}, {"database", "public"}};
+    ASSERT_TRUE(scoped("get_dataset", {{"dataset", "accounts"}, {"database", "public"}}));
+    EXPECT_EQ(w.caller->scoped.back().first, "get_dataset");
+    const std::size_t named = sent("get_dataset");
+    const auto bare = scoped("get_dataset", {{"dataset", "accounts"}});
+    ASSERT_FALSE(bare);
+    EXPECT_EQ(bare.error().code, "unauthorized");
+    EXPECT_EQ(sent("get_dataset"), named) << "a bare name is never sent under a scope";
 
     // The engine's own refusal of a read outside the scope reaches the caller as it said it.
     w.caller->failure = lake::control::ZettaControlError{

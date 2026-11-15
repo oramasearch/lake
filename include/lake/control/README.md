@@ -310,7 +310,7 @@ requests by kind for the process metrics and a request's `Server-Timing`, and
 `mark_workspace_store_moved` (migration `0067`).
 
 `zetta_workspace.hpp`'s `dataset_scope_header`, `dataset_scope_header_value`,
-`engine_checks_dataset_scope`, `dataset_scope_refusal`, `WorkspaceCaller::scoped_call` and the
+`engine_checks_dataset_scope`, `engine_must_enforce_dataset_scope`, `dataset_scope_refusal`, `WorkspaceCaller::scoped_call` and the
 `dataset_scope` argument of `WorkspaceService::call` send a dataset-confined credential's work area
 to the workspace Zetta as `Zetta-Dataset-Scope` (lake#1055, zetta#1515), only to an engine a probe
 shows enforces it. `agent_runs.hpp`'s `work_area_recorded_scope` and `records_work_area` tell a row

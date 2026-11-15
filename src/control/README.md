@@ -147,10 +147,12 @@ which the registry enforces at dispatch, and `work_area_recorded`, which marks a
 were derived with the work area (`records_work_area`: a row without it was made before lake#1055
 and is re-created or flagged `recreate`). `WorkspaceService::call` takes a work area as
 `dataset_scope` for the engine capabilities the workspace Zetta checks against the
-`Zetta-Dataset-Scope` header (`engine_checks_dataset_scope`: `sql`, zetta#1515); it sends the call
-through `WorkspaceCaller::scoped_call`, never through the definitions cache, and only after a probe
-of `server_info` under a scope (`dataset_scope_enforced`, remembered for 30 seconds per service,
-generation and address) shows the engine enforces it. See `docs/api/agent-launches.md`.
+`Zetta-Dataset-Scope` header (`engine_checks_dataset_scope`: `sql`, zetta#1515; `list_datasets`
+and `get_dataset`, zetta#1519). When a probe of `server_info` under a scope
+(`dataset_scope_enforced`, remembered for 30 seconds per service, generation and address) shows the
+engine enforces it, the call goes through `WorkspaceCaller::scoped_call`, never through the
+definitions cache, and a `get_dataset` without its `database` is refused; otherwise `sql`
+(`engine_must_enforce_dataset_scope`) is refused and the other two are sent unscoped. See `docs/api/agent-launches.md`.
 `policy.cpp`'s `authorize` and `authorize_batch` honour the cache's `AuthorizationConfinement`
 (lake#985): a confined decision allows only an object whose full parent chain reaches the confined
 customer, with every repository on it in the confined workspace (`inside_confinement`);

@@ -117,11 +117,17 @@ inline constexpr std::string_view dataset_scope_header = "Zetta-Dataset-Scope";
 // The header's value for a work area (each `<database>/<name>`, as dataset_work_area answers):
 // the datasets joined by ", ", or empty for a work area of no dataset.
 std::string dataset_scope_header_value(const std::vector<std::string>& area);
-// The engine capabilities whose reads the workspace Zetta checks against the header (zetta#1515:
-// `sql`, a SELECT of scoped tables). Under a scope the engine refuses every other capability,
+// The engine capabilities whose reads the workspace Zetta checks against the header: `sql`, a
+// SELECT of scoped tables (zetta#1515), and `list_datasets` and `get_dataset`, which answer only
+// the scope's datasets (zetta#1519). Under a scope the engine refuses every other capability,
 // because it does not declare what it reads; lake proves its own allowed calls of those
-// (list_datasets, get_dataset, ...) itself and sends them without the header.
+// (get_agent, workspace_openapi, ...) itself and sends them without the header.
 bool engine_checks_dataset_scope(std::string_view capability);
+// Of those, the ones lake cannot prove inside the work area on its own (`sql`): on an engine that
+// does not enforce the header they are refused, never sent. The others (list_datasets,
+// get_dataset) lake also confines itself (registry.cpp), so on such an engine they are sent
+// without the header, as before.
+bool engine_must_enforce_dataset_scope(std::string_view capability);
 // Whether a workspace engine answer to a probe under a dataset scope shows that the engine
 // enforces the scope: a Zetta that knows the header refuses `server_info` under any scope with
 // `unauthorized` and `details.dataset_scope`, and one that does not know it answers the call.
@@ -239,10 +245,13 @@ public:
     liquid::runtime::task<ZettaControlResult<WorkspaceState>> withdraw(std::string customer_id);
     // Calls `capability` on the customer's own cluster. Refuses when the workspace is not ready.
     // `dataset_scope`, for a call of a dataset-confined credential that the engine checks
-    // (engine_checks_dataset_scope), is the work area (each `<database>/<name>`): the call carries
-    // the Zetta-Dataset-Scope header, is never answered from or kept in the definitions cache,
-    // and is refused `unauthorized` unless the workspace Zetta is seen to enforce the scope
-    // (dataset_scope_enforced), so a Zetta that ignores the header never runs it unconfined.
+    // (engine_checks_dataset_scope), is the work area (each `<database>/<name>`). On a workspace
+    // Zetta seen to enforce the scope (dataset_scope_enforced) the call carries the
+    // Zetta-Dataset-Scope header and is never answered from or kept in the definitions cache; a
+    // scoped get_dataset must name its `database` (the engine refuses a bare name under a scope).
+    // On one that does not, a capability lake cannot prove itself
+    // (engine_must_enforce_dataset_scope) is refused `unauthorized` and never sent, and any other
+    // is sent as an unconfined call.
     liquid::runtime::task<ZettaControlResult<nlohmann::json>>
     call(std::string customer_id, std::string workspace_id, std::string capability,
          bool read, nlohmann::json input,

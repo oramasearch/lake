@@ -60,10 +60,11 @@ call_workspace(ApiContext& context,
                 std::unexpected(control::ZettaControlError{"invalid_input", std::move(problem)}));
         }
     }
-    // A dataset-confined credential (lake#1055): the engine call that the workspace Zetta can
-    // check carries the work area, and runs only where the engine enforces it. Lake proves every
-    // other call it lets such a credential make (registry.cpp, work_area_refusal) and sends it
-    // as before, since the engine refuses a capability that does not declare its reads.
+    // A dataset-confined credential (lake#1055): an engine call the workspace Zetta can check
+    // (sql, list_datasets, get_dataset) carries the work area wherever the engine enforces it,
+    // and sql runs nowhere else. Lake proves every other call it lets such a credential make
+    // (registry.cpp, work_area_refusal) and sends it as before, since the engine refuses a
+    // capability that does not declare its reads.
     std::optional<std::vector<std::string>> dataset_scope;
     if (control::engine_checks_dataset_scope(capability)) {
         dataset_scope = control::dataset_work_area(context.scopes);

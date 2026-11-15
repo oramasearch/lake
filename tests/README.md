@@ -1062,8 +1062,8 @@ work area. `Streams.ADatasetConfinedLaunchQueriesOnlyUnderTheEnginesDatasetScope
 `Workspaces.ADatasetScopedCallRunsOnlyWhereTheEngineEnforcesTheScope`,
 `Workspaces.ZettaCallerSendsTheDatasetScopeHeader` and
 `Workspaces.DatasetScopeHelpersNameTheWorkAreaAndTheEnginesRefusal` cover the `Zetta-Dataset-Scope`
-header (zetta#1515): a confined query carries the work area and runs only on an engine that enforces
-it, Lake's own proven calls go without it, and a scoped answer never comes from the definitions
-cache. `AgentRuns.RunsMadeBeforeWorkAreasAreRecreatedOrFlagged` (`test_workspaces.cpp`) covers the
+header (zetta#1515, zetta#1519): a confined query, `list_datasets` and `get_dataset` carry the work
+area, the query runs only on an engine that enforces it, `get_dataset` names its database, Lake's
+other proven calls go without it, and a scoped answer never comes from the definitions cache. `AgentRuns.RunsMadeBeforeWorkAreasAreRecreatedOrFlagged` (`test_workspaces.cpp`) covers the
 rows made before lake#1055: a conversation service is re-created on the next turn, and launches and
 schedules are flagged `recreate`. See [agent-launches.md](../docs/api/agent-launches.md#a-runs-dataset-work-area).
