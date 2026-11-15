@@ -158,11 +158,10 @@ preStop + `LAKE_DRAIN_SECONDS` (35) and the 45 s grace period after which the ku
 B never gives up on a predecessor that is stopping normally. Raising `LAKE_DRAIN_SECONDS` needs a
 longer grace period and owner wait to match.
 
-**Operator.** The design works with the operator as it is on `origin/main` (7b8ecb4): no
-operator change is required. Two of its documents describe the old behavior and should be updated
+**Operator.** The design works with the operator as it is: no operator change is required. Two of its documents describe the old behavior and should be updated
 there: `docs/lake/README.md` (Probes and drain: "lake stops its HTTP server at once on SIGTERM"
 and the readiness row "200 only when lake's control store answers a ping"; Pod replacement:
-"nothing yet proves that two processes can safely share it") and `DESIGN.md` decision 38. The
+"nothing yet proves that two processes can safely share it") and its design notes. The
 store-root state is visible in the `/readyz` body and the `store_owner` log events.
 
 **Verify.** `tests/test_shared_store.cpp` (`StoreOwner.*`; the binary cases need
