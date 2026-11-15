@@ -321,11 +321,24 @@ Result<void> InMemoryStore::ping() {
     return {};
 }
 
+bool InMemoryStore::principal_id_taken_locked(const std::string& taap_id) const {
+    return !taap_id.empty() &&
+           (std::ranges::any_of(users_,
+                                [&](const User& user) { return user.taap_id == taap_id; }) ||
+            std::ranges::any_of(organizations_, [&](const Organization& organization) {
+                return organization.taap_id == taap_id;
+            }));
+}
+
 Result<User> InMemoryStore::create_user(const NewUser& in) {
     if (auto checked = check_principal_id(in.taap_id, "taap_id"); !checked) {
         return std::unexpected(checked.error());
     }
     std::lock_guard lock(mutex_);
+    // lake#872: one principal id, one person or organization (PostgresStore::principal_id_taken).
+    if (principal_id_taken_locked(in.taap_id)) {
+        return std::unexpected(StoreError{"conflict", "that identity belongs to another account"});
+    }
     for (const auto& u : users_) {
         if (!in.taap_id.empty() && u.taap_id == in.taap_id)
             return std::unexpected(StoreError{"conflict", "taap_id already exists"});
@@ -4344,9 +4357,8 @@ Result<Organization> InMemoryStore::create_organization(const NewOrganization& i
         return std::unexpected(checked.error());
     }
     std::lock_guard lock(mutex_);
-    for (const auto& o : organizations_) {
-        if (!in.taap_id.empty() && o.taap_id == in.taap_id)
-            return std::unexpected(StoreError{"conflict", "taap_id already exists"});
+    if (principal_id_taken_locked(in.taap_id)) {
+        return std::unexpected(StoreError{"conflict", "that identity belongs to another account"});
     }
     const std::string now = now_iso8601();
     organizations_.push_back(Organization{new_uuid_v4(), in.taap_id, in.display_name, now, now});
@@ -6769,6 +6781,12 @@ Result<IssuedSession> InMemoryStore::sign_in_sso(const SsoIdentity& input) {
     if (auto checked = check_principal_id(input.taap_id, "taap_id"); !checked) {
         return std::unexpected(checked.error());
     }
+    // lake#872: a new account takes the managed key Lake minted, never a caller's choice.
+    const std::string identity =
+        input.custodial_taap_id.empty() ? input.taap_id : input.custodial_taap_id;
+    if (auto checked = check_principal_id(identity, "taap_id"); !checked) {
+        return std::unexpected(checked.error());
+    }
     if (input.provider_id.empty() || input.issuer.empty() || input.subject.empty() ||
         !input.claims.is_object()) {
         return std::unexpected(StoreError{"invalid_input", "SSO assertion is incomplete"});
@@ -6805,13 +6823,23 @@ Result<IssuedSession> InMemoryStore::sign_in_sso(const SsoIdentity& input) {
         }
         user_id = scim->user_id;
     } else {
-        if (!provider->jit_provisioning || input.taap_id.empty()) {
+        if (!provider->jit_provisioning || identity.empty()) {
             return std::unexpected(StoreError{"unauthorized", "SSO user is not provisioned"});
         }
+        if (principal_id_taken_locked(identity)) {
+            return std::unexpected(
+                StoreError{"conflict", "that identity belongs to another account"});
+        }
         const std::string now = now_iso8601();
-        users_.push_back(
-            User{new_uuid_v4(), input.taap_id, input.email, input.display_name, now, now});
+        users_.push_back(User{new_uuid_v4(), identity, input.email, input.display_name, now, now});
         user_id = users_.back().id;
+        if (!input.custodial_public_key.empty() && !input.custodial_wrapped_seed.empty()) {
+            ClerkIdentity managed;
+            managed.custodial_taap_id = identity;
+            managed.custodial_public_key = input.custodial_public_key;
+            managed.custodial_wrapped_seed = input.custodial_wrapped_seed;
+            custodial_identities_[user_id] = std::move(managed);
+        }
         scim_users_.push_back(
             ScimUser{input.provider_id, input.subject, user_id, true, input.claims, now, now});
     }
@@ -6917,7 +6945,13 @@ Result<ScimUser> InMemoryStore::upsert_scim_user(const NewScimUser& input) {
     if (auto checked = check_principal_id(input.taap_id, "taap_id"); !checked) {
         return std::unexpected(checked.error());
     }
-    if (input.provider_id.empty() || input.external_id.empty() || input.taap_id.empty()) {
+    // lake#872: a new account takes the managed key Lake minted, never the SCIM client's choice.
+    const std::string identity =
+        input.custodial_taap_id.empty() ? input.taap_id : input.custodial_taap_id;
+    if (auto checked = check_principal_id(identity, "taap_id"); !checked) {
+        return std::unexpected(checked.error());
+    }
+    if (input.provider_id.empty() || input.external_id.empty() || identity.empty()) {
         return std::unexpected(
             StoreError{"invalid_input", "provider, external id, and TAAP identity are required"});
     }
@@ -6957,7 +6991,17 @@ Result<ScimUser> InMemoryStore::upsert_scim_user(const NewScimUser& input) {
                                                      now});
         return *record;
     }
-    users_.push_back(User{new_uuid_v4(), input.taap_id, input.email, input.display_name, now, now});
+    if (principal_id_taken_locked(identity)) {
+        return std::unexpected(StoreError{"conflict", "that identity belongs to another account"});
+    }
+    users_.push_back(User{new_uuid_v4(), identity, input.email, input.display_name, now, now});
+    if (!input.custodial_public_key.empty() && !input.custodial_wrapped_seed.empty()) {
+        ClerkIdentity managed;
+        managed.custodial_taap_id = identity;
+        managed.custodial_public_key = input.custodial_public_key;
+        managed.custodial_wrapped_seed = input.custodial_wrapped_seed;
+        custodial_identities_[users_.back().id] = std::move(managed);
+    }
     ScimUser created{input.provider_id,
                      input.external_id,
                      users_.back().id,

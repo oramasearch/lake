@@ -1173,17 +1173,6 @@ std::string scim_email(const json& resource) {
     return {};
 }
 
-std::string scim_taap_id(const json& resource) {
-    if (resource.contains("taapId") && resource["taapId"].is_string()) {
-        return resource["taapId"].get<std::string>();
-    }
-    const std::string extension(scim_taap_schema);
-    if (resource.contains(extension) && resource[extension].is_object()) {
-        return resource[extension].value("taapId", "");
-    }
-    return {};
-}
-
 std::string scim_team_name(std::string_view external_id) {
     std::string result;
     result.reserve(std::min<std::size_t>(external_id.size(), 256));
@@ -1322,22 +1311,30 @@ std::expected<json, std::string> apply_scim_patch(json resource, const json& req
     return resource;
 }
 
-std::expected<control::NewScimUser, ApiResult> new_scim_user(const std::string& provider_id,
-                                                             json resource) {
+// A SCIM client never names the identity of the account a create makes (lake#872): Lake mints a
+// managed key for it, and a `taapId` the resource carries is dropped, never stored or answered.
+std::expected<control::NewScimUser, ApiResult>
+new_scim_user(ApiContext& context, const std::string& provider_id, json resource) {
     const std::string external_id = resource.value("externalId", resource.value("userName", ""));
-    const std::string taap_id = scim_taap_id(resource);
-    if (external_id.empty() || taap_id.empty()) {
-        return std::unexpected(ApiResult::failure(
-            "invalid_input", "SCIM user requires externalId or userName and a TAAP identity"));
+    if (external_id.empty()) {
+        return std::unexpected(
+            ApiResult::failure("invalid_input", "SCIM user requires externalId or userName"));
     }
+    resource.erase("taapId");
+    resource.erase(std::string(scim_taap_schema));
     resource["externalId"] = external_id;
-    return control::NewScimUser{provider_id,
-                                external_id,
-                                scim_email(resource),
-                                resource.value("displayName", ""),
-                                taap_id,
-                                resource.value("active", true),
-                                std::move(resource)};
+    control::NewScimUser user{provider_id,
+                              external_id,
+                              scim_email(resource),
+                              resource.value("displayName", ""),
+                              "",
+                              resource.value("active", true),
+                              std::move(resource)};
+    if (!audit::give_managed_key(user, *context.store, context.instance_kek)) {
+        return std::unexpected(
+            ApiResult::failure("store_unavailable", "Lake cannot create a managed key"));
+    }
+    return user;
 }
 
 std::expected<control::NewScimGroup, ApiResult>
@@ -3208,7 +3205,7 @@ void register_identity_capabilities(Registry& registry) {
                             .title = "Create organization",
                             .description =
                                 "Create an organization (identity, owns nothing). taap_id "
-                                "is optional and unique.",
+                                "is optional, unique and the operator's to give.",
                             .input_schema = {{"type", "object"},
                                              {"properties",
                                               {{"taap_id", {{"type", "string"}}},
@@ -3223,6 +3220,16 @@ void register_identity_capabilities(Registry& registry) {
                             .handler = [](const json& in, ApiContext& ctx) {
                                 if (!ctx.store)
                                     return no_store();
+                                // Only the operator names an organization's identity (lake#872):
+                                // an account administrator could otherwise give it an identity a
+                                // grant already names and show its own name there.
+                                if (!in.value("taap_id", "").empty() && !ctx.operator_credential &&
+                                    ctx.acting_identity != control::operator_principal) {
+                                    return ApiResult::failure(
+                                        "forbidden",
+                                        "only the operator names an organization's identity",
+                                        "/taap_id");
+                                }
                                 return one_result(ctx.store->create_organization(
                                     control::NewOrganization{in.value("taap_id", ""),
                                                              in.value("display_name", ""),
@@ -4524,16 +4531,18 @@ void register_sso_capabilities(Registry& registry) {
                     "unauthorized",
                     "sign_in_sso is operator-only; sign in through the provider (OIDC or SAML)");
             }
-            co_return session_answer(co_await issued_result(
-                context.store->sign_in_sso({input.value("provider_id", ""),
-                                            input.value("issuer", ""),
-                                            input.value("subject", ""),
-                                            input.value("email", ""),
-                                            input.value("display_name", ""),
-                                            input.value("taap_id", ""),
-                                            input.value("device_name", "browser"),
-                                            input.value("claims", json::object())}),
-                context));
+            // A new account takes a managed key Lake mints; `taap_id` is ignored (lake#872).
+            control::SsoIdentity identity{input.value("provider_id", ""),
+                                          input.value("issuer", ""),
+                                          input.value("subject", ""),
+                                          input.value("email", ""),
+                                          input.value("display_name", ""),
+                                          "",
+                                          input.value("device_name", "browser"),
+                                          input.value("claims", json::object())};
+            audit::give_managed_key(identity, *context.store, context.instance_kek);
+            co_return session_answer(
+                co_await issued_result(context.store->sign_in_sso(identity), context));
         }});
     registry.add(Capability{
         .name = "start_sso_saml",
@@ -4616,6 +4625,10 @@ void register_sso_capabilities(Registry& registry) {
             if (!accepted) {
                 co_return ApiResult::failure(accepted.error().code, accepted.error().message);
             }
+            // The identity of a just-in-time account is a managed key Lake mints, never the
+            // `taap_id` this unauthenticated caller or its start_sso_saml named (lake#872).
+            accepted->identity.taap_id.clear();
+            audit::give_managed_key(accepted->identity, *context.store, context.instance_kek);
             co_return session_answer(
                 co_await issued_result(context.store->sign_in_sso(accepted->identity), context));
         }});
@@ -4633,8 +4646,7 @@ void register_sso_capabilities(Registry& registry) {
                            {"taap_id", {{"type", "string"}}},
                            {"active", {{"type", "boolean"}}},
                            {"attributes", {{"type", "object"}}}}},
-                         {"required",
-                          json::array({"provider_id", "external_id", "taap_id", "active"})},
+                         {"required", json::array({"provider_id", "external_id", "active"})},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
@@ -4642,15 +4654,21 @@ void register_sso_capabilities(Registry& registry) {
         .action = "admin",
         .resolve_object = sso_provider_object,
         .handler = [](const json& input, ApiContext& context) {
-            return context.store ? one_result(context.store->upsert_scim_user(
-                                       {input.value("provider_id", ""),
-                                        input.value("external_id", ""),
-                                        input.value("email", ""),
-                                        input.value("display_name", ""),
-                                        input.value("taap_id", ""),
-                                        input.value("active", true),
-                                        input.value("attributes", json::object())}))
-                                 : no_store();
+            if (!context.store) {
+                return no_store();
+            }
+            // `taap_id` is ignored: a new account takes a managed key Lake mints (lake#872).
+            control::NewScimUser user{input.value("provider_id", ""),
+                                      input.value("external_id", ""),
+                                      input.value("email", ""),
+                                      input.value("display_name", ""),
+                                      "",
+                                      input.value("active", true),
+                                      input.value("attributes", json::object())};
+            if (!audit::give_managed_key(user, *context.store, context.instance_kek)) {
+                return ApiResult::failure("store_unavailable", "Lake cannot create a managed key");
+            }
+            return one_result(context.store->upsert_scim_user(user));
         }});
     registry.add(Capability{
         .name = "scim_upsert_user",
@@ -4673,7 +4691,7 @@ void register_sso_capabilities(Registry& registry) {
             if (!provider) {
                 return provider.error();
             }
-            auto user = new_scim_user(provider->id, input.at("resource"));
+            auto user = new_scim_user(context, provider->id, input.at("resource"));
             if (!user) {
                 return user.error();
             }
@@ -4780,7 +4798,7 @@ void register_sso_capabilities(Registry& registry) {
                 return ApiResult::failure("invalid_input", patched.error());
             }
             (*patched)["externalId"] = existing->external_id;
-            auto user = new_scim_user(provider->id, std::move(*patched));
+            auto user = new_scim_user(context, provider->id, std::move(*patched));
             if (!user) {
                 return user.error();
             }

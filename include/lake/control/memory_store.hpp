@@ -596,6 +596,8 @@ public:
     // that account's id, or empty.
     std::string take_verified_email_locked(const std::string& email,
                                            const std::string& keep_user_id);
+    // Whether a user (any pool) or organization already has this principal id (lake#872).
+    bool principal_id_taken_locked(const std::string& taap_id) const;
     Result<AccountIdentity> account_identity(const std::string& user_id) override;
     Result<ManagedKey> managed_key(const std::string& user_id) override;
     Result<void> create_identity_link_challenge(const IdentityLinkChallenge&) override;

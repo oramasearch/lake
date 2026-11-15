@@ -22,6 +22,13 @@ A new migration still follows the rules below: idempotent SQL, its row in `schem
 new `*_guard` table created by the newest migration (`LakeManifest.TheGuardTableIsTheNewestMigrations`
 fails otherwise).
 
+`0109_principal_ids` (lake#872) adds `users_taap_id_format` and `organizations_taap_id_format`:
+a `taap_id` is NULL or `taap:` and printable ASCII, at most 512 characters, the rule every creation
+path already applies (`valid_principal_id`). `NOT VALID`, so rows from before lake#870 are not
+scanned; a write to such a row is refused until it is corrected. Guard `principal_ids_guard`; the
+operator must vendor this schema and select the guard. See
+[principal ids](../api/policy.md#principal-ids-lake870-lake872).
+
 `0108_retained_usage` (lake#988, LSR-121) adds `retained_usage_sets` (one row per deleted
 workspace: its account and the window `[from_at, to_at)` read) and `retained_usage` (that
 workspace's quantities: `source` `rollup` or `late`, `dimension`, `labels` as a JSON object of at

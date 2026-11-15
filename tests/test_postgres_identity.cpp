@@ -1069,14 +1069,31 @@ TEST(PostgresIdentity, OperatorPrincipalIsNeverAPersonsIdentity) {
     ASSERT_FALSE(jit);
     EXPECT_EQ(jit.error().code, "invalid_input");
 
-    // A row written outside lake: the session issues, but no request can use it.
+    // lake#872 (migration 0109_principal_ids): the database refuses the row however it is written.
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        EXPECT_THROW(tx.exec("INSERT INTO users (taap_id, display_name) VALUES ('admin', 'P')"),
+                     pqxx::check_violation);
+    }
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        EXPECT_THROW(tx.exec("INSERT INTO organizations (taap_id) VALUES ('share-link:1')"),
+                     pqxx::check_violation);
+    }
+    // A row from before the constraint (it is NOT VALID, so old rows are not scanned): the
+    // session issues, but no request can use it.
     std::string user_id;
     {
         pqxx::connection connection(uri);
         pqxx::work tx(connection);
+        tx.exec("ALTER TABLE users DROP CONSTRAINT users_taap_id_format");
         user_id = tx.exec("INSERT INTO users (taap_id, display_name) VALUES ('admin', 'Planted') "
                           "RETURNING id::text")[0][0]
                       .as<std::string>();
+        tx.exec("ALTER TABLE users ADD CONSTRAINT users_taap_id_format CHECK (taap_id IS NULL OR "
+                "(taap_id ~ '^taap:[!-~]+$' AND length(taap_id) <= 512)) NOT VALID");
         tx.exec_params("INSERT INTO scim_users (provider_id, external_id, user_id, attributes) "
                        "VALUES ($1::uuid, 'planted', $2::uuid, '{}'::jsonb)",
                        provider->id,

@@ -11362,19 +11362,24 @@ struct ApiServer::Impl {
             identity.email = claims->email;
             identity.display_name = claims->display_name;
         }
+        // A just-in-time enterprise account takes a managed key Lake mints, never the TAAP id the
+        // browser that started the flow named (lake#872).
+        control::SsoIdentity enterprise{provider_id,
+                                        provider->issuer,
+                                        identity.subject,
+                                        identity.email,
+                                        identity.display_name,
+                                        "",
+                                        flow->device_name,
+                                        identity.email.empty()
+                                            ? nlohmann::json::object()
+                                            : nlohmann::json{{"email", identity.email}}};
+        if (enterprise_provider) {
+            audit::give_managed_key(enterprise, *options.store, options.instance_kek);
+        }
         control::Result<control::IssuedSession> issued =
-            enterprise_provider
-                ? options.store->sign_in_sso({provider_id,
-                                              provider->issuer,
-                                              identity.subject,
-                                              identity.email,
-                                              identity.display_name,
-                                              flow->identity_document,
-                                              flow->device_name,
-                                              identity.email.empty()
-                                                  ? nlohmann::json::object()
-                                                  : nlohmann::json{{"email", identity.email}}})
-                : options.store->sign_in_oauth(identity);
+            enterprise_provider ? options.store->sign_in_sso(enterprise)
+                                : options.store->sign_in_oauth(identity);
         if (!issued) {
             co_return co_await oauth_error(
                 route, http::status::forbidden, "OAuth identity could not sign in");
@@ -11570,6 +11575,9 @@ struct ApiServer::Impl {
         if (!accepted) {
             co_return co_await saml_error(route, provider_id, accepted.error());
         }
+        // A just-in-time account takes a managed key Lake mints (lake#872).
+        accepted->identity.taap_id.clear();
+        audit::give_managed_key(accepted->identity, *options.store, options.instance_kek);
         control::Result<control::IssuedSession> issued =
             options.store->sign_in_sso(accepted->identity);
         if (!issued) {

@@ -32,7 +32,7 @@ by the registry. The store retains the issuing session and rejects descendants a
 ancestor or linked device is revoked or expires. The complete derivation and migration contract is
 [`identity.md`](identity.md#token-derivation-and-revocation).
 
-## Principal ids (lake#870)
+## Principal ids (lake#870, lake#872)
 
 **What.** The principal `admin` is the operator's: `authorize` allows it everything, and the
 registry skips the policy check for it. Only the admin token acts as it. Every identity a person,
@@ -56,13 +56,37 @@ characters (`valid_principal_id`, `src/control/policy.cpp`).
   grant, so a grant written for another tenant's link id could have repointed it. Lake still creates
   `share-link:` grants itself when a link is made.
 
+- **Nobody but Lake chooses a new SSO or SCIM account's identity** (lake#872): the account a
+  just-in-time sign-in or a SCIM create makes gets a managed key Lake mints, and any `taap_id` or
+  `taapId` the caller sends is ignored ([SSO](sso.md)). Before, an unauthenticated SAML or OIDC
+  caller, or an organization's SCIM client, named it without holding its key.
+- **One principal id, one principal** (lake#872): `create_user`, `create_organization`, the SCIM
+  create and the just-in-time user answer `conflict` for an identity any user (in any pool) or
+  organization already has, so no new principal inherits another's grants or name.
+- **The database refuses anything else** (lake#872, migration `0109_principal_ids`):
+  `users_taap_id_format` and `organizations_taap_id_format` check the same rule, `NOT VALID` so
+  rows from before lake#870 are not scanned; a write to such a row is refused until it is
+  corrected. The operator must vendor the schema and select `principal_ids_guard`.
+
 **Why.** Policy decisions are keyed by the principal string, so a stored identity equal to `admin`,
 or to an identity lake sets in code (`agent-service:`, `share-link:`, `sso-provider/`), would inherit
-what that identity may do. The remaining work on unscoped principals is lake#872.
+what that identity may do, and so would a new account given another principal's identity.
+
+**Grants name identities, not accounts, on purpose.** A grant names a TAAP id, not a user id and
+pool. Since lake#912 a session of an application pool carries no Lake grants, and every creation
+path above now validates the id, takes it from a key Lake minted or a proof of the key, and
+refuses one another principal holds. A grant on a TAAP id therefore reaches only the Lake-pool
+account holding that key; naming user ids would also break grants made before an account exists
+(invitations, imported grants) and identities that move between accounts (*Use my own
+identity*).
 
 **Verify.** `PrincipalIds.*` (`tests/test_sso.cpp`) and
 `PostgresIdentity.OperatorPrincipalIsNeverAPersonsIdentity` (`tests/test_postgres_identity.cpp`),
-which plants a user named `admin` in the database and shows its session is refused.
+which shows the database refuses a user named `admin`, then plants one as an old row would be and
+shows its session is refused. `PrincipalIds.NoCreationPathTakesAnIdentityAnotherPrincipalHolds`
+covers collisions, `PrincipalIds.NoCreationPathAcceptsTheOperatorIdentity` a SCIM client's
+ignored `taap_id`, and `SamlSignIn.TheAcsSignsInOnceAndRefusesReplayTamperingAndUnsolicitedResponses`
+the managed key of a just-in-time SAML account.
 
 ## Objects and grants
 

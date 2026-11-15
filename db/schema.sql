@@ -5310,3 +5310,22 @@ CREATE TABLE IF NOT EXISTS retained_usage (
 CREATE INDEX IF NOT EXISTS retained_usage_customer_at_idx ON retained_usage (customer_id, at);
 CREATE TABLE IF NOT EXISTS retained_usage_guard (applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0108_retained_usage') ON CONFLICT DO NOTHING;
+-- ---------------------------------------------------------------------------------------------
+-- 0109_principal_ids (lake#872, docs/api/policy.md#principal-ids-lake870-lake872): every identity
+-- a person or organization carries is a TAAP id, `taap:` and printable ASCII, at most 512
+-- characters, the rule `valid_principal_id` (src/control/policy.cpp) applies on every creation
+-- path. Policy is keyed by that string, and `admin` (the operator) or an identity lake sets in code
+-- (`agent-service:`, `share-link:`, `sso-provider/`) stored on a row would inherit what it may do.
+-- The database now refuses such a row however it is written. NOT VALID: rows written before
+-- lake#870 are not scanned, and `accepted_principal` already refuses their sessions; a write to
+-- such a row is refused until it is corrected. Numbered after 0106 (lake#949), 0107 and 0108
+-- (open security pull requests).
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_taap_id_format;
+ALTER TABLE users ADD CONSTRAINT users_taap_id_format
+    CHECK (taap_id IS NULL OR (taap_id ~ '^taap:[!-~]+$' AND length(taap_id) <= 512)) NOT VALID;
+ALTER TABLE organizations DROP CONSTRAINT IF EXISTS organizations_taap_id_format;
+ALTER TABLE organizations ADD CONSTRAINT organizations_taap_id_format
+    CHECK (taap_id IS NULL OR (taap_id ~ '^taap:[!-~]+$' AND length(taap_id) <= 512)) NOT VALID;
+CREATE TABLE IF NOT EXISTS principal_ids_guard (applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0109_principal_ids') ON CONFLICT DO NOTHING;

@@ -1677,9 +1677,12 @@ struct SsoIdentity {
     std::string subject;
     std::string email;
     std::string display_name;
-    std::string taap_id;
+    std::string taap_id; // the operator's sign_in_sso only; ignored when a managed key is given
     std::string device_name;
     nlohmann::json claims;
+    // The managed key Lake minted for the account a just-in-time sign-in creates (lake#872). Lake
+    // never takes a new account's identity from the browser or the identity provider.
+    std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
 };
 struct ScimUser {
     std::string provider_id;
@@ -1695,9 +1698,12 @@ struct NewScimUser {
     std::string external_id;
     std::string email;
     std::string display_name;
-    std::string taap_id;
+    std::string taap_id; // ignored when a managed key is given (lake#872)
     bool active = true;
     nlohmann::json attributes;
+    // The managed key Lake minted for the account a create makes (lake#872); a SCIM client never
+    // chooses a new account's identity.
+    std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
 };
 struct ScimGroup {
     std::string provider_id;

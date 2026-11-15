@@ -17,6 +17,7 @@ confirmation link), marks order forms mailed before it as confirmed (once), and 
 `cloud_orders_contact_email_idx` and `cloud_orders_contact_domain_idx` for the per-recipient limits;
 guard `order_email_confirmation_guard`. Additive; numbered after the open `0106` (lake#949). Apply
 before the new binary, which reads the column. See [orders](../docs/api/orders.md#email) and
+[schema.md](../docs/control-plane/schema.md).
 Migration `0108_retained_usage` (lake#988, LSR-121) adds `retained_usage_sets` and `retained_usage`:
 the usage a deleted workspace consumed that no issued invoice billed, as content-free quantities by
 dimension, `kind`/`class`/`model` and day (`rollup`, written by `delete_workspace` before the cascade)

@@ -2026,11 +2026,53 @@ public:
         return {};
     }
 
+    // A principal id belongs to one person or organization (lake#872): a new account or
+    // organization may not take an identity any user, in any pool, or organization already has,
+    // or it would inherit that principal's grants and name.
+    static bool principal_id_taken(pqxx::work& tx, const std::string& taap_id) {
+        return !taap_id.empty() &&
+               !tx.exec_params("SELECT 1 FROM users WHERE taap_id = $1 UNION ALL "
+                               "SELECT 1 FROM organizations WHERE taap_id = $1 LIMIT 1",
+                               taap_id)
+                    .empty();
+    }
+    static StoreError principal_id_conflict() {
+        return StoreError{"conflict", "that identity belongs to another account"};
+    }
+    // The identity a new SSO or SCIM account takes: the managed key Lake minted for it, or, with
+    // none (a direct store caller), the given id. Recorded as a managed key when minted.
+    static Result<std::string> new_account_identity(const std::string& custodial_taap_id,
+                                                    const std::string& taap_id) {
+        const std::string chosen = custodial_taap_id.empty() ? taap_id : custodial_taap_id;
+        if (auto checked = check_principal_id(chosen, "taap_id"); !checked) {
+            return std::unexpected(checked.error());
+        }
+        return chosen;
+    }
+    void record_custodial_identity(pqxx::work& tx,
+                                   const std::string& user_id,
+                                   const std::string& taap_id,
+                                   const std::string& public_key,
+                                   const std::string& wrapped_seed) {
+        if (public_key.empty() || wrapped_seed.empty()) {
+            return;
+        }
+        tx.exec_params("INSERT INTO custodial_identities (user_id, taap_id, public_key, "
+                       "wrapped_seed) VALUES ($1::uuid, $2, $3, $4)",
+                       user_id,
+                       taap_id,
+                       public_key,
+                       wrapped_seed);
+    }
+
     Result<User> create_user(const NewUser& in) override {
         if (auto checked = check_principal_id(in.taap_id, "taap_id"); !checked) {
             return std::unexpected(checked.error());
         }
         return with_tx<User>([&](pqxx::work& tx) -> Result<User> {
+            if (principal_id_taken(tx, in.taap_id)) {
+                return std::unexpected(principal_id_conflict());
+            }
             const pqxx::result rows = tx.exec_params(
                 std::string("INSERT INTO users (taap_id, email, display_name) VALUES "
                             "($1, $2, $3) RETURNING ") +
@@ -2107,6 +2149,9 @@ public:
                         "invalid_input", "customer_id does not reference a policy object"});
                 }
                 parent_id = parents[0][0].as<std::string>();
+            }
+            if (principal_id_taken(tx, in.taap_id)) {
+                return std::unexpected(principal_id_conflict());
             }
             const pqxx::result rows =
                 tx.exec_params(std::string("INSERT INTO organizations (taap_id, display_name) "
@@ -11381,6 +11426,10 @@ public:
         if (auto checked = check_principal_id(input.taap_id, "taap_id"); !checked) {
             return std::unexpected(checked.error());
         }
+        const auto identity = new_account_identity(input.custodial_taap_id, input.taap_id);
+        if (!identity) {
+            return std::unexpected(identity.error());
+        }
         if (input.provider_id.empty() || input.issuer.empty() || input.subject.empty() ||
             !input.claims.is_object()) {
             return std::unexpected(StoreError{"invalid_input", "SSO assertion is incomplete"});
@@ -11424,17 +11473,25 @@ public:
                 }
                 user_id = mapped[0][0].as<std::string>();
             } else {
-                if (!provider.jit_provisioning || input.taap_id.empty()) {
+                if (!provider.jit_provisioning || identity->empty()) {
                     return std::unexpected(
                         StoreError{"unauthorized", "SSO user is not provisioned"});
+                }
+                if (principal_id_taken(tx, *identity)) {
+                    return std::unexpected(principal_id_conflict());
                 }
                 const pqxx::result created =
                     tx.exec_params("INSERT INTO users (taap_id, email, display_name) VALUES ($1, "
                                    "$2, $3) RETURNING id::text",
-                                   input.taap_id,
+                                   *identity,
                                    nullable(input.email),
                                    input.display_name);
                 user_id = created[0][0].as<std::string>();
+                record_custodial_identity(tx,
+                                          user_id,
+                                          *identity,
+                                          input.custodial_public_key,
+                                          input.custodial_wrapped_seed);
                 tx.exec_params(
                     "INSERT INTO scim_users (provider_id, external_id, user_id, attributes) "
                     "VALUES ($1::uuid, $2, $3::uuid, $4::jsonb)",
@@ -11502,7 +11559,11 @@ public:
         if (auto checked = check_principal_id(input.taap_id, "taap_id"); !checked) {
             return std::unexpected(checked.error());
         }
-        if (input.provider_id.empty() || input.external_id.empty() || input.taap_id.empty()) {
+        const auto identity = new_account_identity(input.custodial_taap_id, input.taap_id);
+        if (!identity) {
+            return std::unexpected(identity.error());
+        }
+        if (input.provider_id.empty() || input.external_id.empty() || identity->empty()) {
             return std::unexpected(StoreError{
                 "invalid_input", "provider, external id, and TAAP identity are required"});
         }
@@ -11521,13 +11582,21 @@ public:
             std::string user_id;
             std::string operation = "create";
             if (existing.empty()) {
+                if (principal_id_taken(tx, *identity)) {
+                    return std::unexpected(principal_id_conflict());
+                }
                 const pqxx::result created =
                     tx.exec_params("INSERT INTO users (taap_id, email, display_name) VALUES ($1, "
                                    "$2, $3) RETURNING id::text",
-                                   input.taap_id,
+                                   *identity,
                                    nullable(input.email),
                                    input.display_name);
                 user_id = created[0][0].as<std::string>();
+                record_custodial_identity(tx,
+                                          user_id,
+                                          *identity,
+                                          input.custodial_public_key,
+                                          input.custodial_wrapped_seed);
                 tx.exec_params("INSERT INTO scim_users (provider_id, external_id, user_id, active, "
                                "attributes) "
                                "VALUES ($1::uuid, $2, $3::uuid, $4, $5::jsonb)",
