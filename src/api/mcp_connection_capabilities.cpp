@@ -7,6 +7,7 @@
 // a person marked auto-approved for that tool.
 
 #include "lake/api/mcp_connections.hpp"
+#include "lake/api/agent_stream_triggers.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1597,6 +1598,13 @@ liquid::runtime::task<ApiResult> update_connection(const json& input, ApiContext
             topic_problem(input.at(field).get<std::string>())) {
             co_return ApiResult::failure("invalid_input",
                                          "a topic name is letters, digits, '-', '_' and '.'",
+                                         std::string("/") + field);
+        }
+        // Lake's own streams are never a connection's topic (LSR-190, lake#996).
+        if (input.contains(field) && !input.at(field).is_null() &&
+            system_stream_name(input.at(field).get<std::string>())) {
+            co_return ApiResult::failure("invalid_input",
+                                         "that topic is one Lake writes itself; choose another name",
                                          std::string("/") + field);
         }
     }

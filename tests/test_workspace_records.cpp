@@ -4682,6 +4682,15 @@ TEST_P(WorkspaceRecordStores, McpConnectionStreamsMirrorNotificationsAndDriveThe
                                     {"subscribe_resources", json::array({"memo://inbox"})}}));
     ASSERT_TRUE(streams.ok) << streams.error.message;
     EXPECT_EQ(streams.value["streams"]["input_topic"], "inbox-in");
+    // LSR-190 (lake#996): a stream Lake writes itself is never a connection's topic.
+    for (const char* field : {"input_topic", "output_topic", "notifications_topic"}) {
+        for (const char* system : {"agent-tasks.agent-ask-orama", "agent-events", "build-events.b1",
+                                   "run-metrics.r1", "app-events.a1", "study-events.s1"}) {
+            const auto refused = t.call(first, "update_mcp_connection", in({{"id", id}, {field, system}}));
+            EXPECT_FALSE(refused.ok) << field << " " << system;
+            EXPECT_EQ(refused.error.path, std::string("/") + field) << field << " " << system;
+        }
+    }
 
     // One event waits on the input stream.
     {

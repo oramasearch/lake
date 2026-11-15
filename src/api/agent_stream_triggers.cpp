@@ -34,9 +34,7 @@ constexpr std::size_t max_triggers_per_pass = 256;
 // Streams Lake and its agents write themselves: never a trigger, so an agent's own events can
 // never start it again (the same names Train → Streams shows as system streams).
 bool system_stream(const std::string& name) {
-    return name.starts_with("agent-") || name.starts_with("app-events.") ||
-           name.starts_with("build-events.") || name.starts_with("run-metrics.") ||
-           name.starts_with("study-events.") || name.starts_with("inbox:");
+    return system_stream_name(name);
 }
 
 std::string stream_of(std::string name) {
@@ -558,6 +556,15 @@ void register_agent_stream_capabilities(Registry& registry) {
         .resolve_object = customer_object,
         .authorizes_candidates = true,
         .async_handler = list_agent_streams});
+}
+
+bool system_stream_name(std::string_view name) {
+    if (name.starts_with("topic:")) {
+        name.remove_prefix(6);
+    }
+    return name.starts_with("agent-") || name.starts_with("app-events.") ||
+           name.starts_with("build-events.") || name.starts_with("run-metrics.") ||
+           name.starts_with("study-events.") || name.starts_with("inbox:");
 }
 
 } // namespace lake::api
