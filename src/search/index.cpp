@@ -130,13 +130,42 @@ std::string snippet_for(const std::string& content, const std::string& needle) {
     return snippet;
 }
 
+// A regex query is bounded (LSR-117, lake#984): std::regex backtracks, so the pattern is short and
+// has no quantified group that itself repeats, only the first kRegexInputBytes of a blob are
+// searched, and a query stops scanning after kRegexScanBudget.
+constexpr std::size_t kRegexPatternBytes = 256;
+constexpr std::size_t kRegexInputBytes = 1024 * 1024;
+constexpr auto kRegexScanBudget = std::chrono::seconds(2);
+
+// Why `pattern` is refused as a regex query, or empty when it is accepted.
+std::string regex_pattern_problem(const std::string& pattern) {
+    if (pattern.size() > kRegexPatternBytes) {
+        return "a regex query is at most " + std::to_string(kRegexPatternBytes) + " characters";
+    }
+    // A group that holds a quantifier and is quantified itself, such as (a+)+ or (x*y)*, can take
+    // exponential time on a backtracking engine.
+    static const std::regex nested(R"(\([^()]*[*+?}][^()]*\)\s*[*+{])");
+    if (std::regex_search(pattern, nested)) {
+        return "a regex query cannot repeat a group that itself repeats";
+    }
+    return {};
+}
+
+bool bounded_regex_search(const std::string& content, const std::regex& expression) {
+    const auto end = content.begin() +
+                     static_cast<std::ptrdiff_t>(std::min(content.size(), kRegexInputBytes));
+    return std::regex_search(content.begin(), end, expression);
+}
+
 std::size_t line_for(const std::string& content,
                      const std::string& needle,
                      const std::optional<std::regex>& expression) {
     std::size_t position = content.find(needle);
     if (expression) {
         std::smatch match;
-        if (std::regex_search(content, match, *expression)) {
+        const auto end = content.begin() +
+                         static_cast<std::ptrdiff_t>(std::min(content.size(), kRegexInputBytes));
+        if (std::regex_search(content.begin(), end, match, *expression)) {
             position = static_cast<std::size_t>(match.position());
         }
     }
@@ -1845,13 +1874,18 @@ struct Service::Impl {
                     });
                 }
             }
+            const auto scan_started = std::chrono::steady_clock::now();
             for (const std::string& digest : candidates) {
+                if (matcher.is_regex &&
+                    std::chrono::steady_clock::now() - scan_started > kRegexScanBudget) {
+                    break; // the query's time budget is spent: what matched so far is answered
+                }
                 const auto blob = state.blobs.find(digest);
                 if (blob == state.blobs.end()) {
                     continue;
                 }
                 const bool matched =
-                    matcher.is_regex ? std::regex_search(blob->second.content, *matcher.expression)
+                    matcher.is_regex ? bounded_regex_search(blob->second.content, *matcher.expression)
                                      : blob->second.content.find(needle) != std::string::npos;
                 if (matched) {
                     scores[digest] = 1.0;
@@ -2830,6 +2864,9 @@ Service::query(const Query& query, const std::string& principal, control::Store&
                          : matcher.is_substring ? text.substr(1, text.size() - 2)
                                                 : text;
         if (matcher.is_regex) {
+            if (const std::string problem = regex_pattern_problem(matcher.needle); !problem.empty()) {
+                return std::unexpected(Error{"invalid_input", problem});
+            }
             try {
                 matcher.expression.emplace(matcher.needle);
             } catch (const std::regex_error& error) {

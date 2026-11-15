@@ -41,6 +41,10 @@ answered the request:
 Hits are score-descending and then repository/path ordered for stable ties. A quoted query and
 regex query return score `1`; ranked text returns the combined content and path BM25F score.
 
+**A regex query is bounded** (LSR-117, lake#984): the pattern is at most 256 characters and may not
+repeat a group that itself repeats (`(a+)+`, `(x*y)*`), only the first 1 MiB of each file is
+searched, and a query stops scanning after two seconds, answering what matched so far.
+
 ```sh
 curl -H "Authorization: Bearer $LAKE_ADMIN_TOKEN" \
   --get --data-urlencode 'query="connection refused"' \
