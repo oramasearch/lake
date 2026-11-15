@@ -1,17 +1,16 @@
-/** The price list (`/billing/plans`, lake#564, lake#635): the operator's editor for Orama Cloud's one
- * price list. Lake is priced by usage only: one rate per usage dimension, no plans, no monthly fee,
+/** The price list (`/billing/plans`, lake#564, lake#635): the operator's editor for the instance's
+ * one price list. Lake is priced by usage only: one rate per usage dimension, no plans, no monthly fee,
  * nothing included, and every account is billed at it. The editor shows the list in force this
  * month and any list published for a later month, publishes a new one (`set_price_list`) from a
  * chosen month, and lists every publication (`price_list` with `include_history`). A month is
- * billed at the list in force at its end. Metis is priced by sales and is not on this list. Only
- * where the lake bills. */
+ * billed at the list in force at its end. Only where the lake bills. */
 import { useEffect, useState } from "react";
 import { Tags, Upload } from "lucide-react";
 import { act, ApiError, useRead } from "@/lib/api";
 import { useTrail } from "@/lib/trail";
 import { useToast } from "@/lib/toast";
 import { relative } from "@/lib/format";
-import { Banner, Button, Card, DataTable, Empty, ErrorBlock, Field, Form, Page, Skeleton, Split } from "@/lib/ui";
+import { Button, Card, DataTable, Empty, ErrorBlock, Field, Form, Page, Skeleton, Split } from "@/lib/ui";
 import { DIMENSIONS, monthLabel, months, priceLabel, ratesInput, rateRows, rowTitle, type PriceList, type PriceListAnswer, type RateRow } from "./billing";
 
 export default function PriceListPage() {
@@ -25,9 +24,6 @@ export default function PriceListPage() {
       sub="One rate per kind of usage, and one per GPU class. Compute is priced as the CPU, RAM, GPU and GPU memory each workload is scheduled with. Every account pays for what it uses at these rates: no plans, no monthly fee, nothing included."
       wide
     >
-      <Banner tone="quiet" title="Metis Is Not on This List">
-        Metis is enterprise software priced by Orama's sales team. This list prices Orama Cloud usage only.
-      </Banner>
       {answer.isError ? (
         <ErrorBlock error={answer.error} retry={() => void answer.refetch()} what="the price list" />
       ) : !answer.data ? (
@@ -83,7 +79,7 @@ function Editor({ current, next }: { current: PriceList | null; next: PriceList 
     >
       {!current && (
         <p className="m-0 mb-3 text-[13px] text-ink-2">
-          Nothing is published on this Lake yet. The rows start from Orama Cloud's list rates; publish them to start billing.
+          Nothing is published on this Lake yet. The rows start from example rates; set your own and publish them to start billing.
         </p>
       )}
       <Form id="price-list" onSubmit={submit} error={error}>

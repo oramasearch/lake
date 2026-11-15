@@ -94,10 +94,9 @@ implementation, and the switch that leaves them absent on an enterprise install.
 (decision 57, migration `0074_payment_provider`): Stripe is the payment provider, with its keys in
 lake's own secret store and its webhook at `POST /billing/stripe/webhook`
 ([billing.md#stripe](billing.md#stripe)).
-lake#623, lake#635, lake#637: [billing.md](billing.md#price-list) carries Orama Cloud's price list,
-usage only (one rate per dimension, no plans, no fee, nothing included; Metis is priced by sales),
-time per minute, each rate with its reference rate, date and margin, worked bills, how a change of
-rates mid-month is billed, and when to revisit it.
+lake#623, lake#635, lake#637: [billing.md](billing.md#price-list) describes the price list,
+usage only (one rate per dimension, no plans, no fee, nothing included), time per minute, how an
+instance publishes its rates, and how a change of rates mid-month is billed.
 lake#1156 (migration `0101_coupons`): [billing.md#coupon-codes](billing.md#coupon-codes) documents
 coupon codes for ads, `create_coupon`, `list_coupons`, `disable_coupon` and `redeem_coupon`; a
 redemption is an ordinary credit from Orama.

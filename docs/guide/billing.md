@@ -5,10 +5,8 @@ and finds its invoices. Lake is priced by usage only: you pay for what your work
 kind of usage at its published rates. There is no plan to choose, no monthly fee and no free allowance. The bill
 is worked out from the usage your workspaces already record (see [Usage and Metering](/docs/usage)).
 
-Billing is on for Orama Cloud. An enterprise install of Lake has no billing: this page, the Billing
+Billing is on for a hosted Lake that charges its accounts. A private install of Lake has no billing: this page, the Billing
 item and the billing tools are absent there, and usage is tracked as usual.
-
-Metis is not billed here. It is enterprise software priced by Orama's sales team; talk to sales.
 
 ## Concepts
 
