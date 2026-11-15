@@ -33,8 +33,8 @@ remove_agent_stream_triggers(const ApiContext& context,
                              std::string workspace_id,
                              std::string agent_id);
 
-// The stream-trigger worker, run by the store root's owner only, on its maintenance thread beside
-// the MCP connection streams: for each running workspace's triggers, it starts one job of the
+// The stream-trigger worker, run by the store root's owner only, on the stream thread beside the
+// MCP connection streams (lake#980): for each running workspace's triggers, it starts one job of the
 // agent for each new message on the stream, as the person who set the trigger, and moves the
 // trigger's cursor past it. A trigger whose agent is gone is removed. Answers what one pass did.
 struct AgentStreamPass {

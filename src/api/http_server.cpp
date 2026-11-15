@@ -8085,6 +8085,58 @@ struct ApiServer::Impl {
         }
     }
 
+    // lake#980 (LSR-113): the MCP connection streams, and the workspace-stream agents and resource
+    // repairs that share their pass, run on this thread of their own, so an outside MCP server
+    // answering slowly delays only that pass, never the maintenance thread's usage samples,
+    // deletions, orders or balances. A pass is asked for at most once while one is due.
+    std::mutex stream_pass_mutex;
+    std::condition_variable stream_pass_cv;
+    bool stream_pass_due = false;
+    bool stream_pass_stopping = false;
+    lake::Thread stream_pass_thread;
+
+    void schedule_stream_pass() {
+        std::lock_guard lock(stream_pass_mutex);
+        if (stream_pass_stopping || stream_pass_due) {
+            return;
+        }
+        stream_pass_due = true;
+        stream_pass_cv.notify_all();
+    }
+
+    void run_stream_passes() {
+        for (;;) {
+            {
+                std::unique_lock lock(stream_pass_mutex);
+                stream_pass_cv.wait(lock,
+                                    [this] { return stream_pass_stopping || stream_pass_due; });
+                if (stream_pass_stopping) {
+                    return;
+                }
+                stream_pass_due = false;
+            }
+            run_mcp_streams();
+        }
+    }
+
+    void pause_stream_passes() {
+        {
+            std::lock_guard lock(stream_pass_mutex);
+            stream_pass_stopping = true;
+            stream_pass_due = false;
+        }
+        stream_pass_cv.notify_all();
+    }
+
+    // A pass in progress finishes: it starts no connection past its budget, and each exchange is
+    // bounded (McpStreamLimits).
+    void stop_stream_passes() {
+        pause_stream_passes();
+        if (stream_pass_thread.joinable()) {
+            stream_pass_thread.join();
+        }
+    }
+
     // lake#381: search index rebuilds and their retries run on this thread of their own. A job is
     // named; one whose name is queued already is not queued again; a job may be due later.
     std::mutex search_jobs_mutex;
@@ -8177,6 +8229,7 @@ struct ApiServer::Impl {
             maintenance_queue.clear();
         }
         maintenance_cv.notify_all();
+        pause_stream_passes();
         if (options.search) {
             for (std::string& workspace : options.search->unsettled_workspaces()) {
                 stale.insert(std::move(workspace));
@@ -8195,6 +8248,7 @@ struct ApiServer::Impl {
         if (maintenance_thread.joinable()) {
             maintenance_thread.join();
         }
+        stop_stream_passes();
     }
 
     // lake#381: each space's search index on lake's volume drops what it holds of repositories now
@@ -14752,6 +14806,14 @@ struct ApiServer::Impl {
             metrics.increment_counter(
                 "lake_mcp_stream_problems_total", {}, static_cast<double>(done.problems.size()));
         }
+        // lake#980: connections left alone while they back off, and passes cut at their budget.
+        if (done.backing_off > 0) {
+            metrics.increment_counter(
+                "lake_mcp_stream_backoffs_total", {}, static_cast<double>(done.backing_off));
+        }
+        if (done.stopped_early) {
+            metrics.increment_counter("lake_mcp_stream_passes_stopped_early_total");
+        }
         // Agents started by a workspace stream (lake#677), on the same owner-only pass.
         const AgentStreamPass started = agent_streams.pass(context);
         metrics.increment_counter("lake_agent_stream_passes_total");
@@ -17112,6 +17174,7 @@ bool ApiServer::start() {
     impl.server->start();
     impl.io_thread = lake::Thread([&impl] { impl.io_context.run(); });
     impl.maintenance_thread = lake::Thread([&impl] { impl.run_maintenance(); });
+    impl.stream_pass_thread = lake::Thread([&impl] { impl.run_stream_passes(); });
     impl.search_jobs_thread = lake::Thread([&impl] { impl.run_search_jobs(); });
     impl.is_running.store(true);
     impl.metrics.set_gauge("lake_up", {}, 1.0);
@@ -17327,8 +17390,7 @@ void ApiServer::drain() {
          impl_->store_root_state.load() == StoreRootState::open) &&
         now >= impl_->next_mcp_stream_pass) {
         impl_->next_mcp_stream_pass = now + impl_->options.mcp_stream_interval;
-        Impl* impl = impl_.get();
-        impl_->schedule_maintenance("mcp connection streams", [impl] { impl->run_mcp_streams(); });
+        impl_->schedule_stream_pass();
     }
     // The registry and search segments live under the store root: only its owner removes them.
     if (impl_->options.store &&
