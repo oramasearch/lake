@@ -104,11 +104,25 @@ std::string signed_link_signature(std::string_view key, std::string_view payload
     if (key.empty()) {
         return {};
     }
-    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
-    unsigned int digest_size = 0;
+    // The instance key never signs a link itself (LSR-266, lake#1009): a key for this one purpose
+    // is derived from it first, so a link signature says nothing about the key that seals secrets.
+    constexpr std::string_view purpose = "lake signed link v1";
+    std::array<unsigned char, EVP_MAX_MD_SIZE> link_key{};
+    unsigned int link_key_size = 0;
     if (HMAC(EVP_sha256(),
              key.data(),
              static_cast<int>(key.size()),
+             reinterpret_cast<const unsigned char*>(purpose.data()),
+             purpose.size(),
+             link_key.data(),
+             &link_key_size) == nullptr) {
+        return {};
+    }
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned int digest_size = 0;
+    if (HMAC(EVP_sha256(),
+             link_key.data(),
+             static_cast<int>(link_key_size),
              reinterpret_cast<const unsigned char*>(payload.data()),
              payload.size(),
              digest.data(),
