@@ -49,7 +49,9 @@ RUN npm run build
 FROM ubuntu:24.04 AS build
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Clang 17+ is required for C++26; install clang-19 from the official LLVM apt channel.
+# Clang 17+ is required for C++26; install clang-19 from the official LLVM apt channel. No script
+# is run from the network (lake#1003): the channel's signing key is trusted only when its
+# fingerprint is the one recorded here, and apt checks every package against it.
 # libstdc++-14 is the C++ standard library (Ubuntu 24.04 defaults to 13, which lacks <print>);
 # clang picks the newest libstdc++ installed. OpenSSL 3.6.3 supplies both Corosio TLS and the
 # Argon2id EVP_KDF used by password credentials.
@@ -57,7 +59,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates wget gnupg lsb-release software-properties-common \
       build-essential ninja-build git pkg-config libfuse3-dev fuse3 nodejs ccache \
       libstdc++-14-dev zlib1g-dev libssl-dev libpq-dev \
- && wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh && chmod +x /tmp/llvm.sh && /tmp/llvm.sh 19 \
+ && LLVM_KEY_FINGERPRINT=6084F3CF814B57C1CF12EFD515CF4D18AF4F7421 \
+ && wget -qO /etc/apt/keyrings/llvm.asc https://apt.llvm.org/llvm-snapshot.gpg.key \
+ && gpg --show-keys --with-colons /etc/apt/keyrings/llvm.asc | grep -q "^fpr:::::::::${LLVM_KEY_FINGERPRINT}:" \
+ && echo "deb [signed-by=/etc/apt/keyrings/llvm.asc] http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" \
+      > /etc/apt/sources.list.d/llvm.list \
+ && apt-get update && apt-get install -y --no-install-recommends clang-19 lldb-19 lld-19 clangd-19 \
  && rm -rf /var/lib/apt/lists/*
 
 ARG OPENSSL_VERSION=3.6.3
