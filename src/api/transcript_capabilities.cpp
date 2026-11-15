@@ -275,8 +275,15 @@ liquid::runtime::task<Heard> transcribe_audio(ApiContext& context,
         co_return refused_audio(
             ApiResult::failure(audio.error().code, audio.error().message, audio.error().path));
     }
-    // Its length, measured before the bytes go: billed when the model reports none (lake#658).
+    // Its length, measured before the bytes go (lake#658). Audio whose length cannot be read is
+    // refused before the model is called, since it could not be billed (LSR-112, lake#979).
     const std::optional<double> measured = audio_duration_seconds(audio->bytes);
+    if (!measured || *measured <= 0) {
+        co_return refused_audio(ApiResult::failure(
+            "invalid_input",
+            "the recording's length cannot be read: send WAV, FLAC, Ogg, WebM, MP4 or MP3 audio",
+            path));
+    }
     TranscriptionRequest request{.file_name = audio_file_name(name, audio->mime),
                                  .mime = {},
                                  .audio = std::move(audio->bytes),
@@ -297,7 +304,8 @@ liquid::runtime::task<Heard> transcribe_audio(ApiContext& context,
         const std::string code = ran->error.code.empty() ? "engine_error" : ran->error.code;
         co_return refused_audio(ApiResult::failure(code, ran->error.message));
     }
-    if (!ran->transcription->seconds) {
+    // Billed at the longer of what the model reports and what lake measured (lake#979).
+    if (!ran->transcription->seconds || *ran->transcription->seconds < *measured) {
         ran->transcription->seconds = measured;
     }
     co_return Heard{std::move(ran->transcription), {}};

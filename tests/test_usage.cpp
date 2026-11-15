@@ -690,8 +690,8 @@ TEST(UsageSample, CountsTheSecondsOfATranscriptMadeFromAudio) {
                                 {"workspace_id", rig.home},
                                 {"title", "Call"},
                                 {"source", "recording"},
-                                {"audio_base64", "AAAA"},
-                                {"audio_name", "call.webm"}},
+                                {"audio_base64", base64(wav(61.2))},
+                                {"audio_name", "call.wav"}},
                                context);
     ASSERT_TRUE(made.ok) << made.error.message;
     flush(rig.recorder);
@@ -1186,8 +1186,8 @@ TEST(UsageOverTime, CountsDictationInTheWorkspaceItWasDictatedIn) {
     };
     const json dictation{{"customer_id", rig.customer},
                          {"workspace_id", rig.lab},
-                         {"name", "dictation.webm"},
-                         {"audio_base64", "AAAA"}};
+                         {"name", "dictation.wav"},
+                         {"audio_base64", base64(wav(7.2))}};
     const auto heard = rig.call("transcribe", dictation, context);
     ASSERT_TRUE(heard.ok) << heard.error.message;
     EXPECT_EQ(heard.value["text"], "add a churn project");
@@ -1201,13 +1201,29 @@ TEST(UsageOverTime, CountsDictationInTheWorkspaceItWasDictatedIn) {
     measured["audio_base64"] = base64(wav(4.25));
     measured["name"] = "dictation.wav";
     ASSERT_TRUE(rig.call("transcribe", measured, context).ok);
-    // A recording whose length cannot be read counts nothing (and the audit says so).
-    ASSERT_TRUE(rig.call("transcribe", dictation, context).ok);
+    // A recording whose length cannot be read is refused before the model is called (lake#979).
+    json unmeasurable = dictation;
+    unmeasurable["audio_base64"] = "AAAA";
+    unmeasurable["name"] = "dictation.webm";
+    EXPECT_EQ(rig.call("transcribe", unmeasurable, context).error.code, "invalid_input");
+    // A header that understates the data, or a model that reports less, never shortens what is
+    // billed: the longer of the two is.
+    std::string understated = wav(3.0);
+    understated[40] = understated[41] = understated[42] = understated[43] = 0;
+    understated[40] = static_cast<char>(0x10); // 16 bytes of data claimed of 96000
+    json short_header = dictation;
+    short_header["audio_base64"] = base64(understated);
+    context.transcriber = [](const lake::api::TranscriptionRequest&) {
+        return std::expected<lake::api::Transcription, lake::api::ApiError>(
+            lake::api::Transcription{"more", 0.5, "whisper-1"});
+    };
+    ASSERT_TRUE(rig.call("transcribe", short_header, context).ok);
     flush(rig.recorder);
     auto& lab = rig.workspaces.records(rig.lab);
     EXPECT_EQ(lab.metric_total("lake_usage", {{"dimension", "speech"}, {"kind", "dictation"}}),
-              8 + 5)
-        << "7.2 seconds reported and 4.25 measured, each rounded up";
+              8 + 5 + 3)
+        << "7.2 seconds, 4.25 measured, and 3 measured where the header said less and the model "
+           "0.5; each rounded up";
     EXPECT_EQ(lab.metric_total("lake_usage", {{"dimension", "model_tokens"}}), 0)
         << "a dictation records speech and no model tokens";
     EXPECT_EQ(
@@ -1225,7 +1241,7 @@ TEST(UsageOverTime, CountsDictationInTheWorkspaceItWasDictatedIn) {
                   {"granularity", "hour"},
                   {"dimensions", json::array({"speech"})}});
     ASSERT_TRUE(read.ok) << read.error.message;
-    EXPECT_EQ(dimension(read.value, "speech")->at("total"), 13);
+    EXPECT_EQ(dimension(read.value, "speech")->at("total"), 16);
     EXPECT_EQ(read.value["not_measured"].dump().find("dictation"), std::string::npos)
         << "nothing about dictation is left unmeasured";
 }
