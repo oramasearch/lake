@@ -9,6 +9,8 @@
 #include <string_view>
 #include <vector>
 
+#include "lake/control/dns_txt.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/platform.hpp"
 #include "lake/control/platform_records.hpp"
 #include "lake/control/policy.hpp"
@@ -249,6 +251,40 @@ std::string platform_host_problem(std::string_view requested, const ApiContext& 
 
 json object_schema() {
     return {{"type", "object"}};
+}
+
+// A host as claims keep it: lowercase, without a trailing dot (lake#949).
+std::string domain_host(std::string host) {
+    if (host.ends_with('.')) {
+        host.pop_back();
+    }
+    std::ranges::transform(host, host.begin(), [](const unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+    });
+    return host;
+}
+
+// A claim's random token: 64 lowercase hex digits, the value of its TXT record.
+std::string new_domain_token() {
+    return control::identity_crypto::sha256_hex(control::identity_crypto::random_secret());
+}
+
+// What create_domain and verify_domain answer: the claim's state and the TXT record that proves
+// control. `status` is the routing request's (pending until the operator answers on the row).
+json domain_claim_answer(const control::DomainClaim& claim) {
+    return {{"repository_id", claim.repository_id},
+            {"environment", claim.environment},
+            {"host", claim.host},
+            {"tls", claim.tls},
+            {"status", "pending"},
+            {"deleted", false},
+            {"verification",
+             {{"state", claim.state},
+              {"verified_at", claim.verified_at},
+              {"record",
+               {{"type", "TXT"},
+                {"name", std::string(control::domain_challenge_label) + claim.host},
+                {"value", claim.token}}}}}};
 }
 
 json repository_environment_properties() {
@@ -553,23 +589,35 @@ void register_platform_capabilities(Registry& registry) {
     register_env_action("set_environment_env", false);
     register_env_action("unset_environment_env", true);
 
+    // Custom domains (lake#949, docs/api/platform.md#custom-domains). A host is claimed by one
+    // environment of this Lake at a time, across every account (domain_claims, migration
+    // 0106_domain_claims). create_domain claims it and answers the TXT record that proves control;
+    // only verify_domain, once that record holds the claim's token, writes the domain row the
+    // operator acts on. delete_domain releases the claim and writes the tombstone.
+    const auto domain_input_schema = [](bool with_tls) {
+        json properties{{"repository_id", {{"type", "string"}}},
+                        {"environment", {{"type", "string"}}},
+                        {"host", {{"type", "string"}}}};
+        json required = json::array({"repository_id", "environment", "host"});
+        if (with_tls) {
+            properties["tls"] = {{"type", "string"}};
+            required.push_back("tls");
+        }
+        return json{{"type", "object"},
+                    {"properties", std::move(properties)},
+                    {"required", std::move(required)},
+                    {"additionalProperties", false}};
+    };
     const auto register_domain_action = [&](std::string name, bool deleted) {
         registry.add(Capability{
             .name = std::move(name),
             .title = deleted ? "Delete environment domain" : "Create environment domain",
-            .description = deleted ? "Append a domain tombstone for operator reconciliation."
-                                   : "Append an ACME or provided-certificate domain request.",
-            .input_schema = {{"type", "object"},
-                             {"properties",
-                              {{"repository_id", {{"type", "string"}}},
-                               {"environment", {{"type", "string"}}},
-                               {"host", {{"type", "string"}}},
-                               {"tls", {{"type", "string"}}}}},
-                             {"required",
-                              deleted
-                                  ? json::array({"repository_id", "environment", "host"})
-                                  : json::array({"repository_id", "environment", "host", "tls"})},
-                             {"additionalProperties", false}},
+            .description =
+                deleted ? "Release the environment's claim of a host and append a domain "
+                          "tombstone for operator reconciliation."
+                        : "Claim a host for the environment and answer the TXT record that "
+                          "proves control; verify_domain then requests it from the operator.",
+            .input_schema = domain_input_schema(!deleted),
             .output_schema = object_schema(),
             .kind = CapabilityKind::Action,
             .object = "environment",
@@ -581,7 +629,7 @@ void register_platform_capabilities(Registry& registry) {
                 if (!context.platform) {
                     co_return not_set_up();
                 }
-                const std::string host = input.at("host");
+                const std::string host = domain_host(input.at("host").get<std::string>());
                 const std::string tls = input.value("tls", "");
                 if (!valid_domain(host)) {
                     co_return ApiResult::failure(
@@ -599,34 +647,181 @@ void register_platform_capabilities(Registry& registry) {
                 }
                 const std::string repository_id = input.at("repository_id");
                 const std::string environment = input.at("environment");
+                const auto repository = context.store->get_repository(repository_id);
+                if (!repository) {
+                    co_return ApiResult::failure(
+                        repository.error().code, repository.error().message, "/repository_id");
+                }
                 auto records = repository_records(context, repository_id);
                 if (!records) {
                     co_return refused(records.error());
-                }
-                auto completed = co_await context.platform->change_domain(
-                    *records, repository_id, environment, host, tls, deleted,
-                    context.acting_identity);
-                if (!completed) {
-                    co_return ApiResult::failure("store_error", completed.error().message);
-                }
-                auto result = std::move(*completed);
-                if (!result) {
-                    co_return platform_error(result.error());
                 }
                 set_platform_audit(context,
                                    repository_id,
                                    environment,
                                    deleted ? "platform.domain.delete" : "platform.domain.create");
                 context.audit_details["host"] = host;
-                co_return ApiResult::success({{"repository_id", repository_id},
-                                              {"environment", environment},
-                                              {"host", host},
-                                              {"status", "pending"},
-                                              {"deleted", deleted}});
+                if (deleted) {
+                    if (auto released =
+                            context.store->release_domain_claim(host, repository_id, environment);
+                        !released) {
+                        co_return store_error(released.error());
+                    }
+                    auto completed =
+                        co_await context.platform->change_domain(*records,
+                                                                 repository_id,
+                                                                 environment,
+                                                                 host,
+                                                                 "",
+                                                                 true,
+                                                                 context.acting_identity);
+                    if (!completed) {
+                        co_return ApiResult::failure("store_error", completed.error().message);
+                    }
+                    if (auto result = std::move(*completed); !result) {
+                        co_return platform_error(result.error());
+                    }
+                    co_return ApiResult::success({{"repository_id", repository_id},
+                                                  {"environment", environment},
+                                                  {"host", host},
+                                                  {"status", "pending"},
+                                                  {"deleted", true}});
+                }
+                const auto claim =
+                    context.store->claim_domain({.host = host,
+                                                 .customer_id = repository->customer_id,
+                                                 .workspace_id = repository->workspace_id,
+                                                 .repository_id = repository_id,
+                                                 .environment = environment,
+                                                 .tls = tls,
+                                                 .token = new_domain_token()});
+                if (!claim) {
+                    if (claim.error().code == "conflict") {
+                        co_return ApiResult::failure(
+                            "conflict",
+                            host + " is already claimed by another environment on this Lake",
+                            "/host");
+                    }
+                    co_return store_error(claim.error());
+                }
+                // The same environment asking again (a changed tls) after it proved control:
+                // the operator gets the new request at once.
+                if (claim->state == "verified") {
+                    auto completed =
+                        co_await context.platform->change_domain(*records,
+                                                                 repository_id,
+                                                                 environment,
+                                                                 host,
+                                                                 claim->tls,
+                                                                 false,
+                                                                 context.acting_identity);
+                    if (!completed) {
+                        co_return ApiResult::failure("store_error", completed.error().message);
+                    }
+                    if (auto result = std::move(*completed); !result) {
+                        co_return platform_error(result.error());
+                    }
+                }
+                co_return ApiResult::success(domain_claim_answer(*claim));
             }});
     };
     register_domain_action("create_domain", false);
     register_domain_action("delete_domain", true);
+
+    registry.add(Capability{
+        .name = "verify_domain",
+        .title = "Verify environment domain",
+        .description = "Read the TXT record _lake-challenge.<host>; when it holds the claim's "
+                       "token, mark the claim verified and request the domain from the operator.",
+        .input_schema = domain_input_schema(false),
+        .output_schema = object_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "environment",
+        .action = "deploy",
+        .resolve_object = environment_object,
+        .resolves_operator_audit_target = true,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.platform) {
+                co_return not_set_up();
+            }
+            const std::string host = domain_host(input.at("host").get<std::string>());
+            if (!valid_domain(host)) {
+                co_return ApiResult::failure(
+                    "invalid_input", "host must be a DNS hostname", "/host");
+            }
+            const std::string repository_id = input.at("repository_id");
+            const std::string environment = input.at("environment");
+            auto records = repository_records(context, repository_id);
+            if (!records) {
+                co_return refused(records.error());
+            }
+            auto claim = context.store->get_domain_claim(host);
+            if (!claim && claim.error().code != "not_found") {
+                co_return store_error(claim.error());
+            }
+            if (!claim || claim->repository_id != repository_id ||
+                claim->environment != environment) {
+                co_return ApiResult::failure("not_found",
+                                             "this environment has no claim of " + host +
+                                                 "; call create_domain first",
+                                             "/host");
+            }
+            set_platform_audit(context, repository_id, environment, "platform.domain.verify");
+            context.audit_details["host"] = host;
+            if (claim->state != "verified") {
+                const std::string name = std::string(control::domain_challenge_label) + host;
+                const TxtResolver resolve = context.txt_resolver
+                                                ? context.txt_resolver
+                                                : TxtResolver([](const std::string& asked) {
+                                                      return control::lookup_txt(asked);
+                                                  });
+                // On the blocking pool, never on the server's own thread.
+                auto ran = co_await run_blocking([resolve, name] { return resolve(name); });
+                if (!ran) {
+                    co_return ApiResult::failure("store_unavailable",
+                                                 "could not look up " + name + ": " +
+                                                     ran.error().message);
+                }
+                const auto found = std::move(*ran);
+                if (!found) {
+                    co_return ApiResult::failure(
+                        "store_unavailable", "could not look up " + name + ": " + found.error());
+                }
+                if (std::ranges::find(*found, claim->token) == found->end()) {
+                    co_return ApiResult::failure(
+                        "conflict",
+                        (found->empty() ? name + " has no TXT record yet"
+                                        : name + " does not hold this claim's token") +
+                            "; publish the record create_domain answered and verify again",
+                        "/host");
+                }
+                auto verified = context.store->verify_domain_claim(
+                    host, repository_id, environment, claim->token);
+                if (!verified) {
+                    co_return store_error(verified.error());
+                }
+                claim = std::move(verified);
+            }
+            context.audit_details["verified"] = true;
+            // Verified, so the operator may act on it: the domain row is written now. Asking again
+            // writes the request again, so a write that failed after the claim was verified is
+            // retried by the same call.
+            auto completed = co_await context.platform->change_domain(*records,
+                                                                      repository_id,
+                                                                      environment,
+                                                                      host,
+                                                                      claim->tls,
+                                                                      false,
+                                                                      context.acting_identity);
+            if (!completed) {
+                co_return ApiResult::failure("store_error", completed.error().message);
+            }
+            if (auto result = std::move(*completed); !result) {
+                co_return platform_error(result.error());
+            }
+            co_return ApiResult::success(domain_claim_answer(*claim));
+        }});
 }
 
 } // namespace lake::api

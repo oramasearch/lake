@@ -5,6 +5,12 @@ applies it to `LAKE_CONTROL_DB_URI` in one transaction under an advisory lock, a
 `PostgresSchema` Job does; `lake manifest` reports its latest migration and guard tables
 (lake#1119, [operator-interface.md](../docs/deployment/operator-interface.md)). Once
 orama-operator#936 consumes them, a new migration needs no operator vendoring.
+Migration `0106_domain_claims` (lake#949) adds `domain_claims`: one row per custom-domain host
+across every account (the primary key), the environment holding it, the TXT token that proves
+control and whether it is `verified`. Only a verified claim's domain row reaches the operator, and
+the operator acts only on a domain whose claim is verified. Additive; guard `domain_claims_guard`.
+See [platform](../docs/api/platform.md#custom-domains) and
+[schema.md](../docs/control-plane/schema.md#domain-claims-migration-0106_domain_claims).
 Migration `0105_agent_model_prices` (lake#1230) seeds the `model_tokens` rates of the gpt-6.x models
 the gateway now serves and the long-context classes `<model>@long/input` and `<model>@long/output`
 (also for gpt-5.5), OpenAI's standard price plus 30% read 2026-10-26, by `0095`'s rules (once; a new

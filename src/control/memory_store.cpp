@@ -6036,6 +6036,81 @@ Result<BrowserKeyAdmission> InMemoryStore::admit_browser_key_call(const std::str
     return BrowserKeyAdmission{true, 0};
 }
 
+// Custom-domain claims (lake#949): one per host, as `domain_claims` keeps them (migration
+// 0106_domain_claims). The host's lowercase form is the key; the caller lowercases it.
+Result<DomainClaim> InMemoryStore::claim_domain(const NewDomainClaim& in) {
+    if (in.host.empty() || in.customer_id.empty() || in.workspace_id.empty() ||
+        in.repository_id.empty() || in.environment.empty() || in.token.empty() ||
+        (in.tls != "acme" && in.tls != "provided")) {
+        return std::unexpected(StoreError{
+            "invalid_input",
+            "a domain claim names its host, account, workspace, repository, environment, tls "
+            "and token"});
+    }
+    std::lock_guard lock(mutex_);
+    const auto found = domain_claims_.find(in.host);
+    if (found != domain_claims_.end()) {
+        if (found->second.repository_id != in.repository_id ||
+            found->second.environment != in.environment) {
+            return std::unexpected(
+                StoreError{"conflict", in.host + " is already claimed by another environment"});
+        }
+        found->second.tls = in.tls;
+        return found->second;
+    }
+    DomainClaim claim{.host = in.host,
+                      .customer_id = in.customer_id,
+                      .workspace_id = in.workspace_id,
+                      .repository_id = in.repository_id,
+                      .environment = in.environment,
+                      .tls = in.tls,
+                      .token = in.token,
+                      .state = "pending",
+                      .verified_at = "",
+                      .created_at = browser_key_time(unix_now())};
+    domain_claims_.emplace(in.host, claim);
+    return claim;
+}
+
+Result<DomainClaim> InMemoryStore::get_domain_claim(const std::string& host) {
+    std::lock_guard lock(mutex_);
+    const auto found = domain_claims_.find(host);
+    if (found == domain_claims_.end()) {
+        return std::unexpected(StoreError{"not_found", "no claim of " + host});
+    }
+    return found->second;
+}
+
+Result<DomainClaim> InMemoryStore::verify_domain_claim(const std::string& host,
+                                                       const std::string& repository_id,
+                                                       const std::string& environment,
+                                                       const std::string& token) {
+    std::lock_guard lock(mutex_);
+    const auto found = domain_claims_.find(host);
+    if (found == domain_claims_.end() || found->second.repository_id != repository_id ||
+        found->second.environment != environment || found->second.token != token) {
+        return std::unexpected(
+            StoreError{"not_found", "no claim of " + host + " for this environment"});
+    }
+    if (found->second.state != "verified") {
+        found->second.state = "verified";
+        found->second.verified_at = browser_key_time(unix_now());
+    }
+    return found->second;
+}
+
+Result<void> InMemoryStore::release_domain_claim(const std::string& host,
+                                                 const std::string& repository_id,
+                                                 const std::string& environment) {
+    std::lock_guard lock(mutex_);
+    const auto found = domain_claims_.find(host);
+    if (found != domain_claims_.end() && found->second.repository_id == repository_id &&
+        found->second.environment == environment) {
+        domain_claims_.erase(found);
+    }
+    return {};
+}
+
 Result<std::vector<Session>> InMemoryStore::list_sessions(const std::string& user_id,
                                                           const std::string& pool_id) {
     std::lock_guard lock(mutex_);

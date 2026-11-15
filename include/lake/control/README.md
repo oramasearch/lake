@@ -354,3 +354,9 @@ admission/completion interface. `authentication.hpp` settles outcomes and normal
 refusals. Capacity includes in-flight work; verified success clears account/client failures;
 there is no instance-wide ceiling. See [the contract](../../../docs/api/identity.md#authentication-attempt-limits)
 (lake#966).
+
+`store.hpp` holds custom-domain claims (lake#949, migration `0106_domain_claims`): `DomainClaim`,
+`NewDomainClaim`, `domain_challenge_label`, and the Store calls `claim_domain` (one claim per host
+across accounts; `conflict` for another environment), `get_domain_claim`, `verify_domain_claim` (only
+the claim's own token) and `release_domain_claim`. `dns_txt.hpp` is the TXT lookup verify_domain
+uses.

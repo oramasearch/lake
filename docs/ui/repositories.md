@@ -22,7 +22,7 @@ authorization and audit recording have one path. Their presentation rules are in
 | Artifacts | `/artifacts?repository_id=<id>` | `ArtifactsPage.tsx` | `list_artifacts` | filtered cursor pages of build results |
 | Artifact | `/artifact?repository_id=<id>&id=<result>` | `ArtifactPage.tsx` | `get_artifact` | one result, outputs, timing, cache/divergence, attestations, trace summary |
 | Repository access | `/repository/access?id=<id>` | `../organizations/AccessPage.tsx` | `entity_effective_access` | direct and inherited effective access |
-| Environments, Environment, Logs, Export | `/environments`, `/environment`, `/logs`, `/exports` | `../apps/EnvironmentsPage.tsx`, `EnvironmentPage.tsx`, `LogsPage.tsx`, `ExportsPage.tsx` | `list_environments`, `get_environment`, `list_deployments`, `create_domain`, `delete_domain`, `environment_logs`, `list_exports` | the repository's environments, one environment's deployments and domains, its logs, its signed exports |
+| Environments, Environment, Logs, Export | `/environments`, `/environment`, `/logs`, `/exports` | `../apps/EnvironmentsPage.tsx`, `EnvironmentPage.tsx`, `LogsPage.tsx`, `ExportsPage.tsx` | `list_environments`, `get_environment`, `list_deployments`, `create_domain`, `verify_domain`, `delete_domain`, `environment_logs`, `list_exports` | the repository's environments, one environment's deployments and domains, its logs, its signed exports |
 
 A repository file is edited from its Drive preview (`/drive/preview`): **Edit**, a monospace editor,
 **Commit** (and **Commit and redeploy** for a file in an App's source), with a stale file refused as a

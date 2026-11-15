@@ -606,6 +606,15 @@ public:
                                           const std::string& id,
                                           const std::string& revoked_by_taap_id) override;
     Result<BrowserKeyAdmission> admit_browser_key_call(const std::string& id) override;
+    Result<DomainClaim> claim_domain(const NewDomainClaim&) override;
+    Result<DomainClaim> get_domain_claim(const std::string& host) override;
+    Result<DomainClaim> verify_domain_claim(const std::string& host,
+                                            const std::string& repository_id,
+                                            const std::string& environment,
+                                            const std::string& token) override;
+    Result<void> release_domain_claim(const std::string& host,
+                                      const std::string& repository_id,
+                                      const std::string& environment) override;
     Result<std::vector<Session>> list_sessions(const std::string& user_id,
                                                const std::string& pool_id) override;
     Result<void> revoke_session(const std::string& user_id, const std::string& session_id) override;
@@ -899,6 +908,8 @@ private:
         int window_calls = 0;
     };
     std::vector<StoredBrowserKey> browser_keys_;
+    // Custom-domain claims by host (lake#949), as `domain_claims` keeps them.
+    std::map<std::string, DomainClaim> domain_claims_;
     std::vector<std::pair<std::string, std::string>> session_secrets_;
     std::vector<OfflineGrant> offline_grants_;
     struct RecoveryRecord {

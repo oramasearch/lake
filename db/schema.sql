@@ -5212,3 +5212,34 @@ BEGIN
 END
 $agent_model_prices$;
 INSERT INTO schema_migrations (version) VALUES ('0105_agent_model_prices') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0106_domain_claims (lake#949, docs/api/platform.md#custom-domains): who holds each custom domain
+-- of an environment, across every account of this Lake, and whether they proved they control it.
+-- One row per host (the primary key, lowercase), so a host is claimed by one environment at a
+-- time: create_domain inserts the claim in one statement and answers `conflict` when another
+-- environment holds it. The claim carries a random token the tenant publishes as a TXT record at
+-- `_lake-challenge.<host>`; verify_domain reads it and sets `verified` (Steve, 2026-11-14). Only a
+-- verified claim's domain row is written to the operator's orama_control.domains, and the
+-- operator acts only on a domain whose claim here is verified. delete_domain releases the claim.
+-- Multitenancy (which environment of which account holds a name), so in the control plane beside
+-- workspace routing. Additive: one table, an index and a guard.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS domain_claims (
+    host          text        PRIMARY KEY
+                              CHECK (host = lower(host) AND length(host) BETWEEN 1 AND 253),
+    customer_id   uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    workspace_id  uuid        NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    repository_id uuid        NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    environment   text        NOT NULL CHECK (length(environment) BETWEEN 1 AND 256),
+    tls           text        NOT NULL DEFAULT 'acme' CHECK (tls IN ('acme', 'provided')),
+    token         text        NOT NULL UNIQUE CHECK (token ~ '^[0-9a-f]{64}$'),
+    state         text        NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'verified')),
+    verified_at   timestamptz,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    CHECK ((state = 'verified') = (verified_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS domain_claims_environment_idx
+    ON domain_claims (repository_id, environment);
+CREATE TABLE IF NOT EXISTS domain_claims_guard (applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0106_domain_claims') ON CONFLICT DO NOTHING;

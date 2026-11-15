@@ -1736,6 +1736,29 @@ BrowserKey browser_key_of(const pqxx::row& r) {
     return key;
 }
 
+// A custom domain's claim (lake#949, migration 0106_domain_claims); timestamps as RFC 3339 UTC
+// seconds.
+constexpr const char* domain_claim_columns =
+    "host, customer_id::text, workspace_id::text, repository_id::text, environment, tls, token, "
+    "state, "
+    "coalesce(to_char(verified_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), "
+    "to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')";
+
+DomainClaim domain_claim_of(const pqxx::row& r) {
+    DomainClaim claim;
+    claim.host = r[0].as<std::string>();
+    claim.customer_id = r[1].as<std::string>();
+    claim.workspace_id = r[2].as<std::string>();
+    claim.repository_id = r[3].as<std::string>();
+    claim.environment = r[4].as<std::string>();
+    claim.tls = r[5].as<std::string>();
+    claim.token = r[6].as<std::string>();
+    claim.state = r[7].as<std::string>();
+    claim.verified_at = r[8].as<std::string>();
+    claim.created_at = r[9].as<std::string>();
+    return claim;
+}
+
 // ls1.<public UUID>.<256-bit random secret>; reject malformed input before opening a transaction.
 std::optional<std::string> session_lookup_id(std::string_view bearer) {
     if (bearer.size() != 105 || !bearer.starts_with("ls1.") || bearer[40] != '.') {
@@ -10523,6 +10546,92 @@ public:
                 return BrowserKeyAdmission{false, rows[0][2].as<int>()};
             }
             return BrowserKeyAdmission{true, 0};
+        });
+    }
+    Result<DomainClaim> claim_domain(const NewDomainClaim& in) override {
+        if (in.host.empty() || !uuid_text(in.customer_id) || !uuid_text(in.workspace_id) ||
+            !uuid_text(in.repository_id) || in.environment.empty() || in.token.empty() ||
+            (in.tls != "acme" && in.tls != "provided")) {
+            return std::unexpected(StoreError{
+                "invalid_input",
+                "a domain claim names its host, account, workspace, repository, environment, "
+                "tls and token"});
+        }
+        // One statement, so two environments claiming one host at once cannot both win: the
+        // insert takes a free host; on a taken one the update applies only to the same
+        // environment's claim, and no row back means another environment holds it.
+        return with_tx<DomainClaim>([&](pqxx::work& tx) -> Result<DomainClaim> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("INSERT INTO domain_claims (host, customer_id, workspace_id, "
+                            "repository_id, environment, tls, token) VALUES ($1, $2::uuid, "
+                            "$3::uuid, $4::uuid, $5, $6, $7) ON CONFLICT (host) DO UPDATE SET "
+                            "tls = EXCLUDED.tls WHERE domain_claims.repository_id = "
+                            "EXCLUDED.repository_id AND domain_claims.environment = "
+                            "EXCLUDED.environment RETURNING ") +
+                    domain_claim_columns,
+                in.host,
+                in.customer_id,
+                in.workspace_id,
+                in.repository_id,
+                in.environment,
+                in.tls,
+                in.token);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"conflict", in.host + " is already claimed by another environment"});
+            }
+            return domain_claim_of(rows[0]);
+        });
+    }
+    Result<DomainClaim> get_domain_claim(const std::string& host) override {
+        return with_tx<DomainClaim>([&](pqxx::work& tx) -> Result<DomainClaim> {
+            const pqxx::result rows = tx.exec_params(std::string("SELECT ") + domain_claim_columns +
+                                                         " FROM domain_claims WHERE host = $1",
+                                                     host);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no claim of " + host});
+            }
+            return domain_claim_of(rows[0]);
+        });
+    }
+    Result<DomainClaim> verify_domain_claim(const std::string& host,
+                                            const std::string& repository_id,
+                                            const std::string& environment,
+                                            const std::string& token) override {
+        if (!uuid_text(repository_id)) {
+            return std::unexpected(
+                StoreError{"not_found", "no claim of " + host + " for this environment"});
+        }
+        return with_tx<DomainClaim>([&](pqxx::work& tx) -> Result<DomainClaim> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("UPDATE domain_claims SET state = 'verified', verified_at = "
+                            "coalesce(verified_at, now()) WHERE host = $1 AND repository_id = "
+                            "$2::uuid AND environment = $3 AND token = $4 RETURNING ") +
+                    domain_claim_columns,
+                host,
+                repository_id,
+                environment,
+                token);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no claim of " + host + " for this environment"});
+            }
+            return domain_claim_of(rows[0]);
+        });
+    }
+    Result<void> release_domain_claim(const std::string& host,
+                                      const std::string& repository_id,
+                                      const std::string& environment) override {
+        if (!uuid_text(repository_id)) {
+            return {};
+        }
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec_params("DELETE FROM domain_claims WHERE host = $1 AND repository_id = "
+                           "$2::uuid AND environment = $3",
+                           host,
+                           repository_id,
+                           environment);
+            return {};
         });
     }
     Result<std::vector<Session>> list_sessions(const std::string& user_id,

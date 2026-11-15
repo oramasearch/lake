@@ -108,14 +108,24 @@ applies the change to the environment.
 
 1. Under **Domains**, enter the **Host** and choose **TLS**: **ACME** (`acme`) or **Provided**
    (`provided`).
-2. Press **Create domain**. The domain is listed with its status while the operator sets it up.
-3. To remove one, press **Delete** on its row and confirm **Delete domain**: the host stops serving
-   the environment.
+2. Press **Create domain**. Lake claims the host for this environment (no other environment on this
+   Lake can then take it) and shows a **TXT** record: name `_lake-challenge.<host>`, and a value.
+3. Publish that record at your DNS provider, then press **Verify**. Once Lake reads the value, the
+   domain is listed with its status while the operator sets it up. Until then nothing is routed.
+   Creating the same domain again shows the same record.
+4. To remove one, press **Delete** on its row and confirm **Delete domain**: the host stops serving
+   the environment and is free to claim again.
 
 - REST: `POST /v1/create_domain`:
 
 ```json
 {"repository_id": "<repository id>", "environment": "production", "host": "reports.example.com", "tls": "acme"}
+```
+
+- REST: `POST /v1/verify_domain`, once the TXT record is published:
+
+```json
+{"repository_id": "<repository id>", "environment": "production", "host": "reports.example.com"}
 ```
 
 - REST: `POST /v1/delete_domain`:
@@ -124,9 +134,10 @@ applies the change to the environment.
 {"repository_id": "<repository id>", "environment": "production", "host": "reports.example.com"}
 ```
 
-- MCP: `create_domain`, `delete_domain`.
+- MCP: `create_domain`, `verify_domain`, `delete_domain`.
 
-A host that is not a DNS host name is refused at `/host`.
+A host that is not a DNS host name is refused at `/host`, and so is a host another environment
+already claimed (`409 conflict`). See [custom domains](../api/platform.md#custom-domains).
 
 ### Read the Logs
 

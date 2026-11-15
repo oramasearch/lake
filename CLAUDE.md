@@ -432,6 +432,13 @@ priced at OpenAI's 2x input and 1.5x output plus 30%; a `service_tier` other tha
 and `default` is always sent. Ship → Workspaces → Settings is the picker, with prices. Not deployed;
 the operator must vendor the schema and select `agent_model_prices_guard` before the image rolls. See
 [`docs/api/model-gateway.md#the-workspaces-model`](docs/api/model-gateway.md#the-workspaces-model).
+Custom domains are claimed before they route (lake#949, migration `0106_domain_claims`, Steve
+2026-11-14): `domain_claims` in the control plane holds one claim per host across every account;
+`create_domain` claims it (`conflict` for another environment) and answers the TXT record
+`_lake-challenge.<host>` with the claim's token; `verify_domain` reads it (`src/control/dns_txt.cpp`,
+the host's own name servers) and only then writes the `orama_control.domains` row; `delete_domain`
+releases it. The operator acts only on verified claims, so its release rolls first. Not deployed. See
+[`docs/api/platform.md#custom-domains`](docs/api/platform.md#custom-domains).
 A chat completion with tools to a gpt-6.x model (`responses_for_tools_models`) is sent to OpenAI's
 Responses API and answered as a chat completion, streams included (lake#1245, no migration), because
 OpenAI refuses tools on Chat Completions for those models; gpt-5.5 and calls without tools stay on
