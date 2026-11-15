@@ -9964,6 +9964,35 @@ public:
             return issued;
         });
     }
+    // A Clerk-verified address belongs to the Clerk subject presenting it (lake#920). Any other
+    // Lake-pool account holding it loses it and the password named by it; its other
+    // credentials, sessions and grants stay its own and never reach the Clerk person. Answers
+    // the id of the account it was taken from, or empty.
+    std::string
+    take_verified_email(pqxx::work& tx, const std::string& email, const std::string& keep_user_id) {
+        if (email.empty()) {
+            return "";
+        }
+        const pqxx::result holders =
+            tx.exec_params("SELECT id::text FROM users WHERE pool_id = 'lake' "
+                           "AND lower(email) = lower($1) AND ($2 = '' OR id <> $2::uuid) "
+                           "FOR UPDATE",
+                           email,
+                           keep_user_id);
+        if (holders.empty()) {
+            return "";
+        }
+        const std::string holder = holders[0][0].as<std::string>();
+        tx.exec_params("UPDATE users SET email = NULL WHERE id = $1::uuid", holder);
+        // A password signs in by its address, so one named by the taken address goes with it:
+        // neither the password nor email recovery to that address reaches the old account.
+        tx.exec_params("UPDATE credentials SET revoked_at = coalesce(revoked_at, now()) "
+                       "WHERE user_id = $1::uuid AND pool_id = 'lake' AND kind = 'password' "
+                       "AND subject = lower($2)",
+                       holder,
+                       email);
+        return holder;
+    }
     Result<ClerkUserProvisioned> clerk_user_tx(pqxx::work& tx, const ClerkIdentity& in) {
         if (in.subject.empty()) {
             return std::unexpected(StoreError{"invalid_input", "a Clerk subject is required"});
@@ -9982,40 +10011,35 @@ public:
         if (!rows.empty()) {
             result.user_id = rows[0][0].as<std::string>();
         } else {
-            // Clerk verified this address, so an existing lake account with it is the same
-            // person: link it rather than create a second account.
-            if (!in.email.empty()) {
-                rows = tx.exec_params("SELECT id::text FROM users WHERE pool_id = 'lake' "
-                                      "AND lower(email) = lower($1)",
-                                      in.email);
+            // A new Clerk subject always gets a new account (lake#920, LSR-011). It is never
+            // linked to an existing account by email: that account's address was proven by no
+            // one (password sign-up, SSO or SCIM provisioning, an operator) or belongs to another
+            // Clerk subject, and linking would hand its holder's password, sessions, keys and
+            // grants the verified person's account. Clerk verified this address, so it moves to
+            // the new account and the old holder keeps everything else.
+            if (in.custodial_taap_id.empty() || in.custodial_public_key.empty() ||
+                in.custodial_wrapped_seed.empty()) {
+                return std::unexpected(StoreError{
+                    "invalid_input", "a custodial identity is required to create a user"});
             }
-            if (!rows.empty()) {
-                result.user_id = rows[0][0].as<std::string>();
-                result.linked = true;
-            } else {
-                if (in.custodial_taap_id.empty() || in.custodial_public_key.empty() ||
-                    in.custodial_wrapped_seed.empty()) {
-                    return std::unexpected(StoreError{
-                        "invalid_input", "a custodial identity is required to create a user"});
-                }
-                rows = tx.exec_params("INSERT INTO users (taap_id, email, display_name, "
-                                      "pool_id) VALUES ($1, $2, $3, 'lake') RETURNING id::text",
-                                      in.custodial_taap_id,
-                                      nullable(in.email),
-                                      in.display_name);
-                result.user_id = rows[0][0].as<std::string>();
-                result.created = true;
-                tx.exec_params("INSERT INTO custodial_identities (user_id, taap_id, "
-                               "public_key, wrapped_seed) VALUES ($1::uuid, $2, $3, $4)",
-                               result.user_id,
-                               in.custodial_taap_id,
-                               in.custodial_public_key,
-                               in.custodial_wrapped_seed);
-                const auto customer =
-                    provision_personal_customer(tx, result.user_id, in.custodial_taap_id, subject);
-                if (!customer) {
-                    return std::unexpected(customer.error());
-                }
+            result.email_taken_from = take_verified_email(tx, in.email, "");
+            rows = tx.exec_params("INSERT INTO users (taap_id, email, display_name, "
+                                  "pool_id) VALUES ($1, $2, $3, 'lake') RETURNING id::text",
+                                  in.custodial_taap_id,
+                                  nullable(in.email),
+                                  in.display_name);
+            result.user_id = rows[0][0].as<std::string>();
+            result.created = true;
+            tx.exec_params("INSERT INTO custodial_identities (user_id, taap_id, "
+                           "public_key, wrapped_seed) VALUES ($1::uuid, $2, $3, $4)",
+                           result.user_id,
+                           in.custodial_taap_id,
+                           in.custodial_public_key,
+                           in.custodial_wrapped_seed);
+            const auto customer =
+                provision_personal_customer(tx, result.user_id, in.custodial_taap_id, subject);
+            if (!customer) {
+                return std::unexpected(customer.error());
             }
             tx.exec_params("INSERT INTO credentials (user_id, pool_id, kind, subject) "
                            "VALUES ($1::uuid, 'lake', 'oauth', $2)",
@@ -10205,14 +10229,9 @@ public:
                 return std::unexpected(
                     StoreError{"not_found", "no Lake account is linked to this user"});
             }
-            if (!in.email.empty() &&
-                !tx.exec_params("SELECT 1 FROM users WHERE lower(email) = lower($1) "
-                                "AND id <> $2::uuid",
-                                in.email,
-                                *user_id)
-                     .empty()) {
-                return std::unexpected(StoreError{"conflict", "another account has this email"});
-            }
+            // Clerk verified the new address, so it moves here from any other Lake-pool account
+            // that holds it, as at provisioning (lake#920).
+            take_verified_email(tx, in.email, *user_id);
             tx.exec_params("UPDATE users SET email = COALESCE(NULLIF($2, ''), email), "
                            "display_name = $3 WHERE id = $1::uuid",
                            *user_id,

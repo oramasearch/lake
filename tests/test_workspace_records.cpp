@@ -410,6 +410,8 @@ struct TwoSpaces {
     lake::api::Registry registry;
     struct Space {
         lake::control::Principal principal;
+        // The Clerk identity the person signed in with; its subject is the account's own.
+        lake::control::ClerkIdentity clerk;
         std::string customer_id;
         std::vector<std::string> workspaces;
     };
@@ -457,10 +459,10 @@ struct TwoSpaces {
             lake::control::WorkspaceConfig{dir.string(), 0}, store, zetta);
         lake::api::register_core_capabilities(registry, "test");
         for (const std::string name : {"first", "second"}) {
-            const auto session =
-                store->sign_in_clerk(person(name + "-" + lake::control::new_uuid_v4()));
-            EXPECT_TRUE(session);
             Space space;
+            space.clerk = person(name + "-" + lake::control::new_uuid_v4());
+            const auto session = store->sign_in_clerk(space.clerk);
+            EXPECT_TRUE(session);
             space.principal = *store->context_for(session->secret);
             space.customer_id = store->list_customers(10, space.principal.user_id)->front().id;
             for (const std::string workspace : {"home", "lab"}) {
@@ -5054,9 +5056,8 @@ void WorkspaceRecordStores::check_delegation_offboarding(bool suspended) {
     TwoSpaces t(store, database_uri_);
     const auto& first = t.spaces[0];
     const auto& second = t.spaces[1];
-    auto linked = person("offboard");
-    linked.email = store->get_user(first.principal.user_id)->email;
-    ASSERT_TRUE(store->sign_in_clerk(linked));
+    // The person's own Clerk subject (lake#920: a second subject never links by email).
+    const auto& linked = first.clerk;
     const lake::control::NewAgentLaunch input{.customer_id = first.customer_id,
                                               .agent_id = "agent-7",
                                               .mode = "service",
@@ -5193,9 +5194,8 @@ void WorkspaceRecordStores::check_stream_offboarding(bool suspended) {
     TwoSpaces t(store, database_uri_);
     const auto& first = t.spaces[0];
     const std::string home = first.workspaces[0];
-    auto linked = person("stream-offboard");
-    linked.email = store->get_user(first.principal.user_id)->email;
-    ASSERT_TRUE(store->sign_in_clerk(linked));
+    // The person's own Clerk subject (lake#920: a second subject never links by email).
+    const auto& linked = first.clerk;
     auto context = t.context(first);
     auto records = lake::api::workspace_records(context, first.customer_id, home);
     ASSERT_TRUE(records);

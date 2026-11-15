@@ -592,6 +592,10 @@ public:
                                       const std::string& subject) override;
     // provision_clerk_user under the lock.
     Result<ClerkUserProvisioned> clerk_user_locked(const ClerkIdentity&);
+    // Clears a Clerk-verified address from any other account holding it (lake#920); answers
+    // that account's id, or empty.
+    std::string take_verified_email_locked(const std::string& email,
+                                           const std::string& keep_user_id);
     Result<AccountIdentity> account_identity(const std::string& user_id) override;
     Result<ManagedKey> managed_key(const std::string& user_id) override;
     Result<void> create_identity_link_challenge(const IdentityLinkChallenge&) override;

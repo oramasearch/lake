@@ -203,15 +203,37 @@ void expect_clerk_sign_in_contract(lake::control::Store& store, const std::strin
     EXPECT_EQ(again_principal->user_id, principal->user_id);
     EXPECT_EQ(again_principal->taap_id, first_identity.custodial_taap_id);
 
-    // A second Clerk subject with the same verified email links to the same lake account.
-    const auto linked = store.sign_in_clerk(minted("user_other_" + suffix, email));
-    ASSERT_TRUE(linked) << linked.error().message;
-    const auto linked_principal = store.context_for(linked->secret);
-    ASSERT_TRUE(linked_principal);
-    EXPECT_EQ(linked_principal->user_id, principal->user_id);
+    // A second Clerk subject with the same verified email is never linked to the first account
+    // (lake#920, LSR-011): it gets an account of its own, the address moves to it, and the first
+    // account keeps its sessions and its customer.
+    const auto second = store.sign_in_clerk(minted("user_other_" + suffix, email));
+    ASSERT_TRUE(second) << second.error().message;
+    const auto second_principal = store.context_for(second->secret);
+    ASSERT_TRUE(second_principal);
+    EXPECT_NE(second_principal->user_id, principal->user_id);
+    EXPECT_EQ(store.get_user(second_principal->user_id)->email, email);
+    EXPECT_TRUE(store.get_user(principal->user_id)->email.empty());
+    EXPECT_TRUE(store.context_for(first->secret)) << "the first account is otherwise unchanged";
     const auto still_one = store.list_customers(100, principal->user_id);
     ASSERT_TRUE(still_one);
     EXPECT_EQ(still_one->size(), 1U);
+
+    // An account whose address no one verified (an operator's, or SSO or SCIM provisioning) is
+    // never adopted: its holder's token does not reach the Clerk person's account.
+    const std::string squatted = "squatted-" + email;
+    const auto squatter_identity = minted("unused_" + suffix, squatted);
+    const auto squatter =
+        store.create_user({squatter_identity.custodial_taap_id, squatted, "Squatter"});
+    ASSERT_TRUE(squatter) << squatter.error().message;
+    const auto squatter_token = store.create_token({squatter->id, "lake", "pre", "", {"*"}, 3600});
+    ASSERT_TRUE(squatter_token) << squatter_token.error().message;
+    const auto victim = store.sign_in_clerk(minted("user_victim_" + suffix, squatted));
+    ASSERT_TRUE(victim) << victim.error().message;
+    const auto victim_principal = store.context_for(victim->secret);
+    ASSERT_TRUE(victim_principal);
+    EXPECT_NE(victim_principal->user_id, squatter->id);
+    EXPECT_EQ(store.context_for(squatter_token->secret)->user_id, squatter->id);
+    EXPECT_TRUE(store.get_user(squatter->id)->email.empty());
 
     // A new person needs a custodial identity to be created at all.
     auto without_identity = minted("user_new_" + suffix, "new-" + email);

@@ -406,7 +406,9 @@ struct ClerkUserState {
 struct ClerkUserProvisioned {
     std::string user_id, taap_id;
     bool created = false; // a new account, with a managed key and a personal customer
-    bool linked = false;  // the subject was linked to an account found by its verified email
+    // A new subject is never linked to an existing account by email (lake#920, LSR-011): the
+    // id of the Lake-pool account its verified address was taken from, or empty.
+    std::string email_taken_from;
 };
 // Which key an account signs with (lake#762, docs/api/identity.md#your-own-identity). `managed`:
 // lake minted and holds the key. `own`: the person's own liquid identity, either registered at
@@ -2716,9 +2718,10 @@ public:
                                                             const std::string& origin) = 0;
     virtual Result<IssuedSession> sign_in_passkey(const PasskeyAssertion&) = 0;
     virtual Result<IssuedSession> sign_in_oauth(const OAuthIdentity&) = 0;
-    // Signs in the lake-pool user linked to this Clerk subject. With no link, it links the lake
-    // user with the same email; with neither, it creates the user with the custodial identity
-    // and provisions their personal customer, as password sign-up does.
+    // Signs in the lake-pool user linked to this Clerk subject. With no link, it creates the user
+    // with the custodial identity and provisions their personal customer, as password sign-up
+    // does. It never links an existing account found by email (lake#920): the verified address
+    // moves from any account holding it to the new one.
     virtual Result<IssuedSession> sign_in_clerk(const ClerkIdentity&) = 0;
     // Clerk webhooks (lake#765, docs/api/clerk.md#webhooks).
     // user.created: what a first sign_in_clerk does to the account, without a session. Repeating
@@ -2739,7 +2742,8 @@ public:
                                                const std::string& session_id,
                                                std::int64_t revoked_at) = 0;
     // user.updated: the email (when non-empty) and display name of the account linked to the
-    // subject; not_found when none is linked, conflict when another account has the email.
+    // subject; not_found when none is linked. A verified email another Lake-pool account holds
+    // moves to this one (lake#920).
     virtual Result<std::string> update_clerk_user(const ClerkIdentity&) = 0;
     // user.deleted: disables the account linked to the subject and revokes every session, token
     // and device of it. Withdraws its launches/schedules and invalidates tasks and leases in

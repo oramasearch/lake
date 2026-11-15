@@ -264,24 +264,33 @@ TEST(ClerkWebhooks, PostgresStoreCreatesUpdatesAndDisablesAccounts) {
     EXPECT_EQ(deliveries[0][0].as<int>(), 5) << "each applied delivery, once";
 }
 
-TEST(ClerkWebhooks, AUserCreatedWithAnExistingVerifiedEmailLinksToThatAccount) {
+// lake#920 (LSR-011): a new Clerk subject is never linked to an existing account by email. It
+// gets its own account, and its verified address moves there from the account that held it.
+TEST(ClerkWebhooks, AUserCreatedWithAnExistingEmailGetsItsOwnAccountAndTheAddress) {
     lake::control::InMemoryStore store;
     const auto first = store.sign_in_clerk(sign_in("user_original", "same@example.test"));
     ASSERT_TRUE(first);
     const auto principal = store.context_for(first->secret);
-    const auto linked =
+    const auto second =
         deliver(store,
                 delivery_of("msg_link",
                             event("user.created", user("user_second", "same@example.test", "S"))));
-    EXPECT_EQ(linked.body.at("linked"), true);
-    EXPECT_EQ(linked.body.at("user_id"), principal->user_id);
-    // An unverified address never links: a new account without that email.
-    const auto unlinked = deliver(
+    EXPECT_EQ(second.body.at("created"), true);
+    EXPECT_NE(second.body.at("user_id"), principal->user_id);
+    EXPECT_EQ(second.body.at("email_taken_from"), principal->user_id);
+    EXPECT_FALSE(second.body.contains("linked"));
+    EXPECT_TRUE(store.get_user(principal->user_id)->email.empty());
+    EXPECT_TRUE(store.context_for(first->secret)) << "the first account keeps its sessions";
+    // An unverified address never moves: a new account without that email.
+    const auto unverified = deliver(
         store,
         delivery_of("msg_unverified",
                     event("user.created", user("user_third", "same@example.test", "T", false))));
-    EXPECT_EQ(unlinked.body.at("created"), true);
-    EXPECT_NE(unlinked.body.at("user_id"), principal->user_id);
+    EXPECT_EQ(unverified.body.at("created"), true);
+    EXPECT_NE(unverified.body.at("user_id"), second.body.at("user_id"));
+    EXPECT_FALSE(unverified.body.contains("email_taken_from"));
+    EXPECT_EQ(store.get_user(second.body.at("user_id").get<std::string>())->email,
+              "same@example.test");
 }
 
 namespace {
@@ -594,55 +603,66 @@ TEST_P(ClerkRevocation, SignOutKeepsKeysAndBansStillEndEverything) {
 TEST_P(ClerkRevocation, OrderedBansAndLocksOnlyRestoreNewSignIns) {
     expect_upstream_suspension(*store);
 }
-TEST_P(ClerkRevocation, SuspensionAlsoRefusesLinkedPasswordAuthentication) {
+// lake#920 (LSR-011): an account made by password sign-up for an address its maker never proved
+// is not adopted by the Clerk person who owns the address. The password, its session and the
+// account stay apart from the Clerk person's account, which they never reach.
+TEST_P(ClerkRevocation, APasswordAccountForTheSameEmailIsNeverAdopted) {
     const auto identity = sign_in("user_native_alias", "native-alias@example.test");
+    const auto squatter_identity = sign_in("unused_squatter", "native-alias@example.test");
     const std::string password = "long-native-test-password";
-    lake::control::NewPasswordUser input{.pool_id = "lake",
-                                         .email = identity.email,
-                                         .password = password,
-                                         .custodial_taap_id = identity.custodial_taap_id,
-                                         .custodial_public_key = identity.custodial_public_key,
-                                         .custodial_wrapped_seed = identity.custodial_wrapped_seed};
+    lake::control::NewPasswordUser input{
+        .pool_id = "lake",
+        .email = identity.email,
+        .password = password,
+        .custodial_taap_id = squatter_identity.custodial_taap_id,
+        .custodial_public_key = squatter_identity.custodial_public_key,
+        .custodial_wrapped_seed = squatter_identity.custodial_wrapped_seed};
     const auto native = store->sign_up_password(input);
     ASSERT_TRUE(native);
-    ASSERT_TRUE(store->sign_in_clerk(identity));
+    const auto squatter = store->context_for(native->secret);
+    ASSERT_TRUE(squatter);
+    const auto clerk = store->sign_in_clerk(identity);
+    ASSERT_TRUE(clerk) << clerk.error().message;
+    const auto person = store->context_for(clerk->secret);
+    ASSERT_TRUE(person);
+    EXPECT_NE(person->user_id, squatter->user_id);
+    EXPECT_NE(person->taap_id, squatter->taap_id);
+    EXPECT_EQ(store->get_user(person->user_id)->email, identity.email);
+    EXPECT_TRUE(store->get_user(squatter->user_id)->email.empty());
+    EXPECT_FALSE(store->sign_in_password({"lake", identity.email, password, "", "test"}))
+        << "the password named by the taken address goes with it";
+    EXPECT_EQ(store->context_for(native->secret)->user_id, squatter->user_id)
+        << "the old account's own session reaches only the old account";
     ASSERT_TRUE(store->apply_clerk_user_state({identity.subject, 100, true, false}));
-    EXPECT_FALSE(store->sign_in_password({"lake", identity.email, password, "", "test"}));
-    EXPECT_FALSE(store->context_for(native->secret));
-    ASSERT_TRUE(store->apply_clerk_user_state({identity.subject, 101, false, false}));
-    EXPECT_TRUE(store->sign_in_password({"lake", identity.email, password, "", "test"}));
-    EXPECT_FALSE(store->context_for(native->secret));
+    EXPECT_FALSE(store->context_for(clerk->secret));
 }
-// A suspended account starts no email recovery: the request is accepted as for any address, but
-// no token, mail or notice is created until the suspension is lifted (lake#948, lake#968).
-TEST_P(ClerkRevocation, SuspensionAlsoStopsEmailRecovery) {
+// A password whose address Clerk later verified for someone else goes with the address
+// (lake#920): no email recovery to that address starts for the old account.
+TEST_P(ClerkRevocation, ATakenAddressStartsNoRecoveryOfTheOldAccount) {
     const auto identity = sign_in("user_recovery_alias", "recovery-alias@example.test");
-    lake::control::NewPasswordUser input{.pool_id = "lake",
-                                         .email = identity.email,
-                                         .password = "long-native-test-password",
-                                         .custodial_taap_id = identity.custodial_taap_id,
-                                         .custodial_public_key = identity.custodial_public_key,
-                                         .custodial_wrapped_seed = identity.custodial_wrapped_seed};
+    const auto squatter_identity = sign_in("unused_recovery_squatter", identity.email);
+    lake::control::NewPasswordUser input{
+        .pool_id = "lake",
+        .email = identity.email,
+        .password = "long-native-test-password",
+        .custodial_taap_id = squatter_identity.custodial_taap_id,
+        .custodial_public_key = squatter_identity.custodial_public_key,
+        .custodial_wrapped_seed = squatter_identity.custodial_wrapped_seed};
     ASSERT_TRUE(store->sign_up_password(input));
     ASSERT_TRUE(store->sign_in_clerk(identity));
-    ASSERT_TRUE(store->apply_clerk_user_state({identity.subject, 100, true, false}));
-    const auto suspended =
+    const auto attempt =
         store->begin_email_recovery("lake", identity.email, 24 * 60 * 60, "192.0.2.7");
-    ASSERT_TRUE(suspended) << suspended.error().message;
-    EXPECT_TRUE(suspended->id.empty());
+    ASSERT_TRUE(attempt) << attempt.error().message;
+    EXPECT_TRUE(attempt->id.empty());
     const auto none = store->claim_recovery_deliveries(10);
     ASSERT_TRUE(none);
     EXPECT_TRUE(none->empty());
-    ASSERT_TRUE(store->apply_clerk_user_state({identity.subject, 101, false, false}));
-    const auto restored =
-        store->begin_email_recovery("lake", identity.email, 24 * 60 * 60, "192.0.2.7");
-    ASSERT_TRUE(restored) << restored.error().message;
-    EXPECT_FALSE(restored->id.empty());
-    const auto queued = store->claim_recovery_deliveries(10);
-    ASSERT_TRUE(queued);
-    EXPECT_EQ(queued->size(), 1U);
+    EXPECT_FALSE(store->sign_in_password({"lake", identity.email, input.password, "", "test"}));
 }
-TEST_P(ClerkRevocation, LinkedSubjectsShareSuspensionAndRevocation) {
+// lake#920 (LSR-011): two Clerk subjects with the same address never share an account. The
+// newer takes the address into its own account; suspending or revoking one never touches the
+// other, and no subject reaches the other's account.
+TEST_P(ClerkRevocation, SubjectsWithTheSameEmailNeverShareAnAccount) {
     auto first = sign_in("user_alias_a", "alias@example.test");
     auto second = sign_in("user_alias_b", "alias@example.test");
     const auto a = store->sign_in_clerk(first);
@@ -651,28 +671,18 @@ TEST_P(ClerkRevocation, LinkedSubjectsShareSuspensionAndRevocation) {
     ASSERT_TRUE(b);
     const auto principal = store->context_for(a->secret);
     ASSERT_TRUE(principal);
-    EXPECT_EQ(store->context_for(b->secret)->user_id, principal->user_id);
+    const auto other = store->context_for(b->secret);
+    ASSERT_TRUE(other);
+    EXPECT_NE(other->user_id, principal->user_id);
+    EXPECT_TRUE(store->get_user(principal->user_id)->email.empty());
+    EXPECT_EQ(store->get_user(other->user_id)->email, "alias@example.test");
     ASSERT_TRUE(store->apply_clerk_user_state({first.subject, 100, true}));
     EXPECT_FALSE(store->context_for(a->secret));
-    EXPECT_FALSE(store->context_for(b->secret));
-    EXPECT_FALSE(store->sign_in_clerk(second));
-    ASSERT_TRUE(store->apply_clerk_user_state({second.subject, 99, false}));
-    const auto stale = store->apply_clerk_user_state({second.subject, 98, false});
-    ASSERT_TRUE(stale);
-    EXPECT_FALSE(*stale);
-    // Another subject's fresh normal profile cannot clear the suspended subject.
-    ASSERT_TRUE(store->apply_clerk_user_state({second.subject, 101, false}));
-    EXPECT_FALSE(store->sign_in_clerk(second));
-    ASSERT_TRUE(store->apply_clerk_user_state({first.subject, 102, false}));
-    ASSERT_TRUE(store->sign_in_clerk(second));
+    EXPECT_TRUE(store->context_for(b->secret));
+    EXPECT_TRUE(store->sign_in_clerk(second));
     const auto revoked_at = now() * 1000;
     ASSERT_TRUE(store->revoke_clerk_sessions(first.subject, "sess_alias", revoked_at));
-    EXPECT_FALSE(store->sign_in_clerk(second))
-        << "an alias cannot exchange a pre-revocation template";
-    second.issued_at = revoked_at / 1000 + 1;
-    EXPECT_TRUE(store->sign_in_clerk(second));
-    EXPECT_FALSE(store->context_for(a->secret));
-    EXPECT_FALSE(store->context_for(b->secret));
+    EXPECT_TRUE(store->context_for(b->secret));
 }
 TEST_P(ClerkRevocation, ACurrentStateRetryCanFinishProvisioning) {
     auto data = user("user_retry", "retry@example.test", "Retry");
@@ -688,7 +698,9 @@ TEST_P(ClerkRevocation, ACurrentStateRetryCanFinishProvisioning) {
     EXPECT_EQ(repeated.body.at("created"), false);
     EXPECT_EQ(repeated.body.at("user_id"), created.body.at("user_id"));
 }
-TEST_P(ClerkRevocation, ProvisioningASuspendedAliasPermanentlyRevokesExistingCredentials) {
+// A banned subject provisioned with an existing account's address gets its own, suspended
+// account (lake#920). The existing account is not linked to it, so the ban never touches it.
+TEST_P(ClerkRevocation, ProvisioningASuspendedSubjectWithAnExistingEmailLeavesThatAccountAlone) {
     auto identity = sign_in("user_existing", "existing@example.test");
     const auto original = store->sign_in_clerk(identity);
     ASSERT_TRUE(original);
@@ -697,52 +709,17 @@ TEST_P(ClerkRevocation, ProvisioningASuspendedAliasPermanentlyRevokesExistingCre
     auto data = user("user_suspended_alias", "existing@example.test", "Alias");
     data["banned"] = true;
     data["updated_at"] = 100;
-    const auto linked =
+    const auto provisioned =
         deliver(*store, delivery_of("msg_suspended_alias", event("user.created", data)));
-    ASSERT_EQ(linked.status, 200);
-    ASSERT_TRUE(linked.body.contains("user_id")) << linked.body;
-    EXPECT_EQ(linked.body.at("user_id"), principal->user_id);
-    EXPECT_FALSE(store->context_for(original->secret));
-    EXPECT_FALSE(store->sign_in_clerk(identity));
-    data["banned"] = false;
-    data["updated_at"] = 101;
-    deliver(*store, delivery_of("msg_alias_unban", event("user.updated", data)));
+    ASSERT_EQ(provisioned.status, 200);
+    ASSERT_TRUE(provisioned.body.contains("user_id")) << provisioned.body;
+    EXPECT_NE(provisioned.body.at("user_id"), principal->user_id);
+    EXPECT_EQ(provisioned.body.at("created"), true);
+    EXPECT_TRUE(store->context_for(original->secret));
     EXPECT_TRUE(store->sign_in_clerk(identity));
-    EXPECT_FALSE(store->context_for(original->secret))
-        << "unban cannot revive credentials from before linking";
-}
-TEST_P(ClerkRevocation, AnotherSubjectsNewerProfileCannotHideABan) {
-    auto first = sign_in("user_delayed_ban", "ordered-alias@example.test");
-    auto second = sign_in("user_recent_profile", "ordered-alias@example.test");
-    const auto a = store->sign_in_clerk(first);
-    const auto b = store->sign_in_clerk(second);
-    ASSERT_TRUE(a);
-    ASSERT_TRUE(b);
-    auto newer = user(second.subject, second.email, "Recent");
-    newer["updated_at"] = 101;
-    ASSERT_EQ(
-        deliver(*store, delivery_of("msg_recent_profile", event("user.updated", newer))).status,
-        200);
-    auto banned = user(first.subject, first.email, "Banned");
-    banned["updated_at"] = 100;
-    banned["banned"] = true;
-    ASSERT_EQ(deliver(*store, delivery_of("msg_delayed_ban", event("user.updated", banned))).status,
-              200);
-    EXPECT_FALSE(store->context_for(a->secret));
-    EXPECT_FALSE(store->context_for(b->secret));
-    EXPECT_FALSE(store->sign_in_clerk(first));
-    banned["banned"] = false;
-    banned["updated_at"] = 99;
-    deliver(*store, delivery_of("msg_stale_alias_unban", event("user.updated", banned)));
-    EXPECT_FALSE(store->sign_in_clerk(first));
-    banned["updated_at"] = 100;
-    deliver(*store, delivery_of("msg_equal_alias_unban", event("user.updated", banned)));
-    EXPECT_FALSE(store->sign_in_clerk(first));
-    banned["updated_at"] = 101;
-    deliver(*store, delivery_of("msg_new_alias_unban", event("user.updated", banned)));
-    EXPECT_TRUE(store->sign_in_clerk(first));
-    EXPECT_FALSE(store->context_for(a->secret));
-    EXPECT_FALSE(store->context_for(b->secret));
+    const auto alias = store->get_user(provisioned.body.at("user_id").get<std::string>());
+    ASSERT_TRUE(alias);
+    EXPECT_FALSE(alias->may_act());
 }
 TEST_P(ClerkRevocation, DirectorySyncDeprovisioningSuspendsExistingAndNewCredentials) {
     auto identity = sign_in("user_directory", "directory@example.test");

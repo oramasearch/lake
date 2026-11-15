@@ -5410,6 +5410,26 @@ Result<IssuedSession> InMemoryStore::sign_in_oauth(const OAuthIdentity& input) {
     return issued;
 }
 
+std::string InMemoryStore::take_verified_email_locked(const std::string& email,
+                                                      const std::string& keep_user_id) {
+    if (email.empty()) {
+        return "";
+    }
+    for (auto& user : users_) {
+        if (user.id != keep_user_id && !user.email.empty() && lower(user.email) == lower(email)) {
+            user.email.clear();
+            user.updated_at = now_iso8601();
+            const std::string holder = user.id;
+            std::erase_if(passwords_, [&](const PasswordCredential& password) {
+                return password.user_id == holder && password.pool_id == "lake" &&
+                       lower(password.email) == lower(email);
+            });
+            return holder;
+        }
+    }
+    return "";
+}
+
 Result<ClerkUserProvisioned> InMemoryStore::clerk_user_locked(const ClerkIdentity& input) {
     if (input.subject.empty()) {
         return std::unexpected(StoreError{"invalid_input", "a Clerk subject is required"});
@@ -5421,23 +5441,15 @@ Result<ClerkUserProvisioned> InMemoryStore::clerk_user_locked(const ClerkIdentit
             result.user_id = credential.user_id;
         }
     }
-    if (result.user_id.empty() && !input.email.empty()) {
-        for (const auto& user : users_) {
-            if (lower(user.email) == lower(input.email)) {
-                result.user_id = user.id;
-            }
-        }
-        if (!result.user_id.empty()) {
-            oauth_credentials_.push_back(OAuthCredential{result.user_id, "lake", subject});
-            result.linked = true;
-        }
-    }
+    // A new subject is never linked to an existing account by email (lake#920, LSR-011); the
+    // verified address moves to the new account (PostgresStore::clerk_user_tx).
     if (result.user_id.empty()) {
         if (input.custodial_taap_id.empty() || input.custodial_public_key.empty() ||
             input.custodial_wrapped_seed.empty()) {
             return std::unexpected(
                 StoreError{"invalid_input", "a custodial identity is required to create a user"});
         }
+        result.email_taken_from = take_verified_email_locked(input.email, "");
         const std::string now = now_iso8601();
         users_.push_back(User{
             new_uuid_v4(), input.custodial_taap_id, input.email, input.display_name, now, now});
@@ -5642,11 +5654,7 @@ Result<std::string> InMemoryStore::update_clerk_user(const ClerkIdentity& input)
     if (input.subject.empty() || user_id.empty()) {
         return std::unexpected(StoreError{"not_found", "no Lake account is linked to this user"});
     }
-    if (!input.email.empty() && std::ranges::any_of(users_, [&](const User& user) {
-            return user.id != user_id && lower(user.email) == lower(input.email);
-        })) {
-        return std::unexpected(StoreError{"conflict", "another account has this email"});
-    }
+    take_verified_email_locked(input.email, user_id);
     for (auto& user : users_) {
         if (user.id == user_id) {
             if (!input.email.empty()) {
