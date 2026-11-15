@@ -846,6 +846,13 @@ struct Workspace {
 };
 struct NewWorkspace {
     std::string customer_id, name, environment, created_by_taap_id;
+    // lake#987 (LSR-120): the most live (not deleted) workspaces the customer may have
+    // (LAKE_WORKSPACES_PER_CUSTOMER) and the most live services, which the new workspace's own
+    // Zetta service counts against (LAKE_SERVICES_PER_CUSTOMER); 0 means no limit. Both are
+    // counted in the create transaction, under the customer's row lock; over either the create
+    // answers quota_exceeded.
+    std::size_t max_workspaces = 0;
+    std::size_t max_services = 0;
 };
 struct WorkspacePatch {
     std::optional<std::string> name, environment, desired;

@@ -542,7 +542,12 @@ WorkspaceService::request(std::string customer_id, std::string requested_by) {
             co_return state_of(customer_id, *found);
         }
     }
-    const auto created = store_->create_workspace({customer_id, name, "prod", requested_by});
+    const auto created = store_->create_workspace({customer_id,
+                                                   name,
+                                                   "prod",
+                                                   requested_by,
+                                                   config_.max_workspaces_per_customer,
+                                                   config_.max_per_customer});
     if (!created) {
         co_return from_store<WorkspaceState>(created.error());
     }

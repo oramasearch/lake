@@ -33,6 +33,9 @@ std::optional<std::string> install_zetta_egress_policy(std::string_view allow);
 struct WorkspaceConfig {
     std::string service_dir;          // LAKE_SERVICE_DIR
     std::size_t max_per_customer = 0; // LAKE_SERVICES_PER_CUSTOMER; 0 (the default) means no limit
+    // LAKE_WORKSPACES_PER_CUSTOMER: live workspaces per customer (lake#987); 0 (the default) means
+    // no limit.
+    std::size_t max_workspaces_per_customer = 0;
     // The Agent Library's running agents (LAKE_AGENT_ENDPOINTS, set by the operator), keyed by
     // repository name (agent_library.hpp).
     std::map<std::string, std::string> agent_endpoints;

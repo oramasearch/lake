@@ -3890,6 +3890,32 @@ public:
             if (!existing.empty()) {
                 return std::unexpected(StoreError{"conflict", "a workspace with this name already exists"});
             }
+            // lake#987 (LSR-120): counted under the customer's row lock taken above, so two
+            // concurrent creates cannot both pass.
+            if (input.max_workspaces != 0) {
+                const auto live = tx.exec_params(
+                    "SELECT count(*) FROM workspaces WHERE customer_id = $1::uuid AND desired <> "
+                    "'deleted'",
+                    input.customer_id);
+                if (live[0][0].as<std::size_t>() >= input.max_workspaces) {
+                    return std::unexpected(StoreError{"quota_exceeded",
+                                                      "this account already has " +
+                                                          std::to_string(input.max_workspaces) +
+                                                          " workspaces, the most it may have"});
+                }
+            }
+            if (input.max_services != 0) {
+                const auto live = tx.exec_params(
+                    "SELECT count(*) FROM services WHERE customer_id = $1::uuid AND desired = "
+                    "'present'",
+                    input.customer_id);
+                if (live[0][0].as<std::size_t>() >= input.max_services) {
+                    return std::unexpected(StoreError{
+                        "quota_exceeded",
+                        "this account already runs " + std::to_string(input.max_services) +
+                            " services, and a workspace's Zetta is one"});
+                }
+            }
             const std::string id = new_uuid_v4();
             const std::string service_id = new_uuid_v4();
             tx.exec_params("INSERT INTO workspaces (id, customer_id, name, environment) "

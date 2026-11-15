@@ -141,6 +141,8 @@ int usage() {
         "  LAKE_SERVICE_DIR enables managed services and workspaces (the operator's mount)");
     std::println(
         "  LAKE_SERVICES_PER_CUSTOMER caps live services per customer (default 0: no limit)");
+    std::println(
+        "  LAKE_WORKSPACES_PER_CUSTOMER caps live workspaces per customer (default 0: no limit)");
     std::println("  LAKE_APPS_WILDCARD is the required parent domain for Ship app hosts");
     std::println("  LAKE_APPS_RUNTIME_IMAGE is the base image for source-backed Ship App builds");
     std::println("  LAKE_METHODOLOGY_RUNTIME_IMAGE is the oramasearch/methodology-runtime image "
@@ -760,6 +762,16 @@ int main(int argc, char** argv) {
             return 2;
         }
         workspace_config.max_per_customer = parsed;
+    }
+    if (const std::string limit = env_or("LAKE_WORKSPACES_PER_CUSTOMER", ""); !limit.empty()) {
+        std::size_t parsed = 0;
+        const auto [end, error] =
+            std::from_chars(limit.data(), limit.data() + limit.size(), parsed);
+        if (error != std::errc() || end != limit.data() + limit.size()) {
+            std::println(stderr, "lake: LAKE_WORKSPACES_PER_CUSTOMER must be a whole number");
+            return 2;
+        }
+        workspace_config.max_workspaces_per_customer = parsed;
     }
     opts.allow_non_expiring_credentials =
         env_or("LAKE_ALLOW_NON_EXPIRING_CREDENTIALS", "true") != "false";

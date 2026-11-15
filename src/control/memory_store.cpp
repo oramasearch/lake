@@ -535,6 +535,25 @@ Result<Workspace> InMemoryStore::create_workspace(const NewWorkspace& input) {
             return std::unexpected(StoreError{"conflict", "a workspace with this name already exists"});
         }
     }
+    // lake#987 (LSR-120), as the PostgreSQL store counts them.
+    if (input.max_workspaces != 0 &&
+        static_cast<std::size_t>(std::ranges::count_if(workspaces_, [&](const Workspace& row) {
+            return row.customer_id == input.customer_id && row.desired != "deleted";
+        })) >= input.max_workspaces) {
+        return std::unexpected(StoreError{"quota_exceeded",
+                                          "this account already has " +
+                                              std::to_string(input.max_workspaces) +
+                                              " workspaces, the most it may have"});
+    }
+    if (input.max_services != 0 &&
+        static_cast<std::size_t>(std::ranges::count_if(services_, [&](const ManagedService& row) {
+            return row.customer_id == input.customer_id && row.desired == "present";
+        })) >= input.max_services) {
+        return std::unexpected(StoreError{"quota_exceeded",
+                                          "this account already runs " +
+                                              std::to_string(input.max_services) +
+                                              " services, and a workspace's Zetta is one"});
+    }
     Workspace row;
     row.id = new_uuid_v4();
     row.customer_id = input.customer_id;

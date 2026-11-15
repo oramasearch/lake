@@ -8959,8 +8959,17 @@ void register_workspace_capabilities(Registry& registry) {
                     return ApiResult::success({{"workspaces", result}});
                 }
                 if (creating) {
-                    const auto row = context.store->create_workspace({input.at("customer_id"),
-                        input.at("name"), input.at("environment"), context.acting_identity});
+                    // lake#987: the account's workspace and service caps, counted by the store.
+                    control::NewWorkspace request{input.at("customer_id"),
+                                                  input.at("name"),
+                                                  input.at("environment"),
+                                                  context.acting_identity};
+                    if (context.workspaces != nullptr) {
+                        request.max_workspaces =
+                            context.workspaces->config().max_workspaces_per_customer;
+                        request.max_services = context.workspaces->config().max_per_customer;
+                    }
+                    const auto row = context.store->create_workspace(request);
                     return row ? ApiResult::success(control::workspace_json(*row, operator_view(context))) : store_failure(row.error());
                 }
                 const auto row = context.store->get_workspace(input.at("workspace_id"));
