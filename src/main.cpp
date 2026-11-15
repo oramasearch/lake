@@ -204,8 +204,8 @@ int usage() {
                  "the operator's control rows (default LAKE_PUBLIC_HOST)");
     std::println("  LAKE_SIGN_IN_SSO_PROVIDER the SSO provider id that is the only way in for "
                  "people (not with Clerk)");
-    std::println("  LAKE_ORDER_SHEET JSON merged over the apex order sheet's default offers, "
-                 "prices and limits (docs/api/orders.md)");
+    std::println("  LAKE_ORDER_SHEET the apex order sheet's offers, prices and limits, merged over "
+                 "a default that is off and sells nothing (docs/api/orders.md)");
     std::println("  LAKE_RESEND_API_KEY the Resend key for email; LAKE_RESEND_FROM the "
                  "sender; LAKE_SUPPORT_EMAIL where orders go (all three needed to send email)");
     std::println("  LAKE_BRAND_FILE a JSON brand; LAKE_BRAND_NAME, _SHORT_NAME, _COMPANY, "

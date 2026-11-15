@@ -227,7 +227,7 @@ constexpr std::array environment = {
                         false,
                         "Subscription expiry grace (default 259200)"},
     EnvironmentVariable{
-        "LAKE_ORDER_SHEET", false, false, "JSON merged over the apex order sheet's default offers"},
+        "LAKE_ORDER_SHEET", false, false, "The apex order sheet's offers and prices (default: off, none)"},
     EnvironmentVariable{
         "LAKE_PLATFORM_SYNC_SECONDS", false, false, "Platform poll interval (default 15)"},
     EnvironmentVariable{"LAKE_PRICE_COMPUTE_SECOND_MICROS",
