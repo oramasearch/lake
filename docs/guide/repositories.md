@@ -136,7 +136,8 @@ A token can also be made by API: `POST /v1/create_token` with
 
 ## Change Visibility
 
-There is no visibility control on the page; it is a capability.
+There is no visibility control on the page; it is a capability, and it needs `admin` on the
+repository. Someone who can only write to it cannot change who may read it.
 
 - REST: `POST /v1/set_repository_visibility` with
   `{"id": "<repository id>", "visibility": "public"}`.

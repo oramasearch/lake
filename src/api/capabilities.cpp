@@ -5030,7 +5030,8 @@ void register_repository_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "set_repository_visibility",
         .title = "Set repository visibility",
-        .description = "Set a live repository to private, organization, or public.",
+        .description = "Set a live repository to private, organization, or public. Needs admin "
+                       "on the repository: making it public lets anyone read it (lake#1310).",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"id", {{"type", "string"}}},
@@ -5042,7 +5043,7 @@ void register_repository_capabilities(Registry& registry) {
         .output_schema = repository_schema(),
         .kind = CapabilityKind::Action,
         .object = "repository",
-        .action = "write",
+        .action = "admin",
         .resolve_object = entity_object("repository", "id"),
         .handler = [](const json& in, ApiContext& ctx) {
             return ctx.store ? one_result(ctx.store->set_repository_visibility(in.at("id"),

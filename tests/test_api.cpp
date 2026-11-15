@@ -5376,6 +5376,54 @@ TEST(Forge, WebhookDeliveryRetriesAndRetainsAnEventLog) {
     EXPECT_EQ(calls, 2);
 }
 
+// lake#1310: publishing a repository is an administrator's decision. A writer is refused and the
+// repository stays private; an administrator still changes it.
+TEST(Forge, OnlyAnAdministratorMakesARepositoryPublic) {
+    Surface surface;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository = surface.call(
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", surface.workspace(customer.value["id"])},
+         {"name", "private-work"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const std::string repository_id = repository.value["id"];
+    const auto object = surface.store.find_policy_object("repository", repository_id);
+    ASSERT_TRUE(object);
+    const std::string writer = "taap:1:ed25519:visibility-writer";
+    const std::string administrator = "taap:1:ed25519:visibility-admin";
+    for (const auto& [principal, role] :
+         {std::pair{writer, "write"}, std::pair{administrator, "admin"}}) {
+        ASSERT_TRUE(surface.store.create_grant(
+            {principal, object->id, role, "attestation-" + principal, "admin", "request"}));
+    }
+    const auto as = [&](const std::string& identity) {
+        surface.ctx.acting_identity = identity;
+        surface.ctx.operator_credential = false;
+        surface.ctx.authorization_cache = {};
+    };
+
+    as(writer);
+    const ApiResult published = surface.call(
+        "set_repository_visibility", {{"id", repository_id}, {"visibility", "public"}});
+    EXPECT_FALSE(published.ok);
+    EXPECT_EQ(published.error.code, "unauthorized");
+    const auto unchanged = surface.store.get_repository(repository_id);
+    ASSERT_TRUE(unchanged);
+    EXPECT_EQ(unchanged->visibility, "private");
+
+    as(administrator);
+    const ApiResult made_public = surface.call(
+        "set_repository_visibility", {{"id", repository_id}, {"visibility", "public"}});
+    ASSERT_TRUE(made_public.ok) << made_public.error.message;
+    EXPECT_EQ(made_public.value["visibility"], "public");
+}
+
 TEST(Forge, BranchProtectionRequiresAnApprovedReview) {
     Surface surface;
     const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});

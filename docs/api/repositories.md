@@ -35,7 +35,7 @@ with lake#341, and its content moves with lake#380.
 | `create_repository` | action | `customer_id`, `workspace_id`, `name`, `description?`, `visibility?` | `400 invalid_input` at `/workspace_id` (missing, unknown or deleted workspace), at `/customer_id` (another account's workspace, or an unknown customer), bad name, bad visibility; `409 conflict` (name taken within the customer); with a description, `workspace_not_ready` while the workspace cannot be written, and nothing is created |
 | `rename_repository` | action | `id`, `name` | `404 not_found`, `409 conflict` (tombstoned or name taken) |
 | `transfer_repository` | action | `id`, `customer_id` | always `409 conflict` at `/customer_id`: a repository stays in its account and workspace; export it and import it into the other account's workspace. `404 not_found` |
-| `set_repository_visibility` | action | `id`, `visibility` | `400 invalid_input`, `404 not_found`, `409 conflict` (tombstoned) |
+| `set_repository_visibility` | action, needs `admin` on the repository (lake#1310) | `id`, `visibility` | `400 invalid_input`, `401 unauthorized` (a caller without `admin`, a writer included), `404 not_found`, `409 conflict` (tombstoned) |
 | `delete_repository` | action | `id` | `404 not_found`, `409 conflict` (already tombstoned) |
 | `repository_refs` | read | `id` | `{items: [{name, change}]}`, from the liquid repository |
 | `repository_tree` | read | `id`, `ref` | `{items: [{path, kind, blob, mode, node_id, size, stored_size}]}` |
@@ -52,7 +52,8 @@ with lake#341, and its content moves with lake#380.
 | `audit` | read | audit filters | [`audit.md`](audit.md), including the lifecycle capability calls |
 
 Every lifecycle capability carries the repository or customer authorization object and its
-`write` action. `Registry::call` invokes `authorize(principal, object, action)` before the
+`write` action, except `set_repository_visibility`, which needs `admin`: making a repository public
+lets anyone read it, so only its administrators decide that (lake#1310). `Registry::call` invokes `authorize(principal, object, action)` before the
 handler and appends its signed outcome to `audit_events` through `audit::record`.
 
 `list_repositories` resolves every candidate repository policy object and makes one
