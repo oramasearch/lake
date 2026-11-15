@@ -9,8 +9,8 @@ median and p90 per kind. No browser.
 
 <token-file> holds a lake API token able to call create_service, list_services and delete_service
 for <customer-id> (Developer → MCP, "Every tool"). kubectl must reach the cluster; the context is
-LAKE_KUBE_CONTEXT (default orama-production-cluster-01) and the Lake's namespace LAKE_NAMESPACE
-(default lake), the Lake LAKE_NAME (default prod). The token is never printed.
+LAKE_KUBE_CONTEXT (required) and the Lake's namespace LAKE_NAMESPACE (default lake), the Lake
+LAKE_NAME (default prod). The token is never printed.
 
 Phases, each measured from Create:
   seen        the operator wrote the first status (it noticed the new row)
@@ -30,7 +30,7 @@ from datetime import datetime
 
 base, token_file, customer, runs, *kinds = sys.argv[1:]
 token = open(token_file).read().strip()
-context = os.environ.get("LAKE_KUBE_CONTEXT", "orama-production-cluster-01")
+context = os.environ.get("LAKE_KUBE_CONTEXT") or sys.exit("start-times: set LAKE_KUBE_CONTEXT to the cluster's kubectl context")
 namespace = os.environ.get("LAKE_NAMESPACE", "lake")
 lake = os.environ.get("LAKE_NAME", "prod")
 

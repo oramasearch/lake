@@ -56,8 +56,15 @@ export function args(usage) {
     console.error(`usage: ${usage}`);
     process.exit(2);
   }
-  if (/(^|\.)lake\.live$/.test(new URL(base).hostname) && !process.env.LAKE_E2E_ALLOW_PRODUCTION) {
-    console.error("refusing to run against lake.live (production); set LAKE_E2E_ALLOW_PRODUCTION=1 if that is meant");
+  // Production domains to refuse (comma-separated, e.g. LAKE_E2E_PROTECTED_DOMAINS=example.com):
+  // a host equal to one or beneath it needs LAKE_E2E_ALLOW_PRODUCTION=1.
+  const hostname = new URL(base).hostname;
+  const protectedDomain = (process.env.LAKE_E2E_PROTECTED_DOMAINS ?? "")
+    .split(",")
+    .map((d) => d.trim().toLowerCase())
+    .find((d) => d && (hostname === d || hostname.endsWith(`.${d}`)));
+  if (protectedDomain && !process.env.LAKE_E2E_ALLOW_PRODUCTION) {
+    console.error(`refusing to run against ${protectedDomain} (production); set LAKE_E2E_ALLOW_PRODUCTION=1 if that is meant`);
     process.exit(2);
   }
   return { base: base.replace(/\/$/, ""), ticketFile, out, rest };
