@@ -1044,19 +1044,7 @@ Why the prices are what they are, and how they are governed: [`../billing/pricin
 | `calls` | $2.00 / million | 2000000 | 1000000 calls | managed HTTP API gateway $1.00 / million (REST APIs $3.50) | 2× |
 | `predictions` | $0.01 / 1,000 | 10000 | 1000 calls | serverless CPU inference, about $4.55 / million requests at 2 GB | 2.2× |
 | `searches` | $0.01 / 1,000 | 10000 | 1000 calls | the same serverless request reference: a search of a published index is one request served by the workspace engine, whose CPU, RAM and volume are billed apart. Hosted search services charge about $0.50 / 1,000 searches, the index's compute included (lake#658) | 2.2× |
-| `model_tokens` (`gpt-6.1-sol/input`, `/output`) | $2.60 / $13.00 a million | 2600000 / 13000000 | 1000000 tokens | OpenAI's published standard price ([pricing](https://developers.openai.com/api/docs/pricing) and the model pages, read 2026-10-26): $2.00 / $10.00. The default model of every workspace's agents (lake#1230) | provider + 30% (Steve, 2026-10-26) |
-| `model_tokens` (`gpt-6.1-sol@long/input`, `/output`) | $5.20 / $19.50 a million | 5200000 / 19500000 | 1000000 tokens | a prompt over 272,000 input tokens: 2× input and 1.5× output for the whole request, $4.00 / $15.00 | provider + 30% |
-| `model_tokens` (`gpt-6.1-terra/input`, `/output`) | $1.30 / $6.50 a million | 1300000 / 6500000 | 1000000 tokens | $1.00 / $5.00 | provider + 30% |
-| `model_tokens` (`gpt-6.1-terra@long/input`, `/output`) | $2.60 / $9.75 a million | 2600000 / 9750000 | 1000000 tokens | $2.00 / $7.50 | provider + 30% |
-| `model_tokens` (`gpt-6-astra/input`, `/output`) | $13.00 / $65.00 a million | 13000000 / 65000000 | 1000000 tokens | $10.00 / $50.00 | provider + 30% |
-| `model_tokens` (`gpt-6-astra@long/input`, `/output`) | $26.00 / $97.50 a million | 26000000 / 97500000 | 1000000 tokens | $20.00 / $75.00 | provider + 30% |
-| `model_tokens` (`gpt-6-luna/input`, `/output`) | $0.13 / $0.65 a million | 130000 / 650000 | 1000000 tokens | $0.10 / $0.50 | provider + 30% |
-| `model_tokens` (`gpt-6-luna@long/input`, `/output`) | $0.26 / $0.975 a million | 260000 / 975000 | 1000000 tokens | $0.20 / $0.75 | provider + 30% |
-| `model_tokens` (`gpt-5.5/input`, `gpt-5.5/output`) | $6.50 / $39.00 a million | 6500000 / 39000000 | 1000000 tokens | OpenAI's published standard price ([pricing](https://developers.openai.com/api/docs/pricing), read 2026-10-23): $5.00 / $30.00 | provider + 30% (Steve, 2026-10-23) |
-| `model_tokens` (`gpt-5.5@long/input`, `/output`) | $13.00 / $58.50 a million | 13000000 / 58500000 | 1000000 tokens | over 272,000 input tokens, read 2026-10-26: $10.00 / $45.00 | provider + 30% (lake#1230) |
-| `model_tokens` (`gpt-5/input`, `gpt-5/output`) | $1.625 / $13.00 a million | 1625000 / 13000000 | 1000000 tokens | $1.25 / $10.00 | provider + 30% |
-| `model_tokens` (`gpt-4o/input`, `gpt-4o/output`) | $3.25 / $13.00 a million | 3250000 / 13000000 | 1000000 tokens | $2.50 / $10.00 | provider + 30% |
-| `model_tokens` (`text-embedding-3-small/input`, `/output`) | $0.026 / $0.026 a million | 26000 / 26000 | 1000000 tokens | $0.02, no output price (an embedding reports no output tokens; the gateway needs both rates) | provider + 30% |
+| `model_tokens` (`<model>/input`, `/output`, and `<model>@long/…` for gpt-6.x and gpt-5.5) | none shipped | set by each instance | 1000000 tokens | Lake seeds no model rates. With billing on, a model is refused until its rates are published; with billing off it is served and not billed ([model-gateway.md](model-gateway.md#configuration)) | — |
 | `model_tokens` (historical unclassed usage only) | $9.00 / million | 9000000 | 1000000 tokens | the model provider's per-token rate for lake's agents' default model: $5.00 / million input, $30.00 output; $7.27 / million at 10 input to 1 output | provider + 20%, rounded up |
 | `volumes` | $0.20 / GiB-month | 200000 | 2628000 GiB-seconds (730 hours) | block volume $0.08 / GB-month. Every provisioned volume by its requested size while it runs: a workspace engine's, a managed service's and a store's. An engine's disk is billed this way only, never again for the bytes on it (decision 61, lake#663) | 2.5× |
 
@@ -1091,14 +1079,14 @@ The compute rate rests on an assumption:
 **Long prompts** (lake#1230). OpenAI prices a request whose prompt is longer than 272,000 input
 tokens at 2× input and 1.5× output for the whole request (gpt-6.x and gpt-5.5). The gateway records
 such a request under `<model>@long/input` and `<model>@long/output`, so it is billed at the `@long`
-rates above; 1.3× of the short rate would not cover it. A model with long-context rates is served
+rates the instance publishes, not the short ones. A model with long-context rates is served
 only while both its plain and its `@long` rates are published
 ([model-gateway.md](model-gateway.md#long-prompts)).
 
 **What else the rates cover.** Cached input, which OpenAI bills at 5% of input, is billed at the full
-input rate. A cache write, 1.25× input at OpenAI, is billed as input at 1.3×, so it is covered. Lake
-never requests regional processing (+10%), which would leave cache writes uncovered (1.25 × 1.1 =
-1.375), nor Fast (2×), Ultrafast (6×) or priority processing; the gateway refuses any `service_tier`
+input rate. A cache write, 1.25× input at OpenAI, is billed as input, so an input rate must cover
+it. Lake never requests regional processing (+10%, which would raise a cache write to 1.25 × 1.1 =
+1.375× input), nor Fast (2×), Ultrafast (6×) or priority processing; the gateway refuses any `service_tier`
 but `default` and sends `default` on every request ([model-gateway.md](model-gateway.md#the-processing-tier)).
 Batch and Flex (half price) are not used.
 
@@ -1146,13 +1134,13 @@ vCPU-minute, 60,000 mCPU-seconds; RAM and GPU memory per GiB-minute, 61,440 MiB-
 
 ```http
 POST /v1/set_price_list
-{"currency":"USD","prices":[{"dimension":"cpu","unit_micros":1500,"per":60000},{"dimension":"ram","unit_micros":170,"per":61440},{"dimension":"gpu","unit_micros":38750,"per":60},{"dimension":"gpu","class":"l4","unit_micros":10800,"per":60},{"dimension":"gpu","class":"a10g","unit_micros":21500,"per":60},{"dimension":"gpu","class":"a100","unit_micros":38750,"per":60},{"dimension":"gpu","class":"h100","unit_micros":78750,"per":60},{"dimension":"vram","unit_micros":250,"per":61440},{"dimension":"storage","unit_micros":40000,"per":1073741824},{"dimension":"transfer","unit_micros":50000,"per":1073741824},{"dimension":"speech","unit_micros":7200,"per":60},{"dimension":"calls","unit_micros":2000000,"per":1000000},{"dimension":"predictions","unit_micros":10000,"per":1000},{"dimension":"searches","unit_micros":10000,"per":1000},{"dimension":"model_tokens","unit_micros":9000000,"per":1000000},{"dimension":"model_tokens","class":"gpt-5.5/input","unit_micros":6500000,"per":1000000},{"dimension":"model_tokens","class":"gpt-5.5/output","unit_micros":39000000,"per":1000000},{"dimension":"model_tokens","class":"gpt-5/input","unit_micros":1625000,"per":1000000},{"dimension":"model_tokens","class":"gpt-5/output","unit_micros":13000000,"per":1000000},{"dimension":"model_tokens","class":"gpt-4o/input","unit_micros":3250000,"per":1000000},{"dimension":"model_tokens","class":"gpt-4o/output","unit_micros":13000000,"per":1000000},{"dimension":"model_tokens","class":"text-embedding-3-small/input","unit_micros":26000,"per":1000000},{"dimension":"model_tokens","class":"text-embedding-3-small/output","unit_micros":26000,"per":1000000},{"dimension":"model_tokens","class":"gpt-6.1-sol/input","unit_micros":2600000,"per":1000000},{"dimension":"model_tokens","class":"gpt-6.1-sol/output","unit_micros":13000000,"per":1000000},{"dimension":"model_tokens","class":"gpt-6.1-sol@long/input","unit_micros":5200000,"per":1000000},{"dimension":"model_tokens","class":"gpt-6.1-sol@long/output","unit_micros":19500000,"per":1000000},{"dimension":"model_tokens","class":"gpt-6.1-terra/input","unit_micros":1300000,"per":1000000},{"dimension":"model_tokens","class":"gpt-6.1-terra/output","unit_micros":6500000,"per":1000000},{"dimension":"model_tokens","class":"gpt-6.1-terra@long/input","unit_micros":2600000,"per":1000000},{"dimension":"model_tokens","class":"gpt-6.1-terra@long/output","unit_micros":9750000,"per":1000000},{"dimension":"model_tokens","class":"gpt-6-astra/input","unit_micros":13000000,"per":1000000},{"dimension":"model_tokens","class":"gpt-6-astra/output","unit_micros":65000000,"per":1000000},{"dimension":"model_tokens","class":"gpt-6-astra@long/input","unit_micros":26000000,"per":1000000},{"dimension":"model_tokens","class":"gpt-6-astra@long/output","unit_micros":97500000,"per":1000000},{"dimension":"model_tokens","class":"gpt-6-luna/input","unit_micros":130000,"per":1000000},{"dimension":"model_tokens","class":"gpt-6-luna/output","unit_micros":650000,"per":1000000},{"dimension":"model_tokens","class":"gpt-6-luna@long/input","unit_micros":260000,"per":1000000},{"dimension":"model_tokens","class":"gpt-6-luna@long/output","unit_micros":975000,"per":1000000},{"dimension":"model_tokens","class":"gpt-5.5@long/input","unit_micros":13000000,"per":1000000},{"dimension":"model_tokens","class":"gpt-5.5@long/output","unit_micros":58500000,"per":1000000},{"dimension":"volumes","unit_micros":200000,"per":2628000}]}
+{"currency":"USD","prices":[{"dimension":"cpu","unit_micros":1500,"per":60000},{"dimension":"ram","unit_micros":170,"per":61440},{"dimension":"gpu","unit_micros":38750,"per":60},{"dimension":"gpu","class":"l4","unit_micros":10800,"per":60},{"dimension":"gpu","class":"a10g","unit_micros":21500,"per":60},{"dimension":"gpu","class":"a100","unit_micros":38750,"per":60},{"dimension":"gpu","class":"h100","unit_micros":78750,"per":60},{"dimension":"vram","unit_micros":250,"per":61440},{"dimension":"storage","unit_micros":40000,"per":1073741824},{"dimension":"transfer","unit_micros":50000,"per":1073741824},{"dimension":"speech","unit_micros":7200,"per":60},{"dimension":"calls","unit_micros":2000000,"per":1000000},{"dimension":"predictions","unit_micros":10000,"per":1000},{"dimension":"searches","unit_micros":10000,"per":1000},{"dimension":"model_tokens","unit_micros":9000000,"per":1000000},{"dimension":"volumes","unit_micros":200000,"per":2628000}]}
 ```
 
-The model rates are also seeded by migrations `0095_model_token_prices` and
-`0105_agent_model_prices` (lake#1230) on every instance
-([model-gateway.md](model-gateway.md#configuration)); keep them in any list published by hand, or
-the gateway refuses those models. It applies from the start of this month; add
+Lake seeds no model rates ([model-gateway.md](model-gateway.md#configuration)): add a
+`model_tokens` price for `<model>/input` and `<model>/output` of every model the instance serves
+(and `<model>@long/input` and `/output` for gpt-6.x and gpt-5.5), or, with billing on, the gateway
+refuses those models. It applies from the start of this month; add
 `"effective_from": "YYYY-MM"` for another month. Then
 `GET /v1/price_list` answers it, and `GET /v1/bill_preview?customer_id=<id>` prices an account's
 month at it. Administration → Billing (`/billing/plans`) is the same publication from the web app,

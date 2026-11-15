@@ -178,8 +178,8 @@ choose"*, *"default to sol"*.
 {"workspace_id": "…", "agent_model": "gpt-6.1-sol", "agent_model_chosen": null,
  "default_agent_model": "gpt-6.1-sol", "updated_at": null, "set_by": null, "currency": "USD",
  "agent_models": [{"model": "gpt-6.1-sol", "default": true,
-                   "input_micros_per_million": 2600000, "output_micros_per_million": 13000000,
-                   "long_input_micros_per_million": 5200000, "long_output_micros_per_million": 19500000}, …]}
+                   "input_micros_per_million": 2000000, "output_micros_per_million": 10000000,
+                   "long_input_micros_per_million": 4000000, "long_output_micros_per_million": 15000000}, …]}
 ```
 
 Each price is what a million tokens cost in millionths of `currency`, from the price list in force

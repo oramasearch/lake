@@ -418,9 +418,8 @@ The model gateway restricts calls to exact models in `LAKE_MODEL_GATEWAY_MODELS`
 lake#961), including with billing off. Billing-on additionally requires positive published rates
 for each model's input and output tokens; usage keeps raw counts under model/direction classes,
 while provider snapshot names remain audit detail. Missing used-class rates refuse a bill.
-Migration `0095_model_token_prices` permits model/direction classes in prices and invoice lines,
-and seeds the default models' rates once (OpenAI's published price plus 30%, Steve 2026-10-23) as a
-new publication for the current month on a fresh and an existing instance.
+Migration `0095_model_token_prices` permits model/direction classes in prices and invoice lines.
+The schema seeds no prices: each instance publishes its model rates with `set_price_list`.
 Not deployed; the operator must vendor the schema and select `model_token_prices_guard`.
 See [`docs/api/model-gateway.md`](docs/api/model-gateway.md).
 People choose their agents' model (lake#1230, migration `0105_agent_model_prices`): the gateway also
@@ -428,7 +427,7 @@ serves gpt-6.1-sol, gpt-6.1-terra, gpt-6-astra and gpt-6-luna; a workspace's `ag
 (`get_workspace_settings`, `set_workspace_settings`; a sealed `lake_workspace_settings` record in its
 Zetta; unset means gpt-6.1-sol) replaces the model of every agent turn's chat call, and usage is
 billed under the model called; a prompt over 272,000 input tokens is counted under `<model>@long/*`,
-priced at OpenAI's 2x input and 1.5x output plus 30%; a `service_tier` other than `default` is refused
+priced at the instance's `@long` rates; a `service_tier` other than `default` is refused
 and `default` is always sent. Ship → Workspaces → Settings is the picker, with prices. Not deployed;
 the operator must vendor the schema and select `agent_model_prices_guard` before the image rolls. See
 [`docs/api/model-gateway.md#the-workspaces-model`](docs/api/model-gateway.md#the-workspaces-model).

@@ -91,7 +91,7 @@ Model/direction prices (LSR-095, lake#961) published through `set_price_list` ar
 `rateRows` and `ratesInput` when the operator edits another rate. Model rows keep their exact
 class keys and display casing; GPU defaults are not offered as model classes. The historical
 default model-token rate covers old unclassed usage only. With no published list the editor
-starts from `LIST_RATES`, which carries the default models' input and output rates that migration
-`0095_model_token_prices` seeds (OpenAI's published price plus 30%). `frontend/tests/billing.test.ts` covers an editor round trip
+starts from `LIST_RATES` and offers an empty row for each served model's input and output (and
+`@long`) class (`MODEL_CLASSES`): Lake ships no model rates, so the operator fills in its own. `frontend/tests/billing.test.ts` covers an editor round trip
 with distinct input/output prices; [the gateway contract](../api/model-gateway.md#configuration)
 explains the required published rates and model allowlist.

@@ -4,7 +4,7 @@
  * test`; the build runs it. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DIMENSIONS, GPU_CLASSES, LIST_RATES, addressLines, asksForBillingEmail, billedNote, contactDraft, contactSavedMessage, countryName, countryOptions, invoiceTone, isCountryCode, lineSentence, monthLabel, months, money, owed, paymentSummary, payOnline, priceLabel, providerStatus, quantityLabel, rateRows, ratesInput, recordedByHand, rowTitle, type Contact, type Provider } from "../src/pages/billing/billing.ts";
+import { DIMENSIONS, GPU_CLASSES, LIST_RATES, MODEL_CLASSES, addressLines, asksForBillingEmail, billedNote, contactDraft, contactSavedMessage, countryName, countryOptions, invoiceTone, isCountryCode, lineSentence, monthLabel, months, money, owed, paymentSummary, payOnline, priceLabel, providerStatus, quantityLabel, rateRows, ratesInput, recordedByHand, rowTitle, type Contact, type Provider } from "../src/pages/billing/billing.ts";
 import { billingVisible } from "../src/routes/nav.ts";
 
 test("an amount is in its currency, to the cent unless a price has fractions of one", () => {
@@ -89,17 +89,14 @@ test("an invoice's state is a chip, and what is owed adds up the due ones by cur
 test("the price list editor starts from the published list, or the list rates, one row a dimension and GPU class", () => {
   assert.equal(DIMENSIONS.length, 12);
   const fresh = rateRows(null);
-  // Twelve dimensions, plus four GPU classes each for GPU and GPU memory, plus the default models'
-  // input and output rates (migration 0095_model_token_prices: four models, two directions), plus
-  // migration 0105_agent_model_prices's (lake#1230): four gpt-6.x models with their short and long
-  // rates, and gpt-5.5's long rates.
-  assert.equal(fresh.length, 12 + 2 * GPU_CLASSES.length + 8 + 4 * 4 + 2);
-  assert.deepEqual(fresh.find((r) => r.class === "gpt-6.1-sol/input"), { dimension: "model_tokens", class: "gpt-6.1-sol/input", rate: "2.6", per: "1000000" });
-  assert.deepEqual(fresh.find((r) => r.class === "gpt-6.1-sol@long/output"), { dimension: "model_tokens", class: "gpt-6.1-sol@long/output", rate: "19.5", per: "1000000" });
-  assert.deepEqual(fresh.find((r) => r.class === "gpt-5.5@long/input"), { dimension: "model_tokens", class: "gpt-5.5@long/input", rate: "13", per: "1000000" });
-  assert.deepEqual(fresh.find((r) => r.class === "gpt-5.5/input"), { dimension: "model_tokens", class: "gpt-5.5/input", rate: "6.5", per: "1000000" });
-  assert.deepEqual(fresh.find((r) => r.class === "gpt-5.5/output"), { dimension: "model_tokens", class: "gpt-5.5/output", rate: "39", per: "1000000" });
-  assert.deepEqual(fresh.find((r) => r.class === "text-embedding-3-small/output"), { dimension: "model_tokens", class: "text-embedding-3-small/output", rate: "0.026", per: "1000000" });
+  // Twelve dimensions, plus four GPU classes each for GPU and GPU memory, plus an empty row for each
+  // served model's token class: Lake ships no model rates, so the operator fills them in.
+  assert.equal(fresh.length, 12 + 2 * GPU_CLASSES.length + MODEL_CLASSES.length);
+  assert.equal(MODEL_CLASSES.length, 5 * 4 + 3 * 2);
+  assert.equal(LIST_RATES.some((r) => r.dimension === "model_tokens" && r.class), false, "no model rate is shipped");
+  assert.deepEqual(fresh.find((r) => r.class === "gpt-6.1-sol/input"), { dimension: "model_tokens", class: "gpt-6.1-sol/input", rate: "", per: "1" });
+  assert.deepEqual(fresh.find((r) => r.class === "gpt-5.5@long/output"), { dimension: "model_tokens", class: "gpt-5.5@long/output", rate: "", per: "1" });
+  assert.deepEqual(fresh.find((r) => r.class === "text-embedding-3-small/output"), { dimension: "model_tokens", class: "text-embedding-3-small/output", rate: "", per: "1" });
   assert.deepEqual(fresh[0], { dimension: "cpu", class: "", rate: "0.0015", per: "60000" });
   assert.deepEqual(fresh.find((r) => r.dimension === "gpu" && r.class === "h100"), { dimension: "gpu", class: "h100", rate: "0.07875", per: "60" });
   assert.deepEqual(fresh.find((r) => r.dimension === "vram" && r.class === "l4"), { dimension: "vram", class: "l4", rate: "", per: "1" }, "GPU memory has one rate for every class");

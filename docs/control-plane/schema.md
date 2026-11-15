@@ -22,14 +22,12 @@ A new migration still follows the rules below: idempotent SQL, its row in `schem
 new `*_guard` table created by the newest migration (`LakeManifest.TheGuardTableIsTheNewestMigrations`
 fails otherwise).
 
-`0105_agent_model_prices` (lake#1230) seeds the `model_tokens` rates of the gpt-6.x models the
-gateway now serves (`gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, `gpt-6-luna`) and the
-long-context classes `<model>@long/input` and `<model>@long/output` of those and `gpt-5.5`, at
-OpenAI's standard price plus 30% (read 2026-10-26). No table or column changes: `0095`'s class check
-already allows `@long`. It follows `0095`'s rules: once, while unrecorded; a new publication for this
-UTC month carrying the list in force; an operator's own rate kept; later USD lists given the rates;
-another currency left alone. Additive; guard `agent_model_prices_guard`; the operator must vendor this
-schema and select the guard before the binary rolls, or a Lake with billing on refuses the gpt-6.x
+`0105_agent_model_prices` (lake#1230) names the long-context classes `<model>@long/input` and
+`<model>@long/output` of the gpt-6.x models the gateway now serves (`gpt-6.1-sol`, `gpt-6.1-terra`,
+`gpt-6-astra`, `gpt-6-luna`) and `gpt-5.5`. It seeds no prices: each instance publishes those rates with
+`set_price_list` ([model-gateway.md](../api/model-gateway.md#configuration)), and a list published while
+it still seeded rates is kept. No table or column changes: `0095`'s class check already allows `@long`.
+Additive; guard `agent_model_prices_guard`; without published rates a Lake with billing on refuses the gpt-6.x
 models and gpt-5.5. See [billing](../api/billing.md#rates) and
 [the model gateway](../api/model-gateway.md#long-prompts).
 
@@ -1403,12 +1401,9 @@ Migration `0095_model_token_prices` (LSR-095, lake#961) extends the `class` chec
 workload resource classes are unchanged. No records are rewritten. The new constraints preserve
 all existing class names, and reapplying the schema is idempotent.
 
-It also seeds the default gateway models' input and output prices (OpenAI's published price plus
-30%, Steve 2026-10-23), once, while `0095_model_token_prices` is not yet recorded: a new
-publication for the current UTC month with the rates of the list in force (none on a fresh
-instance) plus the model rates, and the model rates added to any later list; an operator's rate for
-the same class is kept. The rates and their source are in
-[model-gateway.md](../api/model-gateway.md#configuration).
+It seeds no prices. Each instance publishes its model rates with `set_price_list`; an instance that
+applied this migration while it still seeded rates keeps the list it published, because the schema
+never rewrites a price list ([model-gateway.md](../api/model-gateway.md#configuration)).
 
 The operator must vendor `db/schema.sql` and select `model_token_prices_guard` before the new
 Lake binary is deployed. The operator is not edited here. `PostgresBilling.ModelDirectionPricesAndInvoiceLinesRoundTrip`

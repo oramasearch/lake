@@ -118,8 +118,8 @@ covered by the [price list](billing.md#rates). So:
 - Every chat or responses request is sent with `service_tier: "default"`, also when the caller left
   it out, so the account's own default can never choose a costlier tier.
 - Lake never asks for regional processing. That matters for cache writes: they cost 1.25x input and
-  are billed as input at 1.3x, which covers them, but with the 10% regional surcharge
-  (1.25 x 1.1 = 1.375) they would not be covered.
+  are billed at the input rate, and the 10% regional surcharge (1.25 x 1.1 = 1.375) would raise
+  that cost further.
 - Batch and Flex (half price) are not used either.
 
 Verify with `ModelGateway.RefusesACostlierServiceTierAndAlwaysAsksForTheStandardOne` and the
@@ -303,11 +303,10 @@ Provider snapshot names are audit detail (`answered_model`). Each value also car
 ### Long prompts
 
 OpenAI prices a request whose prompt is longer than 272,000 input tokens at 2x input and 1.5x output
-**for the whole request**, on the gpt-6.x models and gpt-5.5. Billing such a request at the short
-rate (1.3x) would not cover it. So when the provider reports more than 272,000 input tokens
+**for the whole request**, on the gpt-6.x models and gpt-5.5, so the short rate would not cover it. So when the provider reports more than 272,000 input tokens
 (`long_context_prompt_tokens` in `model_gateway.hpp`), both values of the call are recorded under the
-long-context classes `<model>@long/input` and `<model>@long/output`, priced at 2x input and 1.5x
-output plus 30% ([billing.md](billing.md#rates)). At exactly 272,000 the plain classes apply. A model
+long-context classes `<model>@long/input` and `<model>@long/output`, which the instance prices on
+its own list ([billing.md](billing.md#rates)). At exactly 272,000 the plain classes apply. A model
 without long-context rates (gpt-5, gpt-4o, the embedding model) keeps its one pair of classes
 (`has_long_context_rate`: names starting `gpt-6`, and `gpt-5.5`). With billing on, a model that has
 long-context rates needs them published as well as its plain ones before it is served, because the
@@ -387,51 +386,23 @@ with `store_unavailable`. Even an embedding model needs both rates, although it 
 output tokens. Publish approved rates with `set_price_list` before enabling a model. Choose rates
 for the configured provider; an allowlist entry never derives prices from its name.
 
-**The default models are priced by the schema** (Steve, 2026-10-23: the provider's published
-per-token price plus 30%). Migration `0095_model_token_prices` seeds them once, on a fresh and an
-existing control plane alike, in millionths of a US dollar per 1,000,000 tokens, from
-OpenAI's published standard price ([pricing](https://developers.openai.com/api/docs/pricing), read 2026-10-23):
-
-| Model | OpenAI input / output (per 1M) | Lake input / output (per 1M) | `unit_micros` input / output |
-|---|---|---|---|
-| `gpt-5.5` | $5.00 / $30.00 (under 272K context) | $6.50 / $39.00 | 6500000 / 39000000 |
-| `gpt-5` | $1.25 / $10.00 | $1.625 / $13.00 | 1625000 / 13000000 |
-| `gpt-4o` | $2.50 / $10.00 | $3.25 / $13.00 | 3250000 / 13000000 |
-| `text-embedding-3-small` | $0.02 / none | $0.026 / $0.026 | 26000 / 26000 |
-
-Migration `0105_agent_model_prices` (lake#1230, Steve 2026-10-26: *"let's use the latest and ensure
-the price is covered properly"*) adds the gpt-6.x models and the long-context rates the same way, from
-the same page and the model pages, read 2026-10-26:
-
-| Model | OpenAI input / output (per 1M) | Lake input / output (per 1M) | `unit_micros` input / output | `@long` input / output |
-|---|---|---|---|---|
-| `gpt-6.1-sol` | $2.00 / $10.00 | $2.60 / $13.00 | 2600000 / 13000000 | 5200000 / 19500000 |
-| `gpt-6.1-terra` | $1.00 / $5.00 | $1.30 / $6.50 | 1300000 / 6500000 | 2600000 / 9750000 |
-| `gpt-6-astra` | $10.00 / $50.00 | $13.00 / $65.00 | 13000000 / 65000000 | 26000000 / 97500000 |
-| `gpt-6-luna` | $0.10 / $0.50 | $0.13 / $0.65 | 130000 / 650000 | 260000 / 975000 |
-| `gpt-5.5` | (0095's rates above) | | | 13000000 / 58500000 |
-
-An embedding reports no output tokens, so its output rate bills nothing; it exists because the
-gateway needs both. Cached input (5% of input at OpenAI) is billed at the full input rate, and a cache
-write (1.25x input) as input at 1.3x, so both are covered; see [The processing tier](#the-processing-tier)
-for why regional processing would break that. Before 0105, a `gpt-5.5` prompt over 272K tokens was
-billed at the short rate, which did not cover it; it is now billed at its `@long` rates. The seed writes a new
-publication for the UTC month it runs in, holding the rates of the list then in force (none on a
-fresh instance) plus these, and adds them to any list published for a later month; a rate already
-published for one of these classes is kept, and a list in another currency is left alone. 0105 follows the same rules (a
-fresh instance therefore has two publications for its first month, 0095's and 0105's). Each runs
-only while its own migration is not recorded, so re-applying the schema never re-adds a
-rate an operator later removed. Change a rate with `set_price_list`; when OpenAI's prices move,
-publish the new rates (provider price × 1.3) and update this table.
+**Lake ships no prices.** The schema seeds no rates, so a new instance has no price list. With
+billing on, every model is refused (`invalid_input` at `/request/model`, before the provider is
+called) until the instance publishes its rates with `set_price_list`; with billing off, every
+configured model is served, its usage is metered and nothing is billed. Each instance sets its own
+rates for the models it serves: `<model>/input` and `<model>/output` for every model, and
+`<model>@long/input` and `<model>@long/output` as well for gpt-6.x and gpt-5.5. Migrations
+`0095_model_token_prices` and `0105_agent_model_prices` only widen the class checks and create their
+guards; an instance that applied them while they still seeded rates keeps the list it published,
+because the schema never rewrites a price list. Cached input is billed at the full input rate, and
+a cache write (1.25x input at the provider) as input, so choose an input rate that covers it; see
+[The processing tier](#the-processing-tier). Change a rate with `set_price_list`.
 
 The operator can change the allowlist by setting `LAKE_MODEL_GATEWAY_MODELS` and restarting Lake.
 Publish model/direction rates through `set_price_list`; the gateway reads the effective list on
 every call. Migration `0095_model_token_prices` extends the price and invoice class checks for
-model/direction names while retaining GPU restrictions. Before deployment the operator must
-vendor `db/schema.sql` and select `model_token_prices_guard`; this change does not edit the operator.
-For 0105 the operator must vendor `db/schema.sql` again and select `agent_model_prices_guard` before
-an image with lake#1230 rolls: without the 0105 rates, a Lake with billing on refuses the gpt-6.x
-models and gpt-5.5 (its long-context rates are missing).
+model/direction names while retaining GPU restrictions. Without published gpt-6.x and `@long` rates,
+a Lake with billing on refuses the gpt-6.x models and gpt-5.5.
 The default list deliberately restricts previously
 accepted arbitrary names; add other approved models explicitly.
 
@@ -503,15 +474,11 @@ incomplete prices, and raw usage labelled by the requested model despite a provi
 input/output invoice amounts and refuses bills after a used model's prices are removed.
 `PostgresBilling.ModelDirectionPricesAndInvoiceLinesRoundTrip` verifies the migration, persisted
 rates and invoice lines, and continued rejection of model/direction classes on GPU prices.
-`PostgresBilling.ModelTokenPricesAreSeededOnceOnFreshAndExistingInstances` checks the seeded rates
-on a fresh database, and on a simulated existing one that the list in force is kept, a new one
-carries its rates plus the seeded ones (an operator's own model rate kept), a later list gets them,
-and a second run adds nothing. `ModelCompletion.ASeededInstanceCallsTheDefaultModelsWithBillingOnAtTheSeededPrices`
-makes a model call with billing on against a freshly seeded PostgreSQL control plane and checks
-the bill prices its input and output at the seeded rates.
-
-`PostgresBilling.AgentModelPricesAreSeededOnceOnFreshAndExistingInstances` checks 0105 the same
-way, with an operator's own `gpt-6.1-sol/input` rate kept and a list in another currency left alone.
+`PostgresBilling.TheSchemaSeedsNoModelPricesAndKeepsAPublishedList` checks that a fresh database
+has no price list and that applying the schema again leaves a published list as it was.
+`ModelCompletion.AFreshInstanceRefusesEveryModelWithBillingOnUntilItPublishesPrices` checks that a
+fresh PostgreSQL control plane refuses every default model with billing on before the provider is
+called, then serves and bills a model at the rates the instance publishes.
 `ModelGateway.ServesTheGpt6ModelsAndOnlyChatModelsAreChoosable` checks the default list.
 
 `RecordModelUsage.UnpricedReportsCannotPoisonABilledAccountsLedger` verifies that rejected reports

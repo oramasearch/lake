@@ -16,13 +16,13 @@ import {
 const sol = {
   model: "gpt-6.1-sol",
   default: true,
-  input_micros_per_million: 2_600_000,
-  output_micros_per_million: 13_000_000,
-  long_input_micros_per_million: 5_200_000,
-  long_output_micros_per_million: 19_500_000,
+  input_micros_per_million: 2_000_000,
+  output_micros_per_million: 10_000_000,
+  long_input_micros_per_million: 4_000_000,
+  long_output_micros_per_million: 15_000_000,
 };
-const luna = { model: "gpt-6-luna", default: false, input_micros_per_million: 130_000, output_micros_per_million: 650_000, long_input_micros_per_million: 260_000, long_output_micros_per_million: 975_000 };
-const gpt4o = { model: "gpt-4o", input_micros_per_million: 3_250_000, output_micros_per_million: 13_000_000, long_input_micros_per_million: null, long_output_micros_per_million: null };
+const luna = { model: "gpt-6-luna", default: false, input_micros_per_million: 100_000, output_micros_per_million: 500_000, long_input_micros_per_million: 200_000, long_output_micros_per_million: 750_000 };
+const gpt4o = { model: "gpt-4o", input_micros_per_million: 2_500_000, output_micros_per_million: 10_000_000, long_input_micros_per_million: null, long_output_micros_per_million: null };
 
 test("unset means gpt-6.1-sol", () => {
   assert.equal(DEFAULT_AGENT_MODEL, "gpt-6.1-sol");
@@ -38,9 +38,9 @@ test("the default is labelled, the others by name", () => {
 });
 
 test("each model shows its price per million tokens from the list in force", () => {
-  assert.equal(agentModelPrice(sol, "USD"), "$2.60 in, $13.00 out per million tokens");
-  assert.equal(agentModelPrice(luna, "USD"), "$0.13 in, $0.65 out per million tokens");
-  assert.equal(longPromptPrice(sol, "USD"), "Prompts over 272,000 tokens: $5.20 in, $19.50 out per million tokens");
+  assert.equal(agentModelPrice(sol, "USD"), "$2.00 in, $10.00 out per million tokens");
+  assert.equal(agentModelPrice(luna, "USD"), "$0.10 in, $0.50 out per million tokens");
+  assert.equal(longPromptPrice(sol, "USD"), "Prompts over 272,000 tokens: $4.00 in, $15.00 out per million tokens");
   assert.equal(longPromptPrice(gpt4o, "USD"), null, "a model with one rate has no long-prompt line");
 });
 

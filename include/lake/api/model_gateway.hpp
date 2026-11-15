@@ -49,7 +49,7 @@ std::vector<std::string> gateway_chat_models(const std::vector<GatewayModel>& mo
 
 // A request whose prompt is longer than this many input tokens is priced by OpenAI at 2x input and
 // 1.5x output for the whole request (gpt-6.x and gpt-5.5), so Lake records it under the model's
-// long-context classes (`<model>@long/input`, `<model>@long/output`), priced the same way plus 30%.
+// long-context classes (`<model>@long/input`, `<model>@long/output`), which each instance prices.
 inline constexpr std::uint64_t long_context_prompt_tokens = 272'000;
 // Whether the model has long-context rates: gpt-6.x and gpt-5.5.
 bool has_long_context_rate(std::string_view model);
