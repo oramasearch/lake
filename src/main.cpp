@@ -394,8 +394,8 @@ int main(int argc, char** argv) {
         }
         opts.balance = *balance;
     }
-    // Stripe (decision 57, lake#628): lake's own platform credentials, environment variables of
-    // the hosting platform (Railway; spec.env with a secretKeyRef on the dev cluster), never a
+    // Stripe (lake#628): lake's own platform credentials, environment variables of
+    // the hosting platform (for example spec.env with a secretKeyRef), never a
     // user's secret store. Read once here and never logged; a new key takes a restart.
     opts.stripe_keys = {env_or("LAKE_STRIPE_SECRET_KEY", ""), env_or("LAKE_STRIPE_WEBHOOK_SECRET", "")};
     opts.store_root = env_or("LAKE_STORE_ROOT", "");
