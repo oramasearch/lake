@@ -20,12 +20,12 @@ const BASE = process.env.BASE ?? "http://localhost:5174";
 const viewer = {
   signed_in: true,
   administrator: false,
-  display_name: "Steve Sperandeo",
-  email: "steve@example.com",
+  display_name: "Ada Lovelace",
+  email: "ada@example.com",
   taap_id: "taap:me",
   customer_id: "me",
   workspace_id: "me-0",
-  spaces: [{ id: "me", name: "steve-x7f2", label: "Your workspaces", personal: true, kind: "individual", workspaces: [{ id: "me-0", name: "steve", customer_id: "me", status: "ready" }] }],
+  spaces: [{ id: "me", name: "ada-x7f2", label: "Your workspaces", personal: true, kind: "individual", workspaces: [{ id: "me-0", name: "ada", customer_id: "me", status: "ready" }] }],
   clerk: { enabled: false },
   password_sign_up: false,
   version: "dev",
@@ -40,7 +40,7 @@ function dimension(name, title, unit, aggregation, total, billed, kinds) {
     aggregation,
     total,
     points: [total],
-    by_workspace: [{ key: "me-0", name: "steve", workspace_id: "me-0", total, points: [total] }],
+    by_workspace: [{ key: "me-0", name: "ada", workspace_id: "me-0", total, points: [total] }],
     by_kind: kinds.map(([key, value]) => ({ key, total: value, points: [value] })),
     billed,
   };
@@ -61,7 +61,7 @@ function usage(input) {
       dimension("cpu", "CPU", "mcpu_seconds", "sum", 1000 * 3600 * 200, true, [["workspace", 1000 * 3600 * 200]]),
       dimension("instances", "Service and App Instances", "instance_seconds", "sum", 3600 * 700, false, [["zetta", 3600 * 700]]),
     ],
-    workspaces: [{ workspace_id: "me-0", name: "steve", measured: true, message: "" }],
+    workspaces: [{ workspace_id: "me-0", name: "ada", measured: true, message: "" }],
     not_measured: [],
   };
 }
@@ -71,7 +71,7 @@ function answer(name, body) {
   if (name === "workspace_status") return { requested: true, ready: true, phase: "Ready", workspace_id: "me-0" };
   if (name === "usage_over_time") return usage(body);
   if (name === "usage_limits") return { customer_id: "me", month: "2026-10-01T00:00:00Z", limits: [], warnings: [], not_measured: [] };
-  if (name === "list_workspaces") return { items: [{ id: "me-0", name: "steve", customer_id: "me" }] };
+  if (name === "list_workspaces") return { items: [{ id: "me-0", name: "ada", customer_id: "me" }] };
   if (name === "list_sessions") return { items: [] };
   return {};
 }

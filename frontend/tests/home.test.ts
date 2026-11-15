@@ -131,8 +131,8 @@ test("an empty workspace is offered its first steps", () => {
 });
 
 test("the empty home greets the person by first name, never by email", () => {
-  assert.equal(greeting("Steve Sperandeo"), "Hello, Steve. What would you like to know?");
-  assert.equal(greeting("steve@example.com"), "What would you like to know?");
+  assert.equal(greeting("Ada Lovelace"), "Hello, Ada. What would you like to know?");
+  assert.equal(greeting("ada@example.com"), "What would you like to know?");
   assert.equal(greeting(undefined), "What would you like to know?");
 });
 

@@ -19,15 +19,15 @@ const BASE = process.env.BASE ?? "http://localhost:5174";
 
 const ws = (customer, names) => names.map((name, i) => ({ id: `${customer}-${i}`, name, customer_id: customer, status: "ready" }));
 const spaces = (orgA, orgB) => [
-  { id: "me", name: "steve-x7f2", label: "Your workspaces", personal: true, kind: "individual", workspaces: ws("me", ["steve", "Churn experiments", "Quarterly revenue forecasts"]) },
+  { id: "me", name: "ada-x7f2", label: "Your workspaces", personal: true, kind: "individual", workspaces: ws("me", ["ada", "Churn experiments", "Quarterly revenue forecasts"]) },
   { id: "acme", name: "acme-research", label: "acme-research", personal: false, kind: "organization", workspaces: ws("acme", orgA) },
   { id: "north", name: "northwind-analytics-and-reporting", label: "northwind-analytics-and-reporting", personal: false, kind: "organization", workspaces: ws("north", orgB) },
 ];
 const viewerFor = (s) => ({
   signed_in: true,
   administrator: false,
-  display_name: "Steve Sperandeo",
-  email: "steve@example.com",
+  display_name: "Ada Lovelace",
+  email: "ada@example.com",
   customer_id: "acme",
   workspace_id: "acme-0",
   spaces: s,
@@ -93,12 +93,12 @@ for (const [scenario, viewer] of Object.entries(VIEWERS)) {
     await context.close();
   }
 }
-// Steve, 2026-10-11: the remembered organization's only workspace was deleted. The app must fall
+// Seen 2026-10-11: the remembered organization's only workspace was deleted. The app must fall
 // back to the person's own first workspace, store it, rewrite the URL, and never say "Choose a
 // workspace"; Workspaces lists every owner's workspaces, as the picker does.
 {
   const listsByOwner = {
-    me: ws("me", ["steve", "Churn experiments", "Quarterly revenue forecasts"]).map((w, i) => ({ ...w, environment: "prod", phase: i === 1 ? "Failed" : "Ready", desired: "running", storage_gi: 5 })),
+    me: ws("me", ["ada", "Churn experiments", "Quarterly revenue forecasts"]).map((w, i) => ({ ...w, environment: "prod", phase: i === 1 ? "Failed" : "Ready", desired: "running", storage_gi: 5 })),
     acme: [],
     north: ws("north", ["Reporting"]).map((w) => ({ ...w, environment: "dev", phase: "Pending", desired: "running", storage_gi: 5 })),
   };

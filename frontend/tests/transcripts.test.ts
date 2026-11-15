@@ -26,7 +26,7 @@ test("a recording's default title names its day and time (TZ=America/Vancouver)"
 });
 
 test("a pasted transcript's title is its first line, shortened", () => {
-  assert.equal(titleFromText("\n\n  Kickoff with Acme  \nSteve: hello"), "Kickoff with Acme");
+  assert.equal(titleFromText("\n\n  Kickoff with Acme  \nAda: hello"), "Kickoff with Acme");
   assert.equal(titleFromText(""), "");
   const long = "A".repeat(80);
   const t = titleFromText(long);
