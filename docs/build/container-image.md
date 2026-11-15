@@ -79,6 +79,31 @@ Keep `Dockerfile` and `.dockerignore` as the image recipe; the context excludes 
 [`ci.md`](ci.md) and [`local.md`](local.md) in the same change so pull-request builds and local
 builds use the image toolchain.
 
+### Pinned inputs (lake#1003)
+
+Every base image is named by tag and digest, so a rebuild of the same source gets the same bytes
+even when the tag moves: `node:22-bookworm-slim@sha256:e9f565d3…` for the web app stage and
+`ubuntu:24.04@sha256:2198e4c6…` for the build and runtime stages (the image index digest, which
+covers every platform). The CMake installer is checked against the SHA-256 Kitware publishes
+(`cmake-<version>-SHA-256.txt`) before it runs, as OpenSSL's archive already was. In
+`CMakeLists.txt` the Boost archive carries the `URL_HASH` Boost publishes beside it
+(`<archive>.txt`), and GoogleTest is fetched by the commit of its `v1.17.0` tag (`52eb8108…`), not
+by the tag. A changed archive fails configure.
+
+To move one, read the new value without pulling or pushing anything and change it in a reviewed
+commit:
+
+```sh
+docker buildx imagetools inspect ubuntu:24.04 | grep '^Digest:'
+curl -sL https://github.com/boostorg/boost/releases/download/<release>/<archive>.txt
+curl -sL https://github.com/Kitware/CMake/releases/download/v<version>/cmake-<version>-SHA-256.txt
+git ls-remote https://github.com/google/googletest.git 'refs/tags/<tag>*'   # the ^{} line for an annotated tag
+```
+
+Not pinned by this change: the LLVM apt script (`llvm.sh` installs packages signed by a key fetched
+from the same host, so a hash of the script alone would not help), and libliquid's own
+`FetchContent` dependencies, which liquid's `CMakeLists.txt` selects, not lake.
+
 ## The compiler cache
 
 The build stage compiles through `ccache` into a BuildKit cache mount (`id=lake-ccache`, 8 GiB),
