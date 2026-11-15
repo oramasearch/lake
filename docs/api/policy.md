@@ -70,7 +70,7 @@ which plants a user named `admin` in the database and shows its session is refus
 |---|---|---|
 | `list_objects` | `read` on `parent_id`; operator admin may list roots | child objects |
 | `get_object` | `read` on `id` | one object |
-| `create_object` | `admin` on `parent_id`; a `path` named for the repository it sits in ([below](#an-object-counts-only-inside-its-own-account-lake913)) | child object |
+| `create_object` | `admin` on `parent_id`; a `path` named for the repository it sits in ([below](#an-object-counts-only-inside-its-own-account-lake913)), for a node of its tree at `ref` (default `main`), under the object of the nearest folder above that node that has one ([below](#a-path-object-sits-where-its-node-lies-lake1030)) | child object |
 | `list_grants` | `admin` on `object_id` | direct grants |
 | `create_grant` | `admin` on `object_id` | grant, with the attestation lake signed for it |
 | `revoke_grant` | `admin` on the grant's object | the revoked grant ([below](#revoking-a-grant)) |
@@ -217,6 +217,31 @@ same case against each store: one account's `create_object` is refused for anoth
 folder, environment and `secrets/<customer_id>` ids, and objects planted before the fix (directly
 in the store) neither let it upload into the other account's folder nor claim its branch rule,
 environment or secret mounts, while the owner keeps its access.
+
+## A path object sits where its node lies (lake#1030)
+
+**What.** After lake#913 a path object's external id had to name the repository its parent sits in,
+but not where in the repository. Admin on one folder's object let its holder call `create_object`
+under that folder with the node id of a sibling folder, or of any other node of the repository;
+the object counted for that node, and the folder administrator's grants governed it.
+
+**The rule.** For every caller but the operator (who keeps it for repair), `create_object` reads
+the repository's tree at `ref` (default `main`) and refuses a `path` object (`invalid_input`) when:
+
+- no file or folder of that tree has the node id the external id names (`/external_id`); a branch
+  rule's `<repository_id>:<ref>` names no node, so it is refused too, and only
+  `set_branch_protection` makes those;
+- the parent is not the object of the nearest folder above the node that has one in this
+  repository, or the repository's own object when none does (`/parent_id`). That is where the
+  drive capabilities link folder objects (`link_folder_chain`), so a path object is made only by
+  an administrator of the folder it lies in, never beside it or below another folder's object.
+
+A tombstoned repository is `conflict`; no repository store is `store_unavailable`.
+
+**Verify.** `Drive.CreateObjectPlacesAPathObjectByTheTree`: a folder administrator cannot claim a
+file beside the folder, an unknown node or a branch rule; a repository administrator cannot place
+an object for a file inside a folder that has its own object under the repository; each places the
+objects of its own folder.
 
 ## Restricted folders hold for every repository read (lake#975)
 

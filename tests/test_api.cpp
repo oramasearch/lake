@@ -6696,6 +6696,72 @@ TEST(Drive, WritesFollowTheBranchRules) {
     EXPECT_FALSE(repositories.restored);
 }
 
+// lake#1030: a folder's administrator creates path objects only for what lies in that folder.
+// The node an object names must be in the repository's tree, and its parent must be the object of
+// the nearest folder above the node that has one: a sibling, a file above the folder, a node
+// deeper than its own folder object, a branch rule or an unknown node is refused.
+TEST(Drive, CreateObjectPlacesAPathObjectByTheTree) {
+    Surface surface;
+    RepositoryFixtureStore repositories;
+    surface.ctx.sync_store = &repositories;
+    const auto owner = surface.call(
+        "create_user", {{"taap_id", "taap:1:ed25519:tree-owner"}, {"display_name", "Owner"}});
+    ASSERT_TRUE(owner.ok);
+    const auto customer = surface.call("create_customer",
+                                       {{"customer_type", "individual"},
+                                        {"user_id", owner.value["id"]},
+                                        {"name", "tree-objects"}});
+    ASSERT_TRUE(customer.ok);
+    const auto repository = surface.call("create_repository",
+                                         {{"customer_id", customer.value["id"]},
+                                          {"workspace_id", surface.workspace(customer.value["id"])},
+                                          {"name", "drive"}});
+    ASSERT_TRUE(repository.ok);
+    const std::string repository_id = repository.value["id"];
+    const auto object = surface.store.find_policy_object("repository", repository_id);
+    ASSERT_TRUE(object);
+    // The fixture's tree: readme.md (1111…), shared/ (2222…), shared/readme.md (3333…).
+    const std::string top_file = repository_id + ":11111111111111111111111111111111";
+    const std::string folder_node = repository_id + ":22222222222222222222222222222222";
+    const std::string inner_file = repository_id + ":33333333333333333333333333333333";
+    const auto folder = surface.store.create_policy_object(
+        {"path", folder_node, object->id, "admin", "test", true});
+    ASSERT_TRUE(folder);
+    const std::string folder_admin = "taap:1:ed25519:folder-admin";
+    ASSERT_TRUE(
+        surface.store.create_grant({folder_admin, folder->id, "admin", "test", "admin", "test"}));
+    const std::string repository_admin = "taap:1:ed25519:repository-admin";
+    ASSERT_TRUE(surface.store.create_grant(
+        {repository_admin, object->id, "admin", "test", "admin", "test"}));
+    surface.ctx.operator_credential = false;
+    const auto create =
+        [&](const std::string& who, const std::string& id, const std::string& parent) {
+            surface.ctx.acting_identity = who;
+            surface.ctx.authorization_cache = {};
+            return surface.call("create_object",
+                                {{"object_type", "path"},
+                                 {"external_id", id},
+                                 {"parent_id", parent},
+                                 {"inherit", false}});
+        };
+    // The folder administrator cannot claim a file beside the folder under it.
+    EXPECT_EQ(create(folder_admin, top_file, folder->id).error.code, "invalid_input");
+    // Nor a node that is not in the tree, nor a branch rule's id.
+    EXPECT_EQ(create(folder_admin, repository_id + ":not-a-node", folder->id).error.code,
+              "invalid_input");
+    EXPECT_EQ(create(repository_admin, repository_id + ":refs/heads/main", object->id).error.code,
+              "invalid_input");
+    // The repository's administrator places the file inside the folder only under the folder.
+    EXPECT_EQ(create(repository_admin, inner_file, object->id).error.code, "invalid_input");
+    EXPECT_EQ(surface.store.find_policy_object("path", top_file).error().code, "not_found");
+    // What lies in the folder is the folder administrator's to protect.
+    const auto inner = create(folder_admin, inner_file, folder->id);
+    EXPECT_TRUE(inner.ok) << inner.error.message;
+    // The repository's administrator protects the file at the top, under the repository.
+    const auto top = create(repository_admin, top_file, object->id);
+    EXPECT_TRUE(top.ok) << top.error.message;
+}
+
 TEST(Drive, MutationChecksTheLockedTreeAndRestoreChecksMain) {
     Surface surface;
     RepositoryFixtureStore repositories;

@@ -923,6 +923,82 @@ std::expected<std::string, ApiError> global_object(const json&, ApiContext&) {
     return std::string{};
 }
 
+// Why a path object for `node_id` may not sit under `parent_id` (lake#1030). Admin on a folder's
+// object let its holder create objects under it, and the external id was checked only for the
+// repository it names, so a folder administrator could make one for a sibling folder (or any
+// other node of the repository) and govern it with their own grants. The node must be a file or
+// folder of the repository's tree at `ref` (default `main`), and the parent must be the object of
+// the nearest folder above it that has one in this repository, or the repository's own object
+// when none does: exactly where the drive capabilities link it (`link_folder_chain`). So a path
+// object is made only by an administrator of the folder it lies in, and a branch rule's
+// `<repository_id>:<ref>` id, which names no node, never is (set_branch_protection makes those).
+ApiResult path_node_refusal(const json& in,
+                            ApiContext& ctx,
+                            const control::PolicyObject& repository_object,
+                            const std::string& node_id) {
+    const auto repository = ctx.store->get_repository(repository_object.external_id);
+    if (!repository) {
+        return ApiResult::failure(
+            repository.error().code, repository.error().message, "/parent_id");
+    }
+    if (!repository->deleted_at.empty()) {
+        return ApiResult::failure("conflict", "repository is tombstoned", "/parent_id");
+    }
+    if (!ctx.sync_store) {
+        return ApiResult::failure("store_unavailable",
+                                  "no repository store is configured to place a path object");
+    }
+    const std::string ref = in.value("ref", std::string("main"));
+    const auto tree = ctx.sync_store->repository_tree(repository->customer_id, repository->id, ref);
+    if (!tree) {
+        return ApiResult::failure(tree.error().code, tree.error().message, "/ref");
+    }
+    const auto node = std::ranges::find(*tree, node_id, &RepositoryTreeEntry::node_id);
+    if (node_id.empty() || node == tree->end()) {
+        return ApiResult::failure("invalid_input",
+                                  "no file or folder of the repository at " + ref +
+                                      " has node id " + node_id,
+                                  "/external_id");
+    }
+    std::string expected = repository_object.id;
+    for (std::string path = node->path; !path.empty();) {
+        const std::size_t slash = path.find_last_of('/');
+        path = slash == std::string::npos ? std::string{} : path.substr(0, slash);
+        if (path.empty()) {
+            break;
+        }
+        const auto folder = std::ranges::find(*tree, path, &RepositoryTreeEntry::path);
+        if (folder == tree->end() || folder->node_id.empty()) {
+            continue;
+        }
+        const auto object =
+            ctx.store->find_policy_object("path", repository->id + ":" + folder->node_id);
+        if (!object) {
+            if (object.error().code == "not_found") {
+                continue;
+            }
+            return ApiResult::failure(object.error().code, object.error().message);
+        }
+        // Only an object under the repository's own counts (lake#913).
+        const auto within = control::object_within(*ctx.store, object->id, repository_object.id);
+        if (!within) {
+            return ApiResult::failure(within.error().code, within.error().message);
+        }
+        if (*within) {
+            expected = object->id;
+            break;
+        }
+    }
+    if (in.at("parent_id").get<std::string>() != expected) {
+        return ApiResult::failure("invalid_input",
+                                  "a path object sits under the object of the nearest folder above "
+                                  "it that has one (" +
+                                      expected + "), and only that folder's administrator makes it",
+                                  "/parent_id");
+    }
+    return ApiResult::success(json::object());
+}
+
 // Why `create_object` refuses this object, or success when it may be made (lake#913). Every
 // consumer finds an object by its type and external id, which is unique across all accounts, so
 // an object a caller names with another account's identifiers would govern that account's
@@ -959,7 +1035,10 @@ ApiResult caller_object_refusal(const json& in, ApiContext& ctx) {
                                       "<node id>, in the repository it sits in",
                                   "/external_id");
     }
-    return ApiResult::success(json::object());
+    if (ctx.operator_credential) {
+        return ApiResult::success(json::object()); // repair, as for the other types
+    }
+    return path_node_refusal(in, ctx, *repository, external_id.substr(prefix.size()));
 }
 
 std::expected<std::string, ApiError> self_object(const json&, ApiContext& context) {
@@ -6642,14 +6721,17 @@ void register_policy_capabilities(Registry& registry) {
         .title = "Create object",
         .description = "Add a path object under a repository or one of its folders, to protect "
                        "a folder or a file with its own grants. Its external_id is "
-                       "<repository_id>:<node id>, naming the repository it sits in; Lake creates "
+                       "<repository_id>:<node id>, naming a file or folder of the repository's "
+                       "tree at ref (default main), and its parent is the object of the nearest "
+                       "folder above that node that has one, or the repository's; Lake creates "
                        "every other kind of object itself.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"object_type", {{"type", "string"}}},
                            {"external_id", {{"type", "string"}}},
                            {"parent_id", {{"type", "string"}}},
-                           {"inherit", {{"type", "boolean"}}}}},
+                           {"inherit", {{"type", "boolean"}}},
+                           {"ref", {{"type", "string"}}}}},
                          {"required", json::array({"object_type", "external_id", "parent_id"})},
                          {"additionalProperties", false}},
         .output_schema = object_schema(),
