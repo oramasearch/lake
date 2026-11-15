@@ -43,6 +43,9 @@ workspace or repository. `library_agent_may_read` (`workspace_capabilities.cpp`)
 Ask Orama's turn key is generated from. See
 [agent-bus.md](../../docs/api/agent-bus.md#a-task-credential-is-confined-to-its-workspace).
 
+`usage_capabilities.cpp`'s `reporter_of` accepts a library agent's bus credential only for a
+`Running` task of its own agent (lake#871).
+
 `registry.cpp` also enforces a launch's dataset work area (lake#1055): `work_area_input` names the
 database on a confined `get_dataset`, `work_area_refusal` refuses at dispatch every call that
 cannot be shown to stay inside the work area, and `confine_answer` keeps only its datasets in a

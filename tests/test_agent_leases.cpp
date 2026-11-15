@@ -403,6 +403,51 @@ TEST_P(AgentLeases, RetryNoticeIsTheTasksMessage) {
     EXPECT_EQ(task->message, message);
 }
 
+// lake#871: a library agent holds a task credential only while it serves that task. Once the task
+// has its answer, the credential it was handed is refused, and another agent's bus credential
+// cannot claim or report on the task.
+TEST_P(AgentLeases, ATaskCredentialEndsWithItsTaskAndAnotherAgentCannotNameIt) {
+    const auto claimed = call("claim_agent_task", json::object());
+    ASSERT_TRUE(claimed.ok) << claimed.error.message;
+    const std::string credential = claimed.value["body"]["lake_token"];
+    const auto principal = store->context_for(credential);
+    ASSERT_TRUE(principal);
+    lake::api::ApiContext context;
+    context.store = store.get();
+    context.authorized = true;
+    context.credential_kind = principal->kind;
+    context.credential_session_id = principal->session_id;
+    context.credential_token_hash = principal->workload_token_hash;
+    context.acting_identity = principal->taap_id;
+    context.instance_kek = lake::test::test_instance_kek();
+    ASSERT_TRUE(registry.call("server_info", json::object(), context).ok);
+
+    lake::api::ApiContext stranger;
+    stranger.store = store.get();
+    stranger.workspaces = workspaces.get();
+    stranger.agent_bus = bus.get();
+    stranger.authorized = true;
+    stranger.acting_identity = "agent-service:agent-experiments";
+    stranger.credential_kind = "agent_service";
+    stranger.agent_service = "agent-experiments";
+    stranger.instance_kek = lake::test::test_instance_kek();
+    const json named{{"task_id", task_id}, {"agent", "agent-experiments"}};
+    const auto taken =
+        liquid::runtime::block_on(registry.call_async("claim_agent_task", named, stranger));
+    ASSERT_TRUE(taken);
+    EXPECT_FALSE(taken->ok) << "another agent's bus credential claims no task of this agent";
+    const json usage{
+        {"task_id", task_id}, {"model_name", "gpt-5"}, {"input_tokens", 1}, {"output_tokens", 1}};
+    const auto reported =
+        liquid::runtime::block_on(registry.call_async("record_model_usage", usage, stranger));
+    ASSERT_TRUE(reported);
+    EXPECT_EQ(reported->error.code, "conflict");
+
+    ASSERT_TRUE(call("publish_agent_event", {{"type", "result"}, {"result", {{"done", true}}}}).ok);
+    EXPECT_FALSE(registry.call("server_info", json::object(), context).ok)
+        << "the finished task's credential acts no more";
+}
+
 TEST(AgentLeaseConfig, ParsesPerAgentBoundsAndRejectsInvalidConfiguration) {
     const auto parsed =
         lake::control::parse_agent_leases("agent-project=60,agent-experiments=3600");

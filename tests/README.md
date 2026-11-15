@@ -1050,6 +1050,11 @@ resolv.conf). The capability flow is in `test_platform.cpp` (`PlatformFixture.*D
 reaches no other account or workspace, and Ask Orama's read list leaves out secrets and
 credentials.
 
+`AgentLeases.ATaskCredentialEndsWithItsTaskAndAnotherAgentCannotNameIt` (`test_agent_leases.cpp`)
+and `RecordModelUsage.ABusCredentialReportsOnlyItsOwnRunningTask` (`test_usage.cpp`) cover
+lake#871: a task credential ends with its task, and a library agent's bus credential names only
+its own agent's running tasks. See [agent-bus.md](../docs/api/agent-bus.md#what-a-library-agent-holds-and-the-trust-placed-in-it).
+
 `test_streams.cpp`'s `AgentWorkArea.ADatasetWorkAreaBecomesCanonicalScopes` and
 `Streams.ADatasetConfinedLaunchCredentialStaysInItsWorkArea` cover a launch's dataset work area
 (lake#1055): the scopes it becomes, and that a launch credential called directly reaches only that

@@ -156,6 +156,35 @@ Tests: `Policy.AConfinedDecisionAllowsOnlyObjectsInsideItsAccountAndWorkspace`,
 `Policy.LibraryAgentReadsLeaveOutSecretsAndCredentials` and
 `Streams.TaskCredentialReadsOnlyItsOwnWorkspacesResources`.
 
+## What a library agent holds, and the trust placed in it
+
+lake#871. A library agent (Ask Orama, its specialists, the Application Agent and the rest of the
+Agent Library) is one shared process per agent that serves every tenant, with one bus credential.
+Claiming a task fills the task body's `{{credential}}` with a task credential that acts as the
+person who started the turn. What bounds that credential today:
+
+- **It lives only while its task runs.** Every call with it renews the claim
+  (`renew_agent_task_lease` in `prepare_call`), which requires the task to be `Running` under the
+  same credential digest; a retry clears the digest, and a finished, failed or reclaimed task's
+  credential is refused. A compromised process holds the credentials of the tasks it is serving at
+  that moment, never earlier ones.
+- **It acts only in its task's account and workspace**
+  ([above](#a-task-credential-is-confined-to-its-workspace), lake#985), with the task's scopes.
+- **The bus credential names only its own agent's running tasks.** `claim_agent_task`,
+  `publish_agent_event` and `record_model_usage` refuse a task of another agent, and
+  `record_model_usage` also refuses one that is not `Running` (`conflict`, `/task_id`), so the bus
+  credential cannot report usage into any workspace whose task it is not serving.
+
+What it does not bound: while a turn runs, the shared process holds that turn's credential in
+clear, beside the credentials of the other tenants' turns it is serving at the same moment. Lake
+therefore trusts every library-agent image it dispatches to (`LAKE_AGENT_ENDPOINTS`) as it trusts
+its own code: they are Orama's private images, pinned by the operator, and never customer code.
+Whether the boundary moves (a library-agent process per workspace, or credentials that never reach
+the process in clear) is open on lake#871.
+
+Tests: `AgentLeases.ATaskCredentialEndsWithItsTaskAndAnotherAgentCannotNameIt` and
+`RecordModelUsage.ABusCredentialReportsOnlyItsOwnRunningTask`.
+
 ## Delegated turns
 
 An agent that delegates calls `agent_turn` with its own task credential (Ask Orama's `delegate`).

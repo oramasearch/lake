@@ -1658,6 +1658,15 @@ std::expected<Reporter, ApiResult> reporter_of(const json& input, ApiContext& co
             return std::unexpected(
                 ApiResult::failure("conflict", "the task is not one of this agent's", "/task_id"));
         }
+        // The bus credential reports only for a task it is serving now (lake#871): a claimed,
+        // Running task, as a task credential itself is usable only while its task runs. A
+        // finished, waiting or reclaimed task of any workspace is not reachable through it.
+        if (task->phase != "Running") {
+            return std::unexpected(
+                ApiResult::failure("conflict",
+                                   "the task is not running; usage is reported while it runs",
+                                   "/task_id"));
+        }
         return Reporter{task->workspace_id, task->agent, task->id, task->customer_id};
     }
     if (context.credential_kind == "agent_task") {
