@@ -1,6 +1,7 @@
 #include "postgres_fixture.hpp"
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdio>
@@ -9,6 +10,7 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -30,6 +32,7 @@
 #include <openssl/core_names.h>
 #include <openssl/ecdsa.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
@@ -277,6 +280,40 @@ public:
         HttpResponse response = request(port_, "POST", path_of(url), jws.dump());
         nonce_ = header(response, "Replay-Nonce");
         return response;
+    }
+
+    // RFC 8555 §7.3.4: the account key, signed HS256 with the binding an administrator issued.
+    nlohmann::json external_account_binding(const lake::control::pki::ExternalAccountBinding& binding,
+                                            std::string_view url) const {
+        const std::string encoded_protected = base64url(
+            nlohmann::json{{"alg", "HS256"}, {"kid", binding.key_id}, {"url", std::string(url)}}
+                .dump());
+        const std::string encoded_payload = base64url(jwk_of(account_key_.get()).dump());
+        std::string key = binding.hmac_key;
+        std::ranges::replace(key, '-', '+');
+        std::ranges::replace(key, '_', '/');
+        while (key.size() % 4 != 0) {
+            key += '=';
+        }
+        std::string raw(key.size(), '\0');
+        const int decoded = EVP_DecodeBlock(reinterpret_cast<unsigned char*>(raw.data()),
+                                            reinterpret_cast<const unsigned char*>(key.data()),
+                                            static_cast<int>(key.size()));
+        raw.resize(static_cast<std::size_t>(decoded < 0 ? 0 : decoded) -
+                   static_cast<std::size_t>(std::ranges::count(key, '=')));
+        const std::string input = encoded_protected + "." + encoded_payload;
+        std::array<unsigned char, EVP_MAX_MD_SIZE> mac{};
+        unsigned size = 0;
+        HMAC(EVP_sha256(),
+             raw.data(),
+             static_cast<int>(raw.size()),
+             reinterpret_cast<const unsigned char*>(input.data()),
+             input.size(),
+             mac.data(),
+             &size);
+        return {{"protected", encoded_protected},
+                {"payload", encoded_payload},
+                {"signature", base64url(mac.data(), size)}};
     }
 
     void set_account_url(std::string account_url) {
@@ -899,6 +936,15 @@ TEST(Pki, AcmeClientCompletesHttp01OrderAndDownloadsCertificate) {
     options.port = 0;
     options.store = store;
     options.instance_kek = instance_kek;
+    // The HTTP-01 check fetches http://<identifier>/...; here the identifier's server answers what
+    // `answer` holds for the challenge path (lake#919).
+    auto answer = std::make_shared<std::map<std::string, std::string>>();
+    std::vector<std::string> fetched;
+    options.acme_http01_fetch = [answer, &fetched](const std::string& url) -> std::optional<std::string> {
+        fetched.push_back(url);
+        const auto found = answer->find(url);
+        return found == answer->end() ? std::nullopt : std::optional(found->second);
+    };
     lake::api::ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
 
@@ -908,13 +954,35 @@ TEST(Pki, AcmeClientCompletesHttp01OrderAndDownloadsCertificate) {
     const HttpResponse directory_response = client.get(directory_url);
     ASSERT_EQ(directory_response.status, 200);
     const nlohmann::json directory = nlohmann::json::parse(directory_response.body);
+    EXPECT_EQ(directory.at("meta").at("externalAccountRequired"), true);
 
     const HttpResponse nonce_response = client.nonce(directory.at("newNonce").get<std::string>());
     ASSERT_EQ(nonce_response.status, 200);
     ASSERT_FALSE(header(nonce_response, "Replay-Nonce").empty());
 
+    // Without a binding from the customer's administrator, no account (lake#919); nor with one
+    // issued for another customer.
+    const std::string new_account = directory.at("newAccount");
+    const HttpResponse unbound = client.post(new_account, {{"termsOfServiceAgreed", true}}, true);
+    EXPECT_EQ(unbound.status, 403) << unbound.body;
+    EXPECT_NE(unbound.body.find("externalAccountRequired"), std::string::npos) << unbound.body;
+    const auto foreign = lake::control::pki::new_external_account_binding(instance_kek, "other");
+    ASSERT_TRUE(foreign);
+    const HttpResponse misbound = client.post(
+        new_account,
+        {{"termsOfServiceAgreed", true},
+         {"externalAccountBinding", client.external_account_binding(*foreign, new_account)}},
+        true);
+    EXPECT_EQ(misbound.status, 403) << misbound.body;
+
+    const auto binding =
+        lake::control::pki::new_external_account_binding(instance_kek, customer->id);
+    ASSERT_TRUE(binding) << binding.error().message;
     const HttpResponse account = client.post(
-        directory.at("newAccount").get<std::string>(), {{"termsOfServiceAgreed", true}}, true);
+        new_account,
+        {{"termsOfServiceAgreed", true},
+         {"externalAccountBinding", client.external_account_binding(*binding, new_account)}},
+        true);
     ASSERT_EQ(account.status, 201) << account.body;
     client.set_account_url(header(account, "Location"));
     ASSERT_FALSE(header(account, "Location").empty());
@@ -939,6 +1007,22 @@ TEST(Pki, AcmeClientCompletesHttp01OrderAndDownloadsCertificate) {
     ASSERT_EQ(key_authorization.status, 200);
     EXPECT_EQ(key_authorization.body, token + "." + client.thumbprint());
 
+    // The identifier does not answer the key authorization yet: the order stays pending and
+    // finalize refuses (lake#919).
+    const std::string challenge_url =
+        "http://" + identifier + "/.well-known/acme-challenge/" + token;
+    (*answer)[challenge_url] = token + ".not-this-account";
+    const HttpResponse wrong =
+        client.post(challenge.at("url").get<std::string>(), nlohmann::json::object());
+    EXPECT_EQ(wrong.status, 403) << wrong.body;
+    EXPECT_NE(wrong.body.find("incorrectResponse"), std::string::npos) << wrong.body;
+    ASSERT_FALSE(fetched.empty());
+    EXPECT_EQ(fetched.back(), challenge_url);
+    const HttpResponse early = client.post(order_document.at("finalize").get<std::string>(),
+                                           {{"csr", csr_for(identifier)}});
+    EXPECT_NE(early.status, 200) << early.body;
+
+    (*answer)[challenge_url] = key_authorization.body + "\n";
     const HttpResponse challenged =
         client.post(challenge.at("url").get<std::string>(), nlohmann::json::object());
     ASSERT_EQ(challenged.status, 200) << challenged.body;

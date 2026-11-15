@@ -1,7 +1,9 @@
 #pragma once
 #include <chrono>
 #include <cstddef>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -237,6 +239,9 @@ struct ServerOptions {
     // The staging root import_github_repository reads checkouts from:
     // <root>/<customer id>/<git_directory> (LAKE_GIT_IMPORT_ROOT, lake#925). Empty: not offered.
     std::string git_import_root;
+    // How an ACME HTTP-01 challenge is fetched (lake#919): empty, the outbound client (plain http
+    // to port 80 of a public address). Tests inject one; answers the body, or nothing.
+    std::function<std::optional<std::string>(const std::string& url)> acme_http01_fetch;
     // Speech-to-text (docs/api/transcripts.md, lake#561): OpenAI's key (LAKE_OPENAI_API_KEY) and
     // the transcription model (LAKE_TRANSCRIBE_MODEL, empty: gpt-4o-transcribe). With no key and
     // no injected `transcriber`, transcribe and audio transcripts answer not_supported.

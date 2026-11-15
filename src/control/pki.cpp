@@ -2053,4 +2053,106 @@ Service::AcmeOrderEntry* Service::find_acme_order_locked(std::string_view custom
     return &order->second;
 }
 
+namespace {
+
+std::string external_account_key(std::string_view instance_kek,
+                                 std::string_view customer_id,
+                                 std::string_view key_id) {
+    const std::string message = "lake acme eab v1\n" + std::string(customer_id) + "\n" +
+                                std::string(key_id);
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned size = 0;
+    if (HMAC(EVP_sha256(),
+             instance_kek.data(),
+             static_cast<int>(instance_kek.size()),
+             reinterpret_cast<const unsigned char*>(message.data()),
+             message.size(),
+             digest.data(),
+             &size) == nullptr) {
+        return {};
+    }
+    return std::string(reinterpret_cast<const char*>(digest.data()), size);
+}
+
+} // namespace
+
+Result<ExternalAccountBinding> new_external_account_binding(std::string_view instance_kek,
+                                                            std::string_view customer_id) {
+    if (instance_kek.empty() || customer_id.empty()) {
+        return std::unexpected(Error{"unavailable", "this lake has no instance key"});
+    }
+    auto key_id = random_acme_value(16);
+    if (!key_id) {
+        return std::unexpected(key_id.error());
+    }
+    const std::string key = external_account_key(instance_kek, customer_id, *key_id);
+    if (key.empty()) {
+        return std::unexpected(crypto_error("could not derive the account binding key"));
+    }
+    auto encoded = base64url_encode(reinterpret_cast<const unsigned char*>(key.data()), key.size());
+    if (!encoded) {
+        return std::unexpected(encoded.error());
+    }
+    return ExternalAccountBinding{*key_id, *encoded};
+}
+
+Result<void> verify_external_account_binding(std::string_view instance_kek,
+                                             std::string_view customer_id,
+                                             std::string_view binding_json,
+                                             std::string_view expected_url,
+                                             const AcmeJwk& account_jwk) {
+    const auto refused = [](std::string message) {
+        return std::unexpected(Error{"external_account_required", std::move(message)});
+    };
+    if (instance_kek.empty()) {
+        return refused("this lake cannot verify an external account binding");
+    }
+    const nlohmann::json binding = nlohmann::json::parse(binding_json, nullptr, false);
+    if (!binding.is_object() || !binding.contains("protected") || !binding.contains("payload") ||
+        !binding.contains("signature") || !binding.at("protected").is_string() ||
+        !binding.at("payload").is_string() || !binding.at("signature").is_string()) {
+        return refused("newAccount needs an externalAccountBinding from this customer's administrator");
+    }
+    const std::string encoded_protected = binding.at("protected");
+    const std::string encoded_payload = binding.at("payload");
+    const auto protected_text = base64url_decode(encoded_protected);
+    const auto payload_text = base64url_decode(encoded_payload);
+    const auto signature = base64url_decode(binding.at("signature").get<std::string>());
+    if (!protected_text || !payload_text || !signature) {
+        return refused("the externalAccountBinding is not base64url");
+    }
+    const nlohmann::json header = nlohmann::json::parse(
+        std::string(protected_text->begin(), protected_text->end()), nullptr, false);
+    const nlohmann::json payload = nlohmann::json::parse(
+        std::string(payload_text->begin(), payload_text->end()), nullptr, false);
+    if (!header.is_object() || header.value("alg", "") != "HS256" || !header.contains("kid") ||
+        !header.at("kid").is_string() || header.at("kid").get<std::string>().empty() ||
+        header.at("kid").get<std::string>().size() > 64 || header.contains("nonce") ||
+        header.value("url", "") != expected_url) {
+        return refused("the externalAccountBinding header must be HS256 with kid and this url");
+    }
+    if (!payload.is_object() || payload.value("kty", "") != "EC" ||
+        payload.value("crv", "") != "P-256" || payload.value("x", "") != account_jwk.x ||
+        payload.value("y", "") != account_jwk.y) {
+        return refused("the externalAccountBinding must bind this account's key");
+    }
+    const std::string key =
+        external_account_key(instance_kek, customer_id, header.at("kid").get<std::string>());
+    const std::string signing_input = encoded_protected + "." + encoded_payload;
+    std::array<unsigned char, EVP_MAX_MD_SIZE> expected{};
+    unsigned size = 0;
+    if (key.empty() ||
+        HMAC(EVP_sha256(),
+             key.data(),
+             static_cast<int>(key.size()),
+             reinterpret_cast<const unsigned char*>(signing_input.data()),
+             signing_input.size(),
+             expected.data(),
+             &size) == nullptr ||
+        signature->size() != size || CRYPTO_memcmp(signature->data(), expected.data(), size) != 0) {
+        return refused("the externalAccountBinding signature does not verify");
+    }
+    return {};
+}
+
 } // namespace lake::control::pki
