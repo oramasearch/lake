@@ -323,7 +323,10 @@ lake asks it once.
 ## Webhooks
 
 `POST /billing/stripe/webhook` receives Stripe's events. It has no lake credential: the
-`Stripe-Signature` header is the credential.
+`Stripe-Signature` header is the credential. **A notice that does not authenticate is not audited one by one** (LSR-196, lake#1002): it is
+answered `400` and counted, and at most one `billing.payment.notice` `denied` event a minute records
+the reason and `refused_since_last_summary`, so unauthenticated traffic cannot append to the central
+audit log at will.
 
 1. **Signature.** `Stripe-Signature: t=<unix seconds>,v1=<hex>[,v1=...]`; lake computes
    HMAC-SHA256 of `<t>.<raw body>` with the webhook secret (OpenSSL) and compares it with every

@@ -376,6 +376,27 @@ std::shared_ptr<lake::api::PaymentProviders> stripe_providers(FakeStripe& stripe
                                            "https://stripe.test"));
 }
 
+// LSR-196 (lake#1002): notices that do not authenticate are anyone's requests. However many arrive,
+// they add at most one denied audit event a minute, never one each.
+TEST(StripeNotices, UnauthenticatedNoticesDoNotEachAppendAnAuditEvent) {
+    FakeStripe stripe;
+    StripeRig rig(stripe_providers(stripe));
+    const std::string body = event("evt_unsigned", "invoice.paid", "in_1");
+    for (int i = 0; i < 20; ++i) {
+        const auto outcome = rig.notice(body, "t=1,v1=00");
+        EXPECT_EQ(outcome.status, 400);
+    }
+    const auto events = lake::test::audit_events(*rig.store, {.limit = 500});
+    ASSERT_TRUE(events) << events.error().message;
+    std::size_t denied = 0;
+    for (const auto& entry : *events) {
+        if (entry.draft.kind == "billing.payment.notice" && entry.draft.outcome == "denied") {
+            ++denied;
+        }
+    }
+    EXPECT_LE(denied, 1U);
+}
+
 TEST(StripeSignature, ChecksTheHmacAndTheToleranceWindow) {
     const std::string body = event("evt_1", "invoice.paid", "in_1");
     const auto now = std::chrono::system_clock::now();
