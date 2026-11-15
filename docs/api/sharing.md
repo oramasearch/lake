@@ -13,8 +13,7 @@ be recalled; export or download performs the copy.
 ordinary policy grant. The recipient sees the continuing live object. Other principals receive
 `unauthorized`.
 
-Sharing requires `share` on the folder and every action the requested role grants (lake#955,
-LSR-089). A caller holding only `share` may grant `read` or `share`, but cannot grant `write`.
+Sharing requires `share` on the folder and every action the requested role grants (lake#955). A caller holding only `share` may grant `read` or `share`, but cannot grant `write`.
 Separate direct or inherited grants can supply the required actions. The same check applies to
 `create_drive_share_link`, before any link record or synthetic grant is written. A denied role
 returns `unauthorized` at `/role`; retrying an existing live grant also requires these checks.

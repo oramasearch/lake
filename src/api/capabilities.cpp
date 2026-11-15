@@ -1605,7 +1605,7 @@ json audit_filter_input() {
               {"limit", {{"type", "integer"}}},
               {"order", {{"type", "string"}, {"enum", json::array({"newest", "oldest"})}}},
               {"include_reads", {{"type", "boolean"}}},
-              // Decision 52 (docs/api/audit.md#which-log): which logs a read covers.
+              // The audit split (docs/api/audit.md#which-log): which logs a read covers.
               {"workspace_id",
                {{"type", "string"},
                 {"description", "Read only this workspace's audit (its Zetta's chain)."}}},
@@ -1738,7 +1738,7 @@ ApiResult audit_items(const std::vector<audit::Event>& events, ApiContext& conte
     return ApiResult::success({{"items", std::move(items)}});
 }
 
-// audit_items over events read from both logs (decision 52): each item says which log it came
+// audit_items over events read from both logs: each item says which log it came
 // from, the workspace and its place in that workspace's chain, and whether it is still queued in
 // this process; the answer names the workspaces that could not be read.
 ApiResult logged_audit_items(const AuditRead& read, ApiContext& context) {
@@ -2831,7 +2831,7 @@ void register_server_info(Registry& registry, std::string_view version) {
         }});
 }
 
-// Using your own identity (lake#762, liquid-bridge decision 65,
+// Using your own identity (lake#762,
 // docs/api/identity.md#your-own-identity).
 json account_identity_json(const control::AccountIdentity& identity) {
     json linked = nullptr;
@@ -3509,7 +3509,7 @@ void register_identity_capabilities(Registry& registry) {
                                           input.value("device_name", "browser"),
                                           input.value("identity_document", "")};
             user.identity_proof = identity_proof_input(input);
-            // Lake's own sign-up without a document gets a managed key (lake#762, decision 65).
+            // Lake's own sign-up without a document gets a managed key (lake#762).
             if (pool_id == "lake" &&
                 user.identity_document.find_first_not_of(" \t\r\n") == std::string::npos) {
                 user.identity_document.clear();
@@ -7198,7 +7198,7 @@ void register_search_capability(Registry& registry) {
 // ---- instance identity and audit ----
 namespace {
 
-// The logs one audit read covers (decision 52, docs/api/audit.md#which-log). `spaces`: the spaces
+// The logs one audit read covers (docs/api/audit.md#which-log). `spaces`: the spaces
 // whose workspaces a caller may read when the input names none (empty for the operator's `audit`:
 // every space).
 std::expected<AuditScope, ApiError>
@@ -7379,7 +7379,7 @@ void register_audit_capabilities(Registry& registry) {
                        "first unless `order` is `oldest` or `after_id` continues a page. Each "
                        "event names its principal (`principal_name`) and, for a workspace call, "
                        "the inner `capability`. Reads the central log and every workspace's audit "
-                       "(decision 52): `workspace_id` reads one workspace's, `customer_id` reads "
+                       ": `workspace_id` reads one workspace's, `customer_id` reads "
                        "one account's (its workspaces and the central events attributed to it), "
                        "and `log: central` reads the central log alone. Each event says its "
                        "`log`. An account's administrator reads its own account's audit by "
@@ -7544,7 +7544,7 @@ void register_audit_capabilities(Registry& registry) {
         .title = "Verify audit chain",
         .description = "Check that an audit log is complete and untampered: every event's "
                        "signature and the hash chain linking them. The central log, or with "
-                       "`workspace_id` that workspace's own chain (decision 52).",
+                       "`workspace_id` that workspace's own chain.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"workspace_id", {{"type", "string"}}},
@@ -7594,7 +7594,7 @@ void register_audit_capabilities(Registry& registry) {
         .title = "Set audit retention",
         .description = "Set an account's retention of the central audit log, at or above the "
                        "400-day floor; it can never be reduced. The account's workspace audits are "
-                       "kept until their workspace is deleted (decision 52, lake#318).",
+                       "kept until their workspace is deleted (lake#318).",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"customer_id", {{"type", "string"}}}, {"days", {{"type", "integer"}}}}},

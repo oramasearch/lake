@@ -3,8 +3,7 @@
 [status.md](status.md) records disabled-account agent offboarding (lake#951), including immediate
 credential refusal and durable workspace-stream cleanup; [Clerk](../api/clerk.md#webhooks) has the
 behavior and verification contract.
-[status.md](status.md) records the workspace dataset/model metadata authorization fix (lake#970,
-LSR-104) separately from deployment; [models.md](../api/models.md) specifies the access contract.
+[status.md](status.md) records the workspace dataset/model metadata authorization fix (lake#970) separately from deployment; [models.md](../api/models.md) specifies the access contract.
 [PKI SAN validation](../api/pki.md#certificate-identities) is implemented in the source tree
 (lake#946); [status.md](status.md) keeps that fix separate from deployed PKI behavior.
 [status.md](status.md) records bounded pipeline processing (lake#967); the
@@ -15,7 +14,7 @@ text and caller-executed functions (lake#960); [status.md](status.md) records so
 [status.md](status.md) tracks bounded JSON admission (lake#944) separately from deployment;
 [HTTP limits](../serving/http.md#request-body-limits) defines its credential and parser budgets.
 
-Clerk/OIDC bounded JWKS refresh and the Clerk exchange attempt limit (lake#956) are tracked in [status.md](status.md) and specified in [Clerk](../api/clerk.md#bounded-key-refresh-lake956-lsr-090).
+Clerk/OIDC bounded JWKS refresh and the Clerk exchange attempt limit (lake#956) are tracked in [status.md](status.md) and specified in [Clerk](../api/clerk.md#bounded-key-refresh-lake956).
 
 Secure-networking store and capability support and its separate operator rollout are tracked in
 [status.md](status.md) and specified in the [control-plane](../control-plane/network.md) and
@@ -72,28 +71,28 @@ implemented and not yet deployed.
 [status.md](status.md) records repository environments and the platform mirror in the repository's
 workspace Zetta (lake#358, lake#359, migration `0060`) as implemented and not yet deployed.
 
-[status.md](status.md) records the audit split by subject (decision 52, lake#317, lake#318,
+[status.md](status.md) records the audit split by subject (lake#317, lake#318,
 migration `0063`) as implemented and not yet deployed.
 
-[status.md](status.md) records the remote MCP/OAuth JSON nesting budget (lake#958, LSR-092);
+[status.md](status.md) records the remote MCP/OAuth JSON nesting budget (lake#958);
 [the contract](../api/mcp-connections.md#the-client) names the readers and regression tests.
 Folder-sharing role attenuation and non-admin recipient restrictions (lake#955) are recorded in
 [status.md](status.md) and [the sharing contract](../api/sharing.md).
-`status.md` records organization owner-only membership changes (LSR-099, lake#965); the
+`status.md` records organization owner-only membership changes (lake#965); the
 [API contract](../api/organizations.md#delegated-administration) states the rule and checks.
 
 
-Repository mutation destination and descendant authorization (lake#962, LSR-096) is recorded in
+Repository mutation destination and descendant authorization (lake#962) is recorded in
 [status.md](status.md) and [the Drive contract](../api/drive.md).
 `status.md` records the source-only dynamic-secret transparency privacy fix (lake#953): digest
 commitments for successful calls and private audit for denials and failures.
 
 `status.md` records checkpoint-authenticated log replication and refusal of legacy full-event
-identity scans (lake#974, LSR-107); [replication](../api/replication.md) describes the compatibility
+identity scans (lake#974); [replication](../api/replication.md) describes the compatibility
 change and verification.
-[status.md](status.md) records workspace audit queue isolation and its pending durable retry work (LSR-098).
-Release source binding (LSR-106) and its producer rollout requirement are recorded in
-[status.md](status.md); the [forge contract](../api/forge.md#source-binding-lsr-106) specifies
+[status.md](status.md) records workspace audit queue isolation and its pending durable retry work.
+Release source binding and its producer rollout requirement are recorded in
+[status.md](status.md); the [forge contract](../api/forge.md#source-binding) specifies
 which signed evidence can satisfy a protected push.
 Storage quota changes through either setter require the operator or instance administrator
-(lake#976, LSR-109); the [status table](status.md) records implementation and deployment separately.
+(lake#976); the [status table](status.md) records implementation and deployment separately.

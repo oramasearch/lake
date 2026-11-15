@@ -10,7 +10,7 @@ A repository is owned by a customer (the tenant) and named within it: the addres
 
 Every repository belongs to one workspace of its account (lake#315, part 1: routing). The
 workspace is named on create and never changes; there is no default workspace. The repository row
-in lake's PostgreSQL is the routing row (decision 54, S10): id, account, workspace, name, visibility
+in lake's PostgreSQL is the routing row (S10): id, account, workspace, name, visibility
 and tombstone, which lake needs to find a repository by name, serve an anonymous read of a public
 one and collect expired tombstones before it reads any workspace. Its description is a record in
 that workspace's Zetta ([below](#where-the-description-lives-lake315-part-2)); forge records moved
@@ -202,7 +202,7 @@ repository's metadata, forge records and content when they move.
   every handler that loads the repository carry it. The push path resolves the repository once and
   hands it, workspace included, to `sync_change_authorizer` and `evaluate_branch_protection`; each
   branch protection audit record and the `push` audit record name the workspace.
-- **Workspace deletion.** Deleting a workspace deletes its repositories (lake#514, decision 54
+- **Workspace deletion.** Deleting a workspace deletes its repositories (lake#514
   S12): in the deletion's transaction every repository of the workspace that is live or still
   inside its retention is tombstoned with its retention ended (`retention_until` now, an earlier
   `deleted_at` kept), which frees its name in the account at once. Each gets a central audit event
@@ -221,8 +221,8 @@ keeps working, with `workspace_id: null`, until an explicitly reviewed migration
 them with `SELECT * FROM workspace_assignments WHERE object_table = 'repositories' AND
 outcome = 'needs_selection'`.
 
-Migration `0066_assign_unrouted_repositories` is that reviewed migration (decision 54 S14,
-lake#513). It runs once and is generic rather than naming an id: each repository that still has no
+Migration `0066_assign_unrouted_repositories` is that reviewed migration
+(lake#513). It runs once and is generic rather than naming an id: each repository that still has no
 workspace, tombstoned ones included, is assigned its account's only live workspace when the account now
 has exactly one; any other (several live workspaces, or none) is left alone and reported with a
 `RAISE WARNING` naming the repository, the account and the count. Each assignment is recorded in
@@ -251,7 +251,7 @@ workspace of its account, `d2a67e5d-cf36-4cd6-83a1-2e77625284dd`. Steps, for the
 
 ## Where the description lives (lake#315 part 2)
 
-Decision 54 (S10) keeps the repository row central as routing and moves only what a person wrote
+Lake keeps the repository row central as routing and moves only what a person wrote
 about the repository. A repository's description, and any later setting (default branch, topics),
 is one sealed record of the `lake_repositories` collection in its workspace's Zetta
 ([workspace records](../architecture/workspace-records.md)), keyed by the repository id and found by
@@ -288,7 +288,7 @@ under another key, in another workspace or of another account does not open.
   [cutover runbook](../architecture/workspace-records.md#cutover-runbook-repository-descriptions-dev-cluster).
 
 `repository_refs`, the table that copied each liquid ref after a push, a replication and a `refs`
-read, is dropped by the same migration (lake#319, decision 54 S11). Nothing read it; the liquid
+read, is dropped by the same migration (lake#319). Nothing read it; the liquid
 repository is the only record of a repository's refs.
 
 ## Verify

@@ -117,7 +117,7 @@ Every completed request writes one JSON object to stdout:
 | `<name>_id` | each identifier the route captured (`repository_id`, `customer_id`, `workspace_id`, `order_id`, …) when it is a UUID |
 | `workspace_id` | the workspace the request was routed to ([below](#the-workspace-request-series)), when it was |
 
-The raw path is not logged (decision 54 S9, lake#384): a path can carry a repository, package,
+The raw path is not logged (lake#384): a path can carry a repository, package,
 image or file name. A captured value that is not a UUID (`:package`, an OCI `:repository`,
 `:digest`, `:filename`, an ACME `:token`) is left out, and the query string never was logged. A
 request log line therefore carries no customer content. The `handler_exception` line
@@ -129,7 +129,7 @@ or `no`, never either token, and `replication_peers`, the origins replication ma
 ### The workspace request series
 
 Lake's process metrics and request logs are instance operations data, a named exception to the
-rule that everything goes in a workspace Zetta (decision 54 S9). Each workspace still gets its own
+rule that everything goes in a workspace Zetta. Each workspace still gets its own
 view of its traffic: a counter `lake_requests` in its Zetta's labelled time series (zetta
 `docs/data/time-series.md`, zetta#1231), created by lake with `create_metric` (counter,
 `resolution_ms` 60000, `retention_ms` 30 days).

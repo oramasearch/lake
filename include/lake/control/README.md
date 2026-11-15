@@ -188,20 +188,20 @@ usage limits (migration `0072_usage_limits`, lake#564): content-free configurati
 in workspace Zettas.
 `store.hpp`'s `BillingPlan`, `BillingPrice`, `Invoice` and `InvoiceLine`, with `billing_plans`,
 `put_billing_plan`, `create_invoice`, `list_invoices`, `get_invoice` and `set_invoice_state`, are
-billing records (migration `0073_billing`, lake#564, decision 56; since lake#635 each publication
+billing records (migration `0073_billing`, lake#564; since lake#635 each publication
 of the usage-only price list is one `BillingPlan` row, and the subscription methods are gone because
 there is no plan to choose): control-plane multitenancy; usage stays in
 workspace Zettas and an invoice line keeps only the quantity billed. `PaymentEvent`,
 `PaymentEventResult`, `billing_provider_customer`, `set_billing_provider_customer`,
 `replace_billing_provider_customer` and `apply_payment_event` are the payment provider's records
-(migration `0074_payment_provider`, lake#620, decision 57): the provider's customer per account,
+(migration `0074_payment_provider`, lake#620): the provider's customer per account,
 replaced only from the id read when the provider no longer has it (lake#856), and its notices,
 applied once by event id. `CloudOrder`, `NewCloudOrder`, `CloudOrderTransition`,
 `CloudOrderPayment`, `CloudOrderEvent` and `CloudOrderEmailOutcome`, with
 `create_cloud_order`, `get_cloud_order`,
 `PaymentEventResult`, `billing_provider_customer`, `set_billing_provider_customer` and
 `apply_payment_event` are the payment provider's records (migration `0074_payment_provider`,
-lake#620, decision 57): the provider's customer per account and its notices, applied once by event
+lake#620): the provider's customer per account and its notices, applied once by event
 id. `BillingContact`, `billing_contact`, `set_billing_contact` and `billing_contact_problem` are each
 account's billing email, name and address (migration `0090_billing_contacts`, lake#857), a billing
 record replaced whole on every save; `set_invoice_provider_status` records whether an invoice's
@@ -249,7 +249,7 @@ an event with `if_revision`, rereads on a conflict and leaves a finished record 
 the store answers its dispatch half only (an empty `body`, a null `result`, and as `message` only
 lake's notice); `create_agent_task` keeps a caller-made `id`, `record_agent_task_event` takes no
 message or answer (the retired content columns are dropped by `0070`).
-`workspace_audit.hpp` holds a workspace's audit chain (decision 52, lake#317): the
+`workspace_audit.hpp` holds a workspace's audit chain (lake#317): the
 `lake_audit_events` collection, chained and copied events, `append_workspace_audit_event`,
 `find_workspace_audit_tail`, `list_workspace_audit` and `verify_workspace_audit`.
 `workspace_records.hpp`'s `list` takes an optional `keep` predicate. `store.hpp` declares

@@ -1,4 +1,4 @@
-// Stripe, lake's payment provider (decision 57, lake#620, docs/api/billing.md#stripe): lake's own
+// Stripe, lake's payment provider (lake#620, docs/api/billing.md#stripe): lake's own
 // client for Stripe's REST API and the check of its webhook signatures. No Stripe SDK ("We write
 // our own"); the HTTP exchange is injected (StripeHttp), the server's outbound client in lake.
 
@@ -141,7 +141,7 @@ std::expected<json, std::string> answer_object(const StripeResponse& response,
 }
 
 // The tags on every object Lake creates in a Stripe account it shares with Orama Cloud v1 and with
-// other Lakes (orama-bridge#199, lake#855), as fields under `prefix` (`metadata`,
+// other Lakes (lake#855), as fields under `prefix` (`metadata`,
 // `subscription_data[metadata]`): orama_app=lake, and lake_instance, this Lake's public host, when
 // it has one. Lake's own keys are lake_*. It never sets Cloud v1's bare team_id, plan_id,
 // addon_type or addon_config: Cloud v1's webhook handlers read those, so a Lake object carrying one

@@ -1,8 +1,8 @@
 # Storage: the contract between lake and the Orama operator
 
 **Status: phase 1 (lake#196); bucket and filesystem pairs (lake#664, not deployed).** A customer's **stores** — buckets, filesystems, network
-filesystems and volumes — follow the managed-services model ([`services.md`](services.md),
-liquid-bridge decision 46): lake records the desired store, the Orama operator makes it exist and
+filesystems and volumes — follow the managed-services model ([`services.md`](services.md)):
+lake records the desired store, the Orama operator makes it exist and
 reports back. Nothing about a customer's store is decided by the operator, and lake never talks to
 Kubernetes.
 
@@ -21,7 +21,7 @@ valid pairs and which are available on this lake.
 
 Phase 1 delivered the model, the table, the capabilities, the UI and the **cluster volume**.
 lake#664 offers every bucket and filesystem pair. A bucket at a cloud provider is **the customer's
-own**, opened with a secret of the workspace's secret store (decision 58); Orama provisions no
+own**, opened with a secret of the workspace's secret store; Orama provisions no
 bucket in an account of its own. Network filesystems wait for phase 4.
 
 ## Tables (migration `0028_stores`, `db/schema.sql`)
@@ -134,7 +134,7 @@ after the services:
      operator checks the spec (a bucket, an `https` endpoint when one is given, a credential mount
      and name; otherwise `Failed` with the reason) and owns a `LakeSealedSecret` `<lake>-<slug>` in
      the Lake's namespace with a `lake` source naming the workspace secret — the sealed projection
-     of decision 58, so services that mount the store get the credential and Postgres never holds
+     of the workspace secret, so services that mount the store get the credential and Postgres never holds
      it. `Provisioning` (*delivering the credentials from the workspace's secret store*) until the
      produced Secret exists, then **Ready** (*credentials delivered*), endpoint
      `<endpoint>/<bucket>`. The operator never touches the bucket itself.

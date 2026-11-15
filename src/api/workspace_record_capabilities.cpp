@@ -116,7 +116,7 @@ ApiResult copy_result(std::string_view collection,
 
 
 
-// The central audit events about a workspace's data, recorded before decision 52 (lake#317,
+// The central audit events about a workspace's data, recorded before the audit split (lake#317,
 // migration 0063): each goes to its workspace's audit as it is, under its id, keeping its
 // signature and central predecessor, so the central chain still holds its place. An event whose
 // workspace was deleted stays central and does not hold the copy back; nothing needs selecting,
@@ -558,7 +558,7 @@ liquid::runtime::task<UncopiedLegacy> uncopied_legacy_digests(ApiContext& contex
     co_return output;
 }
 
-// The tenant blobs the instance registry still holds (lake#383 phase B, decision 54 S5): each
+// The tenant blobs the instance registry still holds (lake#383 phase B): each
 // lake_oci_blobs record of each workspace an image route names, ordered by `<workspace>/<digest>`.
 // A record that already names a store object is in place. One that names none (written before
 // phase B, or while its workspace was served from its space's store) is copied: `copy` checks the

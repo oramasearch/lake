@@ -75,8 +75,7 @@ identity history. A configured peer or a self-consistent Merkle root supplies no
 The checkpoint must cover the entire batch head; an equal-size checkpoint must name that exact
 root, and an earlier partial head needs a valid `checkpoint_consistency` proof under libliquid's
 checkpoint-bound verifier. Missing checkpoints, unknown signers, invalid signatures, stale
-checkpoints and conflicting roots fail closed before the destination log advances (lake#974,
-LSR-107).
+checkpoints and conflicting roots fail closed before the destination log advances (lake#974).
 
 The destination then validates every entry and reconstructs the proposed Merkle head in memory.
 It publishes tiles and `tree.json` only when its current root exactly equals the source's base root
@@ -112,7 +111,7 @@ procedure explicitly.
 
 ## Peers and the replication credential
 
-Lake issue [#915](https://github.com/oramasearch/lake/issues/915) (security review finding LSR-004):
+Lake issue [#915](https://github.com/oramasearch/lake/issues/915) (a security review finding):
 `replicate_repository` is authorized as `admin` on the repository, which every sign-up holds on its
 own repositories, and it used to send the instance credential to whatever `source_url` the caller
 named, with the admin token as the default credential. A repository owner could point it at their

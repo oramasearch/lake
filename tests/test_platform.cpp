@@ -326,7 +326,7 @@ protected:
         return std::move(*opened);
     }
 
-    // The repository's workspace audit, in chain order (decision 52: a deployment's phases are
+    // The repository's workspace audit, in chain order (a deployment's phases are
     // the repository's data). The chain is verified on every read.
     std::vector<lake::audit::Event> workspace_audit() {
         auto opened = records();
@@ -460,7 +460,7 @@ TEST_F(PlatformFixture, SyncCreatesEnvironmentLatestPhaseAndAuditEvent) {
     const auto object = store->get_policy_object(object_id);
     ASSERT_TRUE(object);
     EXPECT_EQ(object->object_type, "environment");
-    // The phase is in the repository's workspace audit, not the central log (decision 52).
+    // The phase is in the repository's workspace audit, not the central log.
     auto central = lake::test::audit_events(*store, {});
     ASSERT_TRUE(central);
     EXPECT_FALSE(std::ranges::any_of(*central, [](const lake::audit::Event& event) {

@@ -46,15 +46,15 @@ keeps `secret_lease_routes`, the leases' content-free route and due index (lake#
 workspace Zettas (lake#358, lake#359).
 [schema.md](schema.md#audit-workspaces-migration-0063_audit_workspaces) documents
 `0063_audit_workspaces`, which records the workspace of each central audit event about a
-workspace's data for the copy into that workspace's own audit chain (decision 52, lake#317).
+workspace's data for the copy into that workspace's own audit chain (lake#317).
 [schema.md](schema.md#repository-records-migration-0064_repository_records) documents
 `0064_repository_records`, which drops `repository_refs` (lake#319) and records each repository
 description's workspace for the copy into its `lake_repositories` record (lake#315 part 2).
 [schema.md](schema.md#workspace-deletions-migration-0065_workspace_deletions) documents
 `0065_workspace_deletions`, the record of what each cascading workspace deletion destroyed
-(decision 54 S12, lake#514). [schema.md](schema.md#unrouted-repositories-migration) documents
+(lake#514). [schema.md](schema.md#unrouted-repositories-migration) documents
 `0066_assign_unrouted_repositories`, the reviewed assignment of repositories left without a
-workspace (decision 54 S14, lake#513).
+workspace (lake#513).
 
 [schema.md](schema.md#tenant-image-routes-migration-0068_oci_repository_routes) documents
 `0068_oci_repository_routes`, the content-free route from a tenant image repository to the workspace

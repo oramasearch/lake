@@ -3,8 +3,8 @@
 **Status: implemented 2026-09-25.** When lake is given a Clerk publishable key, people sign in and
 sign up in the browser through [Clerk](https://clerk.com). lake's own identity pages (password,
 TOTP, passkeys, TAAP document sign-up) stay in the binary for an install without Clerk, such as
-on-prem, and leave the navigation when Clerk is on. The decisions are liquid-bridge decision 43
-(Clerk is the cloud sign-in) and decision 44 (lake holds a TAAP identity for a Clerk user).
+on-prem, and leave the navigation when Clerk is on. The rules are: Clerk is the cloud sign-in,
+and lake holds a TAAP identity for a Clerk user.
 
 ## Why
 
@@ -95,9 +95,9 @@ The credential is `credentials(kind = 'oauth', pool_id = 'lake', subject = 'cler
 | Situation | Result |
 |---|---|
 | The Clerk subject is already linked | Signs in that user |
-| Not linked | Creates the user with a **managed key** (a TAAP identity Lake holds), provisions their personal customer with an `admin` grant (as password sign-up does, decision 40), and links the subject |
+| Not linked | Creates the user with a **managed key** (a TAAP identity Lake holds), provisions their personal customer with an `admin` grant (as password sign-up does), and links the subject |
 
-**A new subject is never linked to an existing account by email** (lake#920, LSR-011). An
+**A new subject is never linked to an existing account by email** (lake#920). An
 account that already holds the address got it from someone who proved nothing to anyone: a
 password sign-up, an organization's SSO or SCIM provisioning, an operator's `create_user`, or a
 different Clerk subject whose address has since moved. Linking would let that holder keep their
@@ -120,13 +120,13 @@ under `LAKE_INSTANCE_KEK`. The seed, public key and identifier are stored in
 the seed; lake commits drive changes itself. It is held so the managed key can sign its own
 replacement: in Account → Identity, *Use my own identity* rotates the account to the person's own
 liquid identity as a linked successor and destroys the seed ([identity.md](identity.md#your-own-identity),
-lake#762, decision 65). Lake's own sign-up without Clerk gives the same managed key when no
+lake#762). Lake's own sign-up without Clerk gives the same managed key when no
 identity document is sent.
 
 ## Webhooks
 
 **Status: implemented, not deployed.** Account provisioning uses `0087_clerk_webhooks` (lake#765);
-ordered suspension and the revocation watermark use `0094_clerk_revocation` (lake#948, LSR-085);
+ordered suspension and the revocation watermark use `0094_clerk_revocation` (lake#948);
 session events end only browser sessions, bound per Clerk session by `0103_clerk_session_binding`
 (lake#1163).
 
@@ -147,7 +147,7 @@ account is disabled.
   `{"applied": false, "duplicate": true}`) and not applied again; its ids are kept in
   `clerk_webhook_deliveries`. Every event is also idempotent on its own.
 - **`user.created`** does what a first sign-in does, without a session: the account with a
-  **managed key** (decision 65), its personal customer with an `admin` grant (decision 40), and the
+  **managed key**, its personal customer with an `admin` grant, and the
   Clerk subject linked (`Store::provision_clerk_user`, the same code `sign_in_clerk` runs). An
   account that already has the subject is found again. Any other account is never linked: a new
   subject gets a new account, and its **verified** primary email moves to it from an account that
@@ -178,8 +178,7 @@ account is disabled.
   by it revoked (lake#920).
 - **`user.deleted`** disables the linked account (`users.disabled_at`) and revokes every session,
   token and device of it in one transaction. It also withdraws its agent launches and schedules,
-  removes task credentials and leases, and prevents queued tasks from being claimed (lake#951,
-  LSR-086). Agent credential resolution and new person-owned launches, schedules and tasks require
+  removes task credentials and leases, and prevents queued tasks from being claimed (lake#951). Agent credential resolution and new person-owned launches, schedules and tasks require
   an active account, including accounts disabled before this change. Creation, claims and lease
   renewals lock that account against concurrent offboarding. **Nothing is erased**: the account, its workspaces and its
   audit stay; deleting data is a separate, confirmed step. A disabled account is issued no session
@@ -293,7 +292,7 @@ The Clerk instance needs:
   through Clerk. The API enforces it (lake#1098): in the `lake` pool `sign_up_password`,
   `sign_in_password`, `verify_mfa` and `recover_with_code` answer `403 forbidden` under Clerk, by
   the same rule `viewer` reports (`lake_pool_password_sign_in`). A password account could otherwise
-  be registered under someone's email before their first Clerk sign-in. Since lake#920 (LSR-011)
+  be registered under someone's email before their first Clerk sign-in. Since lake#920
   a first Clerk sign-in never links to such an account anyway: it gets a new account and takes the
   address ([who a Clerk sign-in becomes](#who-a-clerk-sign-in-becomes)).
 
@@ -374,7 +373,7 @@ Once the customer's host is routed, `LAKE_PUBLIC_HOST` is that host and the Oram
 `LAKE_HOST_ALIASES`: a browser page opened on the Orama host is redirected to the customer's before
 any Clerk script loads, so sign-in never runs on a host the customer's instance does not allow.
 
-## Bounded key refresh (lake#956, LSR-090)
+## Bounded key refresh (lake#956)
 
 Clerk and generic OIDC share `OidcJwks`. Before any network request, it rejects tokens over
 16 KiB, malformed JWTs, absent key IDs, unsupported algorithms and invalid issuer, audience,

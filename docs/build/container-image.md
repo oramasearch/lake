@@ -17,7 +17,7 @@ zetta#1469) and reads the system CA bundle itself, so the list also names
 `src/core/connect/egress_policy.cpp`, `connector_destinations.cpp`, `destination_policy.cpp` and
 `src/core/api/system_trust_store.cpp` (lake#1086). When a new Zetta pin fails to link with undefined
 `zetta::` symbols, add the source that defines each one to that list. The minimal context the
-cluster BuildKit lane uses (`build/contexts/zetta-pin`, liquid-bridge's `liquid-dev` skill) is
+cluster BuildKit lane uses (`build/contexts/zetta-pin`) is
 `git archive <pin> include src` of the bridge's Zetta checkout, so it carries every one of them;
 regenerate it whenever the pin moves.
 

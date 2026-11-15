@@ -1,6 +1,6 @@
 # Managed services: the lake ↔ operator contract
 
-**Status: implemented in lake 2026-09-25 (liquid-bridge decision 46); the operator side is orama-operator `docs/lake/services.md`.** A customer runs any number of
+**Status: implemented in lake 2026-09-25; the operator side is orama-operator `docs/lake/services.md`.** A customer runs any number of
 services on the Lake's cluster — Zetta clusters and Postgres clusters today. lake records what the
 customer wants in its **control Postgres**; the Orama operator reads it, creates one Kubernetes
 resource per service (an `OramaZettaCluster`, or a CloudNativePG `Cluster` that the CloudNativePG
@@ -10,7 +10,7 @@ operator never decides what a customer may have.
 A customer's workspace is now an explicit [workspace contract row](workspaces.md), with a
 primary Zetta service referenced by `zetta_service_id`. `is_default` remains compatibility
 metadata, not a data-plane routing choice. Migration 0039 replaces the earlier default-service
-workspace model and decision 45's request stream.
+workspace model and the request stream it introduced.
 
 ## Tables (migration `0024_services`, `db/schema.sql`)
 
@@ -97,7 +97,7 @@ For each `Lake` with `spec.services.enabled` (or the deprecated `spec.workspaces
    `Failed` / `service quota reached (<n>)` and starts once there is room. Existing services are
    never refused.
 
-## The catalog (decision 47)
+## The catalog
 
 Each kind is run by one upstream operator, installed from the operator's `helmfile.yaml` and
 watching every namespace. The Orama operator writes that operator's resource, named
@@ -121,14 +121,14 @@ Exact field names follow each operator's pinned CRD; where the table and the CRD
 wins and `docs/lake/services.md` in the operator says what was chosen. Every credential also carries
 `endpoint`. Each resource's `app.kubernetes.io/instance` label is its own name, not the Lake's:
 TiDB builds its pod selectors from that label. SQLite, DuckDB and Polars have no
-upstream operator we would use (lake `.claude/skills` → liquid-bridge `/lake-service`, step 1), so
+upstream operator we would use, so
 the Orama operator runs each directly behind a small web service of ours in its own private repo:
 `lake-sqlite`, `lake-duckdb`, `lake-polars`. `lake-duckdb` has the same API as `lake-sqlite` below.
 `lake-polars` is analytics compute, not a database: `POST /v1/datasets/<name>` uploads CSV, JSONL
 or Parquet (stored as Parquet), `GET /v1/datasets` lists them, `DELETE /v1/datasets/<name>` removes
 one, and `POST /v1/query` `{sql}` runs Polars SQL over them (row cap, timeout, memory limit) and
 answers `{columns, rows}`. For `lake-sqlite`, a small web service we wrote
-(decision 47, amended). Its API: `POST /v1/query` `{sql, params}` answers `{columns, rows}`;
+(amended). Its API: `POST /v1/query` `{sql, params}` answers `{columns, rows}`;
 `POST /v1/exec` answers `{rows_affected, last_insert_id}`; `POST /v1/batch` `{statements: [{sql,
 params}]}` runs them in one transaction; `GET /healthz`. Every call but `/healthz` needs
 `Authorization: Bearer <token>`. There is no replication; the volume is the only copy until
@@ -174,5 +174,5 @@ labels, before writing `Deleted`. Only the Orama operator's own resources are ev
 - Endpoints are in-cluster only: nothing outside the cluster reaches a customer's Postgres or
   Zetta. A Postgres service is usable today as a Zetta connection source and from other services.
 - `spec` cannot be changed after creation (no resize).
-- The operator connects with lake's own database credential; see decision 46 for why a narrower
+- The operator connects with lake's own database credential; a narrower
   role was not worth it yet.

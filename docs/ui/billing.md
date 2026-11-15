@@ -1,6 +1,6 @@
 # Billing pages
 
-Organization → Billing and Administration → Billing (lake#564, decision 56): this month's usage and
+Organization → Billing and Administration → Billing (lake#564): this month's usage and
 its cost as it grows and the invoice history, one invoice, and the operator's price list editor.
 Lake is priced by usage only (lake#635): rates per usage dimension, model input/output and GPU
 class for GPU and GPU memory (lake#643). There are no plans, no monthly fee and nothing included,
@@ -87,7 +87,7 @@ provider, and the form is open with the owner's email; save it with an address a
 read it back without the notice; **Edit** reopens it filled. As a member of the same account, the
 card is read-only and has no **Edit**.
 
-Model/direction prices (LSR-095, lake#961) published through `set_price_list` are retained by
+Model/direction prices (lake#961) published through `set_price_list` are retained by
 `rateRows` and `ratesInput` when the operator edits another rate. Model rows keep their exact
 class keys and display casing; GPU defaults are not offered as model classes. The historical
 default model-token rate covers old unclassed usage only. With no published list the editor

@@ -92,7 +92,7 @@ std::string json_lines(const std::vector<Event>& events);
 
 // An event whose id and instant are fixed when its call finishes, and whose predecessor and
 // signature are added when it is written: a workspace's audit, which lake writes off the request
-// path (docs/api/audit.md#workspace-audit, decision 52).
+// path (docs/api/audit.md#workspace-audit).
 struct PendingEvent {
     std::string id;
     std::string occurred_at;
@@ -111,7 +111,7 @@ Result<Event> sign_pending(control::Store& store,
                            const IdentityOptions& options);
 
 // Checks one event alone: its signature against lake's identity history and its digest, but not
-// its predecessor. A workspace's copy of an event recorded centrally before decision 52 is
+// its predecessor. A workspace's copy of an event recorded centrally before the audit split is
 // checked this way; the central chain holds its place.
 Result<void> verify_event(control::Store& store, const Event& event);
 

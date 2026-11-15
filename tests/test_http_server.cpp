@@ -5494,7 +5494,7 @@ TEST(HttpServer, IdleKeepAliveCloseWritesNothingToStderr) {
     EXPECT_EQ(captured_stderr.finish(), "");
 }
 
-// Decision 54 S9 (lake#384): a request log line names the route pattern and the identifiers it
+// lake#384: a request log line names the route pattern and the identifiers it
 // captured, never the raw path, and a request routed to a workspace is counted in that workspace's
 // own `lake_requests` series by the owner loop.
 TEST(HttpServer, RequestLogsNameRoutesAndEachWorkspaceGetsItsOwnRequestSeries) {
@@ -5969,7 +5969,7 @@ struct ReplicationServer {
     }
 };
 
-// lake#915 (LSR-004): a repository owner points replicate_repository at a server they run. Lake
+// lake#915: a repository owner points replicate_repository at a server they run. Lake
 // refuses it before connecting, so the instance's replication credential is never sent there. The
 // operator is refused the same way: only configured peers receive the credential. The refusal is
 // audited in the customer's log with the source it named.
@@ -5992,7 +5992,7 @@ TEST(RepositoryReplication, ASourceThatIsNotAConfiguredPeerNeverReceivesTheCrede
         << "lake connected to a source that is not a configured peer:\n"
         << endpoint.heads().front();
 
-    // Repository events go to the repository's workspace audit (decision 52); `audit` reads it.
+    // Repository events go to the repository's workspace audit; `audit` reads it.
     HttpConnection reader(lake_server.server->port());
     const std::string answered_audit =
         reader.request("GET",

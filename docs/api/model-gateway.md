@@ -73,7 +73,7 @@ gateway is a protocol route named for its protocol.
 
 ### Supported requests
 
-The gateway accepts a closed set of synchronous, token-metered fields (lake#960, LSR-094).
+The gateway accepts a closed set of synchronous, token-metered fields (lake#960).
 Unknown fields are `invalid_input` before the provider is called, including unknown fields inside
 messages, content parts, tools and stream options. Chat and Responses accept text and function
 tools executed by the caller. Embeddings accept text or token arrays. Function parameter schemas
@@ -98,7 +98,7 @@ replays a chat completion with a tool call as OpenAI returns it.
 This deliberately narrows OpenAI compatibility: a provider adding a field does not enable it on
 Lake. Extend the endpoint schemas in `src/api/model_gateway.cpp` only after verifying that its
 charges are represented in workspace usage, with a refusal test and a supported-request test.
-Model eligibility and pricing are handled separately by lake#961 (LSR-095).
+Model eligibility and pricing are handled separately by lake#961.
 
 Verify with `ModelCompletion.RefusesUnmeteredFeaturesBeforeCallingTheProvider` and
 `ModelGateway.AcceptsTextAndCallerExecutedFunctions`, plus the OpenAI route rejection checks in
@@ -375,7 +375,7 @@ Only the `openai` provider protocol is supported, using the configured base URL 
 Malformed configuration, duplicate model names and unsupported providers stop startup. Names are
 case-sensitive and never trimmed, decoded or expanded to snapshot or fine-tuning aliases. An
 unlisted name returns `invalid_input` at `/request/model` before any provider call, through the
-OpenAI routes (including workspace paths), REST and MCP alike (LSR-095, lake#961).
+OpenAI routes (including workspace paths), REST and MCP alike (lake#961).
 
 With billing off, the configured allowlist is sufficient. With billing on, the current UTC month's
 published price list must also have exactly one positive `model_tokens` price for each of

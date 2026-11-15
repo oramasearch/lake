@@ -1,6 +1,6 @@
 # Regions
 
-lake#757, decision 64 ([liquid-bridge `docs/decisions.md`](https://github.com/oramasearch/liquid-bridge/blob/main/docs/decisions.md)).
+lake#757.
 
 ## What exists
 
@@ -14,8 +14,7 @@ nothing below is set there, Lake behaves as it did before, and no picker is show
 
 **A workspace belongs to the region of the Lake it was created on.** An account exists in one
 region only (there is no shared identity across regions), and moving a workspace between regions is
-not supported; both are in the multi-region follow-up epic
-(https://github.com/oramasearch/liquid-bridge/issues/40).
+not supported; both are planned follow-up work.
 
 ## Configuration
 

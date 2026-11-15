@@ -1,4 +1,4 @@
-/** Billing (lake#564, decision 56): the shapes the billing capabilities answer and the pure rules the
+/** Billing (lake#564): the shapes the billing capabilities answer and the pure rules the
  * pages share — amounts in a currency from millionths, a rate in a person's units, a line as usage ×
  * rate = cost, the months a bill covers, the price list editor's rows, an invoice's state as a
  * chip, and the billing contact's countries and address (lake#857). Lake is priced by usage only (lake#635): rates per usage dimension and class, no plans, no fee,

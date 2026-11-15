@@ -107,8 +107,8 @@ Replication preserves the source's signed bytes, rejects malformed issuance time
 successor whose time moves backwards or disappears after an authenticated time was recorded.
 
 **The log attests its own time.** This allows a consumer to reject a stale or replayed checkpoint;
-it does not defend against a log that lies about when it signed. This deliberate limit is
-[decision 37](https://github.com/oramasearch/liquid-bridge/blob/main/docs/decisions.md#37-authenticated-time-on-a-transparency-checkpoint--decided-steve-2026-09-07-a-signed-issued_at-in-the-checkpoint-body).
+it does not defend against a log that lies about when it signed. This limit is
+deliberate: a signed `issued_at` in the checkpoint body is the authenticated time.
 No second key, signature, credential, or timestamp authority is added. RFC 3161 binding remains
 available for a later stronger freshness policy; air-gapped publication requires no authority.
 
@@ -249,7 +249,7 @@ EOF: no padding, count field, or trailer
 ```
 
 Alongside canonical liquid attestations, Lake appends successful dynamic-secret audit commitments
-(lake#953, LSR-087): ASCII `LAKE-AUDIT-COMMITMENT-1\n` followed by canonical CBOR containing
+(lake#953): ASCII `LAKE-AUDIT-COMMITMENT-1\n` followed by canonical CBOR containing
 exactly `{"digest": "<64 lowercase hexadecimal characters>"}`. This is the private signed event's
 SHA-512/256 digest. Full events stay in the private central audit chain, including denied and failed
 attempts; those attempts append nothing publicly. Commitments contain no tenant, principal, object,
@@ -259,7 +259,7 @@ They replicate and verify through the same immutable tile and Merkle path.
 New append and replication admission reject the old `LAKE-AUDIT-EVENT-1\n` full-event format,
 including otherwise valid events. Existing immutable tiles, checkpoints and Merkle proofs remain
 readable and verifiable; this change cannot retract previously published records. Identity scans refuse any historical full
-audit event (lake#974, LSR-107): its self-digest cannot authenticate its signer or principal, and
+audit event (lake#974): its self-digest cannot authenticate its signer or principal, and
 no trusted identity-bound signature verifier is configured for these legacy leaves. Scans return
 `unrecoverable` without partial matches rather than report these claims as verified identities.
 Replicating a historical batch containing an old full-event entry now fails closed. Do not bypass that refusal to copy
@@ -605,4 +605,4 @@ outside policy; it must never reinterpret or discard an existing archive timesta
 
 Replication requires a trusted signed checkpoint covering every imported head; partial batches
 carry a consistency proof to that checkpoint. The [replication contract](replication.md) describes
-admission, compatibility and the focused regression tests (lake#974, LSR-107).
+admission, compatibility and the focused regression tests (lake#974).

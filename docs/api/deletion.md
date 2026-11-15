@@ -6,8 +6,8 @@ REST or MCP; the only way out was raw SQL. Each now has a capability in the one 
 OpenAPI, MCP), and each:
 
 - is policy-checked by `Registry::call` like every capability, and audited: control-plane objects
-  in the central log, a workspace's data in that workspace's own audit chain (decision 52,
-  [audit.md](audit.md#which-log));
+  in the central log, a workspace's data in that workspace's own audit chain
+  ([audit.md](audit.md#which-log));
 - takes `dry_run: true`, which changes nothing and answers what would go, as `delete_workspace`
   does ([workspaces.md](workspaces.md#deletion));
 - is protected in Lake Console by a typed confirmation where the item lives, the dialog listing

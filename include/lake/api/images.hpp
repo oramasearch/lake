@@ -17,7 +17,7 @@
 #include "lake/control/oci_records.hpp"
 #include "lake/control/store.hpp"
 
-// Tenant images (lake#383 phase A, decision 54 S4-S6, docs/api/registry.md#where-a-tenant-image-
+// Tenant images (lake#383 phase A, docs/api/registry.md#where-a-tenant-image-
 // lives). The registry splits: a tenant OCI repository (`<space>/<name>`, `<space>/cache/<name>`)
 // belongs to one workspace, found through the content-free central route oci_repository_routes,
 // and its manifests and tags are sealed records in that workspace's Zetta

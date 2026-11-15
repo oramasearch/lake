@@ -1,4 +1,4 @@
-// Billing (lake#564, decision 56, docs/api/billing.md): price_list, set_price_list,
+// Billing (lake#564, docs/api/billing.md): price_list, set_price_list,
 // billing_account, set_billing_contact, bill_preview, issue_invoice, resend_invoice,
 // list_invoices, get_invoice, record_invoice_payment and void_invoice, with the manual payment
 // provider. Registered only where LAKE_BILLING is on.
@@ -8,7 +8,7 @@
 // row, and invoices with their lines); the usage a bill prices is read from each workspace Zetta
 // through usage_over_time, and only the quantity billed per dimension is kept, on the invoice's
 // lines. Every call is
-// policy-checked and audited in the central log (decision 52): billing is account configuration.
+// policy-checked and audited in the central log: billing is account configuration.
 
 #include "lake/api/balance.hpp"
 #include "lake/api/billing.hpp"

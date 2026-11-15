@@ -2,7 +2,7 @@
 
 lake records signed, hash-linked audit events for every capability call, including authorization
 and input failures, a request body lake cannot read among them
-([Every call, an unreadable body included](#every-call-an-unreadable-body-included)). Since decision 52 (lake#317) the events are kept in two kinds of log: the
+([Every call, an unreadable body included](#every-call-an-unreadable-body-included)). Since lake#317 the events are kept in two kinds of log: the
 central log in lake's PostgreSQL for control-plane and identity events, and each workspace's own
 audit, in its Zetta, for events about that workspace's data. See [Which log](#which-log). The audit stream is the source of evidence for authentication, session and
 token lifecycle, denied authorization, grant changes, secrets and certificate activity, retention
@@ -194,7 +194,7 @@ stores) and `tests/test_streams.cpp` (the acting agent of a task credential) cov
 
 ## Which log
 
-Decision 52 (liquid-bridge `docs/decisions.md`, lake#317, lake#318) splits lake's audit by subject.
+Lake (lake#317, lake#318) splits lake's audit by subject.
 `audit_route` in `src/api/audit_routing.cpp` is the one function that decides, from the
 capability and its input:
 
@@ -248,7 +248,7 @@ workspace round trip is added to any call. The owner loop flushes the queue ever
 held, and once more when the server drains. A flush signs each workspace's events in order and
 appends them to its chain, one conditional `put_record` each.
 
-**Capacity and delivery failure (LSR-098, lake#964).** The process holds at most
+**Capacity and delivery failure (lake#964).** The process holds at most
 `audit_max_pending` events (minimum two), including events currently being flushed. One customer
 can hold at most half that capacity, across all its workspaces; one workspace at most a quarter
 (each allocation is at least one). At the default 65,536, these limits are 32,768 and 16,384.

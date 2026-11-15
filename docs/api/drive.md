@@ -28,7 +28,7 @@ folder object, so repository policy remains the default. Move authorization chec
 source and destination location. Repository mutations use the same store authorization callback
 through REST, MCP, the compatible upload routes, and `lake` store drives.
 
-## Nested Mutation Permissions (lake#962, LSR-096)
+## Nested Mutation Permissions (lake#962)
 
 A write grant on a folder does not authorize its non-inheriting descendants. Uploads check every
 final path after joining the selected folder with each item's relative path. An overwrite also

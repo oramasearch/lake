@@ -73,7 +73,7 @@ as the record's `author`. Lake sets it; the input cannot name one (the schemas r
 member), and `update_issue` keeps it. Records written before lake#598 have no `author`, and a GitHub
 import keeps the GitHub login it read. Review comments are unchanged: liquid's forge client reads
 a review comment's `author` as an actor object. A review records its opener as `opened_by`
-([approvals](#who-may-approve-lsr-077)).
+([approvals](#who-may-approve)).
 
 **People to assign (lake#598).** `issue_assignees` (`repository_id`) answers
 `{"people": [{taap_id, kind, display_name, email, handle}]}`: the person who owns the repository's
@@ -91,10 +91,10 @@ that review to `approved` or `closed`. `create_review_comment` verifies that its
 in the same repository and accepts an anchor value with required `change`, `path`, `line`, and
 `column` members.
 
-### Who may approve (LSR-077)
+### Who may approve
 
 A protected branch's review requirement needs two people, the one who pushes and one who approves.
-Before LSR-077 any repository writer could open a review of their own change, approve it and push
+Before this rule, any repository writer could open a review of their own change, approve it and push
 it, and the branch accepted the approval.
 
 - `create_review` records the caller as `opened_by`; the input cannot name it.
@@ -136,7 +136,7 @@ Unbound legacy evidence remains readable and can accompany an ordinary release; 
 snapshot says `source_binding: "source not bound"`. Bound snapshots say `"verified"`. The snapshot
 also retains the result ID, action, output count and verified attestation identifiers and subjects.
 
-### Source binding (LSR-106)
+### Source binding
 
 A source binding comes only from `build::verify_provenance` succeeding for the selected result:
 it checks the result signature, SLSA signature, result subject and action/predicate relationship.
@@ -199,7 +199,7 @@ The same rules apply to [application lifecycle webhooks](apps.md#lifecycle-webho
 
 The secret is never answered after `create_webhook`: `list_webhooks` and `export_repository` leave
 it out, and a webhook imported from an archive without one signs with a new random secret
-([export](export.md#what-an-archive-never-carries), LSR-024).
+([export](export.md#what-an-archive-never-carries)).
 
 The sender is an injected service at the API boundary so the registry and its tests do not perform
 network I/O. The HTTP service supplies that sender in deployment. If a sender is unavailable, the
@@ -241,10 +241,10 @@ evaluates no rules.
 
 An approved review is a `review` record whose `change_id` exactly equals the reference's proposed
 head, whose current `state` is `approved`, and whose `approval` lake recorded for that same change
-([who may approve](#who-may-approve-lsr-077)). The approver must not be the pusher or the review's
+([who may approve](#who-may-approve)). The approver must not be the pusher or the review's
 opener, and must hold `review` on the rule's `path` object (which inherits the repository's grants)
 when the push is evaluated, so a revoked reviewer's approval stops counting. Approval for an
-ancestor, a different change, a review in any other state, or a review approved before LSR-077
+ancestor, a different change, a review in any other state, or a review approved before this rule
 (which has no `approval`; approve it again) does not satisfy `required_review`. The operator
 credential is one principal: its approval counts for another person's push, never for its own.
 

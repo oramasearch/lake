@@ -28,7 +28,7 @@ class AgentBusCredentials;
 // installed, or nullopt.
 std::optional<std::string> install_zetta_egress_policy(std::string_view allow);
 
-// A customer's managed services (docs/control-plane/services.md, liquid-bridge decision 46): Zetta
+// A customer's managed services (docs/control-plane/services.md): Zetta
 // and Postgres clusters that lake records in its control Postgres and the Orama operator runs.
 // The operator mounts each Ready service's connection into lake as `<service_dir>/<slug>.json`.
 // The customer's workspace, the Zetta cluster Design, Train and Ship delegate to
@@ -74,7 +74,7 @@ struct WorkspaceConfig {
 std::map<std::string, std::string> read_agent_bus_tokens(const std::string& directory);
 
 // `ws-` followed by the first 12 hexadecimal digits of the customer id; empty when the id is not
-// a UUID. The slug of a customer's first workspace, which decision 45 created clusters under.
+// a UUID. The slug of a customer's first workspace, which earlier versions created clusters under.
 std::string workspace_slug(std::string_view customer_id);
 
 // A service as the API and the pages show it: never its credential.

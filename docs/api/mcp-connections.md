@@ -1,6 +1,6 @@
 # MCP Connections
 
-**Status: implemented 2026-10-11 in the source tree (decision 60, lake#652); not deployed.** Lake is
+**Status: implemented 2026-10-11 in the source tree (lake#652); not deployed.** Lake is
 an MCP **server** (`POST /mcp`, every capability a tool, [mcp.md](mcp.md)). It is also an MCP
 **client**: a workspace connects to remote MCP servers, and its people, Ask Orama and its agents use
 their tools through Lake. Lake runs the client server-side, so the browser and agents never hold the
@@ -48,7 +48,7 @@ has the fixed ceiling described below:
 | A tool's title / description / input schema | 256 B / 2 KiB / 16 KiB | cut at a character / cut / the tool is skipped |
 
 Remote MCP and OAuth JSON may contain at most 64 nested objects/arrays, counting the envelope
-and any batch (lake#958, LSR-092). The parser rejects the entire document before constructing
+and any batch (lake#958). The parser rejects the entire document before constructing
 a container beyond the limit. This applies to JSON and SSE answers, notifications, the SSE
 early-answer check, resource/issuer metadata, client registration, token exchange and refresh.
 Over-depth SSE events are discarded; ordinary over-depth answers fail as protocol errors.
@@ -93,7 +93,7 @@ loopback.
   Nothing of it is in PostgreSQL. Lake's store keeps only its **dispatch row** (migration
   `0079_mcp_connection_dispatch`, lake#684, lake#685): the account, workspace and connection ids,
   whether it streams, and the digest of the tools it re-exports. That is dispatch, never content.
-- **The credential** is a workspace secret (decision 58) in a secret mount of the same workspace:
+- **The credential** is a workspace secret in a secret mount of the same workspace:
   a bearer token, or the OAuth refresh token Lake writes there when a person signs in. The record
   holds only its reference, `lake-secret://<mount>/<name>#<field>`. Lake reads it server-side for
   each call (audited in the mount's workspace as `mcp_connection`) and never answers it to a
@@ -299,7 +299,7 @@ digest only: the connection and its tools stay in the workspace Zetta.
 ## A connection's agent and streams
 
 The stream worker requires the person who set the streams to remain present and enabled
-(lake#951, LSR-086). Disabling them immediately blocks input-triggered launches, notifications and
+(lake#951). Disabling them immediately blocks input-triggered launches, notifications and
 result publication. On the next reachable pass it clears their streaming settings, subscriptions
 and pending results and updates the dispatch row, while retaining the connection. The existing
 records preserve pending cleanup across restarts and storage outages; another person may set up
@@ -370,7 +370,7 @@ the workspace's `calls` (`kind: mcp_connection`).
 
 ## Servers that speak only stdio
 
-Decision 60 took remote servers first; lake#659 adds the servers that only speak stdio, an npm or
+Remote servers came first; lake#659 adds the servers that only speak stdio, an npm or
 Python package such as most reference servers. Lake runs one as an **App of the workspace**
 ([Ship Apps](web-apps.md)) whose image is Lake's own runner, `oramasearch/lake-mcp-runner` (a
 private repository and a private image of its own; we write our own, standard library Go, no MCP
@@ -399,7 +399,7 @@ Apps decides, and each step is audited as theirs):
    mcp`, port `8080` (the port the workspace's network policy admits Lake to, as for an agent), the
    name `mcp-<prefix>-<4 hex>`, and the environment: `MCP_RUNNER_TOKEN` and `MCP_STDIO_COMMAND` from
    that secret, and the person's variables, plain or from secrets, which the operator projects from
-   the workspace's secret store as for any App (decision 58, lake#625).
+   the workspace's secret store as for any App (lake#625).
 3. Keeps the connection: its URL is the App's Service in the cluster,
    `http://app-<the first 12 hex digits of the App's id>.<the workspace's namespace>.svc.cluster.local/mcp`,
    its transport `streamable_http`, its authentication the runner's token, and `app_id` and `stdio`

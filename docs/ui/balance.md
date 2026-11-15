@@ -1,7 +1,7 @@
 # Balance pages
 
-lake.live is prepaid ([`../api/billing.md#balance`](../api/billing.md#balance), lake#1114,
-liquid-bridge decision 67): each account has a balance, credits from top-ups minus charges for its
+lake.live is prepaid ([`../api/billing.md#balance`](../api/billing.md#balance), lake#1114):
+each account has a balance, credits from top-ups minus charges for its
 usage. The web app nags while it is low, negative or blocked, and gives one place to add funds.
 Every surface here exists only where the lake bills (`viewer.billing`); none shows for the operator,
 or for an account a paid cloud order covers.

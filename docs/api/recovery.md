@@ -1,6 +1,6 @@
 # Account and encrypted-repository recovery
 
-**Status: implemented by lake #23; email abuse protections and cancellation by lake#968 (LSR-102), not deployed.** Recovery codes, email recovery with a 24-hour cooling period,
+**Status: implemented by lake #23; email abuse protections and cancellation by lake#968, not deployed.** Recovery codes, email recovery with a 24-hour cooling period,
 and organization recovery approved by two distinct administrators restore account sign-in. They
 do not recreate end-to-end encrypted repository keys.
 

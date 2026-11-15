@@ -65,8 +65,8 @@ Signing out (`/logout`) still ends it.
 **Why.** Grants name a bare TAAP identity, and users are unique per `(pool_id, taap_id)`, so an
 application's pool may hold a user whose identity is a Lake account's: anyone can register an
 application and enroll such a user. Before this change the HTTP server copied that identity into
-the acting identity, and the session carried every grant of the Lake account (finding LSR-001 of the
-2026-10 security review). Whether grants should name a user and pool instead is lake#872.
+the acting identity, and the session carried every grant of the Lake account (found in a security review).
+Whether grants should name a user and pool instead is lake#872.
 
 **How.** `ApiServer::context_for` keeps a pool session apart (`ApiContext::application_session`) and
 leaves the request unauthenticated. `Registry::call` admits it, for one call, only to a capability

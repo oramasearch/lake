@@ -1670,7 +1670,7 @@ ApiResult finish_call(const Capability* capability,
             ? acted_workspace(capability, name, input, context, event.outcome, handled)
             : std::string();
     attribute_request(context, name, acted);
-    // Decision 52: events about a workspace's data go to that workspace's audit, queued without
+    // Events about a workspace's data go to that workspace's audit, queued without
     // I/O; the rest are signed into the central chain now.
     const AuditRoute route = audit_route(name, acted, context);
     auto recorded = record_audit(context, event, route);

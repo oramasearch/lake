@@ -66,7 +66,7 @@ browsers never render it as a document.
 
 ## Where a tenant image lives
 
-The registry splits (decision 54 S4-S6, [lake#383](https://github.com/oramasearch/lake/issues/383)
+The registry splits ([lake#383](https://github.com/oramasearch/lake/issues/383)
 phase A). A tenant OCI repository, `<space>/<name>` or `<space>/cache/<name>`, belongs to one
 workspace. npm, Python, debuginfod and legacy one-component OCI repositories stay with the instance,
 as a named exception: one instance-wide namespace with public reads.
@@ -106,7 +106,7 @@ as a named exception: one instance-wide namespace with public reads.
   the last one (last writer wins, as OCI expects). A tag carries its manifest's references, so a
   blob read and the image byte count read only the tags; a blob `GET` lists every tag of its
   repository.
-- **Blobs are objects of the workspace's liquid store** (phase B, decision 54 S5;
+- **Blobs are objects of the workspace's liquid store** (phase B;
   [lake#380](https://github.com/oramasearch/lake/issues/380), [workspace-store.md](../architecture/workspace-store.md)).
   Liquid names an object by its own hash (BLAKE3 in a workspace store) and the store is encrypted
   below liquid, so the SHA-256 a client sends finds the blob through its record: `lake_oci_blobs`

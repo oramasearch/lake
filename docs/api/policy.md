@@ -192,7 +192,7 @@ other accounts can learn: a repository folder is `<repository_id>:<node_id>`, a 
 sit under `secrets/<customer_id>`. Before lake#913, `create_object` took any type and any external
 id under any parent the caller administered, so an account could create those objects first, under
 its own repository or customer, and govern another account's folders, future environments or
-future secret mounts with its own grants (finding LSR-002 of the 2026-10 security review).
+future secret mounts with its own grants (found in a security review).
 
 **The rule, in two places.**
 

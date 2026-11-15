@@ -192,7 +192,7 @@ json imported_artifacts(json artifacts, const json& provenance) {
 }
 
 // A forge record as an archive carries it. A webhook's signing secret never leaves lake, as
-// `list_webhooks` never answers it: export needs only read (LSR-024, lake#933).
+// `list_webhooks` never answers it: export needs only read (lake#933).
 json exported_forge_record(const control::ForgeRecord& record) {
     json exported = control::to_json(record);
     if (record.kind == "webhook" && exported["value"].is_object()) {
@@ -257,7 +257,7 @@ liquid::runtime::task<ApiResult> export_repository(const json& input, ApiContext
         co_return store_error(object.error());
     }
     // Who holds access is an administrator's to read (`list_grants` needs admin), so the archive of
-    // a caller without admin on the repository carries no grants (LSR-024, lake#933).
+    // a caller without admin on the repository carries no grants (lake#933).
     const auto administers = control::authorize(*context.store,
                                                 context.acting_identity,
                                                 object->id,
@@ -396,7 +396,7 @@ liquid::runtime::task<ApiResult> import_repository(const json& input, ApiContext
         }
         json value = imported_forge_value(record, provenance);
         if (kind == "webhook") {
-            // An archive carries no webhook secret (LSR-024), so the imported webhook signs with a
+            // An archive carries no webhook secret, so the imported webhook signs with a
             // new one nobody holds, never an empty or guessable key; its owner creates the webhook
             // again with their receiver's secret. An older archive's secret is kept.
             if (!value.is_object()) {

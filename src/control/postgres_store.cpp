@@ -5009,7 +5009,7 @@ public:
             const std::string id = new_uuid_v4();
             std::string slug = managed_service_slug("svc", id);
             if (in.is_default) {
-                // The first workspace keeps decision 45's name so the operator adopts its
+                // The first workspace keeps its original name so the operator adopts its
                 // cluster; a slug is never reused, so a later one gets a service slug.
                 const std::string workspace = managed_service_slug("ws", in.customer_id);
                 const pqxx::result taken =
@@ -9428,7 +9428,7 @@ public:
             return std::unexpected(StoreError{
                 "invalid_input", "pool, email, and a password of 12 characters are required"});
         }
-        // Lake's own sign-up no longer needs a document (lake#762, decision 65): without one,
+        // Lake's own sign-up no longer needs a document (lake#762): without one,
         // the caller minted a managed key, which this account signs with until the person uses
         // their own identity. Application pools still register the person's document.
         const bool managed = in.identity_document.empty() && !in.custodial_taap_id.empty();

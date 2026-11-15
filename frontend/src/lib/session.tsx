@@ -34,7 +34,7 @@ export type Viewer = {
   clerk: { enabled: boolean; publishable_key?: string; frontend_api?: string };
   password_sign_up: boolean;
   /** The terms of service and privacy policy sign-up and sign-in link to (LAKE_TERMS_URL,
-   * LAKE_PRIVACY_URL, liquid-bridge#15); an empty URL means no link. */
+   * LAKE_PRIVACY_URL); an empty URL means no link. */
   legal?: { terms_url: string; privacy_url: string };
   /** The customer's identity provider when it is this Lake's only way in (lake#1136), else null. */
   sign_in_sso?: { provider_id: string; protocol: string; name: string } | null;

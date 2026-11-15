@@ -176,7 +176,7 @@ names its workspace.
 
 ## Projections
 
-**The rule (lake#625, decision 58).** A user's secret's source of truth is this store. A Kubernetes
+**The rule (lake#625).** A user's secret's source of truth is this store. A Kubernetes
 Secret exists only when an app, service or deployment must mount it, as a projection the operator
 writes from the store and rewrites on rotation; never edited by hand and never the only copy.
 Orama's own platform credentials (Stripe, lake's OpenAI and Clerk keys) are environment variables of
@@ -214,7 +214,7 @@ the hosting platform and never live in a mount. Every user secret flow is audite
   namespace and Secret, the source type, the field count and the version, never a value.
 - **Authentication.** The request's Kubernetes `attestation` is accepted and not verified: lake has
   no TokenReview client on the cluster yet, so the operator presents the Lake's admin bearer
-  (decision 58).
+ .
 
 Who asks for it: an app whose secret environment names a lake secret
 ([web-apps.md](web-apps.md#secret-environment)), and a deployment whose `LakeEnvironment` names a
@@ -280,7 +280,7 @@ and its caller got an error. Counters: `lake_secret_leases_settled_total{outcome
 Each lifecycle call records a signed `dynamic_secret` audit event whose object names the mount or
 lease and whose details identify the operation and its outcome. When a transparency log
 is configured, only a successful call appends a public commitment containing the event's digest
-(lake#953, LSR-087). Denied and failed calls remain private, including cross-tenant attempts against
+(lake#953). Denied and failed calls remain private, including cross-tenant attempts against
 a known mount or lease. The complete signed event stays in the private central audit chain;
 customer, principal, device, request metadata and details never enter a new public leaf.
 No generated username, password, ciphertext, or KEK is present in the audit event or log entry.

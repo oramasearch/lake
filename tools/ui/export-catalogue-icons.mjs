@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Writes the catalogue icons (lake#639) as standalone SVG files under assets/catalogue-icons/, the
-// copy the website's solutions pages use (orama-website-v2#388). The source of record is
+// copy a website can use. The source of record is
 // frontend/src/lib/catalogueIcons.ts; never edit the SVG files by hand.
 //
 //   node tools/ui/export-catalogue-icons.mjs            write the files

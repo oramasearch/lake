@@ -169,7 +169,7 @@ choose"*, *"default to sol"*.
 - **Where.** The settings are workspace data, so they are one sealed record in the workspace's Zetta,
   collection `lake_workspace_settings`, key `workspace`, found by the account
   ([workspace-records.md](../architecture/workspace-records.md)). Nothing of them is in lake's Postgres
-  (the bridge's multitenancy rule; decision 51). The record carries who changed it last (`set_by`) and
+  (the bridge's multitenancy rule). The record carries who changed it last (`set_by`) and
   when (`updated_at`); the change is audited in the workspace's own log with the previous and new model.
 
 `get_workspace_settings` answers:
@@ -244,8 +244,8 @@ solution operating-state batch remains concurrent and reuses that run result.
 
 ## Deletion
 
-Deleting a workspace cascades (decision 54 S12,
-[lake#514](https://github.com/oramasearch/lake/issues/514)). It cannot be undone: the workspace
+Deleting a workspace cascades
+([lake#514](https://github.com/oramasearch/lake/issues/514)). It cannot be undone: the workspace
 Zetta's volume snapshots ([orama-operator#260](https://github.com/oramasearch/orama-operator/issues/260))
 are the only copy left.
 
@@ -280,7 +280,7 @@ nothing is deleted.
 deletes the workspace's image routes, sets the workspace's desired state to `deleted` with its
 services `absent`, and records the
 deletion with everything it destroyed in `workspace_deletions` (migration
-`0065_workspace_deletions`). The operator reads only the desired state, as before (decision 51).
+`0065_workspace_deletions`). The operator reads only the desired state, as before.
 
 **After the commit**, lake removes what lives outside PostgreSQL and records the central audit:
 
@@ -492,7 +492,7 @@ name, and watch `kubectl -n lake get oramazettacluster` lose `<lake>-<workspace>
 ## Known limits
 
 Status: checked on 2026-10-01 against the dev cluster (lake `36679e1`, workspace Zetta
-`dev-13979173`) during the UX review recorded in liquid-bridge `docs/reviews/lake-ux/2026-10-01.md`.
+`dev-13979173`) during a UX review.
 
 - A workspace is stopped with `update_workspace` (`desired: "stopped"`), which withdraws its
   primary Zetta service as [the contract](../control-plane/workspaces.md) describes, or deleted
@@ -511,7 +511,7 @@ Status: checked on 2026-10-01 against the dev cluster (lake `36679e1`, workspace
 ## Pipeline Work Budgets
 
 Lake limits a pipeline to 50,000 steps and 100,000 edges, and an `edit_pipeline` batch to
-256 edits (lake#967, LSR-101). Oversized stored graphs are refused by both `edit_pipeline` and
+256 edits (lake#967). Oversized stored graphs are refused by both `edit_pipeline` and
 `render_pipeline` before their arrays are copied. Edit growth is checked per operation, including
 intermediate states. `save_pipeline` and `workspace_act` with `save_graph` enforce the same counts
 before forwarding to the engine. A direct engine client can still store a larger graph; Lake

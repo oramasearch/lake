@@ -309,7 +309,7 @@ int main(int argc, char** argv) {
     opts.clerk_publishable_key = env_or("LAKE_CLERK_PUBLISHABLE_KEY", "");
     opts.clerk_webhook_secret = env_or("LAKE_CLERK_WEBHOOK_SECRET", "");
     opts.clerk_secret_key = env_or("LAKE_CLERK_SECRET_KEY", "");
-    // The terms and privacy policy sign-up and sign-in link to (liquid-bridge#15): unset keeps
+    // The terms and privacy policy sign-up and sign-in link to: unset keeps
     // Orama's published pages, `off` shows no link, and a malformed URL stops lake.
     for (const auto& [name, value, target, fallback] :
          {std::tuple{"LAKE_TERMS_URL",

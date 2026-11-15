@@ -439,8 +439,8 @@ and the quickstart's state is one sealed record per quickstart in the collection
 body holds the dataset, index, training settings and run id, model id, the conversation's id
 (lake#1182), and each step's last error.
 Nothing of the quickstart's own is added to lake's PostgreSQL control plane: the workspace a person
-gets is the one `start_workspace` makes, and the website key is a browser key (`browser_keys`,
-decision 53), both of which multitenancy already holds. Audit goes to the workspace's own chain
+gets is the one `start_workspace` makes, and the website key is a browser key (`browser_keys`),
+both of which multitenancy already holds. Audit goes to the workspace's own chain
 (`audit_routing.cpp`).
 
 ## Verify

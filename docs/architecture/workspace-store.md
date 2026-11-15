@@ -1,7 +1,7 @@
 # Workspace Store
 
-Refs [lake#380](https://github.com/oramasearch/lake/issues/380), liquid-bridge decision 54 (S1, S2,
-S3 and its 2026-10-03 implementation note), [plan](workspace-storage-plan.md#lake380-the-liquid-store).
+Refs [lake#380](https://github.com/oramasearch/lake/issues/380),
+[plan](workspace-storage-plan.md#lake380-the-liquid-store).
 
 **Status: implemented in the source tree; not deployed; no workspace on dev is switched.** A switched
 workspace's repositories (and with them its Drive, models and datasets) are served from one liquid
@@ -29,7 +29,7 @@ incarnation. `dev-5f70b306` has zetta#1235 but reports neither, and is refused
 | Packs, index runs, object map, leases, collector state, each repository's `LIQUID_REPO`, journal, sessions and replication cursors | Bucket `lake_store` of the workspace Zetta, one object per liquid key, encrypted |
 | Tenant image blobs (lake#383 phase B) | Objects of the same liquid store, not in any repository; each found through its `lake_oci_blobs` record (SHA-256 digest to liquid digest), [registry.md](../api/registry.md#where-a-tenant-image-lives) |
 | The workspace's data key, wrapped | Object `keys/workspace-v1.wrapped` of the same bucket |
-| The workspace's search index (lake#381): manifest, write-once blob runs, segments, artifact members | Objects `search/<name>` of the same bucket, sealed with the workspace's data key and fenced by the store's lease through search's own client calls, never by liquid ([search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)) |
+| The workspace's search index (lake#381): manifest, write-once blob runs, segments, artifact members | Objects `search/<name>` of the same bucket, sealed with the workspace's data key and fenced by the store's lease through search's own client calls, never by liquid ([search.md](../api/search.md#where-the-index-lives-lake381)) |
 | Whether the workspace is switched | `workspaces.store_moved_at` (migration `0067`), content-free |
 | The account's store from before the switch | `LAKE_STORE_ROOT/<space>/store` and `<space>/repositories`, unchanged and read-only from the switch on, until the operator's `remove_space_store` removes both once every workspace of the account is switched ([below](#removing-the-accounts-store)) |
 
@@ -436,7 +436,7 @@ maps of open stores is never held across store I/O, a network call or a wait.
   never held across a lane wait or I/O. It is loaded on first use, evicted when idle under
   `LAKE_SEARCH_MEMORY_BYTES`, and rebuilt on the maintenance thread when missing or unreadable,
   reading one repository at a time under the lane and writing without it
-  ([search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)).
+  ([search.md](../api/search.md#where-the-index-lives-lake381)).
 - **Zetta's HTTP client** (`install_native_http_transport`) is safe from many threads at once: one
   dedicated thread runs every exchange, callers post to it and wait on an event, and its shared TLS
   context cache is locked.
@@ -467,7 +467,7 @@ is never resumed, so its response and its audit event are lost; the count is log
 
 ## Rollout hand-off (lake#536)
 
-In an overlapping rollout (decision 49, `spec.rollout.overlapOnSharedStore`) the successor starts
+In an overlapping rollout (`spec.rollout.overlapOnSharedStore`) the successor starts
 beside its predecessor on the same volume and the same workspace Zettas, and every workspace store
 passes from one to the other through its bucket lease.
 
@@ -496,7 +496,7 @@ signal arrives, before anything else winds down):
    Nothing is joined, so a release waits for the lane's current holder only. The index work
    dropped here (a rebuild queued or running, repositories pending) is not lost: before such a
    workspace's store is released its `search/manifest.json` is removed under the lease, and the
-   next process rebuilds the index ([search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)).
+   next process rebuilds the index ([search.md](../api/search.md#where-the-index-lives-lake381)).
    A rebuild stops only between repositories, so its index writes (written without a lane) can
    still be in flight. Each open store has an `IndexWriteGate` (lake#606): the invalidation and
    every close of the store close it, a replacing put (the manifest, the artifact members) or a

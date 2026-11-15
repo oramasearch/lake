@@ -58,7 +58,7 @@ curl -H "Authorization: Bearer $LAKE_ADMIN_TOKEN" \
   http://127.0.0.1:4900/v1/search
 ```
 
-## Where the index lives (lake#381, decision 54 S8)
+## Where the index lives (lake#381)
 
 A repository's index is kept beside the store that serves it:
 

@@ -4,7 +4,7 @@
 //
 // Lake is the service provider. It sends an AuthnRequest over the HTTP-Redirect binding and takes
 // the identity provider's Response over the HTTP-POST binding at its Assertion Consumer Service.
-// Verification is Lake's own (no XML or XML-security library; liquid decision 32 does the same
+// Verification is Lake's own (no XML or XML-security library; liquid does the same
 // for X.509): a strict XML reader that refuses DTDs, entities other than the predefined ones and
 // processing instructions, Exclusive XML Canonicalization 1.0 without comments, and XML Signature
 // verification with the provider's registered certificate. Every value Lake uses is read from the

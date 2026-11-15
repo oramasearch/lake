@@ -12,10 +12,10 @@ namespace lake::api {
 namespace {
 
 // Control-plane and identity capabilities, and those that span the workspaces of a space or the
-// whole instance: their events stay in the central log (decision 52). Sorted.
+// whole instance: their events stay in the central log. Sorted.
 constexpr std::array central = std::to_array<std::string_view>({
     "accept_invitation",
-    // The prepaid balance is billing, in the control plane (lake#1114, decision 56).
+    // The prepaid balance is billing, in the control plane (lake#1114).
     "account_balance",
     // Which key an account signs with is identity (lake#762).
     "account_identity",
@@ -40,7 +40,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "begin_passkey_registration",
     "begin_passkey_sign_in",
     "begin_root_recovery",
-    // Billing is account configuration in the control plane (decision 56, lake#564).
+    // Billing is account configuration in the control plane (lake#564).
     "bill_preview",
     "billing_account",
     "cancel_recovery",
@@ -56,7 +56,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "copy_workspace_records",
     // A browser key is a credential, kept with the others in the control plane (lake#1152).
     "create_browser_key",
-    // Coupon codes are billing, in the control plane (lake#1156, decision 56).
+    // Coupon codes are billing, in the control plane (lake#1156).
     "create_coupon",
     "create_customer",
     "create_federation_issuer",
@@ -95,7 +95,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "get_team",
     "get_user",
     "get_workspace",
-    // Credits from Orama are billing, in the control plane (lake#1134, decision 56).
+    // Credits from Orama are billing, in the control plane (lake#1134).
     "grant_balance_credit",
     "identity",
     "initialize_tuf",

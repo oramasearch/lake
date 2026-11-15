@@ -14,7 +14,7 @@
 
 namespace lake::control {
 
-// A workspace's audit (lake#317, decision 52, docs/api/audit.md#workspace-audit): the signed
+// A workspace's audit (lake#317, docs/api/audit.md#workspace-audit): the signed
 // events about that workspace's data, in the sealed collection `lake_audit_events` of its own
 // Zetta. Every record is found by one lookup (`workspace:<id>`) and ordered by the event's
 // instant, so one listing reads a workspace's audit newest first.
@@ -27,7 +27,7 @@ namespace lake::control {
 //   index of `sequence:<n>`, written `if_absent`: claiming a place in the chain is that one
 //   conditional write, so two lake replicas never fork it, and a write retried after a lost
 //   answer finds its own event at its place.
-// - **Copied events.** An event recorded in the central log before decision 52 and copied by
+// - **Copied events.** An event recorded in the central log before the audit split and copied by
 //   `copy_workspace_records` keeps its id, signature and central predecessor, under its id. The
 //   central chain holds its place; it is checked alone (audit::verify_event).
 //

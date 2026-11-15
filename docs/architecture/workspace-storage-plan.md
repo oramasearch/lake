@@ -9,7 +9,7 @@ Refs [lake#311](https://github.com/oramasearch/lake/issues/311),
 [lake#383](https://github.com/oramasearch/lake/issues/383) and
 [lake#384](https://github.com/oramasearch/lake/issues/384).
 
-**Status: design, decided 2026-10-03 (decision 54).** Implemented: lake#319 (`repository_refs`
+**Status: design, decided 2026-10-03.** Implemented: lake#319 (`repository_refs`
 dropped) and lake#315 part 2 (the description in `lake_repositories`), both in migration `0064`;
 lake#382 (the log stays with the instance; no migration); lake#384 (route patterns in request logs
 and the per-workspace `lake_requests` series, [PR #521](https://github.com/oramasearch/lake/pull/521),
@@ -23,20 +23,18 @@ columns are dropped by migration `0070_drop_moved_tables` (lake#311,
 [schema.md](../control-plane/schema.md#drop-moved-tables-migration)), and the operator's
 `remove_space_store` removes an account's old store from lake's volume once every workspace of the
 account is switched ([workspace-store.md](workspace-store.md)); neither has run on dev yet. lake#381 keeps the search index beside the workspace store (no migration,
-[search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)).
+[search.md](../api/search.md#where-the-index-lives-lake381)).
 Everything else here is not implemented yet. This page plans the moves that
 [workspace records](workspace-records.md) does not cover: the bytes on lake's store volume
 (liquid stores, search indexes, the registry, the transparency log), the two repository tables
 that sit beside them, and lake's operational telemetry. It states what each item is today, what it
-is under the umbrella rule, where its bytes live, how it moves, and the decisions Steve made. The rule is in [workspace-data-plane.md](workspace-data-plane.md): everything goes in a
+is under the umbrella rule, where its bytes live, how it moves, and the decisions taken. The rule is in [workspace-data-plane.md](workspace-data-plane.md): everything goes in a
 workspace Zetta except multitenancy, dispatch and billing.
 
 ## Decisions
 
-**Decided by Steve on 2026-10-03:** liquid-bridge `docs/decisions.md`
-[decision 54](https://github.com/oramasearch/liquid-bridge/blob/main/docs/decisions.md), recorded in
-[lake#512](https://github.com/oramasearch/lake/issues/512). Every answer is the recommendation
-except S12, where Steve chose cascade over refusal.
+**Decided 2026-10-03**, recorded in lake#512. Every answer is the recommendation except S12,
+where cascade was chosen over refusal.
 
 | # | Item | Question | Decided | Not chosen |
 |---|---|---|---|---|
@@ -94,7 +92,7 @@ volume. The cluster runs no Prometheus, Loki or monitors. Apps: 3 rows; builds: 
    created (a pod's volumes are fixed), and would meet the node's Azure disk attach limit. So a
    workspace's bytes are either served by a pod in the workspace's namespace or kept on a volume
    lake already mounts.
-2. **The operator never reads or writes a workspace Zetta** (decision 51). It may size, snapshot
+2. **The operator never reads or writes a workspace Zetta**. It may size, snapshot
    and delete a workspace's volume from desired state in Postgres; copying bytes is lake's work,
    started by the operator through a lake capability, as `copy_workspace_records` is.
 3. **A liquid store has one writing process** ([store-volume.md](../deployment/store-volume.md)).
@@ -271,7 +269,7 @@ Storage measurement for metering switches from a live `du` of the account's stor
 ### lake#381: the search index
 
 **Implemented** ([lake#381](https://github.com/oramasearch/lake/issues/381), no migration;
-[search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)). The interim of lake#380,
+[search.md](../api/search.md#where-the-index-lives-lake381)). The interim of lake#380,
 in which search neither indexed nor returned a switched workspace's repositories, is gone.
 
 **Before.** `<customer>/index/`: `blobs.json` (blob digest to UTF-8 file text), `segment-<repository>-<change>-<kind>-<ref>.json`
@@ -359,10 +357,10 @@ S7. The two checks that belonged with it:
   temporary names). The store root lock (`.lake-owner.lock`, [store-volume.md](../deployment/store-volume.md))
   admits one writing process at a time, which covers them; they are unchanged.
 - `dynamic_secret` events still reach the log. `lease_dynamic_secret`, `renew_dynamic_secret` and
-  `revoke_dynamic_secret` are in the central list of decision 52's audit routing
+  `revoke_dynamic_secret` are in the central list of the audit routing
   (`src/api/audit_routing.cpp`), although the lease is a record of its mount's workspace, so
   `finish_call` signs each into the private central chain. Successful calls append only the
-  event's digest commitment as the instance log leaf (lake#953, LSR-087); denied and failed calls
+  event's digest commitment as the instance log leaf (lake#953); denied and failed calls
   append nothing publicly. The complete event and all tenant and caller identifiers stay private.
   `WorkspaceRecordStores.DynamicSecretsInAWorkspaceKeepTheirInstanceLogLeaf` checks ordered
   commitments against the private events with a workspace audit route available, and fails if the
@@ -596,4 +594,4 @@ The umbrella rule's exceptions for S7 and S9 are already in the bridge `CLAUDE.m
 
 When an item ships, mark its row in [workspace-data-plane.md](workspace-data-plane.md#storage-audit)
 as moved (or as an instance exception for #382 and #384) and link its change, as the records moves
-do. A change to a decision above is a new liquid-bridge decision, not an edit of this table.
+do. A change to a decision above is a new decision, not an edit of this table.

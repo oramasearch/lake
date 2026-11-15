@@ -196,5 +196,4 @@ rules used by repository agents. [`SECURITY.md`](SECURITY.md) says how to report
 
 ## Licence
 
-No licence is declared in this repository. The project licence decision is tracked in
-[oramasearch/liquid-bridge#2](https://github.com/oramasearch/liquid-bridge/issues/2).
+No licence is declared in this repository yet.

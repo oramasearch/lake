@@ -376,7 +376,7 @@ INSTANTIATE_TEST_SUITE_P(Stores,
 
 } // namespace
 
-// Decision 52 (lake#317): one function decides which log a capability's events go to, and every
+// lake#317: one function decides which log a capability's events go to, and every
 // registered capability is named by it, so a new capability cannot be added without deciding.
 TEST(AuditRouting, EveryRegisteredCapabilityIsClassified) {
     lake::api::Registry registry;
@@ -400,7 +400,7 @@ TEST(AuditRouting, EveryRegisteredCapabilityIsClassified) {
     for (const std::string_view name : workspace) {
         EXPECT_TRUE(registered.contains(std::string(name))) << name << " is not registered";
     }
-    // The identity, control-plane and audit capabilities named in decision 52 stay central; the
+    // The identity, control-plane and audit capabilities named in the audit split stay central; the
     // workspace calls and actions on a workspace's data go to it.
     for (const char* name : {"sign_in_password", "create_membership", "create_grant",
                              "create_workspace", "create_token", "create_customer",

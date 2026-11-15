@@ -33,6 +33,6 @@ custom resource.
 
 lake is part of the liquid project. The product specification is `oramasearch/liquid`
 `docs/features/18-lake-service.md`; the cross-module map, the action plan and the decisions are
-in [`oramasearch/liquid-bridge`](https://github.com/oramasearch/liquid-bridge) `docs/`. The
+kept with the liquid project. The
 Phase 6 design that shapes this codebase is [`phase-6.md`](phase-6.md); what the source tree
 implements today is [`status.md`](status.md).

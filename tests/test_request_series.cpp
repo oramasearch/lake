@@ -1,4 +1,4 @@
-// The per-request log line and the per-workspace request series (decision 54 S9, lake#384,
+// The per-request log line and the per-workspace request series (lake#384,
 // docs/serving/telemetry.md).
 
 #include <gtest/gtest.h>

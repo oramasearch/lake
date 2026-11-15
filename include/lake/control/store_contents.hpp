@@ -60,7 +60,7 @@ public:
 
 // What Lake hands a store browser to open one store (lake#664): the store, what the operator
 // delivered for it (`store_connection`), and the fields of the workspace secret its spec names,
-// read by Lake in the workspace's secret store (decision 58: the workspace's credential, never
+// read by Lake in the workspace's secret store (the workspace's credential, never
 // Orama's). `credential` is empty for a store that names none.
 struct StoreOpening {
     ManagedStore store;

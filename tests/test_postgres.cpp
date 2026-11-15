@@ -1090,7 +1090,7 @@ TEST(PostgresUsageLimits, OneLimitPerDimensionAndZeroRemovesIt) {
     EXPECT_EQ(store->usage_limits(lake::control::new_uuid_v4()).error().code, "not_found");
 }
 
-// Billing records (migration 0073, lake#564, decision 56): the price list (one stored row per
+// Billing records (migration 0073, lake#564): the price list (one stored row per
 // publication since lake#635) and invoices with frozen lines and payment state, in the control
 // plane. billing_subscriptions stays in the schema, unused since lake#635 (no plans to choose).
 TEST(PostgresBilling, PriceListsAndInvoicesFollowTheContract) {
@@ -2909,7 +2909,7 @@ TEST(PostgresMovedTables, MigrationRefusesRowsWithNoRecordedWorkspaceOwner) {
     drop.commit();
 }
 
-// Migration 0064 (decision 54, S11): repository_refs, a copy of liquid's refs nothing read, is
+// Migration 0064 (S11): repository_refs, a copy of liquid's refs nothing read, is
 // dropped (lake#319) and never recreated by a rerun. The description that 0064 left in the row
 // for the copy is gone too (0070), so the row is routing only and a create under a chosen id keeps
 // it.
@@ -2994,7 +2994,7 @@ TEST(PostgresRepositories, MigrationDropsRefsAndTheRowIsRoutingOnly) {
     EXPECT_FALSE(tx.exec("SELECT to_regclass('repository_records_guard')")[0][0].is_null());
 }
 
-// Migration 0066 (decision 54 S14, lake#513): a repository 0051 left without a workspace is
+// Migration 0066 (lake#513): a repository 0051 left without a workspace is
 // assigned its space's only live workspace once the space has exactly one, with its routing and
 // description owners recorded; a space with two workspaces is left alone and reported. The
 // trigger lets only the migration's own block make that change: every other change of
@@ -4311,7 +4311,7 @@ TEST(PostgresBilling, CronRunsAreAWorkloadKindAndTheirEndIsRead) {
     EXPECT_EQ(runs->front().status_updated_at, "2026-10-11T03:02:30Z");
 }
 
-// LSR-095: model/direction rates and frozen invoice lines must survive the PostgreSQL constraints.
+// Model/direction rates and frozen invoice lines must survive the PostgreSQL constraints.
 TEST(PostgresBilling, ModelDirectionPricesAndInvoiceLinesRoundTrip) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {

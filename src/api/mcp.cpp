@@ -217,7 +217,7 @@ liquid::runtime::task<std::optional<std::string>> mcp_dispatch_async(const Regis
                                    ? request.value("method", "")
                                    : "";
     // A workspace's MCP endpoint (/w/<workspace>/mcp) also lists the allowed tools of the
-    // connections its people chose to expose, as `<prefix>__<tool>` (decision 60, lake#652).
+    // connections its people chose to expose, as `<prefix>__<tool>` (lake#652).
     const std::string& workspace = context.path_workspace_id;
     if (method == "tools/list" && !workspace.empty() && context.authorized) {
         nlohmann::json tools = mcp_tools(registry, schema_audience(context));

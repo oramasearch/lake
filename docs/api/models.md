@@ -27,8 +27,7 @@ pull receives zero bytes, and the source and destination trees match.
 Repository capabilities use the repository policy object. Read capabilities allow anonymous
 access only when the repository is public; action capabilities require repository `write`
 access. Without `revision`, `get_dataset` and `get_model` read private workspace metadata and
-require a signed-in Lake caller with `read` on the customer that owns the workspace (lake#970,
-LSR-104). Supplying `customer_id` and `workspace_id` grants no access. The shared workspace
+require a signed-in Lake caller with `read` on the customer that owns the workspace (lake#970). Supplying `customer_id` and `workspace_id` grants no access. The shared workspace
 customer resolver requires authentication before accepting either an explicit customer or an
 Application Agent task's customer; Registry enforces credential scopes and customer `read` before
 dispatch. All capabilities are registered once for `/v1/openapi.json` and `POST /mcp`.

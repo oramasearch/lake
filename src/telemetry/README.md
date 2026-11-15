@@ -52,7 +52,7 @@ owner loop's resume pass counts `lake_workspace_deletions_completed_total` and
 `lake_workspace_deletion_errors_total`.
 
 The store decorator forwards email recovery's trusted client address and owner cancellation
-(lake#968, LSR-102) so instrumented production stores enforce the same budgets and ownership
+(lake#968) so instrumented production stores enforce the same budgets and ownership
 checks as direct stores. See [recovery.md](../../docs/api/recovery.md#email-recovery-budgets).
 The instrumented store forwards `apply_cloud_order_subscription` and records its normal call/error metrics (lake#972); signed entitlement updates therefore use the same observability as Checkout updates. See [orders](../../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
 The store wrapper forwards `authentication_attempt` so telemetry preserves shared account and client admission (lake#966).

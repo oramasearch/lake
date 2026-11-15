@@ -77,7 +77,7 @@ may wrap across source lines.
   reader; it is the engine's name, which only code spans may quote (`study-events.*`,
   Experiments Agent's `study` field). An experiment's attempts are **trials**, each a training
   **run**. `Docs.GuidesSpeakOfExperiments` checks the prose (lake#561).
-- Call the product **Lake**, with a capital L (decision 59, lake#642), and the web app the **Lake
+- Call the product **Lake**, with a capital L (lake#642), and the web app the **Lake
   Console**. Technical names keep their form: hostnames (`lake.live`, `lake.oramadev.net`), the MCP
   server name, CLI commands, `LAKE_*` variables, identifiers and paths, in code spans where they
   stand alone. `Docs.GuidesCallTheProductLake` checks the prose.
@@ -109,4 +109,4 @@ The secrets guide describes private lifecycle audit and public digest commitment
 calls (lake#953); denied and failed attempts publish nothing.
 [Usage](usage.md#set-the-repository-storage-limit) describes the operator permission needed to
 change repository storage limits; account administrators can still change other usage limits
-(lake#976, LSR-109).
+(lake#976).

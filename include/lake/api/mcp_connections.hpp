@@ -1,6 +1,6 @@
 #pragma once
 
-// A workspace's MCP connections (decision 60, lake#652, docs/api/mcp-connections.md): the
+// A workspace's MCP connections (lake#652, docs/api/mcp-connections.md): the
 // capabilities over them, and what Lake's own MCP endpoint needs to re-export a connection's
 // allowed tools under its prefix.
 

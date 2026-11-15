@@ -100,7 +100,7 @@ export default function AuditPage() {
       title={own ? "Your Activity" : "Audit Log"}
       sub={own ? "Signed, hash-linked events for everything you did on this Lake." : "Signed, hash-linked events. Use the filters to narrow the evidence view."}
     >
-      {/* Decision 52: the central log and each workspace's own audit; say which could not be read. */}
+      {/* The central log and each workspace's own audit; say which could not be read. */}
       {((events.data?.unread_workspaces ?? []) as Row[]).map((unread) => (
         <Banner key={unread.workspace_id} tone="warn">
           The audit of workspace <code>{unread.workspace_id}</code> could not be read: {unread.message}

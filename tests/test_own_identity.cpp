@@ -1,4 +1,4 @@
-// Managed keys and using your own identity (lake#762, liquid-bridge decision 65,
+// Managed keys and using your own identity (lake#762,
 // docs/api/identity.md#your-own-identity).
 #include "audit_test_support.hpp"
 #include "identity_proof_test_support.hpp"
@@ -715,7 +715,7 @@ liquid::identity_document signed_by(liquid::identity_document document, liquid::
     return document;
 }
 
-// The attack of lake#917 (LSR-006): the attacker's own key and document, with the victim's
+// The attack of lake#917: the attacker's own key and document, with the victim's
 // identifier written in and self-signed again with the attacker's key.
 std::string forged_document(Person& attacker, const std::string& victim_taap_id) {
     liquid::identity_document document = decoded_document(attacker.document);
@@ -752,7 +752,7 @@ json sign_in_taap_input(liquid::signer& signer,
     return input;
 }
 
-// lake#917 (LSR-006), against either store: a TAAP sign-in succeeds only with the key bound to the
+// lake#917, against either store: a TAAP sign-in succeeds only with the key bound to the
 // registered identity, its own first key or a rotation that key signed. A document naming the
 // victim's identifier with the attacker's key is refused, issues no session, and is audited.
 void expect_taap_sign_in_binds_the_key(lake::control::Store& store,

@@ -159,7 +159,7 @@ constexpr std::array group_rules{
                          n == "delete_transcript";
               }},
     GroupRule{"MCP Connections",
-              "The workspace as a client of remote MCP servers (decision 60): each connection "
+              "The workspace as a client of remote MCP servers: each connection "
               "keeps its server's tools, and a person decides which are allowed and which are "
               "changes. read_mcp_tool runs an allowed read; call_mcp_tool runs a change, which an "
               "agent only proposes unless a person auto-approved that tool for it. Lake holds the "

@@ -117,7 +117,7 @@
   }
 }
 
-/* The terms and privacy sentence under every sign-up and sign-in form (liquid-bridge#15). */
+/* The terms and privacy sentence under every sign-up and sign-in form. */
 .auth-legal {
   margin: 12px 0 0;
   font-size: 12px;
