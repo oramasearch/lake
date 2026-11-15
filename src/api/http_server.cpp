@@ -677,12 +677,10 @@ std::string server_timing_of(const boost::http::route_params& route) {
 // Every page lake answers: only lake frames it (the Ask Orama panel, lake#258), so no clickjacking,
 // and it shows images only from lake itself and `data:` URLs (lake#943), so no Markdown an agent or
 // another person wrote can make the browser send anything to another server by naming an image
-// (docs/serving/http.md#images).
+// (docs/serving/http.md#images). The web app's own pages get the stricter policy of
+// web_app_content_security_policy (lake#991), which also limits scripts and requests.
 constexpr std::string_view page_content_security_policy =
     "frame-ancestors 'self'; img-src 'self' data:";
-// The web app's pages with Clerk on, whose sign-in shows images from Clerk's image host.
-constexpr std::string_view clerk_page_content_security_policy =
-    "frame-ancestors 'self'; img-src 'self' data: https://img.clerk.com";
 
 boost::http::route_task
 send_text(boost::http::route_params& route,
@@ -695,6 +693,7 @@ send_text(boost::http::route_params& route,
     route.status(status);
     route.res.set(http::field::content_type, content_type);
     route.res.set(http::field::cache_control, cache_control);
+    route.res.set("X-Content-Type-Options", "nosniff");
     if (content_type.starts_with("text/html")) {
         route.res.set("Content-Security-Policy", content_security_policy);
     }
@@ -717,6 +716,7 @@ boost::http::route_task send_bytes(boost::http::route_params& route,
     route.status(status);
     route.res.set(http::field::content_type, content_type);
     route.res.set(http::field::cache_control, "no-store");
+    route.res.set("X-Content-Type-Options", "nosniff");
     route.res.erase(http::field::etag);
     route.res.erase(http::field::content_length);
     if (!etag.empty()) {
@@ -14409,12 +14409,15 @@ struct ApiServer::Impl {
                 html.insert(head, brand.head_markup());
             }
         }
+        // Computed from the page as sent: its inline scripts are allowed by hash, nothing else.
+        const std::string policy =
+            web_app_content_security_policy(html, clerk ? clerk->frontend_api : "");
         return send_text(route,
                          boost::http::status::ok,
                          std::move(html),
                          "text/html; charset=utf-8",
                          "private, no-store",
-                         clerk ? clerk_page_content_security_policy : page_content_security_policy);
+                         policy);
     }
 
     boost::http::route_task serve_web_app_file(boost::http::route_params& route, std::string path) {
@@ -16279,6 +16282,9 @@ bool ApiServer::start() {
         route.res.set_start_line(http::status::ok, route.req.version());
         // A draining server answers what it has accepted and closes each connection after it.
         route.res.set_keep_alive(route.req.keep_alive() && !impl.draining.load());
+        // Every answer is read as the type lake names, never sniffed into another (lake#991):
+        // a JSON error, a file's bytes or a stream cannot become a page or a script.
+        route.res.set("X-Content-Type-Options", "nosniff");
         const auto start = std::chrono::steady_clock::now();
         start_request_timing(route, start);
         auto result = co_await cors(route);

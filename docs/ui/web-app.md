@@ -10,8 +10,10 @@ Orama design tokens, the same IBM Plex faces and the same component classes the 
 - **One app, served by lake.** CMake builds `frontend/` with npm and
   `tools/ui/embed-frontend.mjs` embeds `dist/` into the binary (`include/lake/api/web_app.hpp`).
   Lake answers every page route with `index.html` (`Cache-Control: no-cache`,
-  `Content-Security-Policy: frame-ancestors 'self'; img-src 'self' data:`,
-  [`../serving/http.md#images`](../serving/http.md#images)) and serves the content-hashed files under
+  a Content-Security-Policy that allows scripts only from lake and the page's own inline scripts by
+  hash, requests only to lake, and images only from lake and `data:`
+  ([`../serving/http.md#the-web-apps-script-policy`](../serving/http.md#the-web-apps-script-policy),
+  lake#991, and [`../serving/http.md#images`](../serving/http.md#images))) and serves the content-hashed files under
   `/ui/` immutable for a year. No file is read at run time.
 - **It calls only lake's API.** Every read is `GET /v1/<capability>` and every change
   `POST /v1/<capability>`: the same capabilities, authorization and audit as REST and MCP

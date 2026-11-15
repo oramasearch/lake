@@ -5,6 +5,7 @@
 // /index.html and serves the content-hashed files under /ui/ immutable. See docs/ui/README.md.
 
 #include <span>
+#include <string>
 #include <string_view>
 
 namespace lake::api {
@@ -33,6 +34,22 @@ bool web_app_serves(std::string_view method,
                     std::string_view path,
                     std::string_view accept,
                     bool custom_domain);
+
+// The Content-Security-Policy of a page of the web app (lake#991,
+// docs/serving/http.md#the-web-apps-script-policy): scripts only from lake itself and, by SHA-256,
+// the inline scripts `html` carries (index.html's theme script; a `type="application/json"` data
+// block runs nothing and is not listed); requests, fonts, media and workers only to lake (`blob:`
+// for a recording's preview); images from lake and `data:`; styles from lake and inline (the
+// brand's colours and Clerk's components); frames of an https page (an App's preview); no plugins,
+// no <base>, forms only to lake, framed only by lake. `clerk_frontend_api` (the Clerk Frontend API
+// host, empty without Clerk) adds that host for scripts and requests, Clerk's image host and
+// Cloudflare's challenge script, which Clerk's bot protection loads.
+std::string web_app_content_security_policy(std::string_view html,
+                                            std::string_view clerk_frontend_api);
+
+// The SHA-256 source expressions ('sha256-<base64>') of every inline script in `html` that a
+// browser runs: a <script> with no src whose type is absent, empty, a JavaScript type or `module`.
+std::string inline_script_hashes(std::string_view html);
 
 // The Cache-Control for an embedded file: hashed /ui/ files are immutable, index.html is not.
 std::string_view web_app_cache_control(std::string_view path);

@@ -100,7 +100,9 @@ pending zetta#1281 response. See [scoped credentials](../../docs/api/scoped-cred
 
 **The console is the web app (lake#561).** The pages are `frontend/`, embedded in the binary and
 answered for every browser page request by the `web_app` middleware (`web_app.cpp`,
-[web-app.md](../../docs/ui/web-app.md)); they call only `/v1`. lake#561 retired the
+[web-app.md](../../docs/ui/web-app.md)); they call only `/v1`, under the script policy
+`web_app_content_security_policy` builds from the page as sent, and every answer carries `nosniff`
+([http.md](../../docs/serving/http.md#the-web-apps-script-policy), lake#991). lake#561 retired the
 server-rendered console: the page and deferred-panel handlers and every HTML form handler in
 `http_server.cpp`, the renderers in `web_ui.cpp`, `web_ui_streams.cpp` and `web_ui_experiments.cpp`,
 the `lake_workspace` cookie and the experiment chart assets. Where a paragraph below says a page
