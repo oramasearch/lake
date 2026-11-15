@@ -122,6 +122,12 @@ nginx.ingress.kubernetes.io/auth-always-set-cookie: "true"
 nginx.ingress.kubernetes.io/auth-response-headers: X-Orama-User,X-Orama-Space
 ```
 
+`GET /apps/authorize` hands the app its session only for a **browser session** (the session cookie
+on the Lake host). A request carrying `Authorization: Bearer`, with or without a cookie, is `403`
+(LSR-208, lake#1058), so no script or tool carries a Lake credential through to a tenant's app host.
+The e2e probes (`tools/e2e/agents.py`) reach an app without any Lake credential: a public app
+answers 2xx, and a private one redirects an anonymous visitor to `/apps/authorize`.
+
 `GET /v1/apps/auth`, including its `/w/<workspace>/v1/apps/auth` form, resolves a live protected
 app by the host of `X-Original-URL` (ingress-nginx sets `Host` to Lake's Service and sends no
 `X-Forwarded-Host` on the auth subrequest), falling back to `X-Forwarded-Host` or `Host`. A valid host-only `lake_app_session` returns 200 with

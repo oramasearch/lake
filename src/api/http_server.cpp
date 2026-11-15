@@ -9765,6 +9765,15 @@ struct ApiServer::Impl {
                                          "no-store");
         }
         const std::string return_path = app_authorize_path(app_id, redirect_url);
+        // Only a browser session hands an app its session (LSR-208, lake#1058): a bearer sent here
+        // is refused, so no script or tool carries a Lake credential to a tenant's app host.
+        if (!bearer_of(route).empty()) {
+            co_return co_await send_text(route,
+                                         http::status::forbidden,
+                                         "Sign in with the browser to open this app.",
+                                         "text/plain; charset=utf-8",
+                                         "no-store");
+        }
         const ApiContext context = context_for(route);
         if (!context.authorized) {
             const std::string sign_in = "/sign-in?return_to=" + oauth_url_encode(return_path);
