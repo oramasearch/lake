@@ -8,7 +8,7 @@
 
 namespace lake {
 std::string_view version_string() noexcept {
-    return "0.8.1";
+    return "0.9.0";
 }
 std::string_view build_revision_string() noexcept {
     return LAKE_BUILD_REVISION;

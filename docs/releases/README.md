@@ -3,6 +3,8 @@
 One page per tagged release, newest first. A page states what the release includes, what it
 does not, what is knowingly still broken, and how it was verified.
 
+- [v0.9.0](v0.9.0.md) — 2026-11-16. The open-source release: MIT licence, the pre-launch security
+  fixes, lake on liquid v0.3.0, and the public README.
 - [v0.8.1](v0.8.1.md) — 2026-10-27. A patch: a file's exact text, clustering on real columns,
   predicting on a clustering model, Change App reloading onto the new version, and end-to-end fixes.
 - [v0.8.0](v0.8.0.md) — 2026-10-26. Agents on gpt-6.1-sol again (gpt-6.x tool calls through the Responses API;
