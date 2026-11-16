@@ -17,7 +17,7 @@ explicit workspace Zetta. See the [workspace data-plane design](../architecture/
 
 | Topic | Published by | Payload (JSON; the correlation id is the task id) |
 |---|---|---|
-| Lake bus `topic:agent-tasks.<agent>` | lake, when a turn is asked | `{task_id, customer_id, workspace_id, agent, kind}` |
+| Lake bus `topic:agent-tasks.<agent>` | lake, when a turn is asked | `{task_id, customer_id, workspace_id, agent}`: ids only, never the task's kind (lake#1312) |
 | Workspace `topic:agent-events` | the agent, through lake | `{task_id, agent, type, message, result}`; `type` is `progress`, `result` or `failed` |
 
 Lake creates exposed dispatch topics at startup with one-hour/10,000-event retention. Workspace
@@ -74,6 +74,14 @@ When an agent supplies an ID, it must match. Person-side event reads still requi
 
 **Nothing secret is on the bus.** Topics carry task ids only. The body travels in the answer to a
 claim, and the credential is handed over once and never stored.
+
+**No tenant text is on the bus either** (lake#1312). The dispatch topics are shared by every
+account, and every unclaimed task is published again each minute, so a dispatch event is the four
+bounded ids above and nothing the caller chose. A task's `kind` is free text from `agent_turn`;
+it stays in the control store, and `receive_agent_tasks` reads each task from there by the event's
+correlation id and answers its kind. No library agent reads the event payload itself. To verify:
+`AgentLeases.ADispatchEventCarriesIdsOnlyNotTheTasksKind` publishes a task with a 64 KiB kind and
+checks the event is the four ids alone while `receive_agent_tasks` still answers the kind.
 
 **Agents never hold the bus's token.** Every bus call goes through lake, which checks the caller:
 

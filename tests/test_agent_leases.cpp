@@ -529,6 +529,65 @@ TEST_P(AgentLeases, AWorkspaceBoundBusCredentialReachesOnlyItsWorkspace) {
         *store, task_id, lake::control::AgentBusKey{"agent-project", workspace_id}));
 }
 
+// The shared bus carries ids only: a task's kind, free text its caller chose, stays in the store
+// and reaches the agent through receive_agent_tasks (lake#1312).
+TEST_P(AgentLeases, ADispatchEventCarriesIdsOnlyNotTheTasksKind) {
+    const auto existing = store->get_agent_task(task_id);
+    ASSERT_TRUE(existing);
+    const std::string long_kind(64 * 1024, 'k');
+    const auto task =
+        store->create_agent_task({.customer_id = customer_id,
+                                  .agent = "agent-project",
+                                  .kind = long_kind,
+                                  .workspace_id = workspace_id,
+                                  .body = json::object(),
+                                  .scopes = {"server_info"},
+                                  .requested_by_user_id = existing->requested_by_user_id});
+    ASSERT_TRUE(task);
+    const auto published =
+        lake::control::settled(liquid::runtime::block_on(bus->publish_task(*task)));
+    ASSERT_TRUE(published) << published.error().message;
+
+    const auto topic = lake::control::agent_tasks_topic("agent-project");
+    std::vector<lake::control::BusEvent> mine;
+    for (const auto& event : dispatch->events(topic)) {
+        if (event.correlation_id == task->id) {
+            mine.push_back(event);
+        }
+    }
+    ASSERT_EQ(mine.size(), 1U);
+    const json& payload = mine.front().payload;
+    const json expected{{"task_id", task->id},
+                        {"customer_id", customer_id},
+                        {"workspace_id", workspace_id},
+                        {"agent", "agent-project"}};
+    EXPECT_EQ(payload, expected);
+    EXPECT_FALSE(payload.contains("kind"));
+    EXPECT_LT(payload.dump().size(), 256U);
+
+    lake::api::ApiContext context;
+    context.store = store.get();
+    context.workspaces = workspaces.get();
+    context.agent_bus = bus.get();
+    context.authorized = true;
+    context.acting_identity = "agent-service:agent-project";
+    context.credential_kind = "agent_service";
+    context.agent_service = "agent-project";
+    context.instance_kek = lake::test::test_instance_kek();
+    const auto received = liquid::runtime::block_on(
+        registry.call_async("receive_agent_tasks", {{"agent", "agent-project"}}, context));
+    ASSERT_TRUE(received);
+    ASSERT_TRUE(received->ok) << received->error.message;
+    bool found = false;
+    for (const json& item : received->value.at("tasks")) {
+        if (item.at("task_id") == task->id) {
+            found = true;
+            EXPECT_EQ(item.at("kind"), long_kind);
+        }
+    }
+    EXPECT_TRUE(found);
+}
+
 TEST(AgentBusKeys, AFileNameNamesTheAgentAndItsBoundWorkspace) {
     const auto shared = lake::control::agent_bus_key("agent-project");
     EXPECT_EQ(shared.agent, "agent-project");
