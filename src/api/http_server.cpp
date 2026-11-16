@@ -16322,6 +16322,16 @@ struct ApiServer::Impl {
     // last handler and nothing answers otherwise — a request must never hang, so
     // this trailing middleware terminates every miss with a 404.
     boost::http::route_task serve_not_found(boost::http::route_params& route) {
+        // A method HTTP does not define reaches no route (lake#1341): 501, wherever it is sent.
+        // The method itself is never echoed; it is counted and logged as `other`.
+        if (route.req.method() == boost::http::method::unknown) {
+            return send_text(
+                route,
+                boost::http::status::not_implemented,
+                error_body("not_supported", "lake does not implement this HTTP method"),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
         // A tool called with the wrong method is named, with the method to use (lake#256).
         // url.path() is a decoded copy: keep it, never a view of it (a view dangled on Linux).
         const std::string path(route.url.path());

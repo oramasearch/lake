@@ -62,6 +62,7 @@ tick.
 | `GET /acme/<customer-id>/directory`, ACME resource `POST`s, `HEAD /acme/<customer-id>/new-nonce`, `GET /.well-known/acme-challenge/<token>` | RFC 8555 account, HTTP-01 order, CSR finalize, polling, and certificate download |
 | `POST /mcp`, `/w/<workspace_id>/mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call`; the same registry as tools. `initialize` declares `tools.listChanged` and answers an `Mcp-Session-Id`; a session from an older tool list gets `notifications/tools/list_changed` ([mcp.md](../api/mcp.md)). `GET`/`DELETE` answer 405. |
 | anything else | `404 {"ok":false,"error":{"code":"not_found"}}` |
+| a method HTTP does not define (`XMADEUP`, `get`), on any path | `501 {"ok":false,"error":{"code":"not_supported"}}` ([below](#methods-lake-does-not-know)) |
 
 The server-rendered console pages, their deferred panels and their HTML form handlers
 (`/identity/sign-in`, `/repository/create`, `/drive/upload`, `/ship/app/*`, `/design/*` and the
@@ -320,6 +321,24 @@ produces no stderr output; lake's session loop (`HttpConnections`, [below](#conn
 writes nothing for it. Lake pins `oramasearch/beast2` branch `orama-main`, whose carried patch
 suppresses the former `read_header error: end of stream` line. The carrier and its update procedure
 are recorded in [`../build/dependencies.md`](../build/dependencies.md).
+
+## Methods Lake Does Not Know
+
+A client may send any token as the method. The router throws on a method it has no name for when
+it is dispatched by the parsed method, so until lake#1341 a request such as
+`XMADEUP /v1/server_info HTTP/1.1` closed the connection with no answer, no metric and no log
+line. Lake's session loop (`HttpConnections`, [below](#connections-and-workers)) now dispatches by
+the method's text: such a request matches no route and the trailing handler answers it
+`501 Not Implemented` with the JSON envelope, code `not_supported`, and `Cache-Control: no-store`,
+on every path (before the 405 a capability path answers a known method it does not take). The
+method is never echoed. Methods are case-sensitive (RFC 9110), so `get` is one of them. The request
+is counted and logged as `method="other"`, `route="unmatched"`, `status="501"`
+([telemetry.md](telemetry.md#the-method-label)). A method the router names but no route takes
+(`PROPFIND`, `MKCOL`) still answers the 404.
+
+How to verify: `TelemetryHttp.UnknownMethodsOnRoutedPathsAreAnswered501` sends made-up methods to
+`/v1/server_info` and `/healthz` and reads the 501s and the one `other` series; by hand,
+`curl -s -i -X XMADEUP http://127.0.0.1:4900/v1/server_info` answers `501`.
 
 ## Statuses Behind Cloudflare
 

@@ -141,7 +141,11 @@ case-sensitively as RFC 9110 does (`get` is not `GET`), or `other`. The client's
 label or a log field. `TelemetryHttp.UnknownMethodsAreCountedAsOtherNotByTheirText` sends made-up
 methods to a target that is not a URL and finds one `other` series (`route="bad_url"`) and none
 named after them;
-`RequestLog.NamesStandardMethodsAndEveryOtherMethodOther` covers the helper.
+`RequestLog.NamesStandardMethodsAndEveryOtherMethodOther` covers the helper. A method the router
+does not know sent to a routed path is answered `501` by the trailing handler and counted as
+`method="other"`, `route="unmatched"`, `status="501"` (lake#1341,
+[http.md](http.md#methods-lake-does-not-know)); `TelemetryHttp.UnknownMethodsOnRoutedPathsAreAnswered501`
+reads that series.
 
 Startup is also one JSON object and records `admin_token_set` and `replication_token_set` as `yes`
 or `no`, never either token, and `replication_peers`, the origins replication may pull from. Authorization and cookie values are never logged.

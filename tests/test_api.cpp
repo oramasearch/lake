@@ -3322,6 +3322,40 @@ TEST(TelemetryHttp, UnknownMethodsAreCountedAsOtherNotByTheirText) {
     server.stop();
 }
 
+// A method HTTP does not define, sent to a routed path, is answered 501 with lake's error body and
+// counted as `other` (lake#1341): before, the router threw and the connection closed unanswered.
+TEST(TelemetryHttp, UnknownMethodsOnRoutedPathsAreAnswered501) {
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "test-node";
+    options.admin_token = "test-token";
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    const std::vector<std::pair<std::string, std::string>> sent = {
+        {"XMADEUP", "/v1/server_info"}, {"XMADEUP", "/healthz"}, {"get", "/v1/server_info"}};
+    for (const auto& [method, path] : sent) {
+        const std::string answered = http_request(server.port(), method, path, "", "text/plain");
+        EXPECT_NE(answered.find(" 501 "), std::string::npos) << method << " " << path << "\n"
+                                                             << answered;
+        EXPECT_NE(answered.find("\"code\":\"not_supported\""), std::string::npos) << answered;
+        EXPECT_EQ(answered.find(method + " "), std::string::npos) << "the method is not echoed";
+    }
+    // A known method on the same paths still routes.
+    EXPECT_NE(http_get(server.port(), "/v1/server_info").find(" 200 "), std::string::npos);
+
+    const std::string served = http_get(server.port(), "/metrics", "Bearer test-token");
+    ASSERT_NE(served.find(" 200 "), std::string::npos) << served;
+    EXPECT_EQ(served.find("method=\"XMADEUP\""), std::string::npos) << served;
+    EXPECT_EQ(served.find("method=\"get\""), std::string::npos) << served;
+    EXPECT_NE(served.find("lake_http_requests_total{method=\"other\",route=\"unmatched\","
+                          "status=\"501\"} 3\n"),
+              std::string::npos)
+        << served;
+    server.stop();
+}
+
 // The browser session is the API's: password sign-up through /v1 sets the HttpOnly lake_session
 // cookie, which then reads sessions and enrolls MFA. The former server pages are the web app's, so
 // a request that is not a browser's gets the 404 (lake#561).
