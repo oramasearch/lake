@@ -2,10 +2,10 @@
   "$schema": "http://cyclonedx.org/schema/bom-1.7.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.7",
-  "serialNumber": "urn:uuid:c0e31514-c649-5e83-af27-3da778159b40",
+  "serialNumber": "urn:uuid:bbc38319-6fcd-5b02-9f9c-c0cfa89ed063",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-11-16T01:55:20Z",
+    "timestamp": "2026-11-16T09:56:03Z",
     "tools": {
       "components": [
         {
@@ -1797,7 +1797,7 @@
       "bom-ref": "DocumentRoot",
       "type": "library",
       "name": "lake",
-      "version": "f37ad8cb59e9",
+      "version": "557d489fe4a0",
       "licenses": [
         {
           "license": {
@@ -5281,11 +5281,11 @@
       ]
     },
     {
-      "bom-ref": "pkg:docker/node@22-bookworm-slim?package-id=Image-node-962fd7778b1d3f84",
+      "bom-ref": "pkg:docker/node@sha256%3Ae9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee?package-id=Image-node-30d5dfb31b31c8c0&tag=22-bookworm-slim",
       "type": "library",
       "name": "node",
-      "version": "22-bookworm-slim",
-      "purl": "pkg:docker/node@22-bookworm-slim",
+      "version": "22-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee",
+      "purl": "pkg:docker/node@sha256%3Ae9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee?tag=22-bookworm-slim",
       "properties": [
         {
           "name": "syft:package:type",
@@ -6182,11 +6182,11 @@
       ]
     },
     {
-      "bom-ref": "pkg:docker/ubuntu@24.04?package-id=Image-ubuntu-246bf0cb8a2d8764",
+      "bom-ref": "pkg:docker/ubuntu@sha256%3A2198e4c65076e9cb0b3d695219df667c0e3b0072da64ca3c2648aca17dcecaf5?package-id=Image-ubuntu-6698ea6738a5d032&tag=24.04",
       "type": "library",
       "name": "ubuntu",
-      "version": "24.04",
-      "purl": "pkg:docker/ubuntu@24.04",
+      "version": "24.04@sha256:2198e4c65076e9cb0b3d695219df667c0e3b0072da64ca3c2648aca17dcecaf5",
+      "purl": "pkg:docker/ubuntu@sha256%3A2198e4c65076e9cb0b3d695219df667c0e3b0072da64ca3c2648aca17dcecaf5?tag=24.04",
       "properties": [
         {
           "name": "syft:package:type",
@@ -6683,8 +6683,8 @@
       "dependsOn": [
         "Component-Orama-design-tokens-163282b2d124a134",
         "pkg:docker/docker.io/oramasearch/zetta-tunnel-clients@sha256%3Aa9f609689ed5536d0dbafb1b7e165c3389e1053bf3dc2c44aa9e74a7cf2a7f00?package-id=Image-docker.io-oramasearch-zetta-tunnel-clien-046a16629e85cea5&tag=v0.1.0",
-        "pkg:docker/node@22-bookworm-slim?package-id=Image-node-962fd7778b1d3f84",
-        "pkg:docker/ubuntu@24.04?package-id=Image-ubuntu-246bf0cb8a2d8764",
+        "pkg:docker/node@sha256%3Ae9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee?package-id=Image-node-30d5dfb31b31c8c0&tag=22-bookworm-slim",
+        "pkg:docker/ubuntu@sha256%3A2198e4c65076e9cb0b3d695219df667c0e3b0072da64ca3c2648aca17dcecaf5?package-id=Image-ubuntu-6698ea6738a5d032&tag=24.04",
         "pkg:github/boostorg/boost@1.91.0?package-id=Component-Boost-104d102be3d8897c",
         "pkg:github/cppalliance/capy@ce1c7d710c4baaeeddb57fa101707c610f6eb975?package-id=Component-capy-f065864a31964254",
         "pkg:github/google/googletest@v1.17.0?package-id=Component-GoogleTest-34101f2b39cec8bc",
