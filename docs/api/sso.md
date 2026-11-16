@@ -6,7 +6,8 @@ An organization administrator registers a SAML 2.0 or OpenID Connect provider wi
 `register_sso_provider`. A provider has an organization, pool, issuer, attribute mapping, a
 just-in-time provisioning choice, and a per-provider SCIM bearer token. SAML providers require
 metadata and a signing certificate. OIDC providers require a client id and a client secret.
-The client secret is encrypted at rest and the SCIM token is stored only as an Argon2id hash.
+The client secret is encrypted at rest and the SCIM token is stored only as an Argon2id hash and
+a keyed selector ([SCIM bearer authentication](#scim-bearer-authentication)).
 Provider reads never return either value. `test_sso_provider` validates the persisted protocol
 configuration and records its test time.
 
@@ -45,9 +46,33 @@ token, applies federation issuer policy, and then creates the browser session.
 `upsert_scim_user` implements the administrative provisioning capability. The SCIM 2.0 HTTP
 surface is rooted at `/scim/v2`: `/Users` and `/Groups` support filtered list, get, create,
 PATCH, and delete. Every request authenticates its `Authorization: Bearer` value against the
-Argon2id hash stored for one enabled provider; the token identifies the provider and therefore
-the target organization. SCIM responses use `application/scim+json`, SCIM resource schemas,
-`ListResponse`, and the SCIM error schema.
+Argon2id hash stored for the one enabled provider the token's selector names; the token
+identifies the provider and therefore the target organization. SCIM responses use
+`application/scim+json`, SCIM resource schemas, `ListResponse`, and the SCIM error schema.
+
+### SCIM Bearer Authentication
+
+A SCIM request is anonymous until its bearer names a provider, so what it costs before that is
+bounded (lake#1316). Each provider's row keeps, beside the token's Argon2id hash, its
+`scim_token_selector`: the HMAC-SHA-256 of the token under a key derived (HKDF-SHA-256, label
+`lake/scim-token-selector/v1`) from `LAKE_INSTANCE_KEK`. The key means a copy of `sso_providers`
+alone does not let anyone test guesses of a weak, administrator-chosen token.
+`authenticate_scim` computes the presented token's selector, reads the oldest enabled provider
+with that selector and checks only that provider's Argon2id hash. A token no selector matches
+checks no hash at all. Before, every enabled provider of every tenant was tried in turn on the
+HTTP thread, so one anonymous request with a made-up bearer cost one 64 MiB derivation per
+provider anywhere on the instance, and any organization administrator could add providers.
+
+Providers registered before migration `0121_scim_token_selectors` have no selector (NULL). They
+are the only ones still tried by hash, oldest first, when no selector matches; the first success
+records the selector (only if the token was not replaced meanwhile), so that set only shrinks.
+Registering a provider again sets the new token's selector with its hash. Two providers given the
+same token resolve to the oldest enabled one, as before. Both stores check the hash outside the
+lock other requests wait on: the PostgreSQL store reads the candidates and records a selector in
+short transactions of the shared connection and verifies between them; the in-memory store, which
+has no instance key, keys its selectors with one made per process and verifies outside its store
+lock. Guard `scim_token_selectors_guard`; the operator must vendor the schema and select it before
+the image rolls.
 
 A user create requires `externalId` or `userName` and the person's TAAP identity. The identity is
 accepted as top-level `taapId` or as `taapId` in
@@ -220,6 +245,12 @@ failed bearer authentication, two user creates, filtered list, user PATCH, group
 member removal, user delete, group delete, and session/access revocation. The Postgres identity
 test repeats provider-token authentication and user/group list, get, write, delete, sign-in, and
 session revocation. Set `LAKE_TEST_DB_URI` to run its database-backed portion.
+`Scim.ABearerTokenChecksOnlyTheProviderItNames` (in memory, six providers in two organizations)
+and `PostgresIdentity.ScimBearerChecksOnlyTheProviderItsSelectorNames` count Argon2id
+derivations (`identity_crypto::secret_verifications()`): a made-up bearer, directly and through
+the anonymous `scim_list_users`, runs none, a provider's own token one; on PostgreSQL, providers
+whose selector is cleared as a pre-`0121` row's is are the only ones tried, and the first success
+records the selector (lake#1316).
 
 ## How to change
 

@@ -911,7 +911,12 @@ private:
     std::vector<RecoveryNotification> recovery_notifications_;
     std::vector<RecoveryContact> recovery_contacts_;
     std::vector<SsoProvider> sso_providers_;
-    std::vector<std::pair<std::string, std::string>> sso_scim_tokens_;
+    struct ScimToken {
+        std::string provider_id;
+        std::string selector; // scim_token_selector of the token (lake#1316)
+        std::string token_hash;
+    };
+    std::vector<ScimToken> sso_scim_tokens_;
     std::vector<std::pair<std::string, std::string>> sso_oidc_secrets_;
     std::vector<FederationIssuer> federation_issuers_;
     struct SsoCredential {

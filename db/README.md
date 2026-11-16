@@ -5,6 +5,13 @@ applies it to `LAKE_CONTROL_DB_URI` in one transaction under an advisory lock, a
 `PostgresSchema` Job does; `lake manifest` reports its latest migration and guard tables
 (lake#1119, [operator-interface.md](../docs/deployment/operator-interface.md)). Once
 orama-operator#936 consumes them, a new migration needs no operator vendoring.
+Migration `0121_scim_token_selectors` (lake#1316) adds the nullable `sso_providers.scim_token_selector`
+(the HMAC-SHA-256 of the provider's SCIM token under a key derived from `LAKE_INSTANCE_KEK`), the
+partial index `sso_providers_scim_token_selector_idx` and the guard `scim_token_selectors_guard`. A
+SCIM request then checks one provider's Argon2id hash, not every tenant's; providers registered
+before it keep NULL until their first successful SCIM request records it. Additive. Apply before the
+new binary: the operator vendors the schema and selects the guard first. See
+[SSO](../docs/api/sso.md#scim-bearer-authentication) and [schema.md](../docs/control-plane/schema.md).
 Migration `0105_agent_model_prices` (lake#1230) seeds the `model_tokens` rates of the gpt-6.x models
 the gateway now serves and the long-context classes `<model>@long/input` and `<model>@long/output`
 (also for gpt-5.5), OpenAI's standard price plus 30% read 2026-10-26, by `0095`'s rules (once; a new

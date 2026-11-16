@@ -27,6 +27,7 @@
 #include "lake/api/registry.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/handles.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/thread.hpp"
@@ -714,6 +715,88 @@ TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
     const auto revoke = store->revoke_device(context->user_id, context->device_id);
     ASSERT_TRUE(revoke) << revoke.error().message;
     EXPECT_FALSE(store->context_for(sign_up->secret));
+}
+
+// lake#1316: a SCIM bearer names its provider by the token's selector, so a request runs one
+// Argon2id check, a made-up token none. Providers registered before migration 0121 have no selector
+// and are the only ones still tried by hash; the first success records the selector.
+TEST(PostgresIdentity, ScimBearerChecksOnlyTheProviderItsSelectorNames) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || *uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    namespace crypto = lake::control::identity_crypto;
+    std::unique_ptr<lake::control::Store> store =
+        lake::control::make_postgres_store(uri, std::string(test_instance_kek));
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto organization = store->create_organization(
+        {"taap:1:ed25519:scim-selector-" + suffix, "SCIM selector organization", ""});
+    ASSERT_TRUE(organization) << organization.error().message;
+    std::vector<std::string> provider_ids;
+    for (int index = 0; index < 3; ++index) {
+        const std::string name = "scim-" + std::to_string(index) + "-" + suffix;
+        const auto provider = store->register_sso_provider({organization->id,
+                                                            "lake",
+                                                            name,
+                                                            "oidc",
+                                                            "https://" + name + ".stub.example",
+                                                            "",
+                                                            "",
+                                                            "lake-stub-client",
+                                                            "lake-stub-secret",
+                                                            "token-" + name,
+                                                            {{"email", "mail"}},
+                                                            false});
+        ASSERT_TRUE(provider) << provider.error().message;
+        provider_ids.push_back(provider->id);
+    }
+    const auto token = [&](int index) {
+        return "token-scim-" + std::to_string(index) + "-" + suffix;
+    };
+
+    auto before = crypto::secret_verifications();
+    EXPECT_FALSE(store->authenticate_scim("made-up-token"));
+    EXPECT_EQ(crypto::secret_verifications(), before);
+    before = crypto::secret_verifications();
+    const auto named = store->authenticate_scim(token(2));
+    ASSERT_TRUE(named) << named.error().message;
+    EXPECT_EQ(named->id, provider_ids[2]);
+    EXPECT_EQ(crypto::secret_verifications(), before + 1);
+
+    // The first two as a provider registered before 0121 is: no selector.
+    pqxx::connection connection(uri);
+    const auto selector_of = [&](const std::string& id) {
+        pqxx::work tx(connection);
+        const pqxx::result rows =
+            tx.exec_params("SELECT scim_token_selector FROM sso_providers WHERE id = $1::uuid", id);
+        return rows[0][0].is_null() ? std::string() : rows[0][0].as<std::string>();
+    };
+    EXPECT_FALSE(selector_of(provider_ids[2]).empty());
+    {
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE sso_providers SET scim_token_selector = NULL WHERE id = ANY("
+                       "ARRAY[$1::uuid, $2::uuid])",
+                       provider_ids[0],
+                       provider_ids[1]);
+        tx.commit();
+    }
+    before = crypto::secret_verifications();
+    EXPECT_FALSE(store->authenticate_scim("made-up-token"));
+    EXPECT_EQ(crypto::secret_verifications(), before + 2);
+
+    const auto legacy = store->authenticate_scim(token(1));
+    ASSERT_TRUE(legacy) << legacy.error().message;
+    EXPECT_EQ(legacy->id, provider_ids[1]);
+    EXPECT_FALSE(selector_of(provider_ids[1]).empty());
+    EXPECT_TRUE(selector_of(provider_ids[0]).empty());
+
+    // The recorded selector now names it, and only the one provider left without one is tried.
+    before = crypto::secret_verifications();
+    ASSERT_TRUE(store->authenticate_scim(token(1)));
+    EXPECT_EQ(crypto::secret_verifications(), before + 1);
+    before = crypto::secret_verifications();
+    EXPECT_FALSE(store->authenticate_scim("made-up-token"));
+    EXPECT_EQ(crypto::secret_verifications(), before + 1);
 }
 
 TEST(PostgresIdentity, SsoFederationAndScimDeactivation) {

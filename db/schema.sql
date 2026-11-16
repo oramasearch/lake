@@ -5212,3 +5212,23 @@ BEGIN
 END
 $agent_model_prices$;
 INSERT INTO schema_migrations (version) VALUES ('0105_agent_model_prices') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0121_scim_token_selectors (lake#1316, docs/api/sso.md#scim-bearer-authentication): each SSO
+-- provider's SCIM bearer token gets a selector, the HMAC-SHA-256 of the token under a key derived
+-- from the instance key, so a SCIM request looks its provider up and runs one Argon2id check
+-- instead of one for every enabled provider of every tenant. The key keeps a copy of this table
+-- alone from testing guesses of an administrator-chosen token. NULL: registered before this
+-- migration; only those providers are still tried by hash, and the first success records the
+-- selector, so that set only shrinks. Not unique: two providers with the same token resolve to the
+-- oldest enabled one, as before. Additive.
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE sso_providers ADD COLUMN IF NOT EXISTS scim_token_selector text
+    CHECK (scim_token_selector IS NULL OR length(scim_token_selector) BETWEEN 1 AND 128);
+CREATE INDEX IF NOT EXISTS sso_providers_scim_token_selector_idx
+    ON sso_providers (scim_token_selector, created_at) WHERE scim_token_selector IS NOT NULL;
+CREATE TABLE IF NOT EXISTS scim_token_selectors_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0121_scim_token_selectors')
+    ON CONFLICT DO NOTHING;
