@@ -1080,6 +1080,32 @@ TEST_F(LiquidIdFixture, ARowNamingNoRepositoryIsReportedNotSkippedQuietly) {
     EXPECT_TRUE(platform->unresolved_repositories().empty());
 }
 
+// lake#1313: another account's copy of a deployed repository does not take its liquid id, so the
+// original's rows are still placed.
+TEST_F(LiquidIdFixture, AnotherAccountsCopyDoesNotStopTheOriginalsRows) {
+    ASSERT_TRUE(store->set_repository_liquid_id(repository.id, std::string(liquid_id)));
+    const auto copier =
+        store->create_user({"taap:1:ed25519:platform-copier", "copier@example.test", "Copier"});
+    ASSERT_TRUE(copier);
+    const auto other_customer = store->create_customer({"individual", copier->id, "", "copier"});
+    ASSERT_TRUE(other_customer);
+    const auto copy = store->create_repository({other_customer->id,
+                                                "platform",
+                                                "",
+                                                "public",
+                                                workspaces->create(other_customer->id, "copies")});
+    ASSERT_TRUE(copy);
+    liquid_ids[copy->id] = std::string(liquid_id); // a clone shares its source's liquid id
+    const auto refused = store->set_repository_liquid_id(copy->id, std::string(liquid_id));
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "conflict");
+    control->deployments.push_back(
+        deployment_row(std::string(liquid_id), "Ready", "2026-10-17T00:01:00.000000Z"));
+    const auto polled = poll();
+    ASSERT_TRUE(polled) << polled.error().message;
+    EXPECT_TRUE(platform->unresolved_repositories().empty());
+}
+
 TEST_F(LiquidIdFixture, ALiquidIdSharedByTwoRepositoriesIsReportedNotGuessed) {
     const auto other = store->create_repository(
         {repository.customer_id, "platform-copy", "", "private", repository.workspace_id});
@@ -1140,6 +1166,39 @@ void expect_liquid_id_contract(lake::control::Store& store,
     const auto missing = store.set_repository_liquid_id(lake::control::new_uuid_v4(), id);
     ASSERT_FALSE(missing);
     EXPECT_EQ(missing.error().code, "not_found");
+
+    // lake#1313: another account's copy cannot take the id the first account recorded.
+    const auto copier = store.create_user({"taap:1:ed25519:liquid-copier-" + suffix,
+                                           "liquid-copier-" + suffix + "@example.test",
+                                           "Copier"});
+    ASSERT_TRUE(copier) << copier.error().message;
+    const auto other_customer =
+        store.create_customer({"individual", copier->id, "", "liquid-copier-" + suffix});
+    ASSERT_TRUE(other_customer) << other_customer.error().message;
+    const auto copy =
+        store.create_repository({other_customer->id,
+                                 "liquid-copy-" + suffix,
+                                 "",
+                                 "private",
+                                 lake::test::repository_workspace(store, other_customer->id)});
+    ASSERT_TRUE(copy) << copy.error().message;
+    const auto refused = store.set_repository_liquid_id(copy->id, id);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "conflict");
+    EXPECT_EQ(refused.error().message, lake::control::liquid_id_held_elsewhere);
+    EXPECT_EQ(refused.error().message.find(first->id), std::string::npos)
+        << "the refusal names no repository";
+    EXPECT_TRUE(store.get_repository(copy->id)->liquid_id.empty());
+    named = store.repositories_by_liquid_id(id);
+    ASSERT_TRUE(named);
+    ASSERT_EQ(named->size(), 1U);
+    EXPECT_EQ(named->front().id, first->id);
+    // Clearing is never refused, and a deleted holder no longer keeps the id.
+    ASSERT_TRUE(store.set_repository_liquid_id(copy->id, ""));
+    ASSERT_TRUE(
+        store.delete_repository(first->id, {"2026-10-17T00:00:00Z", "2026-11-17T00:00:00Z"}));
+    ASSERT_TRUE(store.set_repository_liquid_id(copy->id, id));
+    EXPECT_EQ(store.get_repository(copy->id)->liquid_id, id);
 }
 
 TEST_F(PlatformFixture, MemoryStoreRecordsAndFindsLiquidIds) {

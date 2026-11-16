@@ -2459,6 +2459,23 @@ public:
     Result<void> set_repository_liquid_id(const std::string& id,
                                           const std::string& liquid_id) override {
         return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            // A liquid id belongs to the account whose repository recorded it first (lake#1313).
+            // The lock on the id makes two accounts' records of it take turns, and the check
+            // below runs after it, so it sees the other's committed record.
+            if (!liquid_id.empty()) {
+                tx.exec_params("SELECT pg_advisory_xact_lock(hashtext('lake_repository_liquid_id:' "
+                               "|| $1))",
+                               liquid_id);
+                const pqxx::result held = tx.exec_params(
+                    "SELECT 1 FROM repositories AS target JOIN repositories AS holder ON "
+                    "holder.liquid_id = $2 AND holder.deleted_at IS NULL AND "
+                    "holder.customer_id <> target.customer_id WHERE target.id = $1::uuid LIMIT 1",
+                    id,
+                    liquid_id);
+                if (!held.empty())
+                    return std::unexpected(
+                        StoreError{"conflict", std::string(liquid_id_held_elsewhere)});
+            }
             // Written only when it changed, so the updated_at trigger moves only then.
             const pqxx::result rows = tx.exec_params(
                 "UPDATE repositories SET liquid_id = NULLIF($2, '') WHERE id = $1::uuid AND "

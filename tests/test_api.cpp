@@ -8769,6 +8769,26 @@ TEST(SyncHttp, PushRecordsTheRepositorysLiquidId) {
     ASSERT_TRUE(clone);
     const auto pulled = liquid::runtime::block_on(endpoint.pull(*clone));
     ASSERT_TRUE(pulled) << pulled.error().message;
+    // lake#1313: another account pushes the clone into an empty repository of its own. The push
+    // succeeds, but the liquid id stays with the account that recorded it first.
+    const auto other_user = control->create_user(
+        {"taap:1:ed25519:liquid-id-copier", "liquid-id-copier@example.test", "Liquid Id Copier"});
+    ASSERT_TRUE(other_user);
+    const auto other_customer =
+        control->create_customer({"individual", other_user->id, "", "liquid-id-copier"});
+    ASSERT_TRUE(other_customer);
+    const auto copy = control->create_repository(
+        {other_customer->id,
+         "copy",
+         "",
+         "private",
+         lake::test::repository_workspace(*control, other_customer->id)});
+    ASSERT_TRUE(copy);
+    liquid::sync_endpoint copy_endpoint(
+        "http://127.0.0.1:" + std::to_string(server.port()) + "/v1/repositories/" + copy->id,
+        liquid::sync_endpoint_options{.bearer_token = "liquid-id-admin"});
+    const auto copied = liquid::runtime::block_on(copy_endpoint.push(*clone));
+    ASSERT_TRUE(copied) << copied.error().message;
     server.stop();
 
     // A repository lake created empty took the identity of its first push: the checkout's id.
@@ -8786,8 +8806,11 @@ TEST(SyncHttp, PushRecordsTheRepositorysLiquidId) {
     EXPECT_EQ(recorded->liquid_id, hex);
     const auto named = control->repositories_by_liquid_id(hex);
     ASSERT_TRUE(named);
-    ASSERT_EQ(named->size(), 1U);
+    ASSERT_EQ(named->size(), 1U) << "another account's copy does not take the liquid id";
     EXPECT_EQ(named->front().id, repository->id);
+    const auto copy_recorded = control->get_repository(copy->id);
+    ASSERT_TRUE(copy_recorded);
+    EXPECT_TRUE(copy_recorded->liquid_id.empty());
 }
 
 TEST(SyncHttp, PushPullShareCustomerStoreAndTransferOnlyMissingChunks) {

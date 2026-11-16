@@ -175,6 +175,19 @@ repository that has a workspace and none recorded (opening its store), then plac
 It does so at most once every `full_sync_every` polls (20, about five minutes) while such a row
 remains, so an unknown id does not reopen repositories on every poll.
 
+A liquid id belongs to the account whose repository recorded it first (lake#1313). Anyone who can
+read a repository (a public one, or one shared with them) can clone it and push the clone into an
+empty repository of their own account, and the copy then has the original's liquid id. Lake does
+not record a liquid id on a repository while a live repository of another account holds it:
+`Store::set_repository_liquid_id` answers `conflict` ("another account's repository holds this
+liquid id", naming no repository), the push still succeeds and carries the refusal in its audit
+details under `liquid_id`, and the sync leaves the copy unrecorded. The original records its id on
+its first push, before any copy can exist, so another account's copy never decides whether the
+original's rows are placed. Repositories of one account that share an id are recorded and reported
+as shared (below). A deleted holder keeps nothing, and clearing an id is never refused. Both stores
+apply the rule; PostgreSQL takes a transaction advisory lock on the id before it checks, so two
+accounts recording the same id at once take turns.
+
 The workspace keeps the row with `repository` set to lake's id, so the pages and the record
 checks find it, and with the operator's value in `operator_repository` when it was another one. The
 operator matches environment values and domains to a deployment by its exact `repository` value, so
@@ -188,7 +201,7 @@ A value that names no single repository is reported, with the reason:
 |---|---|
 | `no repository has this id` | a UUID that is not a lake repository |
 | `no repository has this liquid id` | a liquid id no live repository has, after lake has read the ids it lacked |
-| `the liquid id of N repositories (…); deploy from a checkout of one of them` | two repositories share the liquid id (one was pushed from a clone of the other); lake does not guess |
+| `the liquid id of N repositories (…); deploy from a checkout of one of them` | two repositories of one account share the liquid id (one was pushed from a clone of the other); lake does not guess |
 | `not a lake or liquid repository id` | anything else |
 
 The report is the poll's answer `unresolved_repository` (or `workspace_not_ready`, which then names
@@ -201,8 +214,10 @@ stays `ready`; the other repositories' rows are mirrored as usual.
 Verify with `GET /healthz` (no `platform_unresolved_repositories`) and with `list_deployments` on
 the repository a checkout was cloned from after `liquid deploy`. `LiquidIdFixture.*` in
 `tests/test_platform.cpp` covers the three cases (liquid's id shown, lake's id shown, an unknown or
-shared id reported), `*.RecordsAndFindsLiquidIds` the store on both stores, and
-`SyncHttp.PushRecordsTheRepositorysLiquidId` (`tests/test_api.cpp`) the push.
+shared id reported) and `LiquidIdFixture.AnotherAccountsCopyDoesNotStopTheOriginalsRows` another
+account's copy, `*.RecordsAndFindsLiquidIds` the store on both stores (another account's copy
+refused included), and `SyncHttp.PushRecordsTheRepositorysLiquidId` (`tests/test_api.cpp`) the push,
+an empty repository of another account pushed from a clone included.
 
 To change how a value is placed, change `PlatformService::sync` (`src/control/platform.cpp`) and this
 section together.

@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <memory>
 #include <ranges>
 #include <span>
@@ -176,7 +177,12 @@ SessionRepository create_session_repository(lake::control::Store& store,
     if (!repository) {
         return {};
     }
-    const std::string liquid_id(64, name.size() % 2 == 0 ? 'a' : 'b');
+    // Distinct per name: a liquid id belongs to the first account to record it (lake#1313).
+    std::string liquid_id;
+    for (const unsigned char octet : name) {
+        liquid_id += std::format("{:02x}", octet);
+    }
+    liquid_id.resize(64, '0');
     const auto recorded = store.set_repository_liquid_id(repository->id, liquid_id);
     EXPECT_TRUE(recorded) << recorded.error().message;
     return {repository->id, liquid_id};
