@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# Clerk test users and one-time sign-in tickets for the browser scripts, through Clerk's Backend API
-# (docs/deployment/browser-testing.md). Clerk's sign-in form consumes a ticket from
+# Clerk test users and one-time sign-in tickets for the browser scripts, through Clerk's Backend API. Clerk's sign-in form consumes a ticket from
 # `?__clerk_ticket=`, so a browser signs in without an email code.
 #
 # The instance's secret key comes from the environment, never from an argument or a file:
 #
-#   export CLERK_SECRET_KEY=$(kubectl --context orama-production-cluster-01 -n lake \
-#       get secret clerk-lake-dev -o jsonpath='{.data.secretKey}' | base64 -d)
-#   export CLERK_INSTANCE=ins_3JpNNvZd4jnehvW6XsKWcMq6MKx   # refuse any other instance
+#   export CLERK_SECRET_KEY=...         # the test instance's secret key, from where you keep it
+#   export CLERK_INSTANCE=ins_...       # optional: refuse any other instance
 #
 #   tools/e2e/clerk-ticket.sh create-user <email> <user-id-file>   # a verified test user
 #   tools/e2e/clerk-ticket.sh ticket <clerk-user-id> <ticket-file>  # valid 10 minutes, one use
@@ -38,7 +36,7 @@ fi
 
 case "${1:-}" in
 create-user)
-    email=${2:?email, e.g. e2e-1+clerk_test@agentcity.app}
+    email=${2:?email, e.g. e2e-1+clerk_test@example.com}
     output=${3:?output file for the Clerk user id}
     call POST /users "{\"email_address\":[\"$email\"],\"first_name\":\"E2e\",\"last_name\":\"Test\",\"skip_password_requirement\":true}" \
         | field id >"$output"

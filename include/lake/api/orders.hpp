@@ -1,15 +1,16 @@
 #pragma once
 
 // The apex order sheet (lake#831, docs/api/orders.md, docs/ui/regions.md#the-order-sheet): every
-// way to get Lake on the apex host (lake.live), with its price. Shared regions continue to a
+// way to get Lake on the apex host, with its price. Shared regions continue to a
 // region's host as the region picker did; a private warehouse or dedicated cluster is paid through
 // Stripe Checkout and provisioned by the Orama operator; any offer can instead be sent as an order
 // form, which is emailed to support and never provisioned. Pure functions and one small class: no
 // HTTP type, no I/O.
 //
 // Offers, prices, the included usage credit, providers and regions come from one source: the
-// order sheet configuration, the documented default (default_order_sheet_json) with
-// LAKE_ORDER_SHEET merged over it (RFC 7386), read and validated once at startup.
+// order sheet configuration, LAKE_ORDER_SHEET merged (RFC 7386) over the default
+// (default_order_sheet_json), read and validated once at startup. The default is off and sells
+// nothing: lake carries no offer or price of its own.
 
 #include <chrono>
 #include <cstdint>
@@ -65,8 +66,8 @@ struct OrderTrustClaim {
 };
 
 struct OrderSheet {
-    // Off: the apex is the plain region picker of lake#757.
-    bool enabled = true;
+    // Off (the default): the apex is the plain region picker of lake#757.
+    bool enabled = false;
     // Where the order sheet is, for the web app's "New setup…" and "On-prem…" entries
     // (server_info `order_sheet_url`). Empty: https://<LAKE_APEX_HOST>/ where this Lake serves the
     // apex, else none.
@@ -77,9 +78,9 @@ struct OrderSheet {
     std::string shared_summary;
     std::vector<std::string> shared_features;
     std::string price_list_url;     // empty: the apex's own /order/price-list page
-    std::string promise;            // the lead line
-    bool show_promise = false;      // off until the test in docs/api/billing.md is recorded
-    std::vector<OrderOffer> offers; // private_warehouse, dedicated_cluster, on_prem, in that order
+    std::string promise;            // the lead line; empty: none
+    bool show_promise = false;      // shown only when on and non-empty
+    std::vector<OrderOffer> offers; // those configured of private_warehouse, dedicated_cluster, on_prem
     std::vector<OrderProvider> providers; // for a dedicated cluster, in order
     std::vector<OrderTrustClaim> trust;
     // Abuse limits on the anonymous form: orders a client address may send an hour, and in all.
@@ -94,13 +95,12 @@ struct OrderSheet {
     const OrderProvider* find_provider(std::string_view id) const;
 };
 
-// The documented default (docs/api/orders.md#configuration): the offers, prices, credit and
-// regions from lake#831.
+// The documented default (docs/api/orders.md#configuration): off, no offers, no providers.
 std::string_view default_order_sheet_json();
 
 // The default with `overrides` (LAKE_ORDER_SHEET; empty = none) merged over it as an RFC 7386 JSON
-// merge patch, then validated. An error names the field and stops startup: invalid JSON, an
-// unknown or missing offer, a price that is not a positive whole number of dollars, a credit
+// merge patch, then validated. An offer left out is not sold. An error names the field and stops
+// startup: invalid JSON, an unknown or incomplete offer, a dedicated cluster with no provider, a price that is not a positive whole number of dollars, a credit
 // outside 0-100, a provider or region without an id or label, two with one id, a URL that is not
 // https (or a site path for price_list_url), a limit below 1.
 std::expected<OrderSheet, std::string> order_sheet_from_environment(std::string_view overrides);

@@ -123,7 +123,7 @@ references (lake#625): one field of one secret in a secret mount of the app's wo
 the secret, never a value and never a Kubernetes Secret. The operator owns a `LakeSealedSecret` with
 a `lake` source for each secret, which lake's `mint_sealed_secret` answers sealed to the cluster's
 delivery key ([../api/secrets.md](../api/secrets.md#projections),
-[../deployment/secrets.md](../deployment/secrets.md)). Lake no longer writes a Kubernetes Secret
+[../api/secrets.md](../api/secrets.md)). Lake no longer writes a Kubernetes Secret
 name here; the operator still reads the old `<secret>` and `<secret>/<key>` forms of rows written
 before.
 

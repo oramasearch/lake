@@ -26,7 +26,7 @@ creating an account, you agree to the Terms of Service and acknowledge the Priva
 signing in, …* on sign-in), both linked from `viewer.legal` and opening in a new tab
 (`LegalNotice`, liquid-bridge#15). The instance sets the URLs (`LAKE_TERMS_URL`, `LAKE_PRIVACY_URL`,
 default Orama's published pages) or turns either off; see
-[`../deployment/sign-in.md`](../deployment/sign-in.md#terms-and-privacy).
+[`../api/clerk.md`](../api/clerk.md).
 
 ## Landing copy
 

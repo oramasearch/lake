@@ -53,8 +53,8 @@ is required for this workflow.
 ## Executable browser-to-terminal proof
 
 Build the pinned Liquid CLI separately so Lake continues to consume it as a library only.
-Liquid is not a submodule of this repository: it is a sibling module of `liquid-bridge`, and
-`LAKE_LIQUID_SOURCE_DIR` points at it (default `../liquid`).
+Liquid is not a submodule of this repository: it is a separate repository checked out beside this
+one, and `LAKE_LIQUID_SOURCE_DIR` points at it (default `../liquid`).
 
 ```sh
 cmake -S ../liquid -B build-liquid -G Ninja -DLIQUID_BUILD_TESTS=OFF
@@ -75,8 +75,8 @@ ctest --test-dir build --output-on-failure
 ctest --test-dir build-shared --output-on-failure
 ```
 
-The C++ test obtains its fresh database from `lake::test::postgres_uri()` and its filesystem root
-from `lake::test::fixture_path()`, then passes both to the browser/terminal driver. The shared test
+The C++ test obtains its fresh database from `lake::test::postgres_uri` and its filesystem root
+from `lake::test::fixture_path`, then passes both to the browser/terminal driver. The shared test
 runner loads the schema and drops only that private database; the caller's database is untouched.
 The driver uses its own store, signing identity, browser profile and bearer. It overrides a
 deliberately different environment origin with the explicit flag. The test opens the page on a non-default

@@ -53,21 +53,204 @@ constexpr std::string_view stripe_key = "sk_test_lake831fakekey0001";
 constexpr std::string_view stripe_webhook = "whsec_lake831fakesecret0001";
 constexpr std::string_view resend_key = "re_lake831fakekey0001";
 // This Lake's public host, and another Lake's billing through the same Stripe account (lake#855).
-constexpr std::string_view this_lake = "eu.lake.live";
-constexpr std::string_view other_lake = "us.lake.live";
+constexpr std::string_view this_lake = "eu.lake.example.com";
+constexpr std::string_view other_lake = "us.lake.example.com";
 
 constexpr std::string_view production_regions =
-    R"([{"name":"swedencentral","label":"Europe","host":"eu.lake.live","latitude":"60.67488","longitude":"17.14127"},)"
-    R"({"name":"eastus","label":"United States","host":"us.lake.live","latitude":"37.3719","longitude":"-79.8164"}])";
+    R"([{"name":"swedencentral","label":"Europe","host":"eu.lake.example.com","latitude":"60.67488","longitude":"17.14127"},)"
+    R"({"name":"eastus","label":"United States","host":"us.lake.example.com","latitude":"37.3719","longitude":"-79.8164"}])";
 
 Regions production() {
-    auto regions = regions_from_environment("swedencentral", "", production_regions, "lake.live");
+    auto regions = regions_from_environment("swedencentral", "", production_regions, "lake.example.com");
     EXPECT_TRUE(regions) << regions.error();
     return regions ? *regions : Regions{};
 }
 
+// An order sheet as an instance that sells through the apex configures it (LAKE_ORDER_SHEET): lake's
+// own default sells nothing, so every test that needs offers sets them here.
+constexpr std::string_view example_sheet_json = R"json({
+  "enabled": true,
+  "url": "",
+  "currency": "USD",
+  "shared": {
+    "title": "Shared",
+    "summary": "Your own workspaces on Lake's shared regions. Pay only for what you use, billed by the minute at the published price list.",
+    "features": [
+      "No monthly fee: usage-based",
+      "Backups included",
+      "Europe and United States"
+    ],
+    "price_list_url": "",
+    "promise": "An example promise",
+    "show_promise": false
+  },
+  "offers": {
+    "private_warehouse": {
+      "title": "Private Warehouse",
+      "summary": "A dedicated warehouse on shared hardware, in a shared region.",
+      "features": [
+        "Your own warehouse, isolated from other customers",
+        "Backups included",
+        "Provisioned automatically once paid",
+        "Your own domain, white-labelled (available on request)"
+      ],
+      "monthly_usd": 1000,
+      "starting_from": false,
+      "credit_percent": 40,
+      "checkout": true
+    },
+    "dedicated_cluster": {
+      "title": "Dedicated Cluster",
+      "summary": "A dedicated Kubernetes cluster on the cloud provider and in the region you choose, including regions beyond the shared ones.",
+      "features": [
+        "Your own Kubernetes cluster",
+        "Choose the cloud provider and the region",
+        "Backups included",
+        "Your own domain, white-labelled (available on request)"
+      ],
+      "monthly_usd": 5000,
+      "starting_from": false,
+      "credit_percent": 40,
+      "checkout": true
+    },
+    "on_prem": {
+      "title": "On-Prem",
+      "summary": "On any cloud provider or on bare metal, with any accelerators, in any region.",
+      "features": [
+        "Any cloud provider or bare metal, with any accelerators (GPUs and others)",
+        "Any region, and multi-region deployments with geo-based load balancing and failover",
+        "Backups included",
+        "Your own domain, white-labelled (available on request)"
+      ],
+      "monthly_usd": 10000,
+      "starting_from": true,
+      "credit_percent": 40,
+      "checkout": false
+    }
+  },
+  "providers": [
+    {
+      "id": "azure",
+      "label": "Microsoft Azure",
+      "checkout": true,
+      "regions": [
+        {
+          "id": "eastus",
+          "label": "United States (Virginia)"
+        },
+        {
+          "id": "westus2",
+          "label": "United States (Washington)"
+        },
+        {
+          "id": "swedencentral",
+          "label": "Europe (Sweden)"
+        },
+        {
+          "id": "westeurope",
+          "label": "Europe (Netherlands)"
+        },
+        {
+          "id": "canadacentral",
+          "label": "Canada (Toronto)"
+        },
+        {
+          "id": "japaneast",
+          "label": "Asia (Tokyo)",
+          "checkout": false
+        },
+        {
+          "id": "southeastasia",
+          "label": "Asia (Singapore)",
+          "checkout": false
+        }
+      ]
+    },
+    {
+      "id": "aws",
+      "label": "Amazon Web Services",
+      "checkout": false,
+      "regions": [
+        {
+          "id": "us-east-1",
+          "label": "United States (Virginia)"
+        },
+        {
+          "id": "eu-north-1",
+          "label": "Europe (Stockholm)"
+        },
+        {
+          "id": "ca-central-1",
+          "label": "Canada (Montreal)"
+        },
+        {
+          "id": "ap-northeast-1",
+          "label": "Asia (Tokyo)"
+        },
+        {
+          "id": "ap-southeast-1",
+          "label": "Asia (Singapore)"
+        }
+      ]
+    },
+    {
+      "id": "gcp",
+      "label": "Google Cloud",
+      "checkout": false,
+      "regions": [
+        {
+          "id": "us-central1",
+          "label": "United States (Iowa)"
+        },
+        {
+          "id": "europe-north1",
+          "label": "Europe (Finland)"
+        },
+        {
+          "id": "northamerica-northeast1",
+          "label": "Canada (Montreal)"
+        },
+        {
+          "id": "asia-northeast1",
+          "label": "Asia (Tokyo)"
+        },
+        {
+          "id": "asia-southeast1",
+          "label": "Asia (Singapore)"
+        }
+      ]
+    }
+  ],
+  "trust": [
+    {
+      "text": "SOC 2 compliant: ask for the report",
+      "url": "mailto:support@example.com?subject=SOC%202%20report"
+    },
+    {
+      "text": "Source available, with access to the source code",
+      "url": "https://example.com/source"
+    }
+  ],
+  "limits": {
+    "orders_per_client_per_hour": 5,
+    "orders_per_hour": 60
+  }
+})json";
+
+// The example with `overrides` merged over it (RFC 7386), as one LAKE_ORDER_SHEET value.
+std::string with_example(std::string_view overrides) {
+    json merged = json::parse(example_sheet_json);
+    const json patch = json::parse(overrides, nullptr, false);
+    if (patch.is_object()) {
+        merged.merge_patch(patch);
+    } else {
+        return std::string(overrides); // not an object: passed through for the parser to refuse
+    }
+    return merged.dump();
+}
+
 OrderSheet default_sheet() {
-    auto sheet = order_sheet_from_environment("");
+    auto sheet = order_sheet_from_environment(example_sheet_json);
     EXPECT_TRUE(sheet) << sheet.error();
     return sheet ? *sheet : OrderSheet{};
 }
@@ -220,7 +403,8 @@ struct FakeResend {
 };
 
 ResendSettings resend_settings() {
-    auto settings = resend_settings_from_environment(resend_key, "", "");
+    auto settings =
+        resend_settings_from_environment(resend_key, "Lake <orders@example.com>", "support@example.com");
     EXPECT_TRUE(settings) << settings.error();
     return settings ? *settings : ResendSettings{};
 }
@@ -230,7 +414,24 @@ ResendSettings resend_settings() {
 // ------------------------------------------------------------------------------------------------
 // Configuration
 
-TEST(OrdersConfig, TheDefaultIsTheIssuesOffers) {
+TEST(OrdersConfig, TheDefaultSellsNothing) {
+    const auto sheet = order_sheet_from_environment("");
+    ASSERT_TRUE(sheet) << sheet.error();
+    EXPECT_FALSE(sheet->enabled);
+    EXPECT_TRUE(sheet->offers.empty());
+    EXPECT_TRUE(sheet->providers.empty());
+    EXPECT_TRUE(sheet->trust.empty());
+    EXPECT_TRUE(sheet->promise.empty());
+    EXPECT_FALSE(sheet->show_promise);
+    // Turned on without offers it shows the shared option alone; an offer left out is not sold.
+    const auto shared_only = order_sheet_from_environment(R"({"enabled":true})");
+    ASSERT_TRUE(shared_only) << shared_only.error();
+    EXPECT_TRUE(shared_only->enabled);
+    EXPECT_TRUE(shared_only->offers.empty());
+    EXPECT_EQ(shared_only->find_offer("private_warehouse"), nullptr);
+}
+
+TEST(OrdersConfig, TheExampleSheetHasEveryOffer) {
     const OrderSheet sheet = default_sheet();
     EXPECT_TRUE(sheet.enabled);
     EXPECT_EQ(sheet.currency, "USD");
@@ -247,9 +448,9 @@ TEST(OrdersConfig, TheDefaultIsTheIssuesOffers) {
     EXPECT_TRUE(sheet.offers[2].starting_from);
     EXPECT_FALSE(sheet.offers[2].checkout);
     EXPECT_EQ(included_credit_cents(sheet.offers[2], 2), 800'000);
-    // The lead line is off until its test is recorded (docs/api/billing.md).
+    // The lead line is off unless switched on.
     EXPECT_FALSE(sheet.show_promise);
-    EXPECT_EQ(sheet.promise, "Train and serve a model in 5 minutes for under $5");
+    EXPECT_EQ(sheet.promise, "An example promise");
     // Regions beyond the shared ones, and only the provider the operator provisions is checkout.
     const OrderProvider* azure = sheet.find_provider("azure");
     ASSERT_NE(azure, nullptr);
@@ -298,15 +499,15 @@ TEST(OrdersConfig, TheDefaultIsTheIssuesOffers) {
 }
 
 TEST(OrdersConfig, OverridesMergeOverTheDefault) {
-    const auto sheet = order_sheet_from_environment(
+    const auto sheet = order_sheet_from_environment(with_example(
         R"({"shared":{"show_promise":true},"offers":{"dedicated_cluster":{"monthly_usd":6000,"credit_percent":50}},)"
-        R"("url":"https://lake.live/","limits":{"orders_per_client_per_hour":2}})");
+        R"("url":"https://lake.example.com/","limits":{"orders_per_client_per_hour":2}})"));
     ASSERT_TRUE(sheet) << sheet.error();
     EXPECT_TRUE(sheet->show_promise);
     EXPECT_EQ(sheet->find_offer("dedicated_cluster")->monthly_cents, 600'000);
     EXPECT_EQ(included_credit_cents(*sheet->find_offer("dedicated_cluster")), 300'000);
     EXPECT_EQ(sheet->find_offer("private_warehouse")->monthly_cents, 100'000);
-    EXPECT_EQ(sheet->url, "https://lake.live/");
+    EXPECT_EQ(sheet->url, "https://lake.example.com/");
     EXPECT_EQ(sheet->orders_per_client_per_hour, 2);
     EXPECT_EQ(sheet->orders_per_hour, 60);
     EXPECT_FALSE(order_sheet_from_environment(R"({"enabled":false})")->enabled);
@@ -333,7 +534,9 @@ TEST(OrdersConfig, InvalidValuesNameTheField) {
         {"[]", "must be a JSON object"},
         {R"({"currency":"EUR"})", "currency must be USD"},
         {R"({"offers":{"gold":{}}})", "offers.gold is not an offer"},
-        {R"({"offers":{"on_prem":null}})", "offers.on_prem must be an object"},
+        {R"({"offers":{"on_prem":"x"}})", "offers.on_prem must be an object"},
+        {R"({"offers":{"on_prem":{"title":"On-Prem"}}})", "offers.on_prem.summary must be"},
+        {R"({"shared":{"show_promise":true,"promise":""}})", "promise must be a non-empty string"},
         {R"({"offers":{"private_warehouse":{"monthly_usd":0}}})", "monthly_usd must be between"},
         {R"({"offers":{"private_warehouse":{"monthly_usd":"1000"}}})",
          "monthly_usd must be a whole number"},
@@ -353,12 +556,14 @@ TEST(OrdersConfig, InvalidValuesNameTheField) {
         {R"({"providers":[{"id":"x","label":"X","checkout":true,"regions":[{"id":"r","label":"R","checkout":"yes"}]}]})", "regions[0].checkout must be true or false"},
         {R"({"trust":[{"text":"SOC 2","url":"javascript:void"}]})",
          "trust[0].url must be an https or mailto URL"},
-        {R"({"url":"http://lake.live/"})", "url must be an https URL"},
+        {R"({"url":"http://lake.example.com/"})", "url must be an https URL"},
         {R"({"shared":{"price_list_url":"ftp://x"}})", "price_list_url must be an https URL"},
         {R"({"limits":{"orders_per_hour":0}})", "orders_per_hour must be between"},
     };
     for (const auto& [value, message] : cases) {
-        const auto sheet = order_sheet_from_environment(value);
+        // Each over the example, except the on-prem offer given alone over lake's empty default.
+        const auto sheet = order_sheet_from_environment(
+            value.find("\"title\":\"On-Prem\"") != std::string::npos ? value : with_example(value));
         ASSERT_FALSE(sheet) << "accepted " << value;
         EXPECT_NE(sheet.error().find(message), std::string::npos) << value << ": " << sheet.error();
     }
@@ -570,7 +775,7 @@ TEST(OrdersEmail, SupportGetsEveryFieldAndTheCustomerTheStatusLink) {
     order.created_at = "2026-10-18T12:00:00Z";
     order.contact_email_confirmed_at = "2026-10-18T12:05:00Z";
     const Email support = order_email(sheet, regions, settings, order, "support", "");
-    EXPECT_EQ(support.to, std::vector<std::string>{"support@orama.com"});
+    EXPECT_EQ(support.to, std::vector<std::string>{"support@example.com"});
     EXPECT_EQ(support.reply_to, "ada@example.com");
     EXPECT_NE(support.subject.find(order.id), std::string::npos);
     EXPECT_NE(support.subject.find("Order form"), std::string::npos);
@@ -592,16 +797,16 @@ TEST(OrdersEmail, SupportGetsEveryFieldAndTheCustomerTheStatusLink) {
                                                                   << support.text;
     }
     const Email customer = order_email(
-        sheet, regions, settings, order, "customer", "https://lake.live/orders/x?token=t");
+        sheet, regions, settings, order, "customer", "https://lake.example.com/orders/x?token=t");
     EXPECT_EQ(customer.to, std::vector<std::string>{"ada@example.com"});
-    EXPECT_EQ(customer.reply_to, "support@orama.com");
-    EXPECT_NE(customer.text.find("https://lake.live/orders/x?token=t"), std::string::npos);
+    EXPECT_EQ(customer.reply_to, "support@example.com");
+    EXPECT_NE(customer.text.find("https://lake.example.com/orders/x?token=t"), std::string::npos);
     EXPECT_NE(customer.text.find("Nothing has been charged"), std::string::npos);
     order.state = "ready";
-    order.host = "acme.lake.live";
+    order.host = "acme.lake.example.com";
     const Email ready = order_email(sheet, regions, settings, order, "customer", "");
     EXPECT_NE(ready.subject.find("is ready"), std::string::npos);
-    EXPECT_NE(ready.text.find("https://acme.lake.live/"), std::string::npos);
+    EXPECT_NE(ready.text.find("https://acme.lake.example.com/"), std::string::npos);
     order.state = "failed";
     order.failure_reason = "quota exceeded in canadacentral";
     const Email failed = order_email(sheet, regions, settings, order, "support", "");
@@ -629,14 +834,14 @@ TEST(OrdersEmail, TheCustomersCopyCarriesNothingTheSenderTyped) {
     order.amount_cents = 1'000'000;
     order.included_credit_cents = 400'000;
     order.created_at = "2026-10-18T12:00:00Z";
-    order.host = "acme.lake.live";
+    order.host = "acme.lake.example.com";
     // lake#1000: before the address is confirmed, the one email it gets is the confirmation: the
     // link and the order id, and nothing of the order or of what the sender typed.
     const Email confirmation = order_email(
-        sheet, regions, settings, order, "customer", "https://lake.live/orders/x/confirm?token=c");
+        sheet, regions, settings, order, "customer", "https://lake.example.com/orders/x/confirm?token=c");
     EXPECT_EQ(confirmation.to, std::vector<std::string>{"victim@example.com"});
     EXPECT_NE(confirmation.subject.find("Confirm your email"), std::string::npos);
-    EXPECT_NE(confirmation.text.find("https://lake.live/orders/x/confirm?token=c"),
+    EXPECT_NE(confirmation.text.find("https://lake.example.com/orders/x/confirm?token=c"),
               std::string::npos);
     EXPECT_NE(confirmation.text.find("Order: 0b6f2c1e-1111-4222-8333-444455556666"),
               std::string::npos);
@@ -648,7 +853,7 @@ TEST(OrdersEmail, TheCustomersCopyCarriesNothingTheSenderTyped) {
         EXPECT_EQ(confirmation.text.find(absent), std::string::npos) << absent;
     }
     order.contact_email_confirmed_at = "2026-10-18T12:05:00Z";
-    const std::string status = "https://lake.live/orders/x?token=t";
+    const std::string status = "https://lake.example.com/orders/x?token=t";
     for (const std::string state : {"submitted", "paid", "ready", "failed"}) {
         order.state = state;
         order.failure_reason = state == "failed" ? "quota exceeded" : "";
@@ -664,7 +869,7 @@ TEST(OrdersEmail, TheCustomersCopyCarriesNothingTheSenderTyped) {
               std::string_view("Microsoft Azure, Canada (Toronto) (canadacentral)"),
               std::string_view("Quantity: 2"),
               std::string_view("$10,000 USD / month (2 x $5,000)"),
-              std::string_view("https://lake.live/orders/x?token=t")}) {
+              std::string_view("https://lake.example.com/orders/x?token=t")}) {
             EXPECT_NE(customer.text.find(expected), std::string::npos) << state << ": " << expected;
         }
         if (state == "submitted" || state == "paid" || state == "failed") {
@@ -679,14 +884,20 @@ TEST(OrdersEmail, TheCustomersCopyCarriesNothingTheSenderTyped) {
 TEST(Resend, SettingsComeFromTheEnvironment) {
     const auto defaults = resend_settings_from_environment("", "", "");
     ASSERT_TRUE(defaults);
-    EXPECT_EQ(defaults->support_email, "support@orama.com");
-    EXPECT_EQ(defaults->from, "Lake <orders@lake.live>");
+    // No sender or support address of lake's own: nothing is sent until all three are set.
+    EXPECT_EQ(defaults->support_email, "");
+    EXPECT_EQ(defaults->from, "");
     EXPECT_EQ(defaults->unavailable_reason(), "LAKE_RESEND_API_KEY is not set");
+    EXPECT_EQ(resend_settings_from_environment(resend_key, "", "")->unavailable_reason(),
+              "LAKE_RESEND_FROM is not set");
+    EXPECT_EQ(resend_settings_from_environment(resend_key, "orders@example.com", "")
+                  ->unavailable_reason(),
+              "LAKE_SUPPORT_EMAIL is not set");
     const auto set =
-        resend_settings_from_environment(resend_key, "orders@orama.com", "ops@orama.com");
+        resend_settings_from_environment(resend_key, "orders@example.com", "ops@example.com");
     ASSERT_TRUE(set);
     EXPECT_EQ(set->unavailable_reason(), "");
-    EXPECT_EQ(set->support_email, "ops@orama.com");
+    EXPECT_EQ(set->support_email, "ops@example.com");
     const auto bad_key = resend_settings_from_environment("sk_live_abcdefgh", "", "");
     ASSERT_FALSE(bad_key);
     EXPECT_EQ(bad_key.error(), "LAKE_RESEND_API_KEY is not a Resend API key (re_...)");
@@ -702,7 +913,7 @@ TEST(Resend, SettingsComeFromTheEnvironment) {
 TEST(Resend, SendsWithTheKeyAndAnIdempotencyKey) {
     FakeResend resend;
     const ResendSettings settings = resend_settings();
-    const Email email{{"ada@example.com"}, "Subject", "Body\nline two", "support@orama.com"};
+    const Email email{{"ada@example.com"}, "Subject", "Body\nline two", "support@example.com"};
     const auto sent = send_resend_email(
         settings, email, "lake-order-1-submitted-customer", resend.http(), "https://resend.test");
     ASSERT_TRUE(sent) << sent.error();
@@ -712,11 +923,11 @@ TEST(Resend, SendsWithTheKeyAndAnIdempotencyKey) {
     EXPECT_EQ(request.method, "POST");
     EXPECT_EQ(request.url, "https://resend.test/emails");
     const json body = json::parse(request.body);
-    EXPECT_EQ(body["from"], "Lake <orders@lake.live>");
+    EXPECT_EQ(body["from"], "Lake <orders@example.com>");
     EXPECT_EQ(body["to"], json::array({"ada@example.com"}));
     EXPECT_EQ(body["subject"], "Subject");
     EXPECT_EQ(body["text"], "Body\nline two");
-    EXPECT_EQ(body["reply_to"], "support@orama.com");
+    EXPECT_EQ(body["reply_to"], "support@example.com");
     EXPECT_EQ(resend.sent_by_key["lake-order-1-submitted-customer"], 1);
     // A refused key is reported without echoing it; a failure keeps Resend's message.
     ResendSettings wrong = settings;
@@ -761,8 +972,8 @@ TEST(OrdersCheckout, ASubscriptionWithTheSheetsPriceInline) {
                                    2,
                                    "usd",
                                    "ada@example.com",
-                                   "https://lake.live/orders/order-1?token=t&checkout=done",
-                                   "https://lake.live/orders/order-1?token=t&checkout=cancelled"});
+                                   "https://lake.example.com/orders/order-1?token=t&checkout=done",
+                                   "https://lake.example.com/orders/order-1?token=t&checkout=cancelled"});
     ASSERT_TRUE(session) << session.error();
     EXPECT_EQ(session->id, "cs_test_1");
     EXPECT_EQ(session->url, "https://checkout.stripe.test/c/cs_test_1");
@@ -814,8 +1025,8 @@ TEST(OrdersCheckout, EachPaidOfferIsItsLakeProduct) {
                                1,
                                "usd",
                                "ada@example.com",
-                               "https://lake.live/orders/o?token=t&checkout=done",
-                               "https://lake.live/orders/o?token=t&checkout=cancelled"};
+                               "https://lake.example.com/orders/o?token=t&checkout=done",
+                               "https://lake.example.com/orders/o?token=t&checkout=cancelled"};
     };
     ASSERT_TRUE(provider->create_checkout(order("order-2", "private_warehouse")));
     EXPECT_EQ(field(stripe.last().body, "line_items%5B0%5D%5Bprice_data%5D%5Bproduct%5D"),
@@ -1137,8 +1348,8 @@ void expect_order_contract(lake::control::Store& store) {
     ASSERT_TRUE(
         store.transition_cloud_order({paid.id, "paid", "provisioning", "operator", "claimed"}));
     ASSERT_TRUE(store.transition_cloud_order(
-        {paid.id, "provisioning", "ready", "operator", "Lake is Ready", "", "acme.lake.live"}));
-    EXPECT_EQ(store.get_cloud_order(paid.id)->host, "acme.lake.live");
+        {paid.id, "provisioning", "ready", "operator", "Lake is Ready", "", "acme.lake.example.com"}));
+    EXPECT_EQ(store.get_cloud_order(paid.id)->host, "acme.lake.example.com");
 
     // Events reach the audit log once.
     auto events = store.unaudited_cloud_order_events(100);
@@ -1393,6 +1604,7 @@ struct OrderRig {
         options.regions = production();
         options.billing = billing;
         options.payment_providers = stripe.providers();
+        options.order_sheet = default_sheet();
         options.order_sheet.orders_per_client_per_hour = per_client;
         options.order_sheet.orders_per_hour = per_hour;
         if (with_resend) {
@@ -1445,7 +1657,7 @@ std::string order_id_in(const std::string& html) {
 TEST(OrdersApex, TheSheetShowsEveryOptionAndKeepsTheRegionChoice) {
     OrderRig rig;
     const Response page =
-        send(rig.port(), "GET", "/w/abc?tab=1", "lake.live", {{"CF-IPCountry", "US"}});
+        send(rig.port(), "GET", "/w/abc?tab=1", "lake.example.com", {{"CF-IPCountry", "US"}});
     ASSERT_EQ(page.status, 200) << page.body;
     EXPECT_EQ(page.headers.at("cache-control"), "no-store");
     for (const std::string_view expected :
@@ -1464,7 +1676,6 @@ TEST(OrdersApex, TheSheetShowsEveryOptionAndKeepsTheRegionChoice) {
           std::string_view("Prices are in US dollars (USD)"),
           std::string_view("SOC 2 compliant"),
           std::string_view("Source available"),
-          std::string_view("Full service (Metis)"),
           std::string_view("multi-region deployments with geo-based load balancing and failover"),
           std::string_view("Canada"),
           std::string_view("Asia"),
@@ -1494,7 +1705,7 @@ TEST(OrdersApex, TheSheetShowsEveryOptionAndKeepsTheRegionChoice) {
     }
     EXPECT_EQ(white_label, 3U);
     // The lead line is off by default.
-    EXPECT_EQ(page.body.find("Train and serve a model"), std::string::npos);
+    EXPECT_EQ(page.body.find("An example promise"), std::string::npos);
     // The shared choice is exactly the picker's: preselected by country, posting back to the path.
     EXPECT_NE(page.body.find("value=\"eastus\" checked>"), std::string::npos);
     EXPECT_NE(page.body.find("action=\"/w/abc?tab=1\""), std::string::npos);
@@ -1502,31 +1713,31 @@ TEST(OrdersApex, TheSheetShowsEveryOptionAndKeepsTheRegionChoice) {
         rig.port(),
         "POST",
         "/w/abc?tab=1",
-        "lake.live",
+        "lake.example.com",
         {{"Content-Type", "application/x-www-form-urlencoded"}, {"X-Forwarded-Proto", "https"}},
         "region=eastus");
     EXPECT_EQ(chosen.status, 302);
-    EXPECT_EQ(chosen.headers.at("location"), "https://us.lake.live/w/abc?tab=1");
+    EXPECT_EQ(chosen.headers.at("location"), "https://us.lake.example.com/w/abc?tab=1");
     EXPECT_EQ(chosen.headers.at("set-cookie"),
               "lake_region=eastus; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax; Secure");
     // An unknown offer path is the sheet, like every other path.
-    EXPECT_NE(send(rig.port(), "GET", "/order/gold", "lake.live").body.find("<h1>Get Lake</h1>"),
+    EXPECT_NE(send(rig.port(), "GET", "/order/gold", "lake.example.com").body.find("<h1>Get Lake</h1>"),
               std::string::npos);
     // server_info points the web app at the sheet.
-    const Response info = send(rig.port(), "GET", "/v1/server_info", "eu.lake.live");
-    EXPECT_EQ(json::parse(info.body)["value"]["order_sheet_url"], "https://lake.live/");
+    const Response info = send(rig.port(), "GET", "/v1/server_info", "eu.lake.example.com");
+    EXPECT_EQ(json::parse(info.body)["value"]["order_sheet_url"], "https://lake.example.com/");
     // The price list page answers before one is published.
-    const Response prices = send(rig.port(), "GET", "/order/price-list", "lake.live");
+    const Response prices = send(rig.port(), "GET", "/order/price-list", "lake.example.com");
     EXPECT_EQ(prices.status, 200);
     EXPECT_NE(prices.body.find("not published yet"), std::string::npos);
 }
 
 TEST(OrdersApex, ThePromiseShowsOnlyWhenSwitchedOn) {
     const Regions regions = production();
-    auto sheet = order_sheet_from_environment(R"({"shared":{"show_promise":true}})");
+    auto sheet = order_sheet_from_environment(with_example(R"({"shared":{"show_promise":true}})"));
     ASSERT_TRUE(sheet);
     EXPECT_NE(web_ui_order_sheet(*sheet, regions, regions.list[0], "/", "")
-                  .find("Train and serve a model in 5 minutes for under $5"),
+                  .find("An example promise"),
               std::string::npos);
     // Off: the plain picker of lake#757.
     auto off = order_sheet_from_environment(R"({"enabled":false})");
@@ -1537,17 +1748,17 @@ TEST(OrdersApex, ThePromiseShowsOnlyWhenSwitchedOn) {
     options.order_sheet = *off;
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
-    const Response page = send(server.port(), "GET", "/", "lake.live");
+    const Response page = send(server.port(), "GET", "/", "lake.example.com");
     EXPECT_NE(page.body.find("<h1>Choose a Region</h1>"), std::string::npos);
     EXPECT_NE(
-        send(server.port(), "GET", "/order/on-prem", "lake.live").body.find("Choose a Region"),
+        send(server.port(), "GET", "/order/on-prem", "lake.example.com").body.find("Choose a Region"),
         std::string::npos);
     server.stop();
 }
 
 TEST(OrdersApex, AnOrderFormIsRecordedAndEmailedAndNeverProvisioned) {
     OrderRig rig;
-    const Response form = send(rig.port(), "GET", "/order/on-prem", "lake.live");
+    const Response form = send(rig.port(), "GET", "/order/on-prem", "lake.example.com");
     ASSERT_EQ(form.status, 200);
     EXPECT_NE(form.body.find("action=\"/order\""), std::string::npos);
     EXPECT_NE(form.body.find("name=\"website\""), std::string::npos) << "the field bots fill";
@@ -1556,7 +1767,7 @@ TEST(OrdersApex, AnOrderFormIsRecordedAndEmailedAndNeverProvisioned) {
         rig.port(),
         "POST",
         "/order",
-        "lake.live",
+        "lake.example.com",
         form_headers,
         "offer=on_prem&path=order_form&location=&contact_name=Ada+Lovelace&contact_email=ada%40"
         "example.com&company=Analytical+Engines&details=Bare+metal%2C+H100s%2C+two+regions&"
@@ -1586,12 +1797,12 @@ TEST(OrdersApex, AnOrderFormIsRecordedAndEmailedAndNeverProvisioned) {
     const std::string confirm_text = bodies[0]["text"].get<std::string>();
     const std::string confirm_token = order_confirmation_token(kek, id);
     const std::string confirm_path = "/orders/" + id + "/confirm?token=" + confirm_token;
-    EXPECT_NE(confirm_text.find("https://lake.live" + confirm_path), std::string::npos);
+    EXPECT_NE(confirm_text.find("https://lake.example.com" + confirm_path), std::string::npos);
     EXPECT_EQ(confirm_text.find("Bare metal"), std::string::npos) << "nothing the sender typed";
     EXPECT_EQ(confirm_text.find("On-Prem"), std::string::npos) << "nothing of the order";
     EXPECT_EQ(rig.store->get_cloud_order(id)->support_emailed_state, "");
     // Following the link shows a button and confirms nothing; a wrong token is a 404.
-    const Response confirm_page = send(rig.port(), "GET", confirm_path, "lake.live");
+    const Response confirm_page = send(rig.port(), "GET", confirm_path, "lake.example.com");
     EXPECT_EQ(confirm_page.status, 200);
     EXPECT_NE(confirm_page.body.find("action=\"/orders/" + id + "/confirm\""), std::string::npos);
     EXPECT_TRUE(rig.store->get_cloud_order(id)->contact_email_confirmed_at.empty());
@@ -1600,7 +1811,7 @@ TEST(OrdersApex, AnOrderFormIsRecordedAndEmailedAndNeverProvisioned) {
     EXPECT_EQ(send(rig.port(),
                    "POST",
                    "/orders/" + id + "/confirm",
-                   "lake.live",
+                   "lake.example.com",
                    plain_form,
                    "token=" + token)
                   .status,
@@ -1609,7 +1820,7 @@ TEST(OrdersApex, AnOrderFormIsRecordedAndEmailedAndNeverProvisioned) {
     const Response confirmed = send(rig.port(),
                                     "POST",
                                     "/orders/" + id + "/confirm",
-                                    "lake.live",
+                                    "lake.example.com",
                                     plain_form,
                                     "token=" + confirm_token);
     ASSERT_EQ(confirmed.status, 200) << confirmed.body;
@@ -1623,12 +1834,12 @@ TEST(OrdersApex, AnOrderFormIsRecordedAndEmailedAndNeverProvisioned) {
     }));
     bodies = rig.resend.bodies();
     ASSERT_EQ(bodies.size(), 3U);
-    EXPECT_EQ(bodies[1]["to"], json::array({"support@orama.com"}));
+    EXPECT_EQ(bodies[1]["to"], json::array({"support@example.com"}));
     EXPECT_NE(bodies[1]["text"].get<std::string>().find("Order: " + id), std::string::npos);
     EXPECT_NE(bodies[1]["text"].get<std::string>().find("Bare metal, H100s"), std::string::npos);
     EXPECT_NE(bodies[1]["text"].get<std::string>().find("Email confirmed: "), std::string::npos);
     EXPECT_EQ(bodies[2]["to"], json::array({"ada@example.com"}));
-    EXPECT_NE(bodies[2]["text"].get<std::string>().find("https://lake.live/orders/" + id),
+    EXPECT_NE(bodies[2]["text"].get<std::string>().find("https://lake.example.com/orders/" + id),
               std::string::npos);
     // Every event reached the central audit log.
     ASSERT_TRUE(
@@ -1642,17 +1853,17 @@ TEST(OrdersApex, AnOrderFormIsRecordedAndEmailedAndNeverProvisioned) {
     EXPECT_EQ(audited->front().draft.principal, "lake");
     // The status page.
     const Response status =
-        send(rig.port(), "GET", "/orders/" + id + "?token=" + token, "lake.live");
+        send(rig.port(), "GET", "/orders/" + id + "?token=" + token, "lake.example.com");
     EXPECT_EQ(status.status, 200);
     EXPECT_NE(status.body.find("<h1>Order Received</h1>"), std::string::npos);
-    EXPECT_EQ(send(rig.port(), "GET", "/orders/" + id + "?token=nope", "lake.live").status, 404);
-    EXPECT_EQ(send(rig.port(), "GET", "/orders/" + id, "lake.live").status, 404);
+    EXPECT_EQ(send(rig.port(), "GET", "/orders/" + id + "?token=nope", "lake.example.com").status, 404);
+    EXPECT_EQ(send(rig.port(), "GET", "/orders/" + id, "lake.example.com").status, 404);
 }
 
 TEST(OrdersApex, APaidOrderGoesThroughCheckoutAndTheWebhook) {
     OrderRig rig;
     const Response form = send(
-        rig.port(), "GET", "/order/dedicated-cluster?location=azure%3Acanadacentral", "lake.live");
+        rig.port(), "GET", "/order/dedicated-cluster?location=azure%3Acanadacentral", "lake.example.com");
     EXPECT_NE(form.body.find("value=\"azure:canadacentral\" selected"), std::string::npos);
     EXPECT_NE(form.body.find("value=\"checkout\">Pay $5,000 USD / month with card"),
               std::string::npos);
@@ -1661,7 +1872,7 @@ TEST(OrdersApex, APaidOrderGoesThroughCheckoutAndTheWebhook) {
         send(rig.port(),
              "POST",
              "/order",
-             "lake.live",
+             "lake.example.com",
              form_headers,
              "offer=dedicated_cluster&path=checkout&location=azure%3Acanadacentral&"
              "contact_name=Ada&contact_email=ada%40example.com&quantity=1");
@@ -1674,7 +1885,7 @@ TEST(OrdersApex, APaidOrderGoesThroughCheckoutAndTheWebhook) {
     EXPECT_EQ(order.included_credit_cents, 200'000);
     const std::string token = order_status_token(kek, order.id);
     EXPECT_EQ(field(rig.stripe.last().body, "success_url"),
-              "https%3A%2F%2Flake.live%2Forders%2F" + order.id + "%3Ftoken%3D" + token +
+              "https%3A%2F%2Flake.example.com%2Forders%2F" + order.id + "%3Ftoken%3D" + token +
                   "%26checkout%3Ddone");
     // Before Stripe says so, nothing is emailed: the order waits for payment.
     rig.server->drain();
@@ -1683,7 +1894,7 @@ TEST(OrdersApex, APaidOrderGoesThroughCheckoutAndTheWebhook) {
     const Response waiting = send(rig.port(),
                                   "GET",
                                   "/orders/" + order.id + "?token=" + token + "&checkout=cancelled",
-                                  "lake.live");
+                                  "lake.example.com");
     EXPECT_NE(waiting.body.find("The payment was not completed"), std::string::npos);
     // Stripe's signed webhook, on the region's host, marks it paid.
     const std::string body =
@@ -1692,7 +1903,7 @@ TEST(OrdersApex, APaidOrderGoesThroughCheckoutAndTheWebhook) {
         send(rig.port(),
              "POST",
              "/billing/stripe/webhook",
-             "eu.lake.live",
+             "eu.lake.example.com",
              {{"Content-Type", "application/json"},
               {"Stripe-Signature", stripe_signature_header(body, stripe_webhook, unix_now())}},
              body);
@@ -1705,17 +1916,17 @@ TEST(OrdersApex, APaidOrderGoesThroughCheckoutAndTheWebhook) {
     ASSERT_TRUE(
         rig.store->transition_cloud_order({order.id, "paid", "provisioning", "operator", ""}));
     ASSERT_TRUE(rig.store->transition_cloud_order(
-        {order.id, "provisioning", "ready", "operator", "", "", "acme.lake.live"}));
+        {order.id, "provisioning", "ready", "operator", "", "", "acme.lake.example.com"}));
     ASSERT_TRUE(rig.pass_until(
         [&] { return rig.store->get_cloud_order(order.id)->customer_emailed_state == "ready"; }));
     const auto bodies = rig.resend.bodies();
     ASSERT_EQ(bodies.size(), 3U) << "support and customer on paid, the customer on ready";
     EXPECT_NE(bodies[2]["subject"].get<std::string>().find("is ready"), std::string::npos);
-    EXPECT_NE(bodies[2]["text"].get<std::string>().find("https://acme.lake.live/"),
+    EXPECT_NE(bodies[2]["text"].get<std::string>().find("https://acme.lake.example.com/"),
               std::string::npos);
     const Response ready =
-        send(rig.port(), "GET", "/orders/" + order.id + "?token=" + token, "lake.live");
-    EXPECT_NE(ready.body.find("href=\"https://acme.lake.live/\""), std::string::npos);
+        send(rig.port(), "GET", "/orders/" + order.id + "?token=" + token, "lake.example.com");
+    EXPECT_NE(ready.body.find("href=\"https://acme.lake.example.com/\""), std::string::npos);
 }
 
 TEST(OrdersApex, AFailedCheckoutCancelsTheOrderAndOffersTheForm) {
@@ -1724,7 +1935,7 @@ TEST(OrdersApex, AFailedCheckoutCancelsTheOrderAndOffersTheForm) {
     const Response refused = send(rig.port(),
                                   "POST",
                                   "/order",
-                                  "lake.live",
+                                  "lake.example.com",
                                   form_headers,
                                   "offer=private_warehouse&path=checkout&location=eastus&"
                                   "contact_name=Ada&contact_email=ada%40example.com");
@@ -1733,13 +1944,13 @@ TEST(OrdersApex, AFailedCheckoutCancelsTheOrderAndOffersTheForm) {
     EXPECT_EQ(rig.only_order().state, "cancelled");
     // Without Stripe at all (billing off), the pay button is not offered and checkout is refused.
     OrderRig manual(true, 5, false);
-    const Response form = send(manual.port(), "GET", "/order/private-warehouse", "lake.live");
+    const Response form = send(manual.port(), "GET", "/order/private-warehouse", "lake.example.com");
     EXPECT_EQ(form.body.find("value=\"checkout\""), std::string::npos);
     EXPECT_NE(form.body.find("Card payment is not available right now"), std::string::npos);
     const Response no_card = send(manual.port(),
                                   "POST",
                                   "/order",
-                                  "lake.live",
+                                  "lake.example.com",
                                   form_headers,
                                   "offer=private_warehouse&path=checkout&location=eastus&"
                                   "contact_name=Ada&contact_email=ada%40example.com");
@@ -1755,11 +1966,11 @@ TEST(OrdersApex, OrderFormsCannotUseUpTheCheckoutCap) {
     for (const char* address : {"198.51.100.11", "198.51.100.12"}) {
         auto headers = form_headers;
         headers["X-Real-IP"] = address;
-        EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.live", headers, order_form).status, 200);
+        EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.example.com", headers, order_form).status, 200);
     }
     auto spammer = form_headers;
     spammer["X-Real-IP"] = "198.51.100.13";
-    EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.live", spammer, order_form).status, 429)
+    EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.example.com", spammer, order_form).status, 429)
         << "the order forms' cap is used up";
     auto customer = form_headers;
     customer["X-Real-IP"] = "203.0.113.50";
@@ -1767,7 +1978,7 @@ TEST(OrdersApex, OrderFormsCannotUseUpTheCheckoutCap) {
         send(rig.port(),
              "POST",
              "/order",
-             "lake.live",
+             "lake.example.com",
              customer,
              "offer=dedicated_cluster&path=checkout&location=azure%3Acanadacentral&"
              "contact_name=Bo&contact_email=bo%40example.com&quantity=1");
@@ -1789,7 +2000,7 @@ TEST(OrdersApex, OneAddressIsMailedAtMostThreeConfirmationsADay) {
         EXPECT_EQ(send(rig.port(),
                        "POST",
                        "/order",
-                       "lake.live",
+                       "lake.example.com",
                        headers,
                        order_for("victim%40example.com"))
                       .status,
@@ -1799,12 +2010,12 @@ TEST(OrdersApex, OneAddressIsMailedAtMostThreeConfirmationsADay) {
     auto fourth = form_headers;
     fourth["X-Real-IP"] = "198.51.100.30";
     const Response refused =
-        send(rig.port(), "POST", "/order", "lake.live", fourth, order_for("VICTIM%40example.com"));
+        send(rig.port(), "POST", "/order", "lake.example.com", fourth, order_for("VICTIM%40example.com"));
     EXPECT_EQ(refused.status, 429) << "the same address in another case";
     EXPECT_NE(refused.body.find("this email address"), std::string::npos);
     EXPECT_EQ(rig.store->unaudited_cloud_order_events(10)->size(), 3U) << "nothing recorded";
     EXPECT_EQ(
-        send(rig.port(), "POST", "/order", "lake.live", fourth, order_for("ada%40example.com"))
+        send(rig.port(), "POST", "/order", "lake.example.com", fourth, order_for("ada%40example.com"))
             .status,
         200)
         << "another address of the domain still has its budget";
@@ -1814,7 +2025,7 @@ TEST(OrdersApex, OneAddressIsMailedAtMostThreeConfirmationsADay) {
     ASSERT_EQ(bodies.size(), 4U);
     for (const auto& body : bodies) {
         EXPECT_NE(body["subject"].get<std::string>().find("Confirm your email"), std::string::npos);
-        EXPECT_NE(body["to"], json::array({"support@orama.com"}));
+        EXPECT_NE(body["to"], json::array({"support@example.com"}));
     }
 }
 
@@ -1826,15 +2037,15 @@ TEST(OrdersApex, AbuseIsRefused) {
     const Response bot = send(rig.port(),
                               "POST",
                               "/order",
-                              "lake.live",
+                              "lake.example.com",
                               form_headers,
                               order + "&website=http%3A%2F%2Fspam.example");
     EXPECT_EQ(bot.status, 200);
     EXPECT_TRUE(rig.store->unaudited_cloud_order_events(10)->empty());
     // Two an hour from one address, then 429.
-    EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.live", form_headers, order).status, 200);
-    EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.live", form_headers, order).status, 200);
-    EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.live", form_headers, order).status, 429);
+    EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.example.com", form_headers, order).status, 200);
+    EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.example.com", form_headers, order).status, 200);
+    EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.example.com", form_headers, order).status, 429);
     // lake#838: headers a sender can write do not move it into a fresh bucket; only the address the
     // ingress set (X-Real-IP) does.
     for (const auto& [name, value] : std::vector<std::pair<std::string, std::string>>{
@@ -1843,17 +2054,17 @@ TEST(OrdersApex, AbuseIsRefused) {
              {"X-Forwarded-For", "198.51.100.3, 203.0.113.7"}}) {
         auto forged = form_headers;
         forged[name] = value;
-        EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.live", forged, order).status, 429)
+        EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.example.com", forged, order).status, 429)
             << name << ": " << value;
     }
     auto other = form_headers;
     other["X-Real-IP"] = "198.51.100.9";
-    EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.live", other, order).status, 200);
+    EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.example.com", other, order).status, 200);
     // An invalid form is answered with the form and its errors, and records nothing.
     const Response invalid = send(rig.port(),
                                   "POST",
                                   "/order",
-                                  "lake.live",
+                                  "lake.example.com",
                                   other,
                                   "offer=on_prem&path=order_form&contact_name=&contact_email=x");
     EXPECT_EQ(invalid.status, 400);
@@ -1863,7 +2074,7 @@ TEST(OrdersApex, AbuseIsRefused) {
     const Response large = send(rig.port(),
                                 "POST",
                                 "/order",
-                                "lake.live",
+                                "lake.example.com",
                                 other,
                                 order + "&details=" + std::string(40 * 1024, 'x'));
     EXPECT_EQ(large.status, 413);
@@ -1885,7 +2096,7 @@ TEST(OrdersApex, ForwardingHeadersFromAnUntrustedPeerNeverMakeAFreshBucket) {
         auto rotated = form_headers;
         rotated["X-Real-IP"] = "198.51.100." + std::to_string(i + 1);
         rotated["X-Forwarded-For"] = "203.0.113." + std::to_string(i + 1);
-        const int status = send(rig.port(), "POST", "/order", "lake.live", rotated, order).status;
+        const int status = send(rig.port(), "POST", "/order", "lake.example.com", rotated, order).status;
         EXPECT_TRUE(status == 200 || status == 429) << status;
         accepted += status == 200 ? 1 : 0;
     }
@@ -1894,7 +2105,7 @@ TEST(OrdersApex, ForwardingHeadersFromAnUntrustedPeerNeverMakeAFreshBucket) {
     auto visitor = form_headers;
     visitor["X-Real-IP"] = "198.51.100.200";
     EXPECT_EQ(
-        send(rig.server->proxy_port(), "POST", "/order", "lake.live", visitor, order).status, 200);
+        send(rig.server->proxy_port(), "POST", "/order", "lake.example.com", visitor, order).status, 200);
 }
 
 TEST(OrdersApex, WithoutTheResendKeyTheOrderIsKeptAndItsEmailWaits) {
@@ -1902,7 +2113,7 @@ TEST(OrdersApex, WithoutTheResendKeyTheOrderIsKeptAndItsEmailWaits) {
     const Response sent = send(rig.port(),
                                "POST",
                                "/order",
-                               "lake.live",
+                               "lake.example.com",
                                form_headers,
                                "offer=on_prem&path=order_form&contact_name=Ada&contact_email=ada%40"
                                "example.com&details=Bare+metal");
@@ -1925,7 +2136,7 @@ TEST(OrdersApex, AFailedEmailIsRetried) {
     const Response sent = send(rig.port(),
                                "POST",
                                "/order",
-                               "lake.live",
+                               "lake.example.com",
                                form_headers,
                                "offer=on_prem&path=order_form&contact_name=Ada&contact_email=ada%40"
                                "example.com&details=Bare+metal");
@@ -1939,14 +2150,14 @@ TEST(OrdersApex, AFailedEmailIsRetried) {
 TEST(OrdersApex, AnAsiaClusterCannotBePaidForAndGoesToTheOrderForm) {
     OrderRig rig;
     // The form lists Tokyo and Singapore, marked for the order form.
-    const Response form = send(rig.port(), "GET", "/order/dedicated-cluster", "lake.live");
+    const Response form = send(rig.port(), "GET", "/order/dedicated-cluster", "lake.example.com");
     EXPECT_NE(form.body.find("value=\"azure:japaneast\">Asia (Tokyo) (order form: we'll confirm "
                              "availability)</option>"),
               std::string::npos);
     EXPECT_NE(form.body.find("value=\"azure:canadacentral\">Canada (Toronto)</option>"),
               std::string::npos);
     // Paying for Tokyo is refused before anything is recorded or sent to Stripe.
-    const Response refused = send(rig.port(), "POST", "/order", "lake.live", form_headers,
+    const Response refused = send(rig.port(), "POST", "/order", "lake.example.com", form_headers,
                                   "offer=dedicated_cluster&path=checkout&location=azure%3Ajapaneast&"
                                   "contact_name=Ada&contact_email=ada%40example.com");
     EXPECT_EQ(refused.status, 400);
@@ -1958,7 +2169,7 @@ TEST(OrdersApex, AnAsiaClusterCannotBePaidForAndGoesToTheOrderForm) {
     EXPECT_EQ(rig.stripe.count(), 0U);
     EXPECT_TRUE(rig.store->unaudited_cloud_order_events(10)->empty());
     // The same order sent as an order form is recorded and never reaches Stripe.
-    const Response sent = send(rig.port(), "POST", "/order", "lake.live", form_headers,
+    const Response sent = send(rig.port(), "POST", "/order", "lake.example.com", form_headers,
                                "offer=dedicated_cluster&path=order_form&location=azure%3Ajapaneast&"
                                "contact_name=Ada&contact_email=ada%40example.com");
     ASSERT_EQ(sent.status, 200) << sent.body;
@@ -2076,7 +2287,7 @@ void expect_order_subscription_contract(lake::control::Store& store) {
         EXPECT_TRUE(
             store.transition_cloud_order({order.id, "paid", "provisioning", "operator", ""}));
         EXPECT_TRUE(store.transition_cloud_order(
-            {order.id, "provisioning", "ready", "operator", "", "", "acme.lake.live"}));
+            {order.id, "provisioning", "ready", "operator", "", "", "acme.lake.example.com"}));
         return *store.get_cloud_order(order.id);
     };
     auto order = paid_order("entitled");
@@ -2126,7 +2337,7 @@ void expect_order_subscription_contract(lake::control::Store& store) {
     // A successful retry restores access without recreating the order or discarding its host.
     deliver(renewal_event(order, "evt_renewal_paid", "invoice.paid", now + 2, now + 200, true));
     EXPECT_EQ(store.get_cloud_order(order.id)->entitlement.paid_through, now + 200);
-    EXPECT_EQ(store.get_cloud_order(order.id)->host, "acme.lake.live");
+    EXPECT_EQ(store.get_cloud_order(order.id)->host, "acme.lake.example.com");
     auto ended = subscription_event(
         order, "evt_deleted", "customer.subscription.deleted", "canceled", now + 3, now + 200);
     ended["data"]["object"]["ended_at"] = now + 3;
@@ -2281,7 +2492,7 @@ TEST(OrdersEntitlement, DesiredStateExpiresWithoutAnotherWebhookAndRestoresOnRen
                                                   0}));
     ASSERT_TRUE(store->transition_cloud_order({order.id, "paid", "provisioning", "operator", ""}));
     ASSERT_TRUE(store->transition_cloud_order(
-        {order.id, "provisioning", "ready", "operator", "", "", "acme.lake.live"}));
+        {order.id, "provisioning", "ready", "operator", "", "", "acme.lake.example.com"}));
     pqxx::connection connection(uri);
     {
         pqxx::work tx(connection);
@@ -2298,7 +2509,7 @@ TEST(OrdersEntitlement, DesiredStateExpiresWithoutAnotherWebhookAndRestoresOnRen
                                          order.id);
         EXPECT_EQ(rows[0][0].as<std::string>(), "suspended");
         EXPECT_EQ(rows[0][1].as<std::string>(), "suspended");
-        EXPECT_EQ(rows[0][2].as<std::string>(), "acme.lake.live");
+        EXPECT_EQ(rows[0][2].as<std::string>(), "acme.lake.example.com");
         EXPECT_EQ(rows[0][3].as<std::string>(), "ready");
         tx.commit();
     }

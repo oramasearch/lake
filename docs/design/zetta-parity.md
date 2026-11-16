@@ -99,7 +99,7 @@ statements stay out of reach.
   reaches Zetta, and REST and MCP get it with the page.
 - **Pure renderers, forms, no client JavaScript** (lake `CLAUDE.md`). The graph is SVG laid out on
   the server.
-- **Every page is proven in the browser** (`docs/deployment/browser-testing.md`); the walkthrough
+- **Every page is proven in the browser** (`tools/e2e/README.md`); the walkthrough
   grows a step per phase.
 - **Zetta's schema is the contract.** Field names come from Zetta's OpenAPI at the pinned commit;
   when Zetta changes, the pin moves and the page follows.

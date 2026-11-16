@@ -13,7 +13,7 @@ const base: Balance = {
   limit_micros: -50_000_000,
   state: "ok",
   add_micros: 20_000_000,
-  add_funds_url: "https://lake.live/billing/add-funds?customer_id=acct",
+  add_funds_url: "https://lake.example.com/billing/add-funds?customer_id=acct",
   first_top_up_micros: 20_000_000,
   minimum_top_up_micros: 20_000_000,
   first_top_up_at: "2026-10-24T00:00:00Z",

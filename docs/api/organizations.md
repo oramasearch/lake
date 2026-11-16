@@ -168,7 +168,7 @@ expired or already revoked invitation is `409 conflict` (an accepted one is a me
 
 ## Verify and change
 
-Run the unit and Postgres tests documented in [`../build/ci.md`](../build/ci.md). The acceptance
+Run the unit and Postgres tests documented in [`../build/local.md`](../build/local.md). The acceptance
 coverage is in `tests/test_policy.cpp`; the production-store capability round trip is in
 `tests/test_postgres.cpp`. Self-service is covered by
 `Organizations.APersonCreatesAnOrganizationInvitesAndAColleagueJoinsItsSpace` and

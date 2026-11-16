@@ -3,14 +3,8 @@
 One page per tagged release, newest first. A page states what the release includes, what it
 does not, what is knowingly still broken, and how it was verified.
 
-From v0.7.0 the image applies its own schema (`lake migrate`) and declares its Stripe webhook events,
-Stripe products and environment (`lake manifest`), so the operator can drop its vendored schema and
-lists (orama-operator#936): a lake release becomes only the `image:` in a set file. Releases up to
-v0.6.1 predate the commands; the operator keeps its vendored path for them. See
-[`../deployment/operator-interface.md`](../deployment/operator-interface.md).
-
-- [v0.8.1](v0.8.1.md) — 2026-10-27. A patch: fixes from the customer-insights demo (exact file text, clustering on
-  real columns, Change App reloads onto the new version, e2e T3 and T12, the test sweep).
+- [v0.8.1](v0.8.1.md) — 2026-10-27. A patch: a file's exact text, clustering on real columns,
+  predicting on a clustering model, Change App reloading onto the new version, and end-to-end fixes.
 - [v0.8.0](v0.8.0.md) — 2026-10-26. Agents on gpt-6.1-sol again (gpt-6.x tool calls through the Responses API;
   lake#1245); edit repository files, a change-App conversation and the Change App split screen (lake#1239–#1241).
 - [v0.7.3](v0.7.3.md) — 2026-10-26. A hotfix: agents default to gpt-5.5 again (gpt-6.x refuses tools with
@@ -31,7 +25,7 @@ v0.6.1 predate the commands; the operator keeps its vendored path for them. See
   white-labelled Lake's domain, sign-in and brand, `lake migrate` and `lake manifest`, and security
   and memory fixes. Migrations `0100` to `0103`.
 - [v0.6.1](v0.6.1.md) — 2026-10-24. A patch: a blocked account can stop or rename its workspace (#1122).
-- [v0.6.0](v0.6.0.md) — 2026-10-24. lake.live becomes prepaid: an account balance with Stripe top-ups,
+- [v0.6.0](v0.6.0.md) — 2026-10-24. The hosted service becomes prepaid: an account balance with Stripe top-ups,
   warnings and emails, and a stop on paid work at $50 below zero; sign-in with no name in Clerk.
   Migration `0099`.
 - [v0.5.2](v0.5.2.md) — 2026-10-24. A patch: request headers up to 1 MiB, so people can sign in with
@@ -51,22 +45,24 @@ v0.6.1 predate the commands; the operator keeps its vendored path for them. See
   Lake's own products, a missing kept customer replaced, billing contacts (migration `0090`) with a
   card on the Billing page, and invoices emailed by Stripe. Image `main-89968edc` = `v0.3.1`
   (`sha256:d2347fb0…`), on every Lake since 2026-10-20.
-- [v0.3.0](v0.3.0.md) — 2026-10-19. The lake.live order sheet (four offers, Stripe Checkout,
+- [v0.3.0](v0.3.0.md) — 2026-10-19. The order sheet (four offers, Stripe Checkout,
   order forms, Resend email, status page; migration `0089_cloud_orders`), and the 2026-10-18 UX
   review's fixes: datasets named after their file and shown in the file's column order with types,
   a dataset page that leads to a model, short pipeline and model names, Check after Approve, and
-  Ask Orama proposals the capability accepts. A sign-in runbook and a Resend runbook.
+  Ask Orama proposals the capability accepts.
 - [v0.2.0](v0.2.0.md) — 2026-10-17. Secure networking (connections, scoped credentials, egress,
   developer tunnels and the Network section), regions and the apex picker, a managed key for
   every new account with an optional own identity, Clerk webhooks, one name per agent with all
-  nine agents offered, and Ask Orama's home. Note its known issues, above all the open
-  `sign_in_sso` security defect and the credential and account-enumeration defects found by the
-  end-to-end suite. Image: `oramasearch/lake:v0.2.0` (the same digest as `main-508f9540`,
+  nine agents offered, and Ask Orama's home. Image: `oramasearch/lake:v0.2.0` (the same digest as `main-508f9540`,
   `sha256:e41273a7…`).
 - [v0.1.0](v0.1.0.md) — 2026-10-12. The first tagged release, so the page is the full inventory:
   every feature by area, all 554 deployed capabilities by name, every page of the web app and
-  every guide. Note its known issues, above all the open `sign_in_sso` security defect. Image:
+  every guide. Image:
   `oramasearch/lake:v0.1.0` (the same digest as `20261012a`).
+
+From v0.7.0 the image applies its own schema (`lake migrate`) and declares its Stripe webhook events,
+Stripe products and environment (`lake manifest`), so the operator needs no vendored copy of them.
+Releases up to v0.6.1 predate the commands.
 
 ## Conventions
 
@@ -74,20 +70,19 @@ v0.6.1 predate the commands; the operator keeps its vendored path for them. See
   `version_string()` in `src/version.cpp`, `current_version()` in `include/lake/version.hpp` and
   `project(lake VERSION ...)` in `CMakeLists.txt`; move all three in the pull request that adds
   the release page. `ReleaseVersion.*` fails when they disagree or the page is missing. Tests read the version from
-  `lake::version_string()`. The steps are in the root `CLAUDE.md`, under *Cutting a release*.
+  `lake::version_string()`.
 - **Tag the merge commit** of that pull request `vX.Y.Z` and publish the GitHub release from the
   page.
 - **A release is three tags with one name**: the Git tag, the GitHub release, and the same tag on
-  the image in Docker Hub, naming the digest that is deployed. The cluster runs that image before
-  the release is called done.
+  the published image, naming its digest.
 - **A first release, or one after a long gap, lists everything in it**, not a summary. Check the
   page against the deployed OpenAPI: every path is named on the page, and the page names no
   capability the deployment does not serve.
 - **Every number is measured** and says what it was measured on. A figure with no run behind it
   does not go in.
-- **Claims follow [`docs/design/status.md`](../design/status.md)**: implemented, exercised
-  locally, deployed, and exercised in deployment are different things. A release page does not
-  claim more than that page does.
+- **Claims are exact**: implemented, exercised locally, deployed, and exercised in deployment are
+  different things. A release page does not claim more than was done.
 - **Known issues are part of the release**, linked to their tracking issue. A security defect
   goes first.
-- Cross-repo references are full URLs; issues in this repository are linked by number.
+- **Every page is written for the public**: no deployment names, credentials, people or links to
+  private trackers. Cross-repo references name the repository and number.

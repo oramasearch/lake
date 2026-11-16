@@ -204,11 +204,10 @@ int usage() {
                  "the operator's control rows (default LAKE_PUBLIC_HOST)");
     std::println("  LAKE_SIGN_IN_SSO_PROVIDER the SSO provider id that is the only way in for "
                  "people (not with Clerk)");
-    std::println("  LAKE_ORDER_SHEET JSON merged over the apex order sheet's default offers, "
-                 "prices and limits (docs/api/orders.md)");
-    std::println("  LAKE_RESEND_API_KEY Orama's Resend key for order email; LAKE_RESEND_FROM the "
-                 "sender (default Lake <orders@lake.live>); LAKE_SUPPORT_EMAIL where orders go "
-                 "(default support@orama.com)");
+    std::println("  LAKE_ORDER_SHEET the apex order sheet's offers, prices and limits, merged over "
+                 "a default that is off and sells nothing (docs/api/orders.md)");
+    std::println("  LAKE_RESEND_API_KEY the Resend key for email; LAKE_RESEND_FROM the "
+                 "sender; LAKE_SUPPORT_EMAIL where orders go (all three needed to send email)");
     std::println("  LAKE_BRAND_FILE a JSON brand; LAKE_BRAND_NAME, _SHORT_NAME, _COMPANY, "
                  "_ASSISTANT_NAME, _CONSOLE_TITLE, _BY_ORAMA, _LOGO, _LOGO_DARK, _FAVICON, "
                  "_ACCENT, _ACCENT_DARK, _SUPPORT_EMAIL, _EMAIL_FROM, _LEGAL_NAME, _TERMS_URL, "
@@ -472,7 +471,7 @@ int main(int argc, char** argv) {
     opts.search_memory_bytes = static_cast<std::size_t>(
         std::max<std::uint64_t>(1024ULL * 1024ULL, env_u64("LAKE_SEARCH_MEMORY_BYTES", 256ULL * 1024ULL * 1024ULL)));
     opts.public_host = env_or("LAKE_PUBLIC_HOST", "");
-    // A white-labelled Lake (lake#1136, docs/deployment/white-label-sign-in.md): the operator moves
+    // A white-labelled Lake (lake#1136, docs/api/clerk.md): the operator moves
     // LAKE_PUBLIC_HOST to the customer's host, keeps the Orama host as an alias, and keeps the
     // control rows named by the Orama host. Invalid values stop startup.
     std::string control_host;

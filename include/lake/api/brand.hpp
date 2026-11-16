@@ -96,7 +96,8 @@ struct BrandSources {
 
 // Reads and validates the brand. Every error names the setting at fault, never a file's contents.
 // A brand with any setting is a custom brand: it must name itself (LAKE_BRAND_NAME) and give its
-// own support address and email sender, neither on lake.live, orama.com or oramadev.net.
+// own support address and email sender, neither on the domain of this Lake's own sender or support
+// address.
 // `resend_from` and `support_email` (LAKE_RESEND_FROM's and LAKE_SUPPORT_EMAIL's values) are what
 // Lake's own brand sends from and points people to.
 std::expected<Brand, std::string> brand_from_sources(const BrandSources& sources,

@@ -4,7 +4,7 @@
 // `lake manifest`: its version and revision, the schema it carries and how to apply it
 // (`lake migrate`), the Stripe webhook events it handles and the products it bills under, and
 // every environment variable it reads. The operator reads this from the image a Lake names, so a
-// lake release is only that image. docs/deployment/operator-interface.md.
+// lake release is only that image. docs/control-plane/schema.md.
 
 #include <span>
 #include <string_view>

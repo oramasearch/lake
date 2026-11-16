@@ -176,7 +176,7 @@ the page (`&change=1` in the address, so Back and a reload keep it):
 - **A confirmed proposal** stays in the thread with *You confirmed it; what happened is below*, not
   *A later message replaced this proposal*.
 - **Checked in a browser** by `tools/e2e/change-app.mjs` (lake#1259,
-  [browser testing](../deployment/browser-testing.md#3g-change-app)): ask, propose, confirm, deploy,
+  browser testing): ask, propose, confirm, deploy,
   the frame reloads onto the change, and text outside ASCII survives the change.
 - **Close**, or Escape, returns to the app page.
 

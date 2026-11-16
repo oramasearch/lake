@@ -5198,8 +5198,8 @@ TEST(HttpServer, WorkspaceMcpSessionsLearnThatExportedToolsChanged) {
     EXPECT_FALSE(told(post(call, fresh)));
 }
 
-// A server reports Orama's published terms and privacy policy by default, and the configured ones
-// when they are set (LAKE_TERMS_URL, LAKE_PRIVACY_URL; liquid-bridge#15).
+// A server reports no terms or privacy policy by default, and the configured ones when they are
+// set (LAKE_TERMS_URL, LAKE_PRIVACY_URL).
 TEST(HttpServer, ViewerCarriesTheTermsAndPrivacyLinks) {
     for (const bool configured : {false, true}) {
         lake::api::ServerOptions options;
@@ -5216,8 +5216,8 @@ TEST(HttpServer, ViewerCarriesTheTermsAndPrivacyLinks) {
         const auto viewer =
             nlohmann::json::parse(response_body(connection.request("GET", "/v1/viewer")))["value"];
         EXPECT_EQ(viewer["legal"]["terms_url"],
-                  configured ? "https://acme.example/terms" : "https://www.orama.com/legal/terms");
-        EXPECT_EQ(viewer["legal"]["privacy_url"], configured ? "" : "https://www.orama.com/legal/privacy");
+                  configured ? "https://acme.example/terms" : "");
+        EXPECT_EQ(viewer["legal"]["privacy_url"], "");
     }
 }
 

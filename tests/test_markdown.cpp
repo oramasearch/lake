@@ -254,7 +254,7 @@ TEST(Docs, GuidesNameZettaOnlyWhereAPersonChoosesIt) {
 
 // The product's name is Lake, with a capital L (decision 59, lake#642). Prose never names it
 // lowercase; technical names keep their form: code spans and blocks (`claude mcp add lake`), a
-// hostname or dotted name (lake.live, lake.oramadev.net), a path or link (/skills/lake/SKILL.md,
+// hostname or dotted name (lake.example.com, lake.example.net), a path or link (/skills/lake/SKILL.md,
 // oramasearch/lake), an identifier (lake_tok_, lake-theme, LAKE_KEY), the ciphertext prefix
 // lake:v1 and an issue reference (lake#642).
 static std::vector<std::string> lowercase_product_names(std::string_view prose) {
@@ -286,7 +286,7 @@ TEST(Docs, LowercaseProductNamesAreFoundOnlyInProse) {
     EXPECT_EQ(lowercase_product_names("on this lake.").size(), 1U);
     EXPECT_EQ(lowercase_product_names("lake checks it").size(), 1U);
     EXPECT_TRUE(lowercase_product_names("Lake checks it, and the Lake Console shows it.").empty());
-    EXPECT_TRUE(lowercase_product_names("Open https://lake.oramadev.net or lake.live.").empty());
+    EXPECT_TRUE(lowercase_product_names("Open https://lake.example.net or lake.example.com.").empty());
     EXPECT_TRUE(lowercase_product_names("[skill](/skills/lake/SKILL.md) oramasearch/lake").empty());
     EXPECT_TRUE(
         lowercase_product_names("lake_tok_K, lake-theme, LAKE_KEY, lake#642, lake:v1:k").empty());

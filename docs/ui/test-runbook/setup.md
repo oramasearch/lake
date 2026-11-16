@@ -12,9 +12,8 @@ Do this once per run, before any section file.
 | local | `http://127.0.0.1:4900` (`./build/lake`) | The cases marked *Lake without Clerk*: Lake's own sign-in, sign-up, passkeys, MFA, OAuth | Lake's own pages | none: sign up at `/sign-up` |
 
 Never run this runbook on `lake.live`, `eu.lake.live` or `us.lake.live` (production) without Steve's
-go-ahead, and never on `lake.oramadev.net` (retired 2026-10-24). The Clerk application and
-instance ids are in the bridge's `lake-devops` skill; [`../../deployment/users.md`](../../deployment/users.md)
-says how to create a Clerk user.
+go-ahead, and never on `lake.oramadev.net` (retired 2026-10-24). Create a Clerk user in the Clerk
+dashboard.
 
 ### Confirm the version
 
@@ -48,7 +47,7 @@ curl -s https://lake-testing.oramadev.net/v1/server_info | python3 -c 'import js
 ## Personas
 
 Each persona is its own Clerk user on the environment (sign-up is restricted, so an admin creates
-it, [`users.md`](../../deployment/users.md)). Give each one an email inbox the team controls, so
+it in the Clerk dashboard). Give each one an email inbox the team controls, so
 invitation and share mail can be read.
 
 | Persona | Who | Prepared state |
@@ -68,7 +67,7 @@ workspace** ([04-workspaces.md](04-workspaces.md)); it takes a minute or two to 
 On a Clerk environment, mint a one-time ticket through Clerk's Backend API, with the
 environment's secret key in `CLERK_SECRET_KEY` (from its `clerk-lake-<env>` Secret on the managing
 cluster, never written to a file) and its instance id in `CLERK_INSTANCE`, and open the sign-in page
-with it ([`../../deployment/browser-testing.md`](../../deployment/browser-testing.md)):
+with it ([`../../../tools/e2e/README.md`](../../../tools/e2e/README.md)):
 
 ```sh
 /path/to/lake/tools/e2e/clerk-ticket.sh ticket <clerk user id> /tmp/lake-ticket-owner

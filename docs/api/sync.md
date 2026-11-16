@@ -237,4 +237,4 @@ and compares the pulled tree and file bytes. It also corrupts a TAAP signature, 
 applies an unprotected ref beside a protected refusal, preserves the exact refusal reason, and
 keeps both refs unchanged for the same atomic push while reporting both outcomes. `PostgresSync.*`
 repeats push and pull with the production Postgres control store. The full macOS suite and Linux
-image build run with the rest of the proof documented in [`../build/ci.md`](../build/ci.md).
+image build run with the rest of the proof documented in [`../build/local.md`](../build/local.md).

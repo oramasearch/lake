@@ -180,8 +180,7 @@ names its workspace.
 Secret exists only when an app, service or deployment must mount it, as a projection the operator
 writes from the store and rewrites on rotation; never edited by hand and never the only copy.
 Orama's own platform credentials (Stripe, lake's OpenAI and Clerk keys) are environment variables of
-the hosting platform and never live in a mount. The two levels and the audit of every user secret
-flow: [../deployment/secrets.md](../deployment/secrets.md).
+the hosting platform and never live in a mount. Every user secret flow is audited.
 
 | Capability | Authorization | Input | Result |
 |---|---|---|---|

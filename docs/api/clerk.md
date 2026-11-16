@@ -264,7 +264,8 @@ when changing offboarding; workload cleanup alone does not protect previously di
 
 ## Configuration
 
-Setting up an instance and its social connections is the runbook [`../deployment/sign-in.md`](../deployment/sign-in.md).
+Setting up an instance and its social connections is done in Clerk's dashboard; the settings Lake
+reads are in [`../serving/configuration.md`](../serving/configuration.md).
 
 | Setting | Where | Value |
 |---|---|---|
@@ -294,8 +295,7 @@ The Clerk instance needs:
   the same rule `viewer` reports (`lake_pool_password_sign_in`). A password account could otherwise
   be registered under someone's email before their first Clerk sign-in. Since lake#920 (LSR-011)
   a first Clerk sign-in never links to such an account anyway: it gets a new account and takes the
-  address ([who a Clerk sign-in becomes](#who-a-clerk-sign-in-becomes)). The per-environment table is in
-  [`../deployment/users.md`](../deployment/users.md#what-the-pages-say-about-sign-up).
+  address ([who a Clerk sign-in becomes](#who-a-clerk-sign-in-becomes)).
 
 ### The instance lake.oramadev.net uses
 
@@ -305,8 +305,7 @@ Clerk application `lake-testing` (`app_3JpNNpVUwgRgnkItIPbzzRWa2BP`, first named
 `jtmp_3JpNeutaiIPwfTcdSz8BXC1SEYW`; sign-up `restricted`; email-code sign-in, password optional. Add
 a person with `clerk users create --email <address>` from a directory linked to that application
 (`clerk link --app app_3JpNNpVUwgRgnkItIPbzzRWa2BP`). Before any Clerk command, run `clerk whoami`
-and confirm the linked application; the same email holds several workspaces. Every environment's
-instance is listed in [`../deployment/sign-in.md`](../deployment/sign-in.md).
+and confirm the linked application; the same email holds several workspaces.
 
 ## Verify
 
@@ -359,8 +358,7 @@ exchange route with signed template tokens and an isolated HTTP double. Run
 
 ## A white-labelled Lake (lake#1136)
 
-A Lake on a customer's own domain signs people in there in one of two ways, chosen per offer
-([`../deployment/white-label-sign-in.md`](../deployment/white-label-sign-in.md)):
+A Lake on a customer's own domain signs people in there in one of two ways, chosen per offer:
 
 - **A Clerk production instance for the customer's domain** (Private Warehouse, Dedicated Cluster):
   its Frontend API is `clerk.<customer domain>`. Nothing in Lake changes for it: the issuer and

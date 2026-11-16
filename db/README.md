@@ -3,7 +3,7 @@
 `schema.sql` is compiled into the lake binary (`cmake/embed_schema.cmake`), and `lake migrate`
 applies it to `LAKE_CONTROL_DB_URI` in one transaction under an advisory lock, as the operator's
 `PostgresSchema` Job does; `lake manifest` reports its latest migration and guard tables
-(lake#1119, [operator-interface.md](../docs/deployment/operator-interface.md)). Once
+(lake#1119, [../docs/control-plane/schema.md](../docs/control-plane/schema.md)). Once
 orama-operator#936 consumes them, a new migration needs no operator vendoring.
 Migration `0106_domain_claims` (lake#949) adds `domain_claims`: one row per custom-domain host
 across every account (the primary key), the environment holding it, the TXT token that proves
@@ -111,7 +111,7 @@ paid-through/access deadlines, event ordering and grace to cloud orders. A uniqu
 subscription to one order; `cloud_order_desired_state` evaluates entitlement at read time.
 Apply before the new binary. The operator must vendor the schema, select
 `cloud_order_entitlements_guard`, register the new events and implement suspension before order
-provisioning is enabled. See [orders](../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
+provisioning is enabled. See [orders](../docs/api/orders.md#recurring-entitlement-lake972).
 
 Migration `0091_account_deletion` (lake#810) adds `users.deleted_at`, set by `delete_account` when
 an account is deleted (its email and display name are erased in the same statement), and the guard

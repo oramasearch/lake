@@ -234,7 +234,7 @@ because the web app shows it to people. `store_unavailable` stays the answer whe
 configured and the operator control plane is unreachable (above).
 
 To turn Deployments on, set both variables in the `Lake` CR's `spec.env` (the operator's Zetta
-URL and a bearer it accepts; [aks.md](../deployment/aks.md)) and restart lake. Verify with
+URL and a bearer it accepts) and restart lake. Verify with
 `GET /v1/list_environments?repository_id=<id>`, which then answers `200` with the repository's
 environments (`items`), and with `GET /healthz`, which reports `platform: ready`.
 `PlatformFixture.WithoutThePlatformMirrorEveryCallSaysDeploymentsAreNotSetUp`

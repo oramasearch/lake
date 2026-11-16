@@ -108,7 +108,7 @@ workflow: Ubuntu 24.04, clang-19, a Postgres 16 service, the real-Zetta tests ag
 server built at the zetta-bridge pin and cached per pin, and the UI token gates. The run summary
 shows the passed, failed and skipped counts, and the job fails if a real-Zetta test skipped. Merge
 only on a green `ci` check; macOS-only testing let lake#545 ship a change that broke every
-connection on Linux. See [`docs/build/ci.md`](docs/build/ci.md).
+connection on Linux.
 
 ## Container image
 
@@ -116,7 +116,7 @@ connection on Linux. See [`docs/build/ci.md`](docs/build/ci.md).
 and CMake 3.31, then ships it on a minimal Ubuntu runtime (OpenSSL 3 + libstdc++ + libpq) as UID/GID 10001,
 `ENTRYPOINT lake`, `CMD --listen 0.0.0.0:4900`, port 4900 exposed. It is Zetta's headless-image
 recipe minus the GUI and Postgres deps. Images go to the **private** Docker Hub repo
-`oramasearch/lake` from the tagged [`image` workflow](.github/workflows/image.yml): an immutable
+`oramasearch/lake` from the tagged `image` workflow: an immutable
 Git-tag image plus `sha-<short-sha>`. `latest` and workstation-built deployment images are not used.
 
 Once the Actions credentials are configured, publish a deployment image by pushing an immutable
@@ -165,7 +165,7 @@ cutting one.
 
 Status: 2026-10-12. `Lake/prod` on the dev AKS cluster (there is no production environment yet)
 runs `oramasearch/lake:20261012a` (also tagged `v0.1.0`), built from the v0.1.0 tag (`2e6f6d7`);
-`GET /v1/server_info` reports version `0.1.0` and its OpenAPI lists 554 paths. The newest dated [deployment record](docs/deployment/dev-2026-10-01.md) and
+`GET /v1/server_info` reports version `0.1.0` and its OpenAPI lists 554 paths. The newest dated deployment record and
 [`docs/design/status.md`](docs/design/status.md) describe the 2026-10-01 deployment (`36679e1`) and
 have not been brought up to this one. `status.md` distinguishes what is implemented, exercised
 locally, deployed, and exercised in deployment, and `DocsStatus.MatchesTheObservedOpenApi` fails

@@ -100,7 +100,7 @@ so they still say which capabilities are slow.
 ### The dev site, 2026-10-02
 
 Read-only GETs against `lake.oramadev.net` (`oramasearch/lake:20261002b`) as the test user, five
-requests per page, signed in through a Clerk ticket ([browser-testing.md](../deployment/browser-testing.md)).
+requests per page, signed in through a Clerk ticket ([../../tools/e2e/README.md](../../tools/e2e/README.md)).
 Every page made the workspace calls its budget says, in one round, so the time is in the calls
 themselves:
 

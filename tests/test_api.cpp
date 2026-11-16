@@ -10304,7 +10304,7 @@ TEST(Identity, ClerkTurnsOffLakePoolPasswordSignUpAndSignIn) {
     ASSERT_TRUE(signed_up.ok) << signed_up.error.message;
     ASSERT_TRUE(s.call("sign_in_password", ada).ok);
 
-    s.ctx.clerk_publishable_key = "pk_test_YWJvdmUtc2VhaG9yc2UtNzUzNS5jbGVyay5hY2NvdW50cy5kZXYk";
+    s.ctx.clerk_publishable_key = "pk_test_ZXhhbXBsZS0xMjMuY2xlcmsuYWNjb3VudHMuZGV2JA==";
     EXPECT_EQ(s.call("viewer").value["password_sign_up"], false);
     const auto refused = [&](const std::string& capability, json input) {
         const ApiResult result = s.call(capability, std::move(input));
@@ -10361,9 +10361,10 @@ TEST(WebApp, ViewerReportsTheTermsAndPrivacyLinks) {
 
 TEST(WebApp, LegalUrlSettingsKeepTheDefaultTurnOffOrRefuse) {
     using lake::api::legal_url_setting;
-    const std::string_view fallback = lake::api::default_terms_url;
-    EXPECT_EQ(fallback, "https://www.orama.com/legal/terms");
-    EXPECT_EQ(lake::api::default_privacy_url, "https://www.orama.com/legal/privacy");
+    // No legal link of lake's own: an install names its own pages, or shows none.
+    EXPECT_EQ(lake::api::default_terms_url, "");
+    EXPECT_EQ(lake::api::default_privacy_url, "");
+    const std::string_view fallback = "https://example.com/legal/terms";
     EXPECT_EQ(legal_url_setting("LAKE_TERMS_URL", nullptr, fallback).value(), fallback);
     EXPECT_EQ(legal_url_setting("LAKE_TERMS_URL", "", fallback).value(), fallback);
     EXPECT_EQ(legal_url_setting("LAKE_TERMS_URL", "off", fallback).value(), "");
@@ -10371,7 +10372,7 @@ TEST(WebApp, LegalUrlSettingsKeepTheDefaultTurnOffOrRefuse) {
               "https://acme.example/legal/terms?v=2#top");
     EXPECT_EQ(legal_url_setting("LAKE_PRIVACY_URL", "http://localhost:3000/privacy", fallback).value(),
               "http://localhost:3000/privacy");
-    for (const char* bad : {"javascript:alert(1)", "/legal/terms", "www.orama.com/legal/terms", "https://",
+    for (const char* bad : {"javascript:alert(1)", "/legal/terms", "www.example.com/legal/terms", "https://",
                             "https://a.example/x y", "https://a.example/\"x", "https://a.example/<b>",
                             "ftp://a.example/terms"}) {
         const auto refused = legal_url_setting("LAKE_TERMS_URL", bad, fallback);
@@ -10384,7 +10385,7 @@ TEST(WebApp, LegalUrlSettingsKeepTheDefaultTurnOffOrRefuse) {
 
 TEST(WebApp, ViewerNamesClerkAndAnOrganizationNamesItsSpace) {
     Surface s;
-    s.ctx.clerk_publishable_key = "pk_test_YWJvdmUtc2VhaG9yc2UtNzUzNS5jbGVyay5hY2NvdW50cy5kZXYk";
+    s.ctx.clerk_publishable_key = "pk_test_ZXhhbXBsZS0xMjMuY2xlcmsuYWNjb3VudHMuZGV2JA==";
     s.ctx.authorized = false;
     s.ctx.acting_identity.clear();
     s.ctx.operator_credential = false;
@@ -10392,7 +10393,7 @@ TEST(WebApp, ViewerNamesClerkAndAnOrganizationNamesItsSpace) {
     ASSERT_TRUE(visitor.ok) << visitor.error.message;
     EXPECT_EQ(visitor.value["signed_in"], false);
     EXPECT_EQ(visitor.value["clerk"]["enabled"], true);
-    EXPECT_EQ(visitor.value["clerk"]["frontend_api"], "above-seahorse-7535.clerk.accounts.dev");
+    EXPECT_EQ(visitor.value["clerk"]["frontend_api"], "example-123.clerk.accounts.dev");
     EXPECT_EQ(visitor.value["password_sign_up"], false);
     EXPECT_EQ(visitor.value["version"], "0.0.1");
 

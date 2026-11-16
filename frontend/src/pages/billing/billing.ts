@@ -178,8 +178,7 @@ export function classTitle(name: string): string {
 
 const GIB = 1024 ** 3;
 
-/** Orama Cloud's list rates (lake#623, lake#635, lake#637, lake#643, lake#658;
- * docs/api/billing.md#price-list),
+/** Example rates (lake#623, lake#635, lake#637, lake#643, lake#658; docs/api/billing.md#price-list),
  * what the editor starts from when nothing is published: millionths of a dollar for every `per`
  * units. CPU per vCPU-minute (60,000 mCPU-seconds), RAM and GPU memory per GiB-minute (61,440
  * MiB-seconds), GPU per GPU-minute with a rate per class and a default for any other class. */
@@ -199,9 +198,8 @@ export const LIST_RATES: { dimension: string; class?: string; unit_micros: numbe
   { dimension: "predictions", unit_micros: 10_000, per: 1000 },
   { dimension: "searches", unit_micros: 10_000, per: 1000 },
   { dimension: "model_tokens", unit_micros: 9_000_000, per: 1_000_000 },
-  // The default gateway models (migration 0095_model_token_prices, Steve 2026-10-23): OpenAI's
-  // published price per million tokens (https://developers.openai.com/api/docs/pricing, read
-  // 2026-10-23) plus 30%. An embedding reports no output tokens; the gateway needs both rates.
+  // The default gateway models (migration 0095_model_token_prices), per million tokens. An
+  // embedding reports no output tokens; the gateway needs both rates.
   { dimension: "model_tokens", class: "gpt-5.5/input", unit_micros: 6_500_000, per: 1_000_000 },
   { dimension: "model_tokens", class: "gpt-5.5/output", unit_micros: 39_000_000, per: 1_000_000 },
   { dimension: "model_tokens", class: "gpt-5/input", unit_micros: 1_625_000, per: 1_000_000 },
@@ -210,9 +208,9 @@ export const LIST_RATES: { dimension: string; class?: string; unit_micros: numbe
   { dimension: "model_tokens", class: "gpt-4o/output", unit_micros: 13_000_000, per: 1_000_000 },
   { dimension: "model_tokens", class: "text-embedding-3-small/input", unit_micros: 26_000, per: 1_000_000 },
   { dimension: "model_tokens", class: "text-embedding-3-small/output", unit_micros: 26_000, per: 1_000_000 },
-  // The gpt-6.x models and long-context rates (migration 0105_agent_model_prices, lake#1230, Steve
-  // 2026-10-26): the same page read 2026-10-26, plus 30%. A prompt over 272,000 input tokens is
-  // priced by OpenAI at 2x input and 1.5x output, so it is billed at `<model>@long/...`.
+  // The gpt-6.x models and long-context rates (migration 0105_agent_model_prices, lake#1230). A
+  // prompt over 272,000 input tokens is priced by the provider at 2x input and 1.5x output, so it
+  // is billed at `<model>@long/...`.
   { dimension: "model_tokens", class: "gpt-6.1-sol/input", unit_micros: 2_600_000, per: 1_000_000 },
   { dimension: "model_tokens", class: "gpt-6.1-sol/output", unit_micros: 13_000_000, per: 1_000_000 },
   { dimension: "model_tokens", class: "gpt-6.1-sol@long/input", unit_micros: 5_200_000, per: 1_000_000 },

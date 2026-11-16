@@ -256,7 +256,7 @@ TEST(Clerk, PublishableKeyYieldsTheFrontendApiAndIssuer) {
     ASSERT_TRUE(live);
     EXPECT_EQ(live->issuer, "https://clerk.example.com");
     // Unpadded, as Clerk issues them.
-    std::string unpadded = "pk_test_" + base64("above-seahorse-7535.clerk.accounts.dev$");
+    std::string unpadded = "pk_test_" + base64("example-456.clerk.accounts.dev$");
     while (unpadded.back() == '=') {
         unpadded.pop_back();
     }
@@ -609,7 +609,7 @@ TEST(HttpServer, ClerkBackendStatusDoesNotBlockOtherRequests) {
 }
 
 namespace {
-// What lake.live's production instance issued on 2026-10-24 for a person with no name in Clerk:
+// What a production Clerk instance issues for a person with no name in Clerk:
 // the `lake` template renders `{{user.full_name}}` as null (lake#1115).
 std::string nameless_template_token(const ClerkInstance& clerk,
                                     json email = "person@example.test") {
@@ -736,7 +736,7 @@ TEST(Clerk, ARefusedTokenSaysWhyAndSummarizesWithoutPersonalClaims) {
     EXPECT_TRUE(lake::api::summarize_token("garbage").issuer.empty());
 }
 
-// The exchange end to end: the token shape lake.live refused signs in, and a refused token is
+// The exchange end to end: the token shape lake once refused signs in, and a refused token is
 // logged with its reason and registered claims, never the token or the person's claims.
 TEST(HttpServer, ClerkExchangeAcceptsANamelessPersonAndLogsWhyATokenWasRefused) {
     ClerkInstance clerk;

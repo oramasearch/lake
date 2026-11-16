@@ -227,7 +227,7 @@ constexpr std::array environment = {
                         false,
                         "Subscription expiry grace (default 259200)"},
     EnvironmentVariable{
-        "LAKE_ORDER_SHEET", false, false, "JSON merged over the apex order sheet's default offers"},
+        "LAKE_ORDER_SHEET", false, false, "The apex order sheet's offers and prices (default: off, none)"},
     EnvironmentVariable{
         "LAKE_PLATFORM_SYNC_SECONDS", false, false, "Platform poll interval (default 15)"},
     EnvironmentVariable{"LAKE_PRICE_COMPUTE_SECOND_MICROS",
@@ -275,8 +275,8 @@ constexpr std::array environment = {
                         false,
                         true,
                         "Bearer presented to peer Lakes; never the admin token"},
-    EnvironmentVariable{"LAKE_RESEND_API_KEY", false, true, "Orama's Resend key for order email"},
-    EnvironmentVariable{"LAKE_RESEND_FROM", false, false, "Order email sender"},
+    EnvironmentVariable{"LAKE_RESEND_API_KEY", false, true, "The Resend key lake sends email with"},
+    EnvironmentVariable{"LAKE_RESEND_FROM", false, false, "Email sender (no default: unset, no email is sent)"},
     EnvironmentVariable{"LAKE_SEALING_PUBLIC_KEY",
                         false,
                         false,
@@ -313,7 +313,7 @@ constexpr std::array environment = {
     EnvironmentVariable{
         "LAKE_STRIPE_WEBHOOK_SECRET", false, true, "Signing secret of the Stripe webhook endpoint"},
     EnvironmentVariable{
-        "LAKE_SUPPORT_EMAIL", false, false, "Where orders go (default support@orama.com)"},
+        "LAKE_SUPPORT_EMAIL", false, false, "Where orders go (no default: unset, no email is sent)"},
     EnvironmentVariable{"LAKE_TERMS_URL", false, false, "The terms of service sign-up and sign-in link to (default Orama's; off: none)"},
     EnvironmentVariable{
         "LAKE_TRANSCRIBE_MODEL", false, false, "The speech model (default gpt-4o-transcribe)"},

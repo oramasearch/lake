@@ -192,7 +192,7 @@ also set (a Lake signs in through Clerk or through the customer's provider, neve
   [lake#1022](https://github.com/oramasearch/lake/issues/1022) on Postgres; SAML works.
 
 The runbook, with the Clerk alternative, is
-[`../deployment/white-label-sign-in.md`](../deployment/white-label-sign-in.md). Tests:
+[`clerk.md`](clerk.md). Tests:
 `WhiteLabelSsoOnly.*` in `tests/test_white_label.cpp`, `frontend/tests/sso-sign-in.test.ts`.
 
 ## How to verify

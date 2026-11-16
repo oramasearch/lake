@@ -71,7 +71,7 @@ std::expected<MigrationReport, MigrationError> apply_control_schema(const Migrat
 nlohmann::json migration_report_json(const SchemaFacts& facts, const MigrationReport& report);
 nlohmann::json migration_error_json(const SchemaFacts& facts, const MigrationError& error);
 
-// `lake migrate`'s exit codes (docs/deployment/operator-interface.md).
+// `lake migrate`'s exit codes (docs/control-plane/schema.md).
 inline constexpr int migrate_exit_ok = 0;
 inline constexpr int migrate_exit_apply_failed = 1;
 inline constexpr int migrate_exit_usage = 2;

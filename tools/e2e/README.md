@@ -1,8 +1,9 @@
 # Live end-to-end scripts
 
 Scripts that drive a deployed Lake as a person does. They are not part of the native CTest proof.
-How to get a Clerk test user and ticket, and what each browser script checks, is
-[`docs/deployment/browser-testing.md`](../../docs/deployment/browser-testing.md).
+The browser scripts sign in with a Clerk test user and a one-time ticket from `clerk-ticket.sh`
+(use a Clerk development instance and `+clerk_test` addresses). They refuse any host beneath a
+domain listed in `LAKE_E2E_PROTECTED_DOMAINS` (comma-separated) unless `LAKE_E2E_ALLOW_PRODUCTION=1`.
 
 | Script | What it drives |
 |---|---|
@@ -15,7 +16,7 @@ How to get a Clerk test user and ticket, and what each browser script checks, is
 | `change-app.mjs` | An App's Change App split screen: ask, propose, confirm, deploy, and the frame reloads onto the change (lake#1259) |
 | `agents.py` | The Agent Library over the agent bus (below) |
 | `test_agents.py` | Offline tests of `agents.py`'s own logic (which table T3 ranks by), no Lake needed |
-| `start-times.py` | How long each service kind takes to start |
+| `start-times.py` | How long each service kind takes to start (`LAKE_KUBE_CONTEXT` names the cluster) |
 
 ## Live agent scenarios
 # Browser walkthroughs
@@ -31,9 +32,8 @@ the card moved to the training at once and the conversation did not say *Done: t
 (lake#1204), and the model's answers appear on the page and on that website. Then a failure path: a
 one-row file, clustering asked for and confirmed, and the page must show the reason in plain words
 with **Try again** and **Ask Orama to fix it**. `lib.signIn` waits for
-`domcontentloaded` and the `quickstart-page` test id, never the `load` event, which lake-dev does
-not fire. Both take `<base-url> <ticket-file> <output-dir>`
-([docs/deployment/browser-testing.md](../../docs/deployment/browser-testing.md)). `quickstart.mjs`
+`domcontentloaded` and the `quickstart-page` test id, never the `load` event, which a deployed
+Lake may not fire. Both take `<base-url> <ticket-file> <output-dir>`. `quickstart.mjs`
 leaves its dataset, index, model, key and conversation in the account's workspace.
 
 # Live agent scenarios

@@ -73,4 +73,4 @@ contract and the operator issue together.
 
 Build with at most six jobs and run the focused and complete static and shared suites against a
 fresh local PostgreSQL database. The exact commands and counts for this change are recorded in
-[the proof record](../build/scoped-credentials-proof.md).
+the proof record.

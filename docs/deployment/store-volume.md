@@ -65,7 +65,7 @@ What is on the store volume, and how each part is written:
 | `<customer>/repositories/<id>/` (refs, journal, checkpoint, replication cursor) | libliquid repository on the customer store handle, opened once and cached; cursor via a fixed `.tmp` name | **unsafe**: cached state, shared temporary name |
 | Drive content | a liquid repository in the customer store | **unsafe**, as the store |
 | Models and datasets | liquid sync into the customer store | **unsafe**, as the store |
-| `<customer>/index/` (search segments and manifest of unswitched workspaces' repositories) | `search::Service`, per-account state loaded once and republished from memory | **unsafe**: a publication drops the other process's segments. A switched workspace's index is not here: it is beside its store in its workspace Zetta, written under the store's lease fence (lake#381, [search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)) |
+| `<customer>/index/` (search segments and manifest of unswitched workspaces' repositories) | `search::Service`, per-account state loaded once and republished from memory | **unsafe**: a publication drops the other process's segments. A switched workspace's index is not here: it is beside its store in its workspace Zetta, written under the store's lease fence (lake#381, [search.md](../api/search.md#where-the-index-lives-lake381)) |
 | `<node>/registry/` OCI blobs | uploads under unique ids, blobs renamed into content-addressed paths | safe in the test (444 manifests, 888 blobs, no loss) |
 | `<node>/registry/` manifests, tags, npm and Python indexes | write-then-rename; npm and Python indexes are read-modify-write under an in-process mutex | tags: last writer wins; **package indexes: lost update** |
 | `<node>/log/` transparency tiles and `tree.json` | `flock` on `append.lock`, state re-read under the lock | safe in the test (1,692 appends, tree rebuilt from its entries) |
@@ -158,11 +158,10 @@ preStop + `LAKE_DRAIN_SECONDS` (35) and the 45 s grace period after which the ku
 B never gives up on a predecessor that is stopping normally. Raising `LAKE_DRAIN_SECONDS` needs a
 longer grace period and owner wait to match.
 
-**Operator.** The design works with the operator as it is on `origin/main` (7b8ecb4): no
-operator change is required. Two of its documents describe the old behavior and should be updated
+**Operator.** The design works with the operator as it is: no operator change is required. Two of its documents describe the old behavior and should be updated
 there: `docs/lake/README.md` (Probes and drain: "lake stops its HTTP server at once on SIGTERM"
 and the readiness row "200 only when lake's control store answers a ping"; Pod replacement:
-"nothing yet proves that two processes can safely share it") and `DESIGN.md` decision 38. The
+"nothing yet proves that two processes can safely share it") and its design notes. The
 store-root state is visible in the `/readyz` body and the `store_owner` log events.
 
 **Verify.** `tests/test_shared_store.cpp` (`StoreOwner.*`; the binary cases need

@@ -254,7 +254,7 @@ TEST(WebApps, DesiredStateStatusAndQuotasFollowTheContract) {
 
 TEST(WebApps, ReservedNamesAreRefusedAndOrdinaryNamesUseTheZone) {
     WebApps apps;
-    apps.apps_wildcard = "oramadev.net";
+    apps.apps_wildcard = "example.net";
     apps.apps_reserved_names = "customer-portal, internal";
     for (const char* value : {"lake",
                               "www",
@@ -297,7 +297,7 @@ TEST(WebApps, ReservedNamesAreRefusedAndOrdinaryNamesUseTheZone) {
 
     const auto created = apps.create("reports");
     ASSERT_TRUE(created.ok) << created.error.message;
-    EXPECT_EQ(created.value["host"], "reports.oramadev.net");
+    EXPECT_EQ(created.value["host"], "reports.example.net");
 }
 
 // lake#783: the operator runs an image app only when its image is pinned by digest
@@ -362,14 +362,14 @@ TEST(WebApps, AnImageAppIsRefusedUnlessItsImageIsPinnedByDigest) {
 // (lake#947): {name: "ok", host: "app.<wildcard>"} took the platform's names past the name check.
 TEST(WebApps, AnExplicitHostCannotTakeAReservedNameOrTheLakesOwnHost) {
     WebApps apps;
-    apps.apps_wildcard = "oramadev.net";
+    apps.apps_wildcard = "example.net";
     apps.apps_reserved_names = "customer-portal, internal";
-    apps.public_host = "dev-lake.oramadev.net";
+    apps.public_host = "dev-lake.example.net";
     auto regions = lake::api::regions_from_environment(
         "westus2",
         "",
-        R"([{"name":"westus2","label":"US West","host":"us.oramadev.net","latitude":47,"longitude":-122}])",
-        "picker.oramadev.net");
+        R"([{"name":"westus2","label":"US West","host":"us.example.net","latitude":47,"longitude":-122}])",
+        "picker.example.net");
     ASSERT_TRUE(regions) << regions.error();
     apps.regions = &*regions;
     const auto with_host = [&](const std::string& name, const std::string& host) {
@@ -387,16 +387,16 @@ TEST(WebApps, AnExplicitHostCannotTakeAReservedNameOrTheLakesOwnHost) {
                           {"host", host}});
     };
     int attempt = 0;
-    for (const char* value : {"app.oramadev.net",
-                              "login.oramadev.net",
-                              "auth.oramadev.net",
-                              "sso.oramadev.net",
-                              "grafana.oramadev.net",
-                              "lake.oramadev.net",
-                              "lake-eu.oramadev.net",
-                              "orama-console.oramadev.net",
-                              "customer-portal.oramadev.net",
-                              "internal.oramadev.net"}) {
+    for (const char* value : {"app.example.net",
+                              "login.example.net",
+                              "auth.example.net",
+                              "sso.example.net",
+                              "grafana.example.net",
+                              "lake.example.net",
+                              "lake-eu.example.net",
+                              "orama-console.example.net",
+                              "customer-portal.example.net",
+                              "internal.example.net"}) {
         const std::string host = value;
         const auto refused = with_host("ok-" + std::to_string(attempt++), host);
         EXPECT_EQ(refused.error.code, "invalid_input") << host;
@@ -404,7 +404,7 @@ TEST(WebApps, AnExplicitHostCannotTakeAReservedNameOrTheLakesOwnHost) {
         EXPECT_TRUE(refused.error.message.contains("is reserved"))
             << host << ": " << refused.error.message;
     }
-    for (const char* value : {"dev-lake.oramadev.net", "us.oramadev.net", "picker.oramadev.net"}) {
+    for (const char* value : {"dev-lake.example.net", "us.example.net", "picker.example.net"}) {
         const std::string host = value;
         const auto refused = with_host("ok-" + std::to_string(attempt++), host);
         EXPECT_EQ(refused.error.code, "invalid_input") << host;
@@ -413,9 +413,9 @@ TEST(WebApps, AnExplicitHostCannotTakeAReservedNameOrTheLakesOwnHost) {
             << host << ": " << refused.error.message;
     }
 
-    const auto created = with_host("ok", "shop.oramadev.net");
+    const auto created = with_host("ok", "shop.example.net");
     ASSERT_TRUE(created.ok) << created.error.message;
-    EXPECT_EQ(created.value["host"], "shop.oramadev.net");
+    EXPECT_EQ(created.value["host"], "shop.example.net");
 }
 
 TEST(WebApps, CapabilitiesAreCustomerScopedAndValidateSecretsHostsAndDeletes) {

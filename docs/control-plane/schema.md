@@ -15,8 +15,7 @@ file records is in `schema_migrations`, otherwise the whole idempotent file. It 
 time, and prints the migration rows and guard tables it added as JSON. Exit 0 applied or current,
 1 a statement failed (rolled back), 2 usage, 3 the database unreachable within `--wait-seconds`.
 The server process never migrates. `lake manifest` publishes the schema's SHA-256, latest
-migration, guard table and every guard table, so the operator needs no copy of the file. The full
-contract is [`../deployment/operator-interface.md`](../deployment/operator-interface.md).
+migration, guard table and every guard table, so the operator needs no copy of the file.
 
 A new migration still follows the rules below: idempotent SQL, its row in `schema_migrations`, and a
 new `*_guard` table created by the newest migration (`LakeManifest.TheGuardTableIsTheNewestMigrations`

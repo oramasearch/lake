@@ -115,7 +115,7 @@ requests, validity bounds, recipient-only authorization, admin-only mutations, r
 expiry, trust pinning and signed audit. `NetworkCapabilities` exercises provider authorization,
 scope, bounds and the pending default. `PostgresNetwork` covers migration columns/defaults,
 existing rows and replay. `SchemaConformance` exercises actual REST and MCP transports and
-independently validates required output fields. See [the proof record](../build/tunnel-grants-proof.md).
+independently validates required output fields. See the proof record.
 
 Changes to these fields require updating this page, registry schemas and transport evidence.
 The two migration columns follow section 11.1; do not rewrite `0084_network`. Adopt zetta#1281's
