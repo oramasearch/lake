@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Who signed a change, a review or a comment, or holds access (lake#1326): the person's name and
  * handle from the `people` member of the read that named them, with the key on hover. An identity
  * no account acts for reads "Unknown signer" with a short key. `npm test` covers it

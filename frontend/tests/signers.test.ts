@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Signers by name (lake#1326): a known identity reads as the account's name and handle, an unknown
  * one as "Unknown signer" and a short key, and a comment's author is found in either shape. `npm
  * test`; the build runs it. */
