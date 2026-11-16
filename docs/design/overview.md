@@ -3,7 +3,7 @@
 lake is the hosted service around liquid: forge, drive, platform, identity, secrets, PKI,
 artifact registry and search over one content-addressed store. liquid is the tool; lake is where
 it collects. The product is designed for the hostname `lake.live`; the instance running today is
-https://lake.oramadev.net.
+https://lake.example.com.
 
 ## One binary
 

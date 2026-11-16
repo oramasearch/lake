@@ -1,11 +1,8 @@
 # Deployment
 
-- **[Edge certificates for app hosts](edge-certificates.md) (human action, Steve, done 2026-10-26):** Advanced Certificate
-  Manager on `lake.live` and `oramadev.net` and the two zone tokens' permissions, so `<app>.<lake host>` gets an edge
-  certificate and the `lake.live` zone settings apply (lake#798, a production degradation).
-- **[Release images](release-images.md) (human action, Steve, open):** a release tag is written once,
+- **[Release images](release-images.md) (human action, open):** a release tag is written once,
   only from an approved, tagged source (`tools/release/publish-release-image.py`); Docker Hub tag
-  immutability for `v*` is Steve's to turn on, and retiring `image.yml` is his call (lake#994).
+  immutability for `v*` is the image owner's to turn on (lake#994).
 - [White-label sign-in](white-label-sign-in.md): sign-in on a Lake that serves a customer's own
   domain, through a Clerk instance for that domain or the customer's IdP alone (lake#1136).
 - [Sign-in](sign-in.md): Clerk instances, social-provider setup, production Microsoft ownership,

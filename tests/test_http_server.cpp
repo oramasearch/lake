@@ -1413,7 +1413,7 @@ TEST_P(HttpResponseIsolation, ATokenIsIssuedAndRevokedWithTheBrowserSession) {
     EXPECT_FALSE(after.starts_with("HTTP/1.1 200")) << "a revoked token no longer authenticates";
 }
 
-// lake#1163 (signing out never revokes an API key): a key made in a browser keeps working
+// lake#1163 (signing out never revokes API keys): a key made in a browser keeps working
 // after that browser signs out through /logout, and a key derived from it too. Revoking the key
 // itself still ends its descendant.
 TEST_P(HttpResponseIsolation, AKeyMadeInABrowserOutlivesThatBrowsersSignOut) {
@@ -2504,8 +2504,7 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesProjects) {
               1);
 
     // The Project Agent designs the new project's pipeline in the background, and reading its task
-    // (the project page's latest_agent_task) compiles the design once it is
-    // done.
+    // (the project page's latest_agent_task) compiles the design once it is done.
     const auto latest_build =
         store_->latest_agent_task(customer_id, "build:" + project, connection->workspace_id);
     ASSERT_TRUE(latest_build) << "creating the project started the Project Agent";

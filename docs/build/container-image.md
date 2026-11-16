@@ -45,7 +45,7 @@ Wait for the workflow to succeed before updating `Lake.spec.image`.
 ## Run it under the operator
 
 The `Lake` CR on `orama-operator` runs the image: `spec.image: oramasearch/lake:<tag>`,
-`spec.pullSecretName: oramasearch-dockerhub` (the Secret must exist in `spec.namespace`), port
+`spec.pullSecretName: <registry-secret>` (the Secret must exist in `spec.namespace`), port
 4900 by default (`spec.port`), and no args needed.
 
 ## Local verification

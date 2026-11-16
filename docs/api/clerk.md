@@ -298,12 +298,10 @@ The Clerk instance needs:
 
 ### Setting up your Clerk instance
 
-Clerk application `lake-testing` (`app_3JpNNpVUwgRgnkItIPbzzRWa2BP`, first named `lake`) in the
-`steve@orama.com` workspace, development instance `ins_3JpNNvZd4jnehvW6XsKWcMq6MKx`
-(`above-seahorse-7535.clerk.accounts.dev`), created 2026-09-25. Template
-`jtmp_3JpNeutaiIPwfTcdSz8BXC1SEYW`; sign-up `restricted`; email-code sign-in, password optional. Add
-a person with `clerk users create --email <address>` from a directory linked to that application
-(`clerk link --app app_3JpNNpVUwgRgnkItIPbzzRWa2BP`). Before any Clerk command, run `clerk whoami`
+Create a Clerk application with a development instance (`ins_...`, host
+`example-123.clerk.accounts.dev`) and a JWT template (`jtmp_...`); for example sign-up `restricted`,
+email-code sign-in, password optional. Add a person with `clerk users create --email <address>` from
+a directory linked to that application (`clerk link --app app_...`). Before any Clerk command, run `clerk whoami`
 and confirm the linked application; the same email holds several workspaces.
 
 ## Verify

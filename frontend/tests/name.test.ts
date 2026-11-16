@@ -1,6 +1,6 @@
 /**
- * The product's name is Lake, with a capital L, and the app is the Lake Console (decision 59,
- * lake#642). Technical names keep their form: hostnames (`lake.example.com`, `lake.example.net`), the MCP
+ * The product's name is Lake, with a capital L, and the app is the Lake Console
+ * (lake#642). Technical names keep their form: hostnames (`lake.example.com`, `lake.example.net`), the MCP
  * server name and other code values quoted alone (`"lake"`), identifiers (`lake_tok_`, `lake-theme`,
  * `LAKE_KEY`), paths (`/skills/lake/SKILL.md`), the ciphertext prefix `lake:v1:`, issue references
  * (`lake#642`) and anything inside `<code>`. Every other lowercase "lake" outside a comment is a
