@@ -5129,8 +5129,14 @@ private:
         if (!model_verification->verified || !run_verification->verified) {
             const std::string reason = !model_verification->verified ? model_verification->reason
                                                                      : run_verification->reason;
+            // The reason is liquid's verdict on the caller's own statement (for example an unknown
+            // signer), the same text verify_model_provenance answers as `reason`; the context
+            // field is not rendered, so the reason goes in the message.
             return std::unexpected(
-                SyncStoreError{"invalid_input", "a provenance attestation was refused", reason});
+                SyncStoreError{"invalid_input",
+                               reason.empty() ? std::string{"a provenance attestation was refused"}
+                                              : "a provenance attestation was refused: " + reason,
+                               reason});
         }
         const auto dataset = liquid::parse_digest(text_attribute(model, "training_dataset"));
         const auto code = liquid::parse_digest(text_attribute(model, "training_code"));

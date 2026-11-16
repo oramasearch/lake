@@ -202,6 +202,9 @@ by its key. An issuer no account registered gets no chain, so liquid reads the p
 store: Lake's own identity still verifies, and anyone else is refused as an `unknown signer`. The
 same rule applies to the attestations listed on a repository artifact (`verified: false` with the
 unknown-signer reason). A store that cannot be read gives no chain, so the answer fails closed.
+A refused `attach_model_provenance` answers `invalid_input` with liquid's reason in the message
+(`a provenance attestation was refused: unknown signer: no identity chain binds this name to a
+key`, lake#1354), the same reason `verify_model_provenance` answers as `reason`.
 
 Limits: a rotated identity's later documents are not stored, so a statement signed by a key after
 its first rotation is refused (the same follow-up as in [identity.md](identity.md), Limits); a
