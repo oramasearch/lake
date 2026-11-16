@@ -1484,13 +1484,13 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
     // LSR-009 (lake#918): an agent's task, launch or schedule credential reaches only its own
     // workspace through the object its input names too (a repository, app, build, application or
     // secret mount), whose workspace a handler derives in its body rather than from workspace_id.
-    // A public repository stays readable, as it is to anyone. This complements the binding of the
-    // workspace a call names and of the /w/<id>/ route (lake#1286).
+    // A public repository of another workspace is refused too: a run stays in its own workspace,
+    // and anyone may still read that repository without the run's credential. This complements
+    // the binding of the workspace a call names and of the /w/<id>/ route (lake#1286).
     if (state.proceed && context.authorized) {
         if (const auto bound = bound_agent_workspace(context)) {
             const NamedObjectWorkspace named = named_object_workspace(&entry, input, context);
-            if (!named.workspace_id.empty() && named.workspace_id != *bound &&
-                !(named.public_repository && entry.kind == CapabilityKind::Read)) {
+            if (!named.workspace_id.empty() && named.workspace_id != *bound) {
                 state.result = ApiResult::failure(
                     "unauthorized",
                     "this agent credential belongs to another workspace than the one " +

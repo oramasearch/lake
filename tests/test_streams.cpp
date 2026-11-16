@@ -264,7 +264,8 @@ TEST_F(Streams, TaskCredentialReadsOnlyItsOwnWorkspacesResources) {
 
 // LSR-009 (lake#918): a launch's credential reaches only its own workspace through the object its
 // input names, whose workspace the handler derives (here a repository), and its `workspace_act`
-// runs no action its credential does not name. A public repository stays readable.
+// runs no action its credential does not name. A public repository of another workspace is refused
+// too: the run stays in its own workspace.
 TEST_F(Streams, LaunchCredentialIsBoundThroughObjectsAndRunsNoUnnamedAction) {
     const auto second = workspace->add(store, customer, "second");
     const auto own = store->create_repository({customer, "own", "", "private", workspace->id});
@@ -296,11 +297,12 @@ TEST_F(Streams, LaunchCredentialIsBoundThroughObjectsAndRunsNoUnnamedAction) {
     };
     const auto refused = tree(foreign->id);
     EXPECT_EQ(refused.error.code, "unauthorized");
-    EXPECT_NE(refused.error.message.find("another workspace"), std::string::npos)
-        << refused.error.message;
-    EXPECT_EQ(tree(own->id).error.message.find("another workspace"), std::string::npos);
-    EXPECT_EQ(tree(open->id).error.message.find("another workspace"), std::string::npos)
-        << "a public repository is readable by anyone";
+    EXPECT_NE(refused.error.message.find("own workspace"), std::string::npos) << refused.error.message;
+    const auto own_tree = tree(own->id);
+    EXPECT_NE(own_tree.error.code, "unauthorized") << own_tree.error.message;
+    const auto public_tree = tree(open->id);
+    EXPECT_EQ(public_tree.error.code, "unauthorized")
+        << "a public repository of another workspace is refused to the run's credential";
 
     // workspace_act alone runs no action: the run's code proposes, a person confirms.
     const auto acted = call("workspace_act",

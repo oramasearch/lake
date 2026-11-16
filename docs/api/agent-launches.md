@@ -79,8 +79,10 @@ object a call's input names before the handler runs: a repository (`repository_i
 or a repository capability's `id`), an app (`app_id`), a build (`build_id`), an application or a
 secret mount. When its routing row puts it in another workspace than the task's, launch's or
 schedule's own, the call is `unauthorized` (*this agent credential belongs to another workspace
-than the one … would act in*), in any account of the person. A public repository stays readable,
-as it is to anyone. The lookup is `named_object_workspace` (`src/api/audit_routing.cpp`), the
+than the one … would act in*), in any account of the person. A public repository of another
+workspace is refused too: a run stays in its own workspace, and the repository is still readable
+anonymously, without the run's credential. The input check before it (*this agent credential acts
+only in its own workspace*) refuses the same calls first. The lookup is `named_object_workspace` (`src/api/audit_routing.cpp`), the
 same routing read the audit uses to place a call's event. Verify:
 `Streams.LaunchCredentialIsBoundThroughObjectsAndRunsNoUnnamedAction`.
 
