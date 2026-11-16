@@ -2,17 +2,17 @@
   "spdxVersion": "SPDX-2.3",
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
-  "name": "lake-eabd4abcd560",
-  "documentNamespace": "https://github.com/oramasearch/lake/sbom/eabd4abcd560b0b6b000bb6538f338322e19c59b",
+  "name": "lake-f37ad8cb59e9",
+  "documentNamespace": "https://github.com/oramasearch/lake/sbom/f37ad8cb59e93fb3344b043318e0f74a1ebe82b5",
   "creationInfo": {
-    "created": "2026-11-15T17:23:57Z",
+    "created": "2026-11-16T01:55:20Z",
     "creators": [
       "Organization: OramaSearch, Inc.",
       "Tool: tools/sbom.py",
       "Tool: syft"
     ],
     "licenseListVersion": "3.29",
-    "comment": "Made from source commit eabd4abcd560b0b6b000bb6538f338322e19c59b by tools/sbom.py."
+    "comment": "Made from source commit f37ad8cb59e93fb3344b043318e0f74a1ebe82b5 by tools/sbom.py."
   },
   "documentDescribes": [
     "SPDXRef-DocumentRoot"
@@ -1934,7 +1934,7 @@
     {
       "name": "lake",
       "SPDXID": "SPDXRef-DocumentRoot",
-      "versionInfo": "eabd4abcd560",
+      "versionInfo": "f37ad8cb59e9",
       "downloadLocation": "git+https://github.com/oramasearch/lake.git",
       "homepage": "https://github.com/oramasearch/lake",
       "filesAnalyzed": false,
