@@ -212,7 +212,10 @@ TEST_F(Streams, LaunchCredentialCannotSelectAnotherWorkspaceInTheSameSpace) {
     context.scopes = {"list_streams"};
     const auto refused = call("list_streams", {{"customer_id", customer}, {"workspace_id", second}});
     EXPECT_EQ(refused.error.code, "unauthorized");
-    EXPECT_NE(refused.error.message.find("another workspace"), std::string::npos);
+    // The input check of LSR-118 (lake#985) refuses the named workspace first, before the binding
+    // of the validated workspace (lake#1286) would; both refuse it.
+    EXPECT_NE(refused.error.message.find("acts only in its own workspace"), std::string::npos)
+        << refused.error.message;
     // A schedule's credential naming a launch that is not its own matches no workspace.
     context.credential_kind = "agent_schedule";
     context.credential_session_id = "schedule:missing";
@@ -662,14 +665,19 @@ TEST_F(Streams, ReadsWritesDeletesAndCreatorOwnershipUseSpacePolicy) {
 TEST_F(Streams, AgentEventsShowAMemberOnlyTheirOwnTurns) {
     lake::control::WorkspaceAgentBus events(workspace->service.get(), customer, workspace->id);
     ASSERT_TRUE(liquid::runtime::block_on(events.create_topic("agent-events")).value());
+    // A task is requested by an active account, and carries the scopes its agent is given.
+    const auto ada = store->create_user({"taap:stream-ada", "", "Ada"});
+    const auto grace = store->create_user({"taap:stream-grace", "", "Grace"});
+    ASSERT_TRUE(ada && grace);
     lake::control::AgentTask mine_row;
     mine_row.customer_id = customer;
     mine_row.agent = "agent-ask-orama";
     mine_row.kind = "test";
     mine_row.workspace_id = workspace->id;
-    mine_row.requested_by_user_id = "user-ada";
+    mine_row.scopes = {"browse_stream"};
+    mine_row.requested_by_user_id = ada->id;
     auto theirs_row = mine_row;
-    theirs_row.requested_by_user_id = "user-grace";
+    theirs_row.requested_by_user_id = grace->id;
     const auto mine = store->create_agent_task(mine_row);
     const auto theirs = store->create_agent_task(theirs_row);
     ASSERT_TRUE(mine && theirs);
@@ -683,7 +691,7 @@ TEST_F(Streams, AgentEventsShowAMemberOnlyTheirOwnTurns) {
     ASSERT_TRUE(store->create_grant({"reader", object->id, "read", "test-attestation", "admin", ""}));
     context.operator_credential = false;
     context.acting_identity = "reader";
-    context.acting_user_id = "user-ada";
+    context.acting_user_id = ada->id;
     const auto browsed = call("browse_stream", input("agent-events"));
     ASSERT_TRUE(browsed.ok) << browsed.error.message;
     EXPECT_NE(browsed.value.dump().find("ada's answer"), std::string::npos);

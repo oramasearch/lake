@@ -929,7 +929,11 @@ RegistryCredential registry_credential_of(const boost::http::route_params& route
         return {};
     }
     const std::string username = credential.substr(0, separator);
-    if (username != "lake" && username != "app") {
+    // A methodology run's and a served methodology model's pods pull with their own user name
+    // (orama-operator's methodologyPullUser and methodologyDeploymentPull); registry_access
+    // accepts each only with its own kind of credential.
+    if (username != "lake" && username != "app" && username != "methodology-run" &&
+        username != "methodology-deployment") {
         return {};
     }
     return {username, credential.substr(separator + 1)};

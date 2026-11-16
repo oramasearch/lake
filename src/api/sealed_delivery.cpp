@@ -444,7 +444,7 @@ liquid::runtime::task<ApiResult> mint(const json& input, ApiContext& context) {
     // Without that key nothing is delivered: lake never seals to a key the caller chose
     // (lake#950).
     if (context.sealing_public_key.empty()) {
-        co_return refused("unavailable",
+        co_return refused("store_unavailable",
                           "this lake has no cluster delivery key (LAKE_SEALING_PUBLIC_KEY)",
                           "/recipient/public_key");
     }

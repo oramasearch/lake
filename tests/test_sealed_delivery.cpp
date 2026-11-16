@@ -414,7 +414,7 @@ TEST_F(MintSealedSecret, AMountOfAnotherWorkspaceIsNeverDelivered) {
     context.sealing_public_key.clear();
     const ApiResult keyless = call("mint_sealed_secret", mint_input(source));
     EXPECT_FALSE(keyless.ok);
-    EXPECT_EQ(keyless.error.code, "unavailable");
+    EXPECT_EQ(keyless.error.code, "store_unavailable");
 }
 
 } // namespace

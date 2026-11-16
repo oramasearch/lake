@@ -608,11 +608,16 @@ TEST(RegistryStore, ABuildPushTokenWritesOnlyItsOwnTargetAndCache) {
     const std::string config = "{\"architecture\":\"amd64\"}";
     rig.push_image("tenant-one/app", "v1", config, {"app layer"});
 
-    const auto build = rig.store->create_build({.customer_id = rig.one,
-                                                .workspace_id = rig.alpha,
-                                                .repository = "service-source",
-                                                .revision = "main",
-                                                .target = "lake.example.test/tenant-one/service:b1"});
+    // A build names its source repository by id, one of the build's own account.
+    const auto source =
+        rig.store->create_repository({rig.one, "service-source", "", "private", rig.alpha});
+    ASSERT_TRUE(source) << source.error().message;
+    const auto build =
+        rig.store->create_build({.customer_id = rig.one,
+                                 .workspace_id = rig.alpha,
+                                 .repository = source->id,
+                                 .revision = "main",
+                                 .target = "lake.example.test/tenant-one/service:b1"});
     ASSERT_TRUE(build) << build.error().message;
     ASSERT_TRUE(rig.store->set_build_status(
         build->id,
@@ -645,9 +650,12 @@ TEST(RegistryStore, AMethodologyRunPullsOnlyABuildOfItsOwnWorkspace) {
     rig.route(rig.one, rig.beta, "model");
     const std::string config = "{\"architecture\":\"amd64\"}";
     rig.push_image("tenant-one/model", "b1", config, {"model layer"});
+    const auto source =
+        rig.store->create_repository({rig.one, "model-source", "", "private", rig.beta});
+    ASSERT_TRUE(source) << source.error().message;
     const auto build = rig.store->create_build({.customer_id = rig.one,
                                                 .workspace_id = rig.beta,
-                                                .repository = "model-source",
+                                                .repository = source->id,
                                                 .revision = "main",
                                                 .target = "lake.example.test/tenant-one/model:b1"});
     ASSERT_TRUE(build) << build.error().message;
@@ -671,7 +679,8 @@ TEST(RegistryStore, AMethodologyRunPullsOnlyABuildOfItsOwnWorkspace) {
                                                             .memory_bytes = 1 << 20,
                                                             .timeout_seconds = 60});
         EXPECT_TRUE(run) << run.error().message;
-        const std::string credential = "lmr." + run->id + ".secret-952";
+        // A run credential's secret is at least 32 characters (parse_agent_credential).
+        const std::string credential = "lmr." + run->id + ".secret-952-" + std::string(32, 's');
         EXPECT_TRUE(rig.store->put_methodology_run_status(
             run->id,
             {.phase = "Running",
