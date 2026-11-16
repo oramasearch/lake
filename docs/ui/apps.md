@@ -196,7 +196,7 @@ shows the signed-in App):
   `text/plain` and nginx copies only `X-Orama-User`, `X-Orama-Space` and `Set-Cookie` from it.
   app-runtime starts Streamlit without header settings and its proxy passes the App's headers
   through. Not checked: Cloudflare zone rules in front of the App host.
-- **The sign-in cookie works in the frame.** `lake_app_session` is host-only on the App host,
+- **The sign-in cookie works in the frame.** `__Host-lake_app_session` is host-only on the App host,
   `SameSite=Lax`; the App host and the console are the same site, so it is sent in the frame, and the
   sign-in hand-off (`/apps/authorize`) also runs inside it (the console's own pages allow framing by
   `'self'`).

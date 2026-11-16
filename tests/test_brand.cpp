@@ -138,6 +138,8 @@ lake::control::CloudOrder sample_order() {
     order.contact_email = "ada@example.com";
     order.state = "submitted";
     order.created_at = "2026-10-24T12:00:00Z";
+    // Confirmed, so the order's own emails go to it rather than the confirmation (lake#1000).
+    order.contact_email_confirmed_at = "2026-10-24T12:05:00Z";
     return order;
 }
 

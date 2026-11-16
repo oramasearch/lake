@@ -69,7 +69,7 @@ TEST(RegionsEnvironment, NoneSetMeansNoRegionAndNoPicker) {
 
 TEST(RegionsEnvironment, ReadsTheOperatorsValues) {
     const auto regions =
-        regions_from_environment("swedencentral", "Europe", production_regions, "Lake.Live");
+        regions_from_environment("swedencentral", "Europe", production_regions, "Lake.Example.Com");
     ASSERT_TRUE(regions) << regions.error();
     EXPECT_TRUE(regions->configured());
     EXPECT_EQ(regions->name, "swedencentral");
@@ -372,7 +372,7 @@ TEST(RegionsApex, EveryPathOnTheApexIsThePicker) {
         EXPECT_EQ(page.headers["cache-control"], "no-store");
         EXPECT_TRUE(checked(page, "eastus")) << target;
     }
-    EXPECT_TRUE(checked(send(port, "GET", "/", "LAKE.live:443", {{"CF-IPCountry", "DE"}}),
+    EXPECT_TRUE(checked(send(port, "GET", "/", "LAKE.example.com:443", {{"CF-IPCountry", "DE"}}),
                         "swedencentral"));
     // No country: the first region.
     EXPECT_TRUE(checked(send(port, "GET", "/", "lake.example.com"), "swedencentral"));
@@ -539,7 +539,7 @@ TEST(RegionsApexAgentDocuments, TheApexServesThemAndARegionKeepsItsOwn) {
     }
     EXPECT_TRUE(has(llms.body, "(https://lake.example.com/skills/lake/SKILL.md)"));
     // The port and the case of the host do not matter, as for the picker.
-    EXPECT_TRUE(has(send(port, "GET", "/llms.txt", "LAKE.live:443").body,
+    EXPECT_TRUE(has(send(port, "GET", "/llms.txt", "LAKE.example.com:443").body,
                     "https://lake.example.com is not a Lake"));
 
     Response full = send(port, "GET", "/llms-full.txt", "lake.example.com");

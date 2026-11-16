@@ -348,10 +348,16 @@ TEST(Clerk, PostgresStoreSignsInLinksProvisionsAndHoldsTheSeed) {
     ASSERT_EQ(rows.size(), 1U);
     EXPECT_EQ(rows[0][0].as<std::string>(), rows[0][2].as<std::string>());
     EXPECT_FALSE(rows[0][1].as<std::string>().empty());
+    // One credential per Clerk subject that signed in (user_, user_other_ and user_victim_), each
+    // on its own account: a subject is never linked to another's account by email (LSR-011).
     const auto credentials =
         tx.exec_params("SELECT count(*) FROM credentials WHERE kind = 'oauth' AND subject LIKE $1",
                        "clerk:user_%" + suffix);
-    EXPECT_EQ(credentials[0][0].as<int>(), 2);
+    EXPECT_EQ(credentials[0][0].as<int>(), 3);
+    const auto accounts = tx.exec_params(
+        "SELECT count(DISTINCT user_id) FROM credentials WHERE kind = 'oauth' AND subject LIKE $1",
+        "clerk:user_%" + suffix);
+    EXPECT_EQ(accounts[0][0].as<int>(), 3);
 }
 
 TEST(Clerk, OperatorsRevokeEveryLiveSessionOfAUser) {

@@ -474,6 +474,13 @@ A new inline script in `frontend/index.html` needs nothing else: its hash is com
 is served. A script loaded from another origin, or a request to one, needs its origin added here
 first, with the reason.
 
+Because the policy is computed per page, the route that answers the page is itself a coroutine
+that keeps the policy until the answer is sent: `send_text` is a lazy coroutine that holds only a
+view of the policy, so handing it a local string from a plain function left it pointing at freed
+memory, and the page failed with `handler_exception` "bad field value" (lake#1344). Any other
+header value computed per request and passed to `send_text` must live in the caller's coroutine
+frame the same way.
+
 **`X-Content-Type-Options: nosniff`** is on every answer lake gives (lake#991): the first router
 middleware sets it after clearing the pooled response, and `send_text` and `send_bytes` set it
 again, so a JSON error, a repository file's bytes (`/file/raw`), a registry manifest or a stream
