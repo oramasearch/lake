@@ -67,11 +67,17 @@ exports.
 ## What an archive never carries
 
 Export needs only read on the repository, so the archive carries nothing a reader cannot read
-otherwise (lake#933):
+otherwise (lake#933, lake#1314):
 
 - **No webhook signing secret.** A `webhook` record keeps its `url` and `events` and loses
   `secret`, as `list_webhooks` answers it. Whoever held the secret could sign deliveries the
   receiver accepts as lake's.
+- **Webhooks and their deliveries only for a writer.** `list_webhooks` and
+  `list_webhook_deliveries` need `write`, so the `webhook` and `webhook_delivery` records are in
+  `forge` only when the caller has write on the repository (the operator credential included); a
+  reader's archive has neither. A receiver URL is often a credential itself (a chat incoming-webhook
+  URL, a CI trigger with a token in its path or query), and a delivery's `payload` and `signature`
+  replay a real signed event. An import of a reader's archive therefore creates no webhook.
 - **Grants only for an administrator.** `list_grants` needs `admin`, so `grants` is the
   repository's direct grants only when the caller has admin on the repository (the operator
   credential included); for any other caller it is an empty array.
@@ -84,8 +90,9 @@ its secrets and keeps them on import.
 ## API
 
 `POST /v1/export_repository` accepts `repository_id` and optional `include_git`. It requires
-repository read access and returns `{archive, record}`, with webhook secrets left out and grants
-only for a repository administrator (see above). The durable `export` record retains the
+repository read access and returns `{archive, record}`, with webhook secrets left out, webhooks
+and deliveries only for a repository writer and grants only for a repository administrator (see
+above). The durable `export` record retains the
 manifest and whether Git was requested; the returned archive is the download payload.
 
 `POST /v1/import_repository` accepts `customer_id`, `workspace_id`, destination `name`, and
@@ -128,9 +135,10 @@ It pushes a history with liquid, writes a binary file, an empty file and an edit
 file with `commit_repository_files`, exports, then imports the archive into the account store and
 into a switched workspace store, and compares the tree and the edited file.
 `Export.AnArchiveCarriesNoWebhookSecretAndGrantsOnlyForAnAdministrator`
-exports a repository with a webhook as a reader and as the operator, finds the secret nowhere in
-either archive and grants only in the operator's, then imports the reader's archive and checks the
-webhook's next delivery is signed neither with the source secret nor with an empty key.
+exports a repository with a webhook and a delivery as a reader, a writer and the operator, finds the
+secret nowhere in any archive, the webhook, its URL and its delivery nowhere in the reader's, and
+grants only in the operator's, then imports the writer's archive and checks the webhook's next
+delivery is signed neither with the source secret nor with an empty key.
 
 ## Change
 

@@ -160,7 +160,8 @@ deeper nesting is listed but not indexed.
 
 `/webhooks?repository_id=<id>` groups each webhook's sanitized configuration with its durable
 delivery attempts: event, attempt number, status, error and outcome. `list_webhooks` removes
-secrets. A failed attempt offers **Retry** (`retry_webhook_delivery`), which creates a new attempt
+secrets. Both lists need write on the repository (lake#1314), so a reader opening the page gets the
+page's error state rather than the receiver URLs. A failed attempt offers **Retry** (`retry_webhook_delivery`), which creates a new attempt
 and leaves every earlier one visible.
 
 `/protection?repository_id=<id>` shows each ref pattern with its review, verification,

@@ -145,7 +145,10 @@ ForgeTask<ApiResult> create_record(RepositoryForge& forge, std::string kind, jso
     co_return ApiResult::success(control::to_json(*record));
 }
 
-ForgeTask<ApiResult> list_records(std::string kind, const json& input, ApiContext& context) {
+// Lists `kind` for a caller allowed `action` on the repository: `read` for most records, `write`
+// for webhooks and their deliveries, whose receiver URLs are often credentials (lake#1314).
+ForgeTask<ApiResult>
+list_records(std::string kind, std::string action, const json& input, ApiContext& context) {
     if (!context.store) {
         co_return ApiResult::failure("store_unavailable", "no control-plane store is configured");
     }
@@ -165,13 +168,13 @@ ForgeTask<ApiResult> list_records(std::string kind, const json& input, ApiContex
                 object.error().code, object.error().message, object.error().path);
         }
         const auto decision = control::authorize(
-            *context.store, context.acting_identity, *object, "read", context.authorization_cache);
+            *context.store, context.acting_identity, *object, action, context.authorization_cache);
         if (!decision) {
             co_return from_store_error(decision.error());
         }
         if (!decision->allowed) {
             co_return ApiResult::failure("unauthorized",
-                                         "principal is not allowed to read repository");
+                                         "principal is not allowed to " + action + " repository");
         }
     }
     auto forge = open_forge(input, context);
@@ -707,10 +710,12 @@ std::string forge_description(const std::string& name) {
          "List the comments left on a repository's change reviews, newest first."},
         {"list_releases",
          "List a repository's tagged releases with their verified build artifacts."},
-        {"list_webhooks", "List the webhooks registered on a repository, without their secrets."},
+        {"list_webhooks",
+         "List the webhooks registered on a repository, without their secrets. Needs write on "
+         "the repository."},
         {"list_webhook_deliveries",
          "List a repository's webhook delivery attempts with their status, to find failed ones "
-         "to retry."},
+         "to retry. Needs write on the repository."},
         {"list_exports", "List a repository's signed portable exports, to download or check one."},
         {"list_branch_protections",
          "List the branch protection rules on a repository: who may write to which "
@@ -747,7 +752,8 @@ void add_list(Registry& registry,
               std::string name,
               std::string title,
               std::string kind,
-              bool allows_anonymous_public_read = false) {
+              bool allows_anonymous_public_read = false,
+              std::string action = "read") {
     std::string description = forge_description(name);
     json output_schema = records_schema();
     if (kind == "review" || kind == "review_comment") {
@@ -763,12 +769,12 @@ void add_list(Registry& registry,
         .output_schema = std::move(output_schema),
         .kind = CapabilityKind::Read,
         .object = "repository",
-        .action = "read",
+        .action = action,
         .resolve_object = repository_object,
         .authorizes_candidates = true,
         .allows_anonymous_public_read = allows_anonymous_public_read,
-        .async_handler = [kind = std::move(kind)](const json& input, ApiContext& context) {
-            return list_records(kind, input, context);
+        .async_handler = [kind = std::move(kind), action](const json& input, ApiContext& context) {
+            return list_records(kind, action, input, context);
         }});
 }
 
@@ -1277,7 +1283,9 @@ void register_forge_capabilities(Registry& registry) {
                 {"events", {{"type", "array"}}},
                 {"secret", {{"type", "string"}}}},
                json::array({"url", "events", "secret"}));
-    add_list(registry, "list_webhooks", "List webhooks", "webhook");
+    // A webhook's URL is often a credential, so only a writer, who can manage it, lists it
+    // (lake#1314).
+    add_list(registry, "list_webhooks", "List webhooks", "webhook", false, "write");
 
     registry.add(Capability{
         .name = "deliver_webhook",
@@ -1305,7 +1313,12 @@ void register_forge_capabilities(Registry& registry) {
                    .action = "write",
                    .resolve_object = repository_object,
                    .async_handler = retry_webhook_delivery});
-    add_list(registry, "list_webhook_deliveries", "List webhook deliveries", "webhook_delivery");
+    add_list(registry,
+             "list_webhook_deliveries",
+             "List webhook deliveries",
+             "webhook_delivery",
+             false,
+             "write");
     add_list(registry, "list_exports", "List exports", "export");
 
     registry.add(Capability{

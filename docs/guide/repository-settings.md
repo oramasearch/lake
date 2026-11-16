@@ -94,7 +94,8 @@ Verify the signature over the raw body before trusting it. Any 2xx answer counts
 
 - List: `GET /v1/list_webhooks?repository_id=<repository id>` and
   `GET /v1/list_webhook_deliveries?repository_id=<repository id>` (MCP `list_webhooks`,
-  `list_webhook_deliveries`).
+  `list_webhook_deliveries`). Both need write on the repository: a receiver URL is often a secret
+  itself, so people with read only do not see the webhooks or their deliveries.
 - Retry: `POST /v1/retry_webhook_delivery` with
   `{"repository_id": "<repository id>", "delivery_id": "<delivery id>"}` (MCP
   `retry_webhook_delivery`). Only an unsuccessful attempt can be retried.
