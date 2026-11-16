@@ -453,6 +453,9 @@ struct ApiContext {
     nlohmann::json reauthorization_results = nlohmann::json::array();
     search::Service* search = nullptr;
     control::pki::Service* pki = nullptr;
+    // The body Lake fetched from http://<identifier>/.well-known/acme-challenge/<token> for the
+    // challenge being answered (lake#919); set only by the ACME transport.
+    std::optional<std::string> acme_http01_body;
     // Null selects the explicit pending zetta#1281 implementation.
     control::NetworkRecords* network_records = nullptr;
     control::callers::Service* callers = nullptr;

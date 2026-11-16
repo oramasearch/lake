@@ -65,6 +65,26 @@ The ACME registry transport is not rendered as generic `/v1` routes or MCP tools
 cannot bypass JWS verification. Its public JWS entry points still declare their customer object
 and policy action in registry metadata; HTTP-01 token reads declare the challenge object.
 
+**Enrollment needs an External Account Binding** (RFC 8555 §7.3.4, lake#919). The directory says
+`meta.externalAccountRequired: true`. A customer administrator calls
+`create_acme_external_account_binding` (`customer_id`; `admin` on the customer) and gets a `key_id`
+and an `hmac_key` (base64url), shown once. The ACME client is configured with them: cert-manager's
+`externalAccountBinding` takes `keyID` and a Secret holding the key. `newAccount` must carry
+`externalAccountBinding`, a flattened JWS signed HS256 with that key, whose header has the `kid` and
+the `newAccount` URL and no nonce, and whose payload is the account's own JWK. Without one, or with
+one issued for another customer, the answer is `403` `externalAccountRequired`. The key is derived
+from the instance key, the customer and the key id (HMAC-SHA-256), so Lake stores nothing for it and
+a key opens no other customer. Before lake#919 any anonymous caller could enroll an account on any
+customer.
+
+**The HTTP-01 challenge is checked** (lake#919). When the client posts to the challenge URL, Lake
+fetches `http://<identifier>/.well-known/acme-challenge/<token>` itself, plain http to port 80 of a
+public address only (every resolved address is checked, as for webhooks), within 10 s and 8 KiB. The
+authorization becomes `valid` and the order `ready` only when the body, without trailing whitespace,
+is the challenge's key authorization. Otherwise the answer is `403` `incorrectResponse`, the
+authorization stays `pending`, and finalize refuses. Before lake#919 the challenge was accepted
+without any fetch.
+
 Lake implements the order flow used by cert-manager's HTTP-01 solver: new account, one DNS
 identifier per order, authorization lookup by POST-as-GET, an `http-01` challenge, finalize with a
 PKCS #10 DER CSR, order polling, and `application/pem-certificate-chain` download. During the
@@ -76,7 +96,8 @@ records an audit event.
 
 ### Bounded ACME State
 
-Every ACME route answers without a credential, so nothing a client sends grows Lake's memory
+Every ACME route answers without a Lake credential (an account is bound by its External Account
+Binding, above), so nothing a client sends grows Lake's memory
 without limit (lake#940). The bounds are `pki::AcmeLimits`; the defaults are below.
 
 - A `Replay-Nonce` keeps no state when it is issued: it is a counter and the issue time under an

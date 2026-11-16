@@ -107,6 +107,24 @@ struct AcmeAccount {
     AcmeJwk jwk;
 };
 
+// An ACME External Account Binding (RFC 8555 §7.3.4, lake#919): what a customer administrator is
+// given to enroll an ACME client on that customer. The HMAC key is derived from the instance key,
+// the customer and the key id, so nothing is stored, and a key opens no other customer.
+struct ExternalAccountBinding {
+    std::string key_id;
+    std::string hmac_key; // base64url, unpadded
+};
+Result<ExternalAccountBinding> new_external_account_binding(std::string_view instance_kek,
+                                                            std::string_view customer_id);
+// Verifies newAccount's `externalAccountBinding` (a flattened JWS, as JSON text): HS256 with the
+// derived key of its `kid`, `url` the newAccount URL, no nonce, and the account's own key as its
+// payload.
+Result<void> verify_external_account_binding(std::string_view instance_kek,
+                                             std::string_view customer_id,
+                                             std::string_view binding_json,
+                                             std::string_view expected_url,
+                                             const AcmeJwk& account_jwk);
+
 struct AcmeAuthorization {
     std::string id;
     std::string order_id;

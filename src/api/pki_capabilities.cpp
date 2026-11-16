@@ -553,15 +553,53 @@ void register_pki_capabilities(Registry& registry) {
                                            {"serial", certificate->serial}});
             }});
     }
+    registry.add(Capability{
+        .name = "create_acme_external_account_binding",
+        .title = "Create ACME account binding",
+        .description = "Issue an RFC 8555 External Account Binding (key id and HMAC key) that "
+                       "lets one ACME client, such as cert-manager, enroll on this customer's "
+                       "certificate authority. Customer administrators only; the key is shown "
+                       "once.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"customer_id", {{"type", "string"}}}}},
+                         {"required", json::array({"customer_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"key_id", {{"type", "string"}}},
+                            {"hmac_key", {{"type", "string"}}},
+                            {"directory", {{"type", "string"}}}}}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "admin",
+        .resolve_object = customer_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const std::string customer_id = input.at("customer_id");
+            auto binding =
+                lake::control::pki::new_external_account_binding(context.instance_kek, customer_id);
+            if (!binding) {
+                return from_pki_error(binding.error());
+            }
+            context.audit_customer_id = customer_id;
+            context.audit_kind = "certificate";
+            context.audit_object = "acme-binding/" + binding->key_id;
+            return ApiResult::success({{"key_id", binding->key_id},
+                                       {"hmac_key", binding->hmac_key},
+                                       {"directory", "/acme/" + customer_id + "/directory"}});
+        }});
     registry.add(
         Capability{.name = "acme_new_account",
                    .title = "Create ACME account",
-                   .description = "Register an RFC 8555 account key for one customer.",
+                   .description = "Register an RFC 8555 account key for one customer, bound by "
+                                  "an External Account Binding its administrator issued "
+                                  "(create_acme_external_account_binding).",
                    .input_schema = {{"type", "object"},
                                     {"properties",
                                      {{"customer_id", {{"type", "string"}}},
                                       {"x", {{"type", "string"}}},
-                                      {"y", {{"type", "string"}}}}},
+                                      {"y", {{"type", "string"}}},
+                                      {"external_account_binding", {{"type", "string"}}},
+                                      {"url", {{"type", "string"}}}}},
                                     {"required", json::array({"customer_id", "x", "y"})},
                                     {"additionalProperties", false}},
                    .output_schema = {{"type", "object"},
@@ -575,6 +613,22 @@ void register_pki_capabilities(Registry& registry) {
                    .handler = [](const json& input, ApiContext& context) {
                        if (!context.pki || !context.store) {
                            return no_pki();
+                       }
+                       if (!context.store->get_customer(input.at("customer_id").get<std::string>())) {
+                           return ApiResult::failure("not_found", "no such customer");
+                       }
+                       // Only an administrator of the customer enrolls a client on it
+                       // (lake#919): the account's key must be bound by a key they were given.
+                       const lake::control::pki::AcmeJwk jwk{input.at("x").get<std::string>(),
+                                                             input.at("y").get<std::string>()};
+                       if (auto bound = lake::control::pki::verify_external_account_binding(
+                               context.instance_kek,
+                               input.at("customer_id").get<std::string>(),
+                               input.value("external_account_binding", ""),
+                               input.value("url", ""),
+                               jwk);
+                           !bound) {
+                           return ApiResult::failure("unauthorized", bound.error().message);
                        }
                        auto account = context.pki->create_acme_account(
                            *context.store,
@@ -716,6 +770,29 @@ void register_pki_capabilities(Registry& registry) {
         .handler = [](const json& input, ApiContext& context) {
             if (!context.pki) {
                 return no_pki();
+            }
+            // Proof of control (lake#919): the HTTP-01 response Lake fetched from the identifier
+            // itself must be this challenge's key authorization before the order is ready.
+            const auto pending =
+                context.pki->acme_authorization(input.at("customer_id").get<std::string>(),
+                                                input.at("account_id").get<std::string>(),
+                                                input.at("authorization_id").get<std::string>());
+            if (!pending) {
+                return from_pki_error(pending.error());
+            }
+            if (pending->status != "valid") {
+                std::string observed = context.acme_http01_body.value_or("");
+                while (!observed.empty() &&
+                       (observed.back() == '\n' || observed.back() == '\r' ||
+                        observed.back() == ' ' || observed.back() == '\t')) {
+                    observed.pop_back();
+                }
+                if (!context.acme_http01_body || observed != pending->key_authorization) {
+                    return ApiResult::failure(
+                        "incorrect_response",
+                        "http://" + pending->identifier + "/.well-known/acme-challenge/" +
+                            pending->token + " did not answer this challenge's key authorization");
+                }
             }
             auto authorization =
                 context.pki->authorize_acme_order(input.at("customer_id").get<std::string>(),

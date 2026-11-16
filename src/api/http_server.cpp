@@ -7059,6 +7059,9 @@ struct OutboundRequest {
     // connect time with mcp_public_address, as MCP connections are, so a webhook a tenant points at
     // a private, loopback or link-local address never reaches Lake's own network.
     bool public_only = false;
+    // Plain http to port 80 of a public address, for an ACME HTTP-01 check (lake#919): the one
+    // fetch RFC 8555 defines over http. Used only with public_only.
+    bool acme_http01 = false;
 };
 
 // An identity provider's discovery document, token endpoint and keys (lake#837) answer within this.
@@ -7077,7 +7080,10 @@ struct OutboundTarget {
     std::string path;
 };
 
-bool parse_outbound_url(std::string_view url, OutboundTarget& target, bool cluster_http = false) {
+bool parse_outbound_url(std::string_view url,
+                        OutboundTarget& target,
+                        bool cluster_http = false,
+                        bool acme_http01 = false) {
     if (url.starts_with("https://")) {
         url.remove_prefix(8);
         target.secure = true;
@@ -7121,7 +7127,9 @@ bool parse_outbound_url(std::string_view url, OutboundTarget& target, bool clust
     const bool loopback =
         target.host == "127.0.0.1" || target.host == "::1" || target.host == "localhost";
     const bool cluster = cluster_http && target.host.ends_with(".svc.cluster.local");
-    return !target.host.empty() && !target.port.empty() && (target.secure || loopback || cluster);
+    const bool http01 = acme_http01 && !target.secure && target.port == "80";
+    return !target.host.empty() && !target.port.empty() &&
+           (target.secure || loopback || cluster || http01);
 }
 
 std::string outbound_host_header(const OutboundTarget& target) {
@@ -7314,12 +7322,15 @@ private:
 
     boost::capy::task<> perform(std::shared_ptr<Pending> pending) {
         OutboundTarget target;
-        if (!parse_outbound_url(pending->request.url, target, pending->request.cluster_http)) {
+        if (!parse_outbound_url(pending->request.url,
+                                target,
+                                pending->request.cluster_http,
+                                pending->request.acme_http01 && pending->request.public_only)) {
             pending->response.error = "outbound URL must use HTTPS, except for loopback tests";
             finish(pending);
             co_return;
         }
-        if (pending->request.public_only && !target.secure) {
+        if (pending->request.public_only && !target.secure && !pending->request.acme_http01) {
             pending->response.error = "outbound URL must use HTTPS";
             finish(pending);
             co_return;
@@ -9997,9 +10008,16 @@ struct ApiServer::Impl {
     boost::http::route_task acme_problem(boost::http::route_params& route,
                                          const control::pki::Error& error) {
         const bool bad_nonce = error.message.find("nonce") != std::string::npos;
-        const std::string problem = bad_nonce ? "badNonce" : "malformed";
+        const bool unbound = error.code == "unauthorized" || error.code == "external_account_required";
+        const bool incorrect = error.code == "incorrect_response";
+        const std::string problem = unbound     ? "externalAccountRequired"
+                                    : incorrect ? "incorrectResponse"
+                                    : bad_nonce ? "badNonce"
+                                                : "malformed";
         const boost::http::status status = error.code == "not_found"
                                                ? boost::http::status::not_found
+                                           : unbound || incorrect
+                                               ? boost::http::status::forbidden
                                                : boost::http::status::bad_request;
         return send_acme(route,
                          status,
@@ -10017,7 +10035,10 @@ struct ApiServer::Impl {
                          boost::http::status::ok,
                          nlohmann::json{{"newNonce", base + "/new-nonce"},
                                         {"newAccount", base + "/new-account"},
-                                        {"newOrder", base + "/new-order"}}
+                                        {"newOrder", base + "/new-order"},
+                                        // Enrollment needs a binding an administrator issued
+                                        // (lake#919).
+                                        {"meta", {{"externalAccountRequired", true}}}}
                              .dump(),
                          "application/json");
     }
@@ -10042,6 +10063,24 @@ struct ApiServer::Impl {
                          "no-store");
     }
 
+    // GET the HTTP-01 response a challenge names (lake#919): the injected fetch in tests, otherwise
+    // the outbound client, plain http to port 80 of a public address only, 10 s, 8 KiB.
+    std::optional<std::string> fetch_acme_http01(const std::string& url) {
+        if (options.acme_http01_fetch) {
+            return options.acme_http01_fetch(url);
+        }
+        OutboundRequest request{
+            "GET", url, "", {{"User-Agent", "lake-acme/1"}}, std::chrono::seconds(10)};
+        request.body_limit = 8 * 1024;
+        request.public_only = true;
+        request.acme_http01 = true;
+        OutboundResponse response = outbound_http->request(request);
+        if (response.status != 200 || !response.error.empty()) {
+            return std::nullopt;
+        }
+        return std::move(response.body);
+    }
+
     boost::http::route_task serve_acme_post(boost::http::route_params& route,
                                             std::string capability_name) {
         auto [read_error, body] = co_await read_string_body(route);
@@ -10063,6 +10102,15 @@ struct ApiServer::Impl {
         if (verified->jwk) {
             input["x"] = verified->jwk->x;
             input["y"] = verified->jwk->y;
+        }
+        if (new_account) {
+            // RFC 8555 §7.3.4: the binding an administrator of this customer issued (lake#919).
+            if (verified->payload.is_object() &&
+                verified->payload.contains("externalAccountBinding")) {
+                input["external_account_binding"] =
+                    verified->payload.at("externalAccountBinding").dump();
+            }
+            input["url"] = expected_url;
         }
         if (!verified->account_id.empty()) {
             input["account_id"] = verified->account_id;
@@ -10088,6 +10136,20 @@ struct ApiServer::Impl {
         }
         if (capability_name == "acme_finalize_order") {
             input["csr"] = verified->payload.value("csr", "");
+        }
+        if (capability_name == "acme_http01_challenge") {
+            // Proof of control (lake#919): fetch the challenge from the identifier itself, over
+            // plain http to port 80 of a public address, before the order can become ready.
+            const auto pending =
+                pki.acme_authorization(customer_id, verified->account_id, authorization_id);
+            if (pending && pending->status != "valid") {
+                const std::string url = "http://" + pending->identifier +
+                                        "/.well-known/acme-challenge/" + pending->token;
+                auto fetched = co_await run_blocking([this, url] { return fetch_acme_http01(url); });
+                if (fetched && *fetched) {
+                    context.acme_http01_body = std::move(**fetched);
+                }
+            }
         }
         const ApiResult result = registry.call(capability_name, input, context);
         if (!result.ok) {
