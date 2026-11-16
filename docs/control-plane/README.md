@@ -19,6 +19,10 @@ operator status fields, notification, quotas, namespaces, Secret-reference bound
 purpose-hash credentials including exact-repository image pulls.
 [schema.md](schema.md#app-transfer-migration) documents `0081_app_transfer`, each app's ingress
 bytes by hour, written by the operator and charged once as `transfer` (lake#661).
+[services.md](services.md) defines the managed-services catalog, what the Orama operator writes per
+kind and each kind's `<slug>.json` credential. TiDB's carries `database` and Cassandra's
+`keyspace`, both `app`, and both name a tenant user rather than the store's administrator
+(orama-operator#771); the fields are additive.
 [builds.md](builds.md) defines the `builds` desired row, configured Ship App runtime base, operator
 status loop, cancellation, notifications and purpose-hash credential boundary.
 
