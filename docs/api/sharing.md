@@ -75,6 +75,26 @@ that result directly, so its answers match `authorize` rather than duplicating r
 RFC 3339 expiry. Lake returns the bearer token once and keeps only its HMAC-SHA-256 digest. A
 synthetic `share-link:<id>` grant makes the policy engine the authority for link scope and role.
 
+### The expiry
+
+`expires_at` is an RFC 3339 time in UTC and nothing else (lake#1319):
+`YYYY-MM-DDTHH:MM:SS[.fraction]Z`, with a four-digit year, a real calendar date, an hour of 00 to
+23, minutes and seconds of 00 to 59, an optional fraction of one to nine digits after a `.`, and a
+capital `Z`. It must be later than the time of the call. Anything else is `invalid_input` at
+`/expires_at`: a word such as `never`, a date without a time, a time with an offset such as
+`+02:00`, a lowercase `z`, a leap second (`:60`) or an impossible date such as `2030-02-30`.
+
+Why: a link is a bearer credential, and its expiry is decided by comparing the stored text with
+the clock's UTC text. A value in another shape was accepted before and compared as text, so
+`never` made a link that never expired while every listing showed an expiry, and an offset moved
+the real expiry by up to fourteen hours. Links stored before this check keep working as they did;
+revoke one whose expiry is not a UTC time.
+
+Verify: `Drive.ShareLinkExpiryIsAnRfc3339UtcTime` (`tests/test_api.cpp`) refuses each shape above
+and accepts a future `Z` time with and without a fraction. The check is `share_link_expiry` in
+`src/api/drive_capabilities.cpp`; a change to the accepted shape changes that function, this
+section and the test together.
+
 ### Where links live
 
 A link lives in the workspace Zetta of the workspace that holds it (lake#350), as one sealed record
