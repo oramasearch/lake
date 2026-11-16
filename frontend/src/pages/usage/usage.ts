@@ -281,9 +281,13 @@ export function stackSeries(
   return { labels: bands.map((b) => b.label), values, stacked };
 }
 
-function csvCell(value: unknown): string {
-  const text = value === null || value === undefined ? "" : String(value);
-  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+/** One CSV cell. A text cell that a spreadsheet would read as a formula (it starts with =, +, -, @,
+ * a tab or a carriage return) gets a leading apostrophe, so a workspace or object name a person
+ * chose stays literal text (LSR-201, lake#1007). Numbers are written as they are. */
+export function csvCell(value: unknown): string {
+  let text = value === null || value === undefined ? "" : String(value);
+  if (typeof value === "string" && /^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
 /** The reading as CSV: one row per dimension, breakdown and period, in each dimension's own unit

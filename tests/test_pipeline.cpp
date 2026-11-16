@@ -128,6 +128,12 @@ TEST(Pipeline, RendersLanesStepsEdgesStatusAndSelection) {
     hostile["nodes"][0]["name"] = "<script>alert(1)</script>";
     const std::string escaped = pl::render_svg(*pl::from_json(hostile), {}, "", "?step=");
     EXPECT_EQ(escaped.find("<script>"), std::string::npos);
+
+    // LSR-193 (lake#999): a run status from the engine cannot leave the class attribute.
+    const std::string injected = pl::render_svg(
+        parsed(), {{"train", "x\" onmouseover=\"alert(1)"}}, "", "?step=");
+    EXPECT_EQ(injected.find("onmouseover=\""), std::string::npos);
+    EXPECT_NE(injected.find("step-model status-unknown"), std::string::npos);
 }
 
 TEST(Pipeline, EveryEditKeepsWhatEachStepDoes) {

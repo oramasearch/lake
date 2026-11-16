@@ -1882,6 +1882,34 @@ TEST(TransparencyTimestamp, OwnerLoopRenewsDueEvidenceThroughRegistry) {
     }));
 }
 
+// LSR-199 (lake#1005): one Ed25519 key listed under a second id (by adding a member to its key
+// object) counts once toward a threshold, and a key object with an unknown member is not a TUF key.
+TEST(TransparencyTuf, OneKeyUnderTwoIdsSignsOnce) {
+    TemporaryRoot temporary;
+    Keys keys;
+    lake::transparency::Service service(temporary.path(), "instance-a");
+    json alias = keys.target_a.value;
+    alias["x"] = "alias";
+    const std::string alias_id = sha256(alias.dump());
+    json body = root_document(1, keys.roots(), keys.targets(), keys.snapshot, keys.timestamp,
+                              keys.root_threshold())
+                    .at("signed");
+    body["keys"][alias_id] = alias;
+    body["roles"]["targets"] = {{"keyids", json::array({keys.target_a.id, alias_id})},
+                                {"threshold", 2}};
+    const auto initialized = service.initialize(signed_document(body, keys.root_threshold()));
+    if (!initialized) {
+        return; // refused at the root: the alias is not a TUF key
+    }
+    json targets = targets_document(1, {&keys.target_a});
+    targets["signatures"].push_back(
+        {{"keyid", alias_id}, {"sig", targets.at("signatures").at(0).at("sig")}});
+    const json snapshot = snapshot_document(1, targets, keys.snapshot);
+    const json timestamp = timestamp_document(1, snapshot, keys.timestamp);
+    EXPECT_FALSE(service.publish(targets, snapshot, timestamp))
+        << "one key's signature under two ids met a threshold of two";
+}
+
 TEST(TransparencyTuf, AppendsThresholdSignedMetadataAndRejectsRepositoryAttacks) {
     TemporaryRoot temporary;
     Keys keys;

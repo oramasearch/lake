@@ -63,7 +63,8 @@ every page and API call is resolved by `context_for` as before.
    The handler records an `authentication` audit event with object
    `clerk` and method `clerk`, success or denied, then redirects with the `lake_session` cookie
    (`HttpOnly`, `SameSite=Lax`, `Secure` over HTTPS) to the posted `next` field when it is a
-   same-origin path (one leading `/`, never `//` or `/\`) or a Ship app return
+   same-origin path (one leading `/`, never `//` or `/\`, and no control character or backslash
+   anywhere, in the browser and on the server, LSR-184) or a Ship app return
    (`/apps/authorize?app=…&rd=…`), else to the `lake_sign_in_return` app return, else to
    the home (`/`; lake#600, `account_landing` in `http_server.cpp`; it was `/repositories`), which is
    Quickstart since lake#1128

@@ -17,6 +17,17 @@ std::string text(const nlohmann::json& object, const char* key) {
     return found != object.end() && found->is_string() ? found->get<std::string>() : std::string();
 }
 
+// The run status as a class token (LSR-193, lake#999): the engine's status goes into a class
+// attribute, so only a short [a-z0-9_-] word is used as it is; anything else is "unknown".
+std::string status_class(std::string_view outcome) {
+    const bool safe = !outcome.empty() && outcome.size() <= 32 &&
+                      std::ranges::all_of(outcome, [](char c) {
+                          return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' ||
+                                 c == '-';
+                      });
+    return safe ? std::string(outcome) : std::string("unknown");
+}
+
 bool known(std::string_view value, std::span<const std::string_view> names) {
     return std::ranges::find(names, value) != names.end();
 }
@@ -446,7 +457,7 @@ std::string render_svg(const Graph& graph,
             web_ui_escape(link_base),
             url_encode(step.id),
             known(step.kind, step_kinds) ? step.kind : "other",
-            outcome.empty() ? "" : " status-" + outcome,
+            outcome.empty() ? "" : " status-" + status_class(outcome),
             step.id == selected ? " selected" : "",
             x,
             y,

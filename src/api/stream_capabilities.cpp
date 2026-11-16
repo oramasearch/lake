@@ -1,4 +1,5 @@
 #include "lake/api/capabilities.hpp"
+#include "lake/api/agent_stream_triggers.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -180,10 +181,7 @@ std::string topic_name(std::string name) {
     return name;
 }
 bool reserved(const std::string& name) {
-    return name == "agent-events" || name.starts_with("agent-") ||
-           name.starts_with("app-events.") || name.starts_with("build-events.") ||
-           name.starts_with("run-metrics.") || name.starts_with("study-events.") ||
-           name.starts_with("inbox:");
+    return system_stream_name(name);
 }
 
 Task proxy(ApiContext& context, const json& input, std::string capability, json args) {

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string_view>
+
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -10,6 +12,12 @@
 #include "lake/control/zetta_control.hpp"
 
 namespace lake::api {
+
+// A stream Lake and its agents write themselves (agent tasks and events, app, build, run-metric and
+// study events, inboxes). No tenant writes one, names one as an MCP connection's topic, or makes one a
+// trigger (LSR-190, lake#996). `name` may carry the "topic:" prefix.
+[[nodiscard]] bool system_stream_name(std::string_view name);
+
 
 // An agent started by a workspace stream (lake#677, docs/api/agent-launches.md#stream-triggers):
 // `set_agent_streams` names the streams whose new messages each start a run of a Python agent,

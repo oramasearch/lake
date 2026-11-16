@@ -183,8 +183,10 @@ Every metadata document is the TUF envelope:
 ```
 
 Lake currently accepts Ed25519 keys and SHA-256 metadata hashes. A key id is the lowercase SHA-256
-digest of the compact canonical JSON key object. Each counted signature must have a distinct key
-id; repeating one signature cannot satisfy a threshold.
+digest of the compact canonical JSON key object. A key object holds only `keytype`, `scheme`,
+`keyval` (the public key alone) and `keyid_hash_algorithms`; any other member refuses the key.
+**A threshold counts distinct public keys**, not key ids (LSR-199, lake#1005): one key listed under
+two ids signs once, and repeating one signature cannot satisfy a threshold.
 
 The root must define all four roles, each role's key ids, and a positive threshold. Initial root
 metadata is version 1 and meets its own root threshold. A replacement root advances by exactly one

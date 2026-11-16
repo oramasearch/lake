@@ -10,10 +10,8 @@ export {landingAfterSignIn} from "@/pages/ask/home";
 /** Identity capabilities belong to no workspace: call them unprefixed. */
 export const NO_WORKSPACE = { workspace: null } as const;
 
-/** A same-origin path: one leading slash, never `//host` or `/\host`. */
-export function sameOriginPath(value: string | null | undefined): value is string {
-  return !!value && value.startsWith("/") && !value.startsWith("//") && !value.startsWith("/\\");
-}
+export {sameOriginPath} from "@/lib/returnPath";
+import {sameOriginPath} from "@/lib/returnPath";
 
 /** The page to open after signing in: `?return_to` when it is a Ship app's `/apps/authorize`
  * (set by that page), else `?next` when it is a same-origin path, else the page's own default. */
