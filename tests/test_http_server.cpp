@@ -1167,6 +1167,47 @@ TEST_P(HttpResponseIsolation, FreshSignUpOwnsFirstRepositoryWithZeroInitialMeter
     EXPECT_TRUE(usage.at("value").at("items").empty());
     EXPECT_EQ(usage.at("value").at("summary").at("storage").at("repositories_bytes"), 0);
     EXPECT_FALSE(usage.at("value").at("over_quota"));
+    // A route that issues a session checks the origin with no session present (LSR-110,
+    // lake#977): a page elsewhere cannot post a credential and sign this browser in.
+    {
+        auto browser = connect();
+        const std::string credential =
+            with_identity({{"email", email}, {"password", password_}, {"device_name", "browser"}});
+        const std::string cross = browser->request("POST",
+                                                   "/v1/sign_in_password",
+                                                   credential,
+                                                   "",
+                                                   "HTTP/1.1",
+                                                   {},
+                                                   "application/json",
+                                                   {{"Origin", "https://attacker.example.test"},
+                                                    {"Sec-Fetch-Site", "cross-site"}});
+        EXPECT_TRUE(cross.starts_with("HTTP/1.1 403")) << cross;
+        EXPECT_EQ(cross.find("Set-Cookie:"), std::string::npos) << cross;
+        const std::string plain = browser->request(
+            "POST", "/v1/sign_in_password", credential, "", "HTTP/1.1", {}, "text/plain");
+        EXPECT_TRUE(plain.starts_with("HTTP/1.1 403")) << plain;
+        for (const char* form : {"/identity/clerk-session", "/session"}) {
+            const std::string refused = browser->request("POST",
+                                                         form,
+                                                         "token=x",
+                                                         "",
+                                                         "HTTP/1.1",
+                                                         {},
+                                                         "application/x-www-form-urlencoded",
+                                                         {{"Origin", "https://attacker.example.test"}});
+            EXPECT_TRUE(refused.starts_with("HTTP/1.1 403")) << form << "\n" << refused;
+        }
+        const std::string own = browser->request("POST",
+                                                 "/v1/sign_in_password",
+                                                 credential,
+                                                 "",
+                                                 "HTTP/1.1",
+                                                 {},
+                                                 "application/json",
+                                                 {{"Sec-Fetch-Site", "same-origin"}});
+        EXPECT_TRUE(own.starts_with("HTTP/1.1 200")) << own;
+    }
     // A repository belongs to a workspace (lake#315): without one, none is created.
     const auto [early_response, early] = post_v1(
         *client,

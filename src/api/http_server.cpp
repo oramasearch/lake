@@ -11917,7 +11917,9 @@ struct ApiServer::Impl {
             const auto build = options.store->get_build(run->build_id);
             const std::string image =
                 build ? build_target_image(build->target, customer->name) : std::string();
-            if (!build || build->customer_id != customer->id || image.empty() ||
+            // The build is the run's own workspace's (lake#952), not only its customer's.
+            if (!build || build->customer_id != customer->id || run->workspace_id.empty() ||
+                build->workspace_id != run->workspace_id || image.empty() ||
                 repository != customer->name + "/" + image) {
                 return {RegistryAccess::Denied};
             }
@@ -11940,7 +11942,8 @@ struct ApiServer::Impl {
             const auto build = options.store->get_build(deployment->build_id);
             const std::string image =
                 build ? build_target_image(build->target, customer->name) : std::string();
-            if (!build || build->customer_id != customer->id || image.empty() ||
+            if (!build || build->customer_id != customer->id || deployment->workspace_id.empty() ||
+                build->workspace_id != deployment->workspace_id || image.empty() ||
                 repository != customer->name + "/" + image) {
                 return {RegistryAccess::Denied};
             }
@@ -12024,6 +12027,15 @@ struct ApiServer::Impl {
         const bool own_target =
             !grant.build_image.empty() &&
             (tenant->name == grant.build_image || tenant->name == "cache/" + grant.build_image);
+        // A build's push token writes only its own target and cache, routed or not (lake#909):
+        // code a build runs can read the token, and must not overwrite the workspace's other
+        // images. Reads stay within the workspace, below.
+        if (write && !grant.build_image.empty() && !own_target) {
+            return std::unexpected(
+                RegistryRefusal{boost::http::status::forbidden,
+                                "a build writes only its own target image and its cache",
+                                "DENIED"});
+        }
         if (!routed && write && grant.may_route && own_target) {
             routed = options.store->create_oci_repository_route(
                 customer->id, tenant->name, grant.workspace_id);
@@ -14812,7 +14824,43 @@ struct ApiServer::Impl {
     // An unsafe request the browser session authenticates must come from lake's own origin, and a
     // /v1 or /mcp POST must be JSON, which no cross-site form or simple request can send.
     // Bearer-authenticated calls are not affected. Empty: the request may proceed.
+    // A route that issues a browser session (LSR-110, lake#977). A cross-site POST carries no
+    // SameSite=Lax cookie, so these are checked whether or not a session is present: otherwise a
+    // page elsewhere could post the attacker's own credential and sign the visitor's browser in
+    // as the attacker (login CSRF).
+    static bool session_issuing_request(const boost::http::route_params& route) {
+        const std::string path(route.url.path());
+        if (path == "/session" || path == "/identity/clerk-session") {
+            return true;
+        }
+        if (path.starts_with("/apps/") && path.find("/identity/") != std::string::npos) {
+            return true;
+        }
+        const std::string local =
+            workspace_path_id(path).empty() ? path : workspace_prefixed_local_path(path);
+        for (const std::string_view name : {"sign_up_password",
+                                            "sign_in_password",
+                                            "verify_mfa",
+                                            "sign_in_passkey",
+                                            "recover_with_code",
+                                            "complete_recovery"}) {
+            if (local == "/v1/" + std::string(name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     std::string cross_site_refusal(const boost::http::route_params& route) const {
+        if (unsafe_method(route) && bearer_of(route).empty() && session_issuing_request(route)) {
+            if (!from_own_origin(route)) {
+                return "Cross-site requests cannot sign in.";
+            }
+            const std::string path(route.url.path());
+            if (path.find("/v1/") != std::string::npos && !json_content_type(route)) {
+                return "Cross-site requests cannot sign in.";
+            }
+        }
         if (!unsafe_method(route) || !session_cookie_request(route)) {
             return {};
         }

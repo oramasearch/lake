@@ -265,7 +265,7 @@ environment or a token file, or reaches the network it was not granted (methodol
 `lmr.<run id>.<secret>` for the stage and collect pods and writes only its SHA-256 to
 `methodology_run_status`; Lake resolves it by comparing digests in constant time. It acts as no
 person, reaches only `methodology_run_input`, `methodology_run_artifact` and
-`methodology_run_output` for its own run (and a pull of its own image), and stops resolving when the
+`methodology_run_output` for its own run (and a pull of its own image, only when that build is the run's own workspace's, lake#952), and stops resolving when the
 run ends:
 
 - `methodology_run_input` answers the run's spec (mode, parameters, target, features, holdout,
@@ -370,7 +370,7 @@ Deployment of the methodology's own image (`methodology serve`) mounts that volu
 credential, no service account token and no network of its own unless granted, and answers on a
 Service that only Lake's pods can reach. The serve pod checks its sandbox before it imports the code,
 as a run does. The credential reaches `methodology_deployment_input` for that deployment only (and a
-pull of its image, which kubelet repeats when a serve pod restarts), and stops resolving when it
+pull of its image, which kubelet repeats when a serve pod restarts, only when that build is the deployment's own workspace's, lake#952), and stops resolving when it
 stops.
 
 Its phase is the operator's: `Building`, `Queued` (a GPU model with no node of its class),
