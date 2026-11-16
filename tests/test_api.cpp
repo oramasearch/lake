@@ -139,6 +139,8 @@ struct RepositoryFixtureStore final : SyncStore {
     std::string commit_message;
     std::vector<RepositoryWriteOperation> committed_operations;
     std::optional<std::vector<RepositoryTreeEntry>> write_tree;
+    // The tree at a given revision, when a test needs one to differ from main's (lake#923).
+    std::map<std::string, std::vector<RepositoryTreeEntry>> trees_at;
     std::string conflict_path = "readme.md";
     std::string resolved_conflict;
     std::string conflict_resolution;
@@ -167,7 +169,10 @@ struct RepositoryFixtureStore final : SyncStore {
     }
 
     SyncStoreResult<std::vector<RepositoryTreeEntry>>
-    repository_tree(const std::string&, const std::string&, const std::string&) override {
+    repository_tree(const std::string&, const std::string&, const std::string& ref) override {
+        if (const auto at = trees_at.find(ref); at != trees_at.end()) {
+            return at->second;
+        }
         const std::string shared_path = shared_folder_moved ? "renamed" : "shared";
         return std::vector<RepositoryTreeEntry>{
             {"readme.md", "blob", "blob-1", 0644, "11111111111111111111111111111111"},
@@ -6500,6 +6505,72 @@ TEST(Drive, SharingCannotGrantActionsTheCallerDoesNotHold) {
 
     surface.ctx.acting_identity = "taap:1:ed25519:owner";
     EXPECT_TRUE(share({{"principal_taap_id", "taap:1:ed25519:outsider"}, {"role", "write"}}).ok);
+}
+
+// LSR-014 (lake#923): a diff or restore reads revisions other than the ref its object came from,
+// and the node a path names can differ between them. A restricted folder renamed away, a shared
+// one made under its old name: the old revision is the restricted folder's, and stays unreadable.
+TEST(Drive, HistoryAuthorizesTheNodeAtEveryRevisionItReads) {
+    Surface surface;
+    RepositoryFixtureStore repositories;
+    surface.ctx.sync_store = &repositories;
+    const auto owner = surface.call(
+        "create_user", {{"taap_id", "taap:1:ed25519:history-owner"}, {"display_name", "Owner"}});
+    ASSERT_TRUE(owner.ok);
+    const auto customer = surface.call("create_customer",
+                                       {{"customer_type", "individual"},
+                                        {"user_id", owner.value["id"]},
+                                        {"name", "history-nodes"}});
+    ASSERT_TRUE(customer.ok);
+    const auto repository = surface.call("create_repository",
+                                         {{"customer_id", customer.value["id"]},
+                                          {"workspace_id", surface.workspace(customer.value["id"])},
+                                          {"name", "drive"}});
+    ASSERT_TRUE(repository.ok);
+    const std::string repository_id = repository.value["id"];
+    const auto object = surface.store.find_policy_object("repository", repository_id);
+    ASSERT_TRUE(object);
+    // Today's `shared` folder is shared with Bob; at change-old the same path was another node,
+    // a restricted folder of its own.
+    const auto shared_folder = surface.store.create_policy_object(
+        {"path", repository_id + ":22222222222222222222222222222222", object->id, "admin", "test", false});
+    const auto restricted_folder = surface.store.create_policy_object(
+        {"path", repository_id + ":restricted-old", object->id, "admin", "test", false});
+    ASSERT_TRUE(shared_folder && restricted_folder);
+    ASSERT_TRUE(surface.store.create_grant(
+        {"taap:1:ed25519:bob", shared_folder->id, "read", "test", "admin", "test"}));
+    auto old_tree = *repositories.repository_tree("", "", "main");
+    for (auto& entry : old_tree) {
+        if (entry.path == "shared") {
+            entry.node_id = "restricted-old";
+        }
+        if (entry.path == "shared/readme.md") {
+            entry.node_id = "restricted-old-readme";
+        }
+    }
+    repositories.trees_at["change-old"] = old_tree;
+    surface.ctx.operator_credential = false;
+    surface.ctx.acting_identity = "taap:1:ed25519:bob";
+    const json diff{{"repository_id", repository_id},
+                    {"ref", "main"},
+                    {"path", "shared/readme.md"},
+                    {"left", "change-old"},
+                    {"right", "main"}};
+    EXPECT_EQ(surface.call("diff_drive_versions", diff).error.code, "unauthorized");
+    json swapped = diff;
+    swapped["left"] = "main";
+    swapped["right"] = "change-old";
+    EXPECT_EQ(surface.call("diff_drive_versions", swapped).error.code, "unauthorized");
+    json restore{{"repository_id", repository_id},
+                 {"ref", "main"},
+                 {"path", "shared/readme.md"},
+                 {"change_id", "change-old"}};
+    EXPECT_EQ(surface.call("restore_drive_version", restore).error.code, "unauthorized");
+    EXPECT_FALSE(repositories.restored);
+    json same = diff;
+    same["left"] = "main";
+    EXPECT_NE(surface.call("diff_drive_versions", same).error.code, "unauthorized")
+        << "both sides are the shared folder Bob may read";
 }
 
 TEST(Drive, MutationChecksTheLockedTreeAndRestoreChecksMain) {
