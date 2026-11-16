@@ -26,7 +26,7 @@ goes into that workspace's liquid store, never into `blobs/`; `blobs/` keeps the
 and the tenant blobs pushed before, until the copy moves them and a later, approved step removes
 the files.
 
-Writes use a sibling temporary file followed by rename. OCI upload sessions are staged separately;
+Writes use a sibling temporary file followed by rename. **An OCI upload session belongs to the repository that started it** (LSR-192, lake#998): its repository is recorded with it, and an append or a finish naming another repository answers `404 BLOB_UPLOAD_UNKNOWN`, whatever push access the caller holds there. OCI upload sessions are staged separately;
 completion recalculates SHA-256 and refuses bytes that do not match the requested digest. A
 manifest is accepted only when it is schema version 2 JSON and every referenced config or layer
 digest is already present. Blob and digest-manifest reads also require that a tag in the requested

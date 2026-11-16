@@ -492,7 +492,7 @@ browser must post to from another origin is a bearer route, never an exemption h
 Two routes take a link instead of a credential, for clients that cannot hold a session: the Hub's
 basic-LFS upload `href` (`PUT /api/lfs/<repository>/<oid>`, [models](../api/models.md)) and a
 tunnel client download (`GET /tunnel-clients/<platform>`, lake#745). Both sign their fields with
-HMAC-SHA-256 under `LAKE_INSTANCE_KEK`, base64url without padding, carry `expires` (Unix seconds,
+HMAC-SHA-256 under a key derived from `LAKE_INSTANCE_KEK` for this purpose alone (HMAC-SHA-256 of `lake signed link v1`; the instance key itself never signs a link, LSR-266), base64url without padding, carry `expires` (Unix seconds,
 15 minutes ahead) and `signature` in the query, and are checked in constant time
 (`signed_link_signature` and `signed_link_matches`, `src/api/tunnel_clients.cpp`). No new key and no
 new primitive: a new kind of link names itself on its payload's first line, as the tunnel client's

@@ -419,7 +419,8 @@ the rows each run holds out. A parameter without a range keeps its default. Befo
 {"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "Late payers tuning", "methodology": "W-0a1b2c3d", "dataset": "sales.payers", "target": "late", "from_defaults": true, "budgets": {"max_trials": 8, "max_parallel_trials": 2, "max_wall_time_ms": 0, "cost_cap": 0}, "confirm": true}
 ```
 
-- `dataset` is `<database>.<table>`; `target` names the column to predict (required when the
+- `dataset` is `<database>.<table>`, each part letters, digits, `_` and single `-` (never `--`, which
+  starts an SQL comment, and never at either end; LSR-191), checked when the run starts; `target` names the column to predict (required when the
   methodology has a target); `features` is optional (every column but the target). Or name
   `project` and `pipeline` of a pipeline whose model step is this methodology; its connect step's
   table, its target and its holdout are used.

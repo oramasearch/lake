@@ -1391,6 +1391,31 @@ TEST(RegistryProtocols, OciClientPushesAndPullsTwoLayersByteIdentical) {
         return digest;
     };
 
+    // LSR-192 (lake#998): an upload started in one repository cannot be continued in another.
+    {
+        const std::string started = http_request(server.port(),
+                                                 "POST",
+                                                 "/v2/lake-fixture/blobs/uploads/",
+                                                 "",
+                                                 "application/octet-stream",
+                                                 {},
+                                                 authorization);
+        const std::string location = response_header(started, "Location");
+        const std::string upload = location.substr(location.rfind('/') + 1);
+        const std::string contents = "elsewhere";
+        const std::string digest = "sha256:" + lake::control::identity_crypto::sha256_hex(contents);
+        const std::string crossed = http_request(server.port(),
+                                                 "PUT",
+                                                 "/v2/other-fixture/blobs/uploads/" + upload +
+                                                     "?digest=" + digest,
+                                                 contents,
+                                                 "application/octet-stream",
+                                                 {},
+                                                 authorization);
+        EXPECT_NE(crossed.find(" 404 "), std::string::npos) << crossed;
+        EXPECT_NE(crossed.find("BLOB_UPLOAD_UNKNOWN"), std::string::npos) << crossed;
+    }
+
     const std::string config = R"({"architecture":"arm64","os":"darwin"})";
     const std::string first_layer("lake layer one\0with binary", 26);
     const std::string second_layer = "lake layer two has different bytes\n";

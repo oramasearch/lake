@@ -569,6 +569,35 @@ TEST(OwnIdentity, ASignInDocumentNamingAnotherIdentityIsRefused) {
     EXPECT_FALSE(lake::control::own_identity::verify_document(base64url(*forged_encoded)));
 }
 
+// LSR-198 (lake#1004): the replay key is what the signature authenticates. An extra member in the
+// signature object is refused, and the same signed assertion gives the same key however its
+// signature object is ordered.
+TEST(OwnIdentity, ATaapAssertionHasOneReplayKeyAndNoUnknownSignatureMembers) {
+    auto person = person_at(lake::test::fixture_path("taap-sign-in-replay"));
+    const std::int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
+    const std::string nonce = "taap-sign-in-replay-nonce";
+    const json signature = taap_sign_in_signature(person.signer, nonce, now);
+    const auto first = lake::control::identity_crypto::verify_taap_sign_in(
+        person.document, "lake", nonce, now, signature);
+    ASSERT_TRUE(first) << first.error();
+
+    json padded = signature;
+    padded["padding"] = "a fresh assertion id, once";
+    EXPECT_FALSE(lake::control::identity_crypto::verify_taap_sign_in(
+        person.document, "lake", nonce, now, padded));
+
+    json reordered = json::object();
+    for (auto it = signature.rbegin(); it != signature.rend(); ++it) {
+        reordered[it.key()] = it.value();
+    }
+    const auto again = lake::control::identity_crypto::verify_taap_sign_in(
+        person.document, "lake", nonce, now, reordered);
+    ASSERT_TRUE(again) << again.error();
+    EXPECT_EQ(again->assertion_id, first->assertion_id);
+}
+
 // A liquid push signed by the person's own key, linked to their account, is attributed to the
 // account in the push audit.
 TEST(OwnIdentity, APushFromTheLinkedKeyIsAttributedToTheAccount) {
