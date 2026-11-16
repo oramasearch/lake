@@ -80,6 +80,10 @@ struct Repository {
     // when a row names an id it does not know, and every push records it again.
     std::string liquid_id;
 };
+// The refusal of `Store::set_repository_liquid_id` for an id another account's live repository
+// recorded first (lake#1313). It names no repository, so it tells the pusher nothing about it.
+inline constexpr std::string_view liquid_id_held_elsewhere =
+    "another account's repository holds this liquid id";
 // A repository's settings record (lake#315 part 2, control/repository_records.hpp): its
 // description, and later settings, in the workspace Zetta of the repository's workspace.
 struct RepositorySettings {
@@ -1994,8 +1998,10 @@ public:
                                                  const RepositoryDeletion& deletion) = 0;
     // Liquid repository ids (lake#805, docs/api/platform.md#which-repository-a-row-names). The
     // live repositories whose recorded liquid id is `liquid_id` (more than one when a repository
-    // was pushed from another's clone); records one (`not_found` for an unknown repository); and
-    // the live repositories with a workspace whose id lake has not read yet, oldest first.
+    // of the same account was pushed from another's clone); records one (`not_found` for an
+    // unknown repository; `conflict`, `liquid_id_held_elsewhere`, when a live repository of
+    // another account already holds it: the first account to record an id keeps it, lake#1313);
+    // and the live repositories with a workspace whose id lake has not read yet, oldest first.
     virtual Result<std::vector<Repository>> repositories_by_liquid_id(const std::string& liquid_id) = 0;
     virtual Result<void> set_repository_liquid_id(const std::string& id,
                                                   const std::string& liquid_id) = 0;

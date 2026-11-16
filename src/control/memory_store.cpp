@@ -7543,13 +7543,18 @@ InMemoryStore::repositories_by_liquid_id(const std::string& liquid_id) {
 Result<void> InMemoryStore::set_repository_liquid_id(const std::string& id,
                                                      const std::string& liquid_id) {
     std::lock_guard lock(mutex_);
-    for (auto& r : repositories_) {
-        if (r.id == id) {
-            r.liquid_id = liquid_id;
-            return {};
-        }
-    }
-    return std::unexpected(StoreError{"not_found", "no repository " + id});
+    const auto target = std::ranges::find(repositories_, id, &Repository::id);
+    if (target == repositories_.end())
+        return std::unexpected(StoreError{"not_found", "no repository " + id});
+    // A liquid id belongs to the account whose repository recorded it first (lake#1313).
+    const bool held_elsewhere = std::ranges::any_of(repositories_, [&](const Repository& r) {
+        return !liquid_id.empty() && r.liquid_id == liquid_id && r.deleted_at.empty() &&
+               r.customer_id != target->customer_id;
+    });
+    if (held_elsewhere)
+        return std::unexpected(StoreError{"conflict", std::string(liquid_id_held_elsewhere)});
+    target->liquid_id = liquid_id;
+    return {};
 }
 
 Result<std::vector<Repository>> InMemoryStore::repositories_without_liquid_id(int limit) {
