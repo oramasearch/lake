@@ -127,7 +127,7 @@ void log_database_diagnostic(std::string_view code, std::string_view message) {
     std::println(stderr, "{}", entry.dump());
 }
 
-constexpr std::array<ErrorCode, 39> documented_error_codes{{
+constexpr std::array<ErrorCode, 40> documented_error_codes{{
     {"invalid_input", 400, "The input is at fault; `path` points at the field."},
     {"secret_required",
      400,
@@ -137,6 +137,11 @@ constexpr std::array<ErrorCode, 39> documented_error_codes{{
      400,
      "An archive or record does not match the digest it carries, so it was changed or damaged."},
     {"invalid_signature", 400, "A signature does not verify against its key."},
+    {"unsupported_client_version",
+     400,
+     "The request's Liquid-Version header names a liquid release this Lake does not support; "
+     "the message gives the supported range and which side to upgrade, and server_info's "
+     "`liquid` lists it."},
     {"unauthenticated",
      401,
      "No credential was accepted: `reason` says whether it was missing, invalid or expired, and "

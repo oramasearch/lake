@@ -398,7 +398,8 @@ constexpr std::array group_rules{
               }},
     GroupRule{"Repositories",
               "Repositories and their files, changes, reviews, issues, releases, webhooks, "
-              "artifacts, models and datasets, and liquid sync.",
+              "artifacts, models and datasets, and liquid sync. People clone and push with the "
+              "liquid CLI and open repositories in liquify, liquid's IDE.",
               [](std::string_view n) {
                   return contains_any(n,
                                       {"repositor",
@@ -591,7 +592,9 @@ constexpr std::string_view start_here =
     "step stands and what to call next. The worked flow is the first one below.\n";
 
 constexpr std::string_view what_lake_does =
-    "- **Data**: repositories (liquid version control with reviews, issues and releases), drives "
+    "- **Data**: repositories (liquid version control with reviews, issues and releases; clone, "
+    "pull and push them with the liquid CLI, and open them in liquify, liquid's IDE; "
+    "`server_info`'s `liquid` says which liquid releases this Lake supports), drives "
     "in four kinds (workspace files, a repository with history, virtual folders of shortcuts, or "
     "a bucket or filesystem of the workspace's storage, browsed in place) with the workspace's "
     "storage beside them, datasets, connections (the databases a workspace reads, on the Connections "

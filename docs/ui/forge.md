@@ -38,7 +38,13 @@ the panel explains the missing setting and shows no commands
 into a new directory and enters it; the second runs `liquid push` from that checkout after changes
 have been captured and named. The panel tells the person to export an account token from
 **Tokens** as `LIQUID_TOKEN` before running either; the token is never in the URL
-([../api/sync.md](../api/sync.md)). URLs and directory names are shell-quoted.
+([../api/sync.md](../api/sync.md)). URLs and directory names are shell-quoted. A last line names
+liquify, liquid's IDE, as the place to open the repository: `liquify '<directory>'` on the checkout,
+or a clone from liquify's start screen with the repository URL (lake#1324). The named-lake
+form (`liquid lake add <name> <url>` once, then clone and push by name) waits for
+[liquid#525](https://github.com/oramasearch/liquid/issues/525); until liquid has that command the
+panel keeps the full-URL commands. The liquid releases this Lake supports are in `server_info`
+([../api/liquid-clients.md](../api/liquid-clients.md)).
 `tests/instance_origin.mjs` executes the two blocks copied from the page and is described in
 [../deployment/private-install.md](../deployment/private-install.md).
 

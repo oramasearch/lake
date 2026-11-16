@@ -59,6 +59,10 @@ Use `liquid clone <url> ./checkout` for an initial materialized checkout, then `
 directory. The native browser-to-terminal proof and private runbook are in
 [`../deployment/private-install.md`](../deployment/private-install.md).
 
+A client may send its liquid release as `Liquid-Version: <MAJOR.MINOR.PATCH>`. One outside the
+range `server_info` publishes under `liquid` is refused with HTTP 400 before the sync starts, in
+this protocol's error body; see [liquid-clients.md](liquid-clients.md) (lake#1324).
+
 An offline publisher also sends `Liquid-Offline-Grant: <grant-uuid>`. The grant is context for
 publication reauthorization, never a replacement for the ordinary credential. Push verifies its
 current ownership, device binding, expiry, and revocation state, then checks current write policy
