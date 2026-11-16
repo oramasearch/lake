@@ -204,6 +204,49 @@ bool valid_domain(std::string_view host) {
     });
 }
 
+// A tenant's domain may not be one of this Lake's own names (lake#949): its public host and
+// aliases, the zone its public host sits in, and the apps wildcard. Empty: the host may be claimed.
+std::string platform_host_problem(std::string_view requested, const ApiContext& context) {
+    const auto lower = [](std::string_view text) {
+        std::string out(text);
+        std::ranges::transform(out, out.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        while (out.ends_with('.')) {
+            out.pop_back();
+        }
+        return out;
+    };
+    const std::string host = lower(requested);
+    std::vector<std::string> reserved;
+    if (!context.public_host.empty()) {
+        const std::string own = lower(context.public_host);
+        reserved.push_back(own);
+        // The zone the Lake's host is in (`oramadev.net` for `lake-dev.oramadev.net`), when the
+        // host is below one; a two-label host (`lake.live`) is the zone itself.
+        if (std::ranges::count(own, '.') >= 2) {
+            reserved.push_back(own.substr(own.find('.') + 1));
+        }
+    }
+    for (const std::string& alias : context.host_aliases) {
+        reserved.push_back(lower(alias));
+    }
+    std::string wildcard = lower(context.apps_wildcard);
+    if (wildcard.starts_with("*.")) {
+        wildcard.erase(0, 2);
+    }
+    if (!wildcard.empty()) {
+        reserved.push_back(wildcard);
+    }
+    for (const std::string& name : reserved) {
+        if (!name.empty() && (host == name || host.ends_with("." + name))) {
+            return "host " + host + " is one of this Lake's own names (" + name +
+                   "); use a domain you own";
+        }
+    }
+    return {};
+}
+
 json object_schema() {
     return {{"type", "object"}};
 }
@@ -543,6 +586,12 @@ void register_platform_capabilities(Registry& registry) {
                 if (!valid_domain(host)) {
                     co_return ApiResult::failure(
                         "invalid_input", "host must be a DNS hostname", "/host");
+                }
+                if (!deleted) {
+                    if (const std::string problem = platform_host_problem(host, context);
+                        !problem.empty()) {
+                        co_return ApiResult::failure("invalid_input", problem, "/host");
+                    }
                 }
                 if (!deleted && tls != "acme" && tls != "provided") {
                     co_return ApiResult::failure(

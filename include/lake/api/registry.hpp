@@ -470,6 +470,8 @@ struct ApiContext {
     control::AgentTaskBus* agent_bus = nullptr;
     // Ship Apps configuration supplied by the Lake operator (docs/control-plane/web-apps.md).
     std::string apps_wildcard;
+    // This Lake's other names (LAKE_HOST_ALIASES): no tenant domain may be one (lake#949).
+    std::vector<std::string> host_aliases;
     std::string apps_runtime_image;
     // The methodology-runtime image a workspace methodology's image is built from and whose
     // stage and collect pods move its data (LAKE_METHODOLOGY_RUNTIME_IMAGE, lake#655).
