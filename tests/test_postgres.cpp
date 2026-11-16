@@ -666,26 +666,25 @@ TEST(PostgresCapabilities, SearchFiltersRepositoryCandidates) {
         uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
     ASSERT_TRUE(store->ping()) << store->ping().error().message;
     const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    const std::string customer = "search-customer-" + suffix;
-    const std::string allowed_repository = "allowed-" + suffix;
-    const std::string denied_repository = "denied-" + suffix;
-    const auto customer_object = store->create_policy_object(
-        {"customer", customer, "", "admin", "postgres-search-customer", true});
-    ASSERT_TRUE(customer_object) << customer_object.error().message;
-    const auto allowed_object = store->create_policy_object({"repository",
-                                                             allowed_repository,
-                                                             customer_object->id,
-                                                             "admin",
-                                                             "postgres-search-allowed",
-                                                             true});
+    // Real rows: a hit whose repository row cannot be read is dropped (LSR-108), so the account
+    // and its two repositories exist, each with the policy object create_repository makes.
+    const auto user = store->create_user({"taap:postgres-search-" + suffix, "", "Search"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer_row =
+        store->create_customer({"individual", user->id, "", "search-" + suffix});
+    ASSERT_TRUE(customer_row) << customer_row.error().message;
+    const std::string customer = customer_row->id;
+    const auto workspace = lake::test::repository_workspace(*store, customer);
+    const auto allowed_row =
+        store->create_repository({customer, "allowed", "", "private", workspace});
+    ASSERT_TRUE(allowed_row) << allowed_row.error().message;
+    const auto denied_row =
+        store->create_repository({customer, "denied", "", "private", workspace});
+    ASSERT_TRUE(denied_row) << denied_row.error().message;
+    const std::string allowed_repository = allowed_row->id;
+    const std::string denied_repository = denied_row->id;
+    const auto allowed_object = store->find_policy_object("repository", allowed_repository);
     ASSERT_TRUE(allowed_object) << allowed_object.error().message;
-    const auto denied_object = store->create_policy_object({"repository",
-                                                            denied_repository,
-                                                            customer_object->id,
-                                                            "admin",
-                                                            "postgres-search-denied",
-                                                            true});
-    ASSERT_TRUE(denied_object) << denied_object.error().message;
     const auto grant = store->create_grant({"reader",
                                             allowed_object->id,
                                             "read",

@@ -775,13 +775,16 @@ TEST(Pki, RootRecoveryNeedsSharesPresentedByDistinctParticipants) {
                   .error.code,
               "forbidden");
     EXPECT_FALSE(rig.claim("dave", ceremony_id).ok); // not an admin, not a participant
+    // An agent's task credential acting for a participant is refused too: it is confined to its
+    // task's workspace (lake#918, LSR-118), and one whose task row cannot be read reaches no
+    // object, so the policy check refuses it before the handler would.
     auto agent = rig.person("alice");
     agent.credential_kind = "agent_task";
     EXPECT_EQ(rig.call("claim_root_recovery_share",
                        {{"customer_id", rig.customer_id}, {"ceremony_id", ceremony_id}},
                        agent)
                   .error.code,
-              "forbidden");
+              "unauthorized");
     const auto alice_share = rig.claim("alice", ceremony_id);
     ASSERT_TRUE(alice_share.ok) << alice_share.error.message;
     EXPECT_EQ(alice_share.value.at("index"), 1);

@@ -5470,8 +5470,9 @@ TEST(GitHubImport, ReadsOnlyTheCallersStagingFolder) {
                              {"git_directory", directory},
                              {"recording", json::object()}});
     };
-    // No staging root: the import is not offered.
-    EXPECT_EQ(import_from("example.git").error.code, "unavailable");
+    // No staging root: the import is not offered (`not_supported`, 501, which a caller does not
+    // retry).
+    EXPECT_EQ(import_from("example.git").error.code, "not_supported");
 
     const std::filesystem::path root = std::filesystem::temp_directory_path() /
                                        ("lake-import-" + lake::control::new_uuid_v4());

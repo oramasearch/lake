@@ -712,6 +712,8 @@ TEST_F(PlatformFixture, ReadRoleCannotWriteAndDeployRoleIsRequiredForDomains) {
 // reaches the operator only once the tenant proved control with the TXT record create_domain
 // answered.
 TEST_F(PlatformFixture, AnUnverifiedDomainIsNeverWrittenForTheOperator) {
+    // The environment exists once the sync has mirrored its deployment (lake#913).
+    ASSERT_TRUE(sync());
     use_fake_dns();
     ApiResult created = call_async("create_domain",
                                    {{"repository_id", repository.id},
@@ -751,6 +753,8 @@ TEST_F(PlatformFixture, AnUnverifiedDomainIsNeverWrittenForTheOperator) {
 }
 
 TEST_F(PlatformFixture, VerifyDomainFailsUntilTheRecordHoldsTheToken) {
+    // The environment exists once the sync has mirrored its deployment (lake#913).
+    ASSERT_TRUE(sync());
     use_fake_dns();
     ApiResult created = call_async("create_domain",
                                    {{"repository_id", repository.id},
@@ -809,6 +813,8 @@ TEST_F(PlatformFixture, VerifyDomainFailsUntilTheRecordHoldsTheToken) {
 }
 
 TEST_F(PlatformFixture, AHostIsClaimedByOneEnvironmentAcrossCustomers) {
+    // The environment exists once the sync has mirrored its deployment (lake#913).
+    ASSERT_TRUE(sync());
     ApiResult first = create_verified_domain("shop.example.test");
     ASSERT_TRUE(first.ok) << first.error.message;
 
@@ -821,8 +827,13 @@ TEST_F(PlatformFixture, AHostIsClaimedByOneEnvironmentAcrossCustomers) {
     const auto other = store->create_repository(
         {customer->id, "other", "", "private", workspaces->create(customer->id, "home")});
     ASSERT_TRUE(other);
-    control->deployments.push_back(deployment_row(other->id, "deploying", "2026-09-06T00:01:00Z"));
-    ASSERT_TRUE(sync());
+    // A deployment id is the operator's, one per deployment across repositories: this one is not
+    // the fixture repository's `deployment-1`.
+    json other_deployment = deployment_row(other->id, "deploying", "2026-09-06T00:01:00Z");
+    other_deployment["deployment_id"] = "deployment-other";
+    control->deployments.push_back(std::move(other_deployment));
+    const auto synced = sync();
+    ASSERT_TRUE(synced) << synced.error().code << ": " << synced.error().message;
     const std::size_t rows = control->domains.size();
 
     const json taken{{"repository_id", other->id},
