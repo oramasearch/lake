@@ -34,6 +34,11 @@ and are unchanged. Clerk sits in front of Lake's own sessions:
 Lake verifies a `lake` JWT-template token and issues an ordinary `lake_session`
 ([`../api/clerk.md`](../api/clerk.md)).
 
+The session cookie is `__Host-lake_session` when the request reached Lake over TLS (`X-Forwarded-Proto:
+https` from the ingress), and `lake_session` only over plain HTTP. A `__Host-` cookie must be `Secure`, have
+`Path=/` and no `Domain`, so a page on a sibling host (an App, a preview) cannot plant or shadow it. The
+plain name is not read behind TLS, so **everyone signs in once more after the release that introduces it**.
+
 ## 1. A Clerk instance
 
 Two Clerk applications serve four environments. Each application's development instance serves the

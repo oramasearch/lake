@@ -22,7 +22,7 @@ security review about Lake.
 
 | Term | What it is |
 |---|---|
-| **Session** | What signing in creates: a random secret Lake stores only as a digest. The browser holds it in the `lake_session` cookie. |
+| **Session** | What signing in creates: a random secret Lake stores only as a digest. The browser holds it in the `__Host-lake_session` cookie behind TLS (`Secure`, `Path=/`, no `Domain`, so no sibling subdomain can set or shadow it), or `lake_session` over plain HTTP in development. An App's session is `__Host-lake_app_session`. |
 | **Key** (API token) | A named session for programs and agents, sent as `Authorization: Bearer <key>`, limited to the capabilities it names. |
 | **Device** | A browser or passkey that signed in. Revoking a device ends its sessions and its passkey. |
 | **TAAP identity** | Your cryptographic identity. Grants, audit events and attestations name it. |
@@ -111,7 +111,7 @@ The secret is shown once; Lake keeps only its hash.
 
 Ship apps are served on addresses next to Lake's own, so a page of an app is *same-site* with Lake
 and a browser would send Lake's cookie along with its requests. Lake therefore refuses any unsafe
-request (`POST`, `PUT`, `PATCH`, `DELETE`) authenticated only by the `lake_session` cookie when:
+request (`POST`, `PUT`, `PATCH`, `DELETE`) authenticated only by the session cookie when:
 
 - `Sec-Fetch-Site` is present and is not `same-origin`;
 - `Origin` is present and is not Lake's own origin (including `Origin: null`); or

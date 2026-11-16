@@ -2532,13 +2532,35 @@ oci_content_range(const boost::http::route_params& route) {
     return std::optional<OciContentRange>{{*start, *end}};
 }
 
-std::string browser_session_cookie(const boost::http::route_params& route,
-                                   std::string_view secret) {
-    std::string cookie = "lake_session=" + std::string(secret) + "; HttpOnly; SameSite=Lax; Path=/";
+// The console's session cookie (LSR-115, lake#982, lake#910). Over HTTPS it is
+// __Host-lake_session: Secure, Path=/ and no Domain, so a tenant app on a subdomain of the Lake can
+// neither set nor shadow it; only that name is read. Over plain HTTP (local development, tests) the
+// prefix is not allowed, and it stays lake_session.
+std::string session_cookie_name(const boost::http::route_params& route) {
+    return request_is_https(route) ? "__Host-lake_session" : "lake_session";
+}
+
+std::string session_cookie(const boost::http::route_params& route,
+                           std::string_view secret,
+                           std::string_view same_site = "Lax") {
+    std::string cookie = session_cookie_name(route) + "=" + std::string(secret) +
+                         "; HttpOnly; SameSite=" + std::string(same_site) + "; Path=/";
     if (request_is_https(route)) {
         cookie += "; Secure";
     }
     return cookie;
+}
+
+std::string session_cookie_of(const boost::http::route_params& route) {
+    return cookie_value(route, session_cookie_name(route));
+}
+
+// An app's session cookie is always Secure, so it always carries the __Host- prefix (LSR-115).
+constexpr std::string_view app_session_cookie = "__Host-lake_app_session";
+
+std::string browser_session_cookie(const boost::http::route_params& route,
+                                   std::string_view secret) {
+    return session_cookie(route, secret);
 }
 
 // Invalid JSON is discarded; structural budget failures are returned by read_json_body.
@@ -9559,7 +9581,7 @@ struct ApiServer::Impl {
         if (!bearer.empty()) {
             ctx.authentication_method = "bearer";
         } else {
-            bearer = cookie_value(route, "lake_session");
+            bearer = session_cookie_of(route);
             if (!bearer.empty()) {
                 ctx.authentication_method = "session";
             }
@@ -9729,7 +9751,7 @@ struct ApiServer::Impl {
                 route, http::status::unauthorized, "", "text/plain", "no-store");
         }
 
-        const std::string session = cookie_value(route, "lake_app_session");
+        const std::string session = cookie_value(route, app_session_cookie);
         if (!session.empty()) {
             const auto claims = control::verify_web_app_session(options.instance_kek, session);
             if (claims) {
@@ -9752,7 +9774,8 @@ struct ApiServer::Impl {
                                                                   authorization->app.workspace_id);
                 if (token) {
                     const std::string cookie =
-                        "lake_app_session=" + *token + "; Path=/; Secure; HttpOnly; SameSite=Lax";
+                        std::string(app_session_cookie) + "=" + *token +
+                        "; Path=/; Secure; HttpOnly; SameSite=Lax";
                     ApiContext context =
                         app_auth_audit_context(route, &authorization->app, authorization->user_id);
                     (void)record_direct_event(context,
@@ -10197,9 +10220,7 @@ struct ApiServer::Impl {
                 "application/json; charset=utf-8",
                 "no-store");
         }
-        std::string cookie = "lake_session=" + token + "; HttpOnly; SameSite=Strict; Path=/";
-        if (request_is_https(route))
-            cookie += "; Secure";
+        std::string cookie = session_cookie(route, token, "Strict");
         co_return co_await redirect(route, "/repositories", cookie);
     }
 
@@ -10237,9 +10258,14 @@ struct ApiServer::Impl {
         }
         // With Clerk, the browser also holds a Clerk session; the sign-in page ends it too, or the
         // next visit would sign the person straight back in.
+        // Static strings: redirect is a coroutine that may run after this function returns.
+        static const std::string cleared_https =
+            "__Host-lake_session=; HttpOnly; SameSite=Strict; Path=/; Secure; Max-Age=0";
+        static const std::string cleared_http =
+            "lake_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0";
         return redirect(route,
                         clerk ? "/sign-in?signed_out=1" : "/",
-                        "lake_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+                        request_is_https(route) ? cleared_https : cleared_http);
     }
 
     boost::http::route_task serve_page_error(boost::http::route_params& route,
@@ -10996,11 +11022,7 @@ struct ApiServer::Impl {
                                  })) {
             co_return co_await back("Lake could not record the sign-in. Please try again.");
         }
-        std::string cookie = "lake_session=" + session_result.value.value("secret", "") +
-                             "; HttpOnly; SameSite=Lax; Path=/";
-        if (request_is_https(route)) {
-            cookie += "; Secure";
-        }
+        std::string cookie = session_cookie(route, session_result.value.value("secret", ""));
         // The page that sent the person here (`next`, lake#561), else the Ship app return.
         std::string destination = same_origin_next(form_field(body, "next"));
         if (destination.empty()) {
@@ -11203,11 +11225,7 @@ struct ApiServer::Impl {
             co_return co_await oauth_error(
                 route, http::status::service_unavailable, "OAuth audit recording failed");
         }
-        std::string cookie = "lake_session=" + application_result.value.value("secret", "") +
-                             "; HttpOnly; SameSite=Lax; Path=/";
-        if (request_is_https(route)) {
-            cookie += "; Secure";
-        }
+        std::string cookie = session_cookie(route, application_result.value.value("secret", ""));
         std::string destination(account_landing);
         if (issued_pool != "lake") {
             // The redirect URI is the application's settings in its workspace (lake#351); when
@@ -11402,11 +11420,7 @@ struct ApiServer::Impl {
                                          "application/json; charset=utf-8",
                                          "no-store");
         }
-        std::string cookie = "lake_session=" + session_result.value.value("secret", "") +
-                             "; HttpOnly; SameSite=Lax; Path=/";
-        if (request_is_https(route)) {
-            cookie += "; Secure";
-        }
+        std::string cookie = session_cookie(route, session_result.value.value("secret", ""));
         std::string destination = same_origin_next(accepted->return_to);
         if (destination.empty()) {
             destination = std::string(account_landing);
@@ -14720,7 +14734,7 @@ struct ApiServer::Impl {
     // The browser session authenticates this request: no bearer, and a lake_session cookie.
     // context_for resolves exactly this case to authentication_method "session".
     static bool session_cookie_request(const boost::http::route_params& route) {
-        return bearer_of(route).empty() && !cookie_value(route, "lake_session").empty();
+        return bearer_of(route).empty() && !session_cookie_of(route).empty();
     }
 
     static bool unsafe_method(const boost::http::route_params& route) {
