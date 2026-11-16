@@ -1,109 +1,113 @@
-name: image
-
-on:
-  push:
-    tags:
-      - '*'
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Immutable Docker Hub tag to publish
-        required: true
-        type: string
-
-permissions:
-  contents: read
-
-jobs:
-  image:
-    runs-on: ubuntu-24.04
-    steps:
-      # Private repositories are read with one read-only deploy key each (secrets DEPLOY_KEY_*,
-      # docs/build/ci.md). The ssh agent maps each key to its repository by the key's comment and
-      # rewrites both git@ and https:// URLs of those repositories onto it.
-      - name: Load the deploy keys
-        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
-        with:
-          ssh-private-key: |
-            ${{ secrets.DEPLOY_KEY_COROSIO }}
-            ${{ secrets.DEPLOY_KEY_BEAST2 }}
-            ${{ secrets.DEPLOY_KEY_ORAMACORE_CPP }}
-            ${{ secrets.DEPLOY_KEY_AUTOMERGE_CPP }}
-            ${{ secrets.DEPLOY_KEY_LIQUID }}
-            ${{ secrets.DEPLOY_KEY_ZETTA }}
-
-      - name: Check out source
-        uses: actions/checkout@v4
-
-      - name: Check out submodules
-        run: git submodule update --init --recursive --depth 1
-
-      - name: Check out the Zetta client source
-        # Only Zetta's client headers and transport are compiled, so its own submodules are not
-        # needed. Bump this ref with the zetta-bridge pin lake is built against.
-        run: |
-          git init -q _external/zetta
-          git -C _external/zetta remote add origin git@github.com:oramasearch/zetta.git
-          git -C _external/zetta fetch -q --depth 1 origin 149303c142e0c9ede4ac0c023ae631838140f1bc
-          git -C _external/zetta checkout -q FETCH_HEAD
-
-      - name: Check out the liquid source
-        # liquid is a sibling module of liquid-bridge, not a submodule of lake. The bridge holds
-        # the one pin; bump this ref when the bridge bumps liquid.
-        run: |
-          git init -q _external/liquid
-          git -C _external/liquid remote add origin git@github.com:oramasearch/liquid.git
-          git -C _external/liquid fetch -q --depth 1 origin 93ddcfe3a44aeeb033414720787130d0cb53df62
-          git -C _external/liquid checkout -q FETCH_HEAD
-          git -C _external/liquid submodule update --init --recursive --depth 1
-          # liquid's own .dockerignore excludes its whole tree; as a named build context here it
-          # must be the plain source.
-          rm -f _external/liquid/.dockerignore
-
-      - name: Resolve image tags
-        id: image_tags
-        env:
-          REQUESTED_TAG: ${{ inputs.tag || github.ref_name }}
-        shell: bash
-        run: |
-          if [[ -z "$REQUESTED_TAG" ]]; then
-            echo "An image tag is required." >&2
-            exit 1
-          fi
-          if [[ "${REQUESTED_TAG,,}" == "latest" ]]; then
-            echo "The latest tag is forbidden; use an immutable tag." >&2
-            exit 1
-          fi
-          if [[ ! "$REQUESTED_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
-            echo "The image tag is not Docker-compatible: $REQUESTED_TAG" >&2
-            exit 1
-          fi
-          echo "release=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
-          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
-          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          build-contexts: |
-            zetta_source=${{ github.workspace }}/_external/zetta
-            liquid_source=${{ github.workspace }}/_external/liquid
-          push: true
-          platforms: linux/amd64
-          build-args: |
-            LAKE_BUILD_REVISION=${{ steps.image_tags.outputs.revision }}
-            LAKE_BUILD_CREATED=${{ steps.image_tags.outputs.created }}
-          tags: |
-            oramasearch/lake:${{ steps.image_tags.outputs.release }}
-            oramasearch/lake:sha-${{ steps.image_tags.outputs.short_sha }}
+# This workflow is commented out: lake has no hosted CI. The proof of a change is the local
+# suite (docs/build/local.md) and the Linux lane; see docs/build/ci.md. Uncomment every line
+# below to restore it.
+#
+# name: image
+#
+# on:
+#   push:
+#     tags:
+#       - '*'
+#   workflow_dispatch:
+#     inputs:
+#       tag:
+#         description: Immutable Docker Hub tag to publish
+#         required: true
+#         type: string
+#
+# permissions:
+#   contents: read
+#
+# jobs:
+#   image:
+#     runs-on: ubuntu-24.04
+#     steps:
+#       # Private repositories are read with one read-only deploy key each (secrets DEPLOY_KEY_*,
+#       # docs/build/ci.md). The ssh agent maps each key to its repository by the key's comment and
+#       # rewrites both git@ and https:// URLs of those repositories onto it.
+#       - name: Load the deploy keys
+#         uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
+#         with:
+#           ssh-private-key: |
+#             ${{ secrets.DEPLOY_KEY_COROSIO }}
+#             ${{ secrets.DEPLOY_KEY_BEAST2 }}
+#             ${{ secrets.DEPLOY_KEY_ORAMACORE_CPP }}
+#             ${{ secrets.DEPLOY_KEY_AUTOMERGE_CPP }}
+#             ${{ secrets.DEPLOY_KEY_LIQUID }}
+#             ${{ secrets.DEPLOY_KEY_ZETTA }}
+#
+#       - name: Check out source
+#         uses: actions/checkout@v4
+#
+#       - name: Check out submodules
+#         run: git submodule update --init --recursive --depth 1
+#
+#       - name: Check out the Zetta client source
+#         # Only Zetta's client headers and transport are compiled, so its own submodules are not
+#         # needed. Bump this ref with the zetta-bridge pin lake is built against.
+#         run: |
+#           git init -q _external/zetta
+#           git -C _external/zetta remote add origin git@github.com:oramasearch/zetta.git
+#           git -C _external/zetta fetch -q --depth 1 origin 149303c142e0c9ede4ac0c023ae631838140f1bc
+#           git -C _external/zetta checkout -q FETCH_HEAD
+#
+#       - name: Check out the liquid source
+#         # liquid is a sibling module of liquid-bridge, not a submodule of lake. The bridge holds
+#         # the one pin; bump this ref when the bridge bumps liquid.
+#         run: |
+#           git init -q _external/liquid
+#           git -C _external/liquid remote add origin git@github.com:oramasearch/liquid.git
+#           git -C _external/liquid fetch -q --depth 1 origin 93ddcfe3a44aeeb033414720787130d0cb53df62
+#           git -C _external/liquid checkout -q FETCH_HEAD
+#           git -C _external/liquid submodule update --init --recursive --depth 1
+#           # liquid's own .dockerignore excludes its whole tree; as a named build context here it
+#           # must be the plain source.
+#           rm -f _external/liquid/.dockerignore
+#
+#       - name: Resolve image tags
+#         id: image_tags
+#         env:
+#           REQUESTED_TAG: ${{ inputs.tag || github.ref_name }}
+#         shell: bash
+#         run: |
+#           if [[ -z "$REQUESTED_TAG" ]]; then
+#             echo "An image tag is required." >&2
+#             exit 1
+#           fi
+#           if [[ "${REQUESTED_TAG,,}" == "latest" ]]; then
+#             echo "The latest tag is forbidden; use an immutable tag." >&2
+#             exit 1
+#           fi
+#           if [[ ! "$REQUESTED_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+#             echo "The image tag is not Docker-compatible: $REQUESTED_TAG" >&2
+#             exit 1
+#           fi
+#           echo "release=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
+#           echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+#           echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+#           echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+#
+#       - name: Set up Docker Buildx
+#         uses: docker/setup-buildx-action@v3
+#
+#       - name: Log in to Docker Hub
+#         uses: docker/login-action@v3
+#         with:
+#           username: ${{ secrets.DOCKERHUB_USERNAME }}
+#           password: ${{ secrets.DOCKERHUB_TOKEN }}
+#
+#       - name: Build and push
+#         uses: docker/build-push-action@v6
+#         with:
+#           context: .
+#           build-contexts: |
+#             zetta_source=${{ github.workspace }}/_external/zetta
+#             liquid_source=${{ github.workspace }}/_external/liquid
+#           push: true
+#           platforms: linux/amd64
+#           build-args: |
+#             LAKE_BUILD_REVISION=${{ steps.image_tags.outputs.revision }}
+#             LAKE_BUILD_CREATED=${{ steps.image_tags.outputs.created }}
+#           tags: |
+#             oramasearch/lake:${{ steps.image_tags.outputs.release }}
+#             oramasearch/lake:sha-${{ steps.image_tags.outputs.short_sha }}
