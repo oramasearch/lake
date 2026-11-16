@@ -6018,6 +6018,10 @@ TEST(Workspaces, SqlNamesTheWordAMisspeltStatementStartsWith) {
     const auto write = r.call("workspace_sql", {{"statement", "DROP TABLE datasets.accounts"}});
     EXPECT_NE(write.error.message.find("it starts with 'DROP'"), std::string::npos);
     EXPECT_EQ(r.w.caller->calls.size(), before) << "the read-only guard still holds";
+    // A statement that passes is sent with read_only, so the engine enforces it too (zetta#1501).
+    r.w.caller->answers["sql"] = {{"columns", json::array()}, {"rows", json::array()}};
+    ASSERT_TRUE(r.call("workspace_sql", {{"statement", "SELECT 1"}}).ok);
+    EXPECT_EQ(r.sent("sql").value("read_only", false), true);
 }
 
 // lake#1229: the workspace Zetta route's `sql` (an App's binding) answers at most
