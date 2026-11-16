@@ -3,6 +3,7 @@
 #include "lake/api/model_gateway.hpp"
 
 #include "lake/api/billing.hpp"
+#include "lake/control/identity_crypto.hpp"
 
 #include <algorithm>
 #include <format>
@@ -621,6 +622,81 @@ void ModelStreamUsage::line(std::string_view text) {
     }
 }
 
+void scrub_cached_tokens(nlohmann::json& answer) {
+    if (answer.is_array()) {
+        for (auto& item : answer) {
+            scrub_cached_tokens(item);
+        }
+        return;
+    }
+    if (!answer.is_object()) {
+        return;
+    }
+    for (auto& [key, value] : answer.items()) {
+        if (key == "cached_tokens" && value.is_number()) {
+            value = 0;
+        } else {
+            scrub_cached_tokens(value);
+        }
+    }
+}
+
+std::string ModelStreamScrubber::feed(std::string_view piece) {
+    std::string out;
+    std::size_t start = 0;
+    for (;;) {
+        const std::size_t end = piece.find('\n', start);
+        if (end == std::string_view::npos) {
+            partial_.append(piece.substr(start));
+            return out;
+        }
+        if (partial_.empty()) {
+            out += line(piece.substr(start, end - start));
+        } else {
+            partial_.append(piece.substr(start, end - start));
+            out += line(partial_);
+            partial_.clear();
+        }
+        out += '\n';
+        start = end + 1;
+    }
+}
+
+std::string ModelStreamScrubber::finish() {
+    const std::string last = std::move(partial_);
+    partial_.clear();
+    return last.empty() ? std::string() : line(last);
+}
+
+// One line of the stream, without its line end: only a `data:` event that names `cached_tokens`
+// is rewritten, so every other line reaches the caller exactly as the provider sent it.
+std::string ModelStreamScrubber::line(std::string_view text) {
+    if (text.find("cached_tokens") == std::string_view::npos) {
+        return std::string(text);
+    }
+    const bool carriage_return = text.ends_with('\r');
+    std::string_view event = trim(text);
+    if (!event.starts_with("data:")) {
+        return std::string(text);
+    }
+    nlohmann::json parsed = nlohmann::json::parse(trim(event.substr(5)), nullptr, false);
+    if (parsed.is_discarded()) {
+        return std::string(text);
+    }
+    scrub_cached_tokens(parsed);
+    std::string out = "data: " + parsed.dump();
+    if (carriage_return) {
+        out += '\r';
+    }
+    return out;
+}
+
+std::string prompt_cache_key(std::string_view workspace_id) {
+    const std::string digest = control::identity_crypto::sha256_hex(
+        "lake model gateway prompt cache\n" + std::string(workspace_id));
+    return "lake-" + digest.substr(0, 32);
+}
+
 ApiError model_provider_failure(int status, std::string_view body, std::string_view transport) {
     if (!transport.empty()) {
         return ApiError{"store_unavailable",
@@ -874,6 +950,10 @@ std::expected<nlohmann::json, ApiError> chat_request_as_responses(const nlohmann
                  {"tools", std::move(tools)},
                  {"store", false},
                  {"service_tier", "default"}};
+    // The workspace's cache bucket, which the gateway names (lake#1309), goes with the request.
+    if (const auto key = chat.find("prompt_cache_key"); key != chat.end() && key->is_string()) {
+        request["prompt_cache_key"] = *key;
+    }
     if (const auto choice = chat.find("tool_choice"); choice != chat.end() && !choice->is_null()) {
         request["tool_choice"] =
             choice->is_object()

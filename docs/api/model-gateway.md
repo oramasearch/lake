@@ -125,14 +125,53 @@ covered by the [price list](billing.md#rates). So:
 Verify with `ModelGateway.RefusesACostlierServiceTierAndAlwaysAsksForTheStandardOne` and the
 `service_tier: priority` case of `ModelCompletion.RefusesUnmeteredFeaturesBeforeCallingTheProvider`.
 
+### Prompt caching
+
+**Issue:** lake#1309 · **Code:** `scrub_cached_tokens`, `ModelStreamScrubber` and
+`prompt_cache_key` in `src/api/model_gateway.cpp`; their calls in `model_completion`
+(`src/api/usage_capabilities.cpp`).
+
+Lake calls the provider for every workspace with one key, so every workspace's prompts sit in one
+provider account's prompt cache. OpenAI reports a request whose first 1024 or more tokens match a
+recent request's as `cached_tokens` (`usage.prompt_tokens_details` on Chat Completions,
+`usage.input_tokens_details` on Responses), in steps of 128 tokens. Passed on, that count would let a
+caller in one workspace learn whether another workspace on the same Lake had just sent a given
+prompt prefix (a document, a dataset's rows, a question), and extend a known prefix block by block.
+So:
+
+- **The gateway reports no cache hits.** Every `cached_tokens` count in what the caller is sent is
+  0: in a JSON answer, in a chat completion translated from a [Responses answer](#tools-on-the-gpt-6-models),
+  in a relayed stream and in a stream answered whole as `events`. In a stream only the event that
+  carries the count is rewritten (as `data: ` and its JSON with the count set to 0); every other
+  line reaches the caller byte for byte. The provider's other usage fields are passed on as
+  reported.
+- **Each workspace has its own cache bucket.** Every `chat/completions` and `responses` call is sent
+  with `prompt_cache_key` set to `lake-` and the first 32 hexadecimal digits of a SHA-256 of the
+  call's workspace id, so OpenAI routes each workspace's prompts to a cache of their own and the
+  response time no longer says much about another workspace's prompts. The key names no workspace.
+  A chat completion sent to the Responses API keeps it. Embeddings have no prompt cache and are
+  sent without one. `prompt_cache_key` is not a field a caller may send: a request that carries it
+  is `invalid_input`, so no caller can name another workspace's bucket.
+- **Counting and billing are unchanged.** They read only the input and output tokens, from the
+  provider's own answer before the scrub. A cached input token is counted and billed as any other
+  input token.
+
+An OpenAI-compatible provider other than OpenAI (`LAKE_MODEL_PROVIDER_URL`) must accept
+`prompt_cache_key` or ignore it.
+
+Verify with `ModelGateway.ScrubsEveryCachedTokensCountAndLeavesTheRestAlone`,
+`ModelCompletion.AnswersNoCacheHitsInAnyShapeAndCountsTheSameTokens` and
+`ModelCompletion.SendsEachCallWithItsWorkspacesOwnPromptCacheKey`.
+
 ### Streaming
 
 `stream: true` is accepted. For a chat completion Lake adds `stream_options.include_usage: true`, so
 the provider reports the stream's usage in its last event (the Responses API always does, in
-`response.completed`). The answer is `text/event-stream` with the provider's events, unchanged, and
-Lake relays them as they arrive (lake#665): the outbound client hands the provider's body on piece by
-piece, and the route writes each piece to the caller in chunked transfer, so an agent that shows
-tokens as they come gets them as the provider sends them, not all at once at the end.
+`response.completed`). The answer is `text/event-stream` with the provider's events, unchanged but
+for the [cache count](#prompt-caching), and Lake relays them as they arrive (lake#665): the outbound
+client hands the provider's body on piece by piece, and the route writes each line to the caller in
+chunked transfer as soon as it is whole, so an agent that shows tokens as they come gets them as the
+provider sends them, not all at once at the end.
 
 - Lake reads the usage from the events as they pass and counts it from the event that carries it,
   once the stream ends. A stream that ends without one is counted by
@@ -199,6 +238,7 @@ so it stays there. A call without tools, a Responses request and an embedding ar
 | `verbosity` | `text.verbosity` |
 | `parallel_tool_calls`, `temperature`, `top_p`, `user`, `stream` | the same |
 | `store`, `service_tier` | `false` and `default`, [as always](#the-processing-tier) |
+| `prompt_cache_key` (set by Lake) | the same, [the workspace's bucket](#prompt-caching) |
 
 Fields Responses has no equivalent for are `invalid_input` at their path before the provider is
 called: `n` other than 1, `logprobs: true`, `top_logprobs`, `logit_bias`, `stop`, `seed`, a non-zero
@@ -212,8 +252,8 @@ and its `tool_calls` (`id` the `call_id`, `function.name`, `function.arguments`)
 `finish_reason` `tool_calls` when it called a tool, `length` when it stopped at `max_output_tokens`,
 `content_filter` when it was filtered, else `stop`. `usage` is `prompt_tokens` (input tokens),
 `completion_tokens` (output tokens, reasoning included), `total_tokens`, and
-`prompt_tokens_details.cached_tokens` and `completion_tokens_details.reasoning_tokens` when the
-provider reports them. Reasoning items are not shown, as Chat Completions never shows them. An answer
+`prompt_tokens_details.cached_tokens` (answered as 0, see [Prompt caching](#prompt-caching)) and
+`completion_tokens_details.reasoning_tokens` when the provider reports them. Reasoning items are not shown, as Chat Completions never shows them. An answer
 whose `status` is `failed` is `engine_error` with the provider's message, after its tokens are counted.
 
 **Streaming.** A streamed call is sent as a Responses stream and rewritten, as it arrives, into Chat
