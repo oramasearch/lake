@@ -7945,6 +7945,16 @@ std::shared_ptr<McpHttp> make_mcp_http(bool allow_private_addresses) {
 struct ApiServer::Impl {
     ServerOptions options;
     telemetry::Metrics metrics;
+    // lake#1353: where a workspace store's object client counts its requests. Liquid can finish a
+    // store's work after the server is gone (a repository's lease released in the background on
+    // liquid's own runtime), so the client holds this link, never the server, and ~Impl cuts it
+    // before any member is destroyed; a request answered later is not counted.
+    struct ObjectRequestMetrics {
+        std::shared_mutex mutex;
+        telemetry::Metrics* metrics = nullptr;
+    };
+    std::shared_ptr<ObjectRequestMetrics> object_request_metrics =
+        std::make_shared<ObjectRequestMetrics>();
     std::chrono::steady_clock::time_point next_topic_reap{};
     std::chrono::steady_clock::time_point next_secret_lease_sweep{};
     std::size_t reported_bus_reaps = 0;
@@ -8730,8 +8740,15 @@ struct ApiServer::Impl {
         config.lease_ttl = options.workspace_store_lease_ttl;
         // Bounded labels only (lake#527): the request's kind and its outcome class, never a
         // workspace, key or bucket.
-        config.observer = [this](control::ObjectRequestKind kind, int status,
-                                 std::chrono::nanoseconds elapsed) {
+        object_request_metrics->metrics = &metrics;
+        config.observer = [link = object_request_metrics](control::ObjectRequestKind kind,
+                                                          int status,
+                                                          std::chrono::nanoseconds elapsed) {
+            std::shared_lock attached(link->mutex);
+            if (!link->metrics) {
+                return;
+            }
+            telemetry::Metrics& metrics = *link->metrics;
             const std::string name(control::object_request_kind_name(kind));
             const std::string outcome = status == 0     ? "no_answer"
                                         : status < 300  ? "ok"
@@ -8954,6 +8971,13 @@ struct ApiServer::Impl {
             sync_store.search_index_spent(workspace_id, bytes);
         };
         return index;
+    }
+
+    // Before any member goes: a workspace store request still finishing on liquid's runtime
+    // (lake#1353) no longer reaches this server's metrics, and one being counted now finishes.
+    ~Impl() {
+        std::unique_lock detached(object_request_metrics->mutex);
+        object_request_metrics->metrics = nullptr;
     }
 
     explicit Impl(ServerOptions opts)

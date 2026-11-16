@@ -709,6 +709,15 @@ The process metrics `lake_workspace_store_requests_total{kind,outcome}` and
 `lake_workspace_store_request_duration_seconds{kind}` and each response's `store` Server-Timing
 entries give the same counts on dev; a deployed measurement belongs in the deployment record.
 
+A workspace store's object client reaches those metrics through a link the server owns, never
+through the server itself (lake#1353). Liquid can still finish a store's work after the server
+that opened it is gone: a destroyed repository releases its lease in the background on liquid's
+own runtime, so its last request can be answered after `ApiServer` was destroyed, in a draining
+pod as in the tests. The server cuts the link first thing in its destruction (waiting for a count
+in progress), so such a request is sent and answered but no longer counted. An AddressSanitizer
+run of `WorkspaceStoreHandoff.*` ([testing](../build/testing.md#addresssanitizer)) found it as a
+heap-use-after-free in `ZettaObjectClient::send`.
+
 ### One fsync per operation (lake#535)
 
 **On dev** (lake `20261006d`, `d86f1ca`, 2026-10-06, before lake#535), a one-file commit to
