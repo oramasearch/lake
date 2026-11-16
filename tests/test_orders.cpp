@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -2561,11 +2562,17 @@ TEST(OrdersEntitlement, DesiredStateViewSurvivesALaterColumnOnCloudOrders) {
         return names;
     };
     pqxx::work tx(connection);
+    // The view names cloud_orders' columns as of 0097 (through entitlement_retry_invoice_id);
+    // columns a later migration adds to cloud_orders (0107's contact_email_confirmed_at) are not
+    // in it unless that migration appends them after desired_state.
     auto expected = columns(tx, "cloud_orders");
+    const auto last_0097 = std::ranges::find(expected, std::string("entitlement_retry_invoice_id"));
+    ASSERT_NE(last_0097, expected.end());
+    expected.erase(std::next(last_0097), expected.end());
     expected.push_back("entitlement_state");
     expected.push_back("desired_state");
     EXPECT_EQ(columns(tx, "cloud_order_desired_state"), expected)
-        << "the view lists every cloud_orders column, then its two own";
+        << "the view lists cloud_orders' columns as of 0097, then its two own";
     tx.exec("ALTER TABLE cloud_orders ADD COLUMN later_column text");
     tx.exec(schema);
     EXPECT_EQ(columns(tx, "cloud_order_desired_state"), expected)
