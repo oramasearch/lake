@@ -72,6 +72,22 @@ std::map<std::string, std::string> request_log_ids(const Params& params) {
     return ids;
 }
 
+// The method a request is counted and logged under (lake#1315): its standard name, or `other`
+// for any method HTTP does not define. A client may send any token as the method, and each new
+// label value is a new metric series kept for the life of the process, so the client's text is
+// never a label or a log field. Methods are case-sensitive (RFC 9110 section 9.1): `get` is
+// `other`.
+inline std::string_view request_method_label(std::string_view method) {
+    static constexpr std::string_view standard[] = {
+        "GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH"};
+    for (const std::string_view name : standard) {
+        if (method == name) {
+            return name;
+        }
+    }
+    return "other";
+}
+
 // Whether a route pattern is a capability call's: REST `/v1/<capability>` or MCP.
 inline bool request_log_capability_route(std::string_view route) {
     return route.starts_with("/v1/") || route.starts_with("/w/:workspace_id/v1/") ||

@@ -9283,7 +9283,7 @@ struct ApiServer::Impl {
                         std::chrono::steady_clock::time_point start) {
         const double duration_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-        const std::string method(route.req.method_text());
+        const std::string method(request_method_label(route.req.method_text()));
         const int status_code = route.res.status_int();
         const std::string status = std::to_string(status_code);
         const telemetry::Labels labels{
@@ -17286,13 +17286,13 @@ bool ApiServer::start() {
     };
     limits.admission_wait = impl.options.store_owner_wait + std::chrono::minutes(2);
     // Answered before any route: logged and counted like a routed request, named by the reason.
-    limits.refused = [&impl](std::string_view method, unsigned status, std::string_view reason) {
-        const telemetry::Labels labels{{"method", std::string(method)},
-                                       {"route", std::string(reason)},
-                                       {"status", std::to_string(status)}};
+    limits.refused = [&impl](std::string_view sent, unsigned status, std::string_view reason) {
+        const std::string method(request_method_label(sent));
+        const telemetry::Labels labels{
+            {"method", method}, {"route", std::string(reason)}, {"status", std::to_string(status)}};
         impl.metrics.increment_counter("lake_http_requests_total", labels);
         RequestLogEntry entry{.ts = log_timestamp(),
-                              .method = std::string(method),
+                              .method = method,
                               .route = std::string(reason),
                               .status = static_cast<int>(status),
                               .duration_ms = 0.0,

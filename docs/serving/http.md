@@ -357,7 +357,8 @@ runs is logged as one JSON line on stdout:
 ```
 
 Like the request log line, it names the route pattern and never the raw path
-(lake#384, [telemetry.md](telemetry.md#request-logs)).
+(lake#384, [telemetry.md](telemetry.md#request-logs)), and the method by its standard name or
+`other` (lake#1315, [telemetry.md](telemetry.md#the-method-label)).
 
 The request id is the caller's `X-Request-Id`, or a new UUID. The request is then answered `500`
 with `Cache-Control: no-store` and `X-Request-Id`: a standalone HTML error page
