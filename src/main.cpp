@@ -25,6 +25,7 @@
 #include "lake/api/tunnel_clients.hpp"
 #include "lake/api/white_label.hpp"
 #include "lake/control/agent_bus.hpp"
+#include "lake/control/agent_task_proxy.hpp"
 #include "lake/control/agent_library.hpp"
 #include "lake/control/agent_runs.hpp"
 #include "lake/control/memory_store.hpp"
@@ -754,8 +755,10 @@ int main(int argc, char** argv) {
     }
     workspace_config.internal_url = opts.internal_url;
     workspace_config.agent_service_token = env_or("LAKE_AGENT_SERVICE_TOKEN", "");
-    workspace_config.agent_bus_tokens =
-        lake::control::read_agent_bus_tokens(env_or("LAKE_AGENT_BUS_DIR", ""));
+    // Re-read whenever the directory changes, so the operator adds or removes a workspace's bound
+    // credential without restarting lake (lake#871).
+    workspace_config.agent_bus_credentials =
+        std::make_shared<lake::control::AgentBusCredentials>(env_or("LAKE_AGENT_BUS_DIR", ""));
     if (const std::string limit = env_or("LAKE_SERVICES_PER_CUSTOMER", ""); !limit.empty()) {
         std::size_t parsed = 0;
         const auto [end, error] =

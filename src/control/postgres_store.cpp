@@ -5211,9 +5211,9 @@ public:
         "a.generation, a.phase, a.url, a.ready, a.message, a.observed_generation, "
         "to_char(a.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "a.source_entrypoint, a.token_hashes_json::text, COALESCE(a.workspace_id::text, ''), "
-        "a.restart_generation";
+        "a.restart_generation, a.token_generation, a.token_hashes_generation";
     // The number of web_app_columns: a query that selects more after them reads its own from here.
-    static constexpr int web_app_column_count = 28;
+    static constexpr int web_app_column_count = 30;
 
     static WebApp web_app_from(const pqxx::row& row) {
         WebApp app;
@@ -5245,6 +5245,10 @@ public:
         app.token_hashes = nlohmann::json::parse(row[25].as<std::string>());
         app.workspace_id = row[26].as<std::string>();
         app.restart_generation = row[27].as<std::int64_t>();
+        app.token_generation = row[28].as<std::int64_t>();
+        if (!row[29].is_null()) {
+            app.token_hashes_generation = row[29].as<std::int64_t>();
+        }
         return app;
     }
 
@@ -5549,8 +5553,19 @@ public:
                 current->auth,
                 patch.restart);
             if (patch.rotate_tokens) {
-                tx.exec_params(
-                    "UPDATE apps SET token_hashes_json = '{}'::jsonb WHERE id = $1::uuid", id);
+                // Rotation is desired state (lake#1070): Lake asks for the next generation, and
+                // every token stops verifying until the operator writes hashes for it. Only an
+                // operator that has never reported a generation still needs Lake to clear the
+                // hashes, which is the one write Lake makes to the operator's column, and it
+                // stops as soon as that operator is upgraded.
+                const pqxx::result rotated = tx.exec_params(
+                    "UPDATE apps SET token_generation = token_generation + 1 WHERE id = $1::uuid "
+                    "RETURNING token_hashes_generation IS NULL",
+                    id);
+                if (!rotated.empty() && rotated[0][0].as<bool>()) {
+                    tx.exec_params(
+                        "UPDATE apps SET token_hashes_json = '{}'::jsonb WHERE id = $1::uuid", id);
+                }
             }
             // The stores it mounts (lake#666): replaced when asked, and none once deleted.
             if (desired == "deleted") {

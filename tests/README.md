@@ -121,7 +121,11 @@ cover the capabilities; `AgentRuns.ApplicationAgentWritesAppsOnlyAfterTheProposa
 workspace notice recovery and racing-terminal-write cases on memory and PostgreSQL stores.
 It checks that a retry notice is the task's message (the web app shows it), legacy migration
 adoption, schema reapplication, the partial expiry index, and duration bounds without clock sleeps.
-The Streams task-credential fixture takes a real claim before making calls. See
+The Streams task-credential fixture takes a real claim before making calls. It also checks task
+credentials by reference (lake#871): a `by_reference` claim answers no credential, the task opens
+only for its own agent while it runs, and a workspace-bound bus credential reaches only its
+workspace, and `AgentBusKeys.TheDirectoryIsReReadWhenItChanges` that credentials added, removed or
+swapped by a Secret update take effect without a restart. See
 [agent-bus.md](../docs/api/agent-bus.md).
 
 `HttpResponseIsolation.AskOramaSaysWhoIsWorkingOnALongTurn` (lake#451) runs a real Ask Orama
@@ -1080,3 +1084,7 @@ area, the query runs only on an engine that enforces it, `get_dataset` names its
 other proven calls go without it, and a scoped answer never comes from the definitions cache. `AgentRuns.RunsMadeBeforeWorkAreasAreRecreatedOrFlagged` (`test_workspaces.cpp`) covers the
 rows made before lake#1055: a conversation service is re-created on the next turn, and launches and
 schedules are flagged `recreate`. See [agent-launches.md](../docs/api/agent-launches.md#a-runs-dataset-work-area).
+`PostgresWebApps.TokenRotationIsAGenerationTheOperatorAcknowledges` and the rotation steps of
+`WebApps.OperatorHashesRestrictEveryPurposeAndRotationRevokesOldTokens` check lake#1070: with an
+operator that reports no generation, rotation clears the hashes; with one that does, it leaves them
+and the unacknowledged generation revokes them until the operator writes the next.

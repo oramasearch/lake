@@ -287,6 +287,11 @@ with the `repository_refs` table (lake#319).
 `application_authorization_codes.cpp` keeps an application's authorization codes in its workspace
 (lake#363). The stores no longer write or read `auth_app_authorization_codes`, which `0070`
 drops.
+`agent_task_proxy.cpp` resolves a library agent's bus credential plus `X-Lake-Agent-Task` to the
+principal of a task running on that agent, so a task claimed by reference is never handed its
+credential, and splits a `LAKE_AGENT_BUS_DIR` file name into the agent and its bound workspace
+(lake#871). Its `AgentBusCredentials` re-reads that directory whenever its modification time or
+`..data` link changes, so a credential added or removed takes effect on the next request.
 `agent_task_records.cpp` keeps what was written for an agent task in its workspace (lake#374,
 lake#375). The stores keep only the dispatch half: `create_agent_task` inserts no body (and takes
 the caller's `id` and `parent_task_id`), `record_agent_task_event` moves the phase and clears lake's
@@ -413,3 +418,7 @@ docs/api/platform.md#custom-domains): the question and answer codecs (`encode_tx
 `decode_txt_answer`), `/etc/resolv.conf`'s name servers, and `lookup_txt`, one bounded UDP question
 per server with a TCP retry when the answer is truncated. POSIX sockets only; `verify_domain` runs it
 on the blocking pool. Both stores keep the claims (`domain_claims`, migration `0106_domain_claims`).
+App token rotation is desired state (lake#1070): `update_web_app` with `rotate_tokens` increments
+`apps.token_generation` and clears `token_hashes_json` only for an app whose operator reports no
+`token_hashes_generation`; `web_app_token_purpose` (`web_apps.cpp`) refuses every hash while the
+two generations differ. See [web-apps.md](../../docs/control-plane/web-apps.md#token-rotation).

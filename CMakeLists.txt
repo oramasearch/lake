@@ -285,6 +285,7 @@ add_library(lake-core STATIC
   src/control/repository_records.cpp
   src/control/oci_records.cpp
   src/control/agent_task_records.cpp
+  src/control/agent_task_proxy.cpp
   src/control/metering.cpp
   src/control/workspace_audit.cpp
   "${LAKE_LIQUID_SOURCE_DIR}/src/scan/detectors.cpp"

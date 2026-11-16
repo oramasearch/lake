@@ -189,7 +189,9 @@ exact revision. Zetta calls retain the workspace read allow-list and read-only S
 ([SQL on the Zetta route](workspaces.md#sql-on-this-route), lake#1229). Every
 other capability or target is refused. The registry accepts the pull token only as HTTP Basic user
 `app`, with the token as the password. It cannot read another app or `<space>/cache/...`, and it
-cannot start uploads or publish manifests. New hashes invalidate prior tokens; unbinding or
+cannot start uploads or publish manifests. Rotation is a token generation the operator
+acknowledges: a hash verifies only while the operator's generation matches the one Lake asked for
+([token rotation](../control-plane/web-apps.md#token-rotation), lake#1070). New hashes invalidate prior tokens; unbinding or
 deletion revokes workload access. Events remain available during teardown until the operator
 reports `Deleted`.
 

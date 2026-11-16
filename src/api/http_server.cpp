@@ -28,6 +28,7 @@
 #include "lake/control/agents.hpp"
 #include "lake/control/agent_library.hpp"
 #include "lake/control/agent_bus.hpp"
+#include "lake/control/agent_task_proxy.hpp"
 
 #include <algorithm>
 #include <array>
@@ -9554,19 +9555,49 @@ struct ApiServer::Impl {
         return "unmatched";
     }
 
-    // The library agent a bus credential belongs to, or empty. Every token is compared, so the
-    // time taken does not say which one was close.
-    std::string bus_agent_for(const std::string& bearer) const {
+    // The library agent a bus credential belongs to, and the workspace it is bound to (empty
+    // agent: none). Every token is compared, so the time taken does not say which one was close.
+    control::AgentBusKey bus_agent_for(const std::string& bearer) const {
         std::string found;
         if (bearer.empty() || !options.workspaces) {
-            return found;
+            return {};
         }
-        for (const auto& [agent, token] : options.workspaces->config().agent_bus_tokens) {
+        // LAKE_AGENT_BUS_DIR as it is now, re-read when it changed (lake#871): a workspace's
+        // credential the operator removed stops working on the next request.
+        const auto& config = options.workspaces->config();
+        const auto reloaded =
+            config.agent_bus_credentials ? config.agent_bus_credentials->current() : nullptr;
+        for (const auto& [name, token] : reloaded ? *reloaded : config.agent_bus_tokens) {
             if (constant_time_equal(bearer, token)) {
-                found = agent;
+                found = name;
             }
         }
-        return found;
+        return found.empty() ? control::AgentBusKey{} : control::agent_bus_key(found);
+    }
+
+    // A credential's principal onto the call's context.
+    static void apply_principal(ApiContext& ctx, const control::Principal& principal) {
+        ctx.authorized = true;
+        ctx.session_credential = true;
+        ctx.acting_user_id = principal.user_id;
+        ctx.acting_identity = principal.taap_id;
+        ctx.credential_device_id = principal.device_id;
+        ctx.credential_session_id = principal.session_id;
+        ctx.credential_kind = principal.kind;
+        ctx.credential_workload_id = principal.workload_id;
+        ctx.credential_customer_id = principal.workload_customer_id;
+        ctx.credential_repository_id = principal.workload_repository_id;
+        ctx.credential_revision = principal.workload_revision;
+        ctx.credential_token_hash = principal.workload_token_hash;
+        ctx.credential_expires_at_unix = principal.expires_at_unix;
+        ctx.pool_id = principal.pool_id;
+        ctx.scopes = principal.scopes;
+        // A browser key acts as no person and is no session (lake#1152): the registry admits it
+        // only to what it is bound to.
+        if (principal.browser_key) {
+            ctx.session_credential = false;
+            ctx.browser_key = principal.browser_key;
+        }
     }
 
     ApiContext context_for(const boost::http::route_params& route) const {
@@ -9711,13 +9742,32 @@ struct ApiServer::Impl {
             ctx.authorized = true;
             ctx.acting_identity = "admin";
             ctx.operator_credential = true;
-        } else if (const std::string agent = bus_agent_for(bearer); !agent.empty()) {
+        } else if (const control::AgentBusKey bus = bus_agent_for(bearer);
+                   !bus.agent.empty() && route.req.count(control::agent_task_header) != 0) {
+            // A library agent acting for a task it is running, by reference (lake#871,
+            // docs/api/agent-bus.md#task-credentials-by-reference): Lake adds the task's
+            // credential to this request, so the agent never holds it. Anything but a task
+            // running on this agent (in its bound workspace) is refused as a wrong credential,
+            // never answered as the bus credential.
+            const std::string task_id(route.req.at(control::agent_task_header));
+            auto principal = options.store
+                                 ? control::agent_task_principal(*options.store, task_id, bus)
+                                 : control::Result<control::Principal>(std::unexpected(
+                                       control::StoreError{"not_found", "no store"}));
+            if (principal) {
+                apply_principal(ctx, *principal);
+                ctx.agent_service_workspace_id = bus.workspace_id;
+            } else {
+                ctx.credential_rejection = "invalid";
+            }
+        } else if (!bus.agent.empty()) {
             // A library agent on the agent bus (docs/api/agent-bus.md): it may only reach the
             // bus's capabilities, which check for this kind and this agent themselves.
             ctx.authorized = true;
-            ctx.acting_identity = "agent-service:" + agent;
+            ctx.acting_identity = "agent-service:" + bus.agent;
             ctx.credential_kind = "agent_service";
-            ctx.agent_service = agent;
+            ctx.agent_service = bus.agent;
+            ctx.agent_service_workspace_id = bus.workspace_id;
         } else if (!bearer.empty() && options.store) {
             auto principal = options.store->context_for(bearer);
             if (principal && principal->pool_id != "lake") {
@@ -9728,27 +9778,7 @@ struct ApiServer::Impl {
                 // on the user's own sign-in in its pool (Capability::serves_application_pools).
                 ctx.application_session = *principal;
             } else if (principal) {
-                ctx.authorized = true;
-                ctx.session_credential = true;
-                ctx.acting_user_id = principal->user_id;
-                ctx.acting_identity = principal->taap_id;
-                ctx.credential_device_id = principal->device_id;
-                ctx.credential_session_id = principal->session_id;
-                ctx.credential_kind = principal->kind;
-                ctx.credential_workload_id = principal->workload_id;
-                ctx.credential_customer_id = principal->workload_customer_id;
-                ctx.credential_repository_id = principal->workload_repository_id;
-                ctx.credential_revision = principal->workload_revision;
-                ctx.credential_token_hash = principal->workload_token_hash;
-                ctx.credential_expires_at_unix = principal->expires_at_unix;
-                ctx.pool_id = principal->pool_id;
-                ctx.scopes = principal->scopes;
-                // A browser key acts as no person and is no session (lake#1152): the registry
-                // admits it only to what it is bound to.
-                if (principal->browser_key) {
-                    ctx.session_credential = false;
-                    ctx.browser_key = principal->browser_key;
-                }
+                apply_principal(ctx, *principal);
             } else {
                 // Said apart so a caller knows to renew rather than fix its key (lake#450).
                 ctx.credential_rejection =

@@ -19,6 +19,8 @@
 
 namespace lake::control {
 
+class AgentBusCredentials;
+
 // Installs the egress allowlist zetta's client consults for every connection lake makes to a Zetta
 // (the bus and each workspace Zetta). zetta v0.5.0's client refuses all but loopback until one is
 // installed (lake#1097); the operator renders the list as ZETTA_EGRESS_ALLOW, in zetta's syntax
@@ -55,6 +57,11 @@ struct WorkspaceConfig {
     // agent in LAKE_AGENT_BUS_DIR, named by its key, which the operator mounts into that agent
     // alone. Never the service token, which user-created agents on agent-runtime also hold.
     std::map<std::string, std::string> agent_bus_tokens;
+    // The same credentials read from LAKE_AGENT_BUS_DIR and re-read whenever the directory
+    // changes (control/agent_task_proxy.hpp, lake#871), so a workspace's bound credential is
+    // picked up or dropped without restarting lake. When set, it is used instead of
+    // agent_bus_tokens.
+    std::shared_ptr<AgentBusCredentials> agent_bus_credentials;
     std::map<std::string, int> agent_lease_seconds;
 
     bool configured() const {

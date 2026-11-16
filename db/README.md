@@ -42,6 +42,13 @@ reported as warnings, not changed. No table changes; guard `service_workspace_ro
 Numbered after the open `0106` (lake#1295), `0107` to `0109` (lake#1296) and `0110` (lake#1300).
 The operator vendors the schema and selects the guard before the image rolls. See
 [services](../docs/control-plane/services.md#workspace-routing) and
+Migration `0112_app_token_generation` (lake#1070) adds `apps.token_generation` (Lake's desired token
+generation, which rotation increments) and the nullable `apps.token_hashes_generation` (the
+operator's acknowledged one), with the guard `app_token_generation_guard`. Additive. Numbered after
+the open `0106` to `0111` (lake#1295, #1296, #1300, #1302). Apply before the new binary: the
+operator vendors the schema and selects the guard. Lake is safe with an operator that does not
+write the new column yet (it clears the hashes as before). See
+[web-apps.md](../docs/control-plane/web-apps.md#token-rotation) and
 [schema.md](../docs/control-plane/schema.md).
 Migration `0105_agent_model_prices` (lake#1230) seeds the `model_tokens` rates of the gpt-6.x models
 the gateway now serves and the long-context classes `<model>@long/input` and `<model>@long/output`

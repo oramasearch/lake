@@ -1672,6 +1672,91 @@ TEST(PostgresWebApps, ARestartRecordsTheGenerationTheOperatorRollsThePodsOn) {
     EXPECT_FALSE(tx.exec("SELECT to_regclass('app_restarts_guard')")[0][0].is_null());
 }
 
+// lake#1070: rotation is desired state. Lake asks for the next token generation, a hash verifies
+// only while the operator's acknowledged generation matches, and Lake writes token_hashes_json only
+// for an operator that has never reported a generation.
+TEST(PostgresWebApps, TokenRotationIsAGenerationTheOperatorAcknowledges) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:rotate-" + suffix, "rotate-" + suffix + "@example.com", "Apps"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "rt-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto workspace = store->create_workspace({customer->id, "apps", "dev", ""});
+    ASSERT_TRUE(workspace);
+    lake::control::NewWebApp app;
+    app.customer_id = customer->id;
+    app.workspace_id = workspace->id;
+    app.name = "rotating";
+    app.mode = "image";
+    app.image = "registry.example/rotating@sha256:" + std::string(64, 'b');
+    app.framework = "container";
+    app.port = 8080;
+    app.host = "rotating-" + suffix + ".apps.example.test";
+    const auto created = store->create_web_app(app);
+    ASSERT_TRUE(created) << created.error().message;
+    EXPECT_EQ(created->token_generation, 0);
+    EXPECT_FALSE(created->token_hashes_generation);
+
+    const std::string token = "rotate-source-" + suffix;
+    const json hashes{{"source", lake::control::identity_crypto::sha256_hex(token)}};
+    // What the operator writes: the hashes, and from an upgraded operator, their generation.
+    const auto operator_writes = [&](const json& values, std::optional<std::int64_t> generation) {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        if (generation) {
+            tx.exec_params("UPDATE apps SET token_hashes_json = $2::jsonb, "
+                           "token_hashes_generation = $3 WHERE id = $1::uuid",
+                           created->id,
+                           values.dump(),
+                           *generation);
+        } else {
+            tx.exec_params("UPDATE apps SET token_hashes_json = $2::jsonb WHERE id = $1::uuid",
+                           created->id,
+                           values.dump());
+        }
+        tx.commit();
+    };
+    lake::control::WebAppPatch rotate;
+    rotate.rotate_tokens = true;
+
+    // An operator that reports no generation: Lake clears the hashes, as before.
+    operator_writes(hashes, std::nullopt);
+    ASSERT_TRUE(store->context_for(token));
+    const auto legacy = store->update_web_app(created->id, rotate);
+    ASSERT_TRUE(legacy) << legacy.error().message;
+    EXPECT_EQ(legacy->token_generation, 1);
+    EXPECT_TRUE(legacy->token_hashes.empty());
+    EXPECT_FALSE(store->context_for(token));
+
+    // An operator that acknowledges: Lake leaves the hashes alone and the mismatch revokes them.
+    operator_writes(hashes, 1);
+    ASSERT_TRUE(store->context_for(token));
+    const auto acknowledged = store->update_web_app(created->id, rotate);
+    ASSERT_TRUE(acknowledged) << acknowledged.error().message;
+    EXPECT_EQ(acknowledged->token_generation, 2);
+    EXPECT_EQ(acknowledged->token_hashes, hashes);
+    EXPECT_EQ(acknowledged->token_hashes_generation, 1);
+    EXPECT_FALSE(store->context_for(token));
+
+    // The operator mints the next generation; only its tokens verify.
+    const std::string replacement = "rotate-replacement-" + suffix;
+    operator_writes({{"source", lake::control::identity_crypto::sha256_hex(replacement)}}, 2);
+    EXPECT_FALSE(store->context_for(token));
+    EXPECT_TRUE(store->context_for(replacement));
+
+    pqxx::connection connection(uri);
+    pqxx::work tx(connection);
+    EXPECT_FALSE(tx.exec("SELECT to_regclass('app_token_generation_guard')")[0][0].is_null());
+}
+
 TEST(PostgresWebApps, DesiredStateQuotaNotifyAndOperatorStatusFollowTheContract) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {

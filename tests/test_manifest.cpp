@@ -181,6 +181,19 @@ TEST(LakeManifest, MarksWhatTheOperatorMustSupply) {
     }
 }
 
+// orama-operator#1176 runs per-workspace library agents only for an image that lists this
+// (lake#871).
+TEST(LakeManifest, ListsTheFeaturesTheOperatorSwitchesOn) {
+    const auto manifest = lake::api::operator_manifest();
+    ASSERT_TRUE(manifest.contains("features"));
+    ASSERT_TRUE(manifest["features"].is_array());
+    const auto& features = manifest["features"];
+    EXPECT_NE(std::find(features.begin(), features.end(),
+                        nlohmann::json("agent_bus_workspace_credentials")),
+              features.end());
+    EXPECT_EQ(manifest["manifest_version"], 1) << "the array is additive";
+}
+
 TEST(LakeManifest, CarriesTheSchemaFileByteForByte) {
     const std::string file = read_source("db/schema.sql");
     ASSERT_FALSE(file.empty());

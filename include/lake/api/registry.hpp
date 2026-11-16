@@ -505,6 +505,10 @@ struct ApiContext {
     std::string internal_url;
     // The library agent whose bus credential authenticated the call (LAKE_AGENT_BUS_DIR), or empty.
     std::string agent_service;
+    // The workspace that bus credential is bound to (a file `<agent>.<workspace id>` in
+    // LAKE_AGENT_BUS_DIR, lake#871), or empty for the agent's shared credential. A bound
+    // credential reaches only that workspace's tasks.
+    std::string agent_service_workspace_id;
     // LAKE_ALLOW_NON_EXPIRING_CREDENTIALS: the instance-wide switch over every customer's opt-in
     // to keys and tokens that never expire (lake#234).
     bool non_expiring_credentials_allowed = true;

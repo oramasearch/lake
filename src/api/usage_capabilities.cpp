@@ -1667,6 +1667,12 @@ std::expected<Reporter, ApiResult> reporter_of(const json& input, ApiContext& co
                                    "the task is not running; usage is reported while it runs",
                                    "/task_id"));
         }
+        // A bus credential bound to one workspace reports only that workspace's tasks (lake#871).
+        if (!context.agent_service_workspace_id.empty() &&
+            task->workspace_id != context.agent_service_workspace_id) {
+            return std::unexpected(ApiResult::failure(
+                "conflict", "the task is not in this bus credential's workspace", "/task_id"));
+        }
         return Reporter{task->workspace_id, task->agent, task->id, task->customer_id};
     }
     if (context.credential_kind == "agent_task") {
