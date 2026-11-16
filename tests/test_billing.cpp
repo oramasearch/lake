@@ -1020,7 +1020,7 @@ TEST(Billing, ModelInputAndOutputHaveExactPricesAndCannotFallBackToTheBlendedRat
     EXPECT_EQ(empty.error.code, "conflict");
 }
 
-// LSR-121 (lake#988): deleting a workspace never takes its consumed usage off a bill that has not
+// lake#988: deleting a workspace never takes its consumed usage off a bill that has not
 // been issued. delete_workspace retains the usage before the cascade, the month's bill and
 // usage_over_time still count it, values the recorder held are added later, a repeated delete
 // writes the same rollup, and a deletion whose usage cannot be read is refused.

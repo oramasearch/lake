@@ -180,7 +180,7 @@ bool mcp_public_address(const std::vector<std::uint8_t>& bytes) {
         std::all_of(bytes.begin() + 4, bytes.begin() + 12, [](auto b) { return b == 0; })) {
         return v4(bytes[12], bytes[13], bytes[14], bytes[15]); // NAT64, 64:ff9b::/96
     }
-    // Only global unicast, 2000::/3, is public (LSR-265, lake#1008). That refuses every other form,
+    // Only global unicast, 2000::/3, is public (lake#1008). That refuses every other form,
     // among them IPv4-compatible ::a.b.c.d, site-local fec0::/10, local-use NAT64 64:ff9b:1::/48,
     // unique-local, link-local and multicast.
     if ((bytes[0] & 0xE0) != 0x20) {

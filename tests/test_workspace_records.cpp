@@ -4189,7 +4189,7 @@ TEST_P(WorkspaceRecordStores, McpConnectionsLiveInTheirWorkspaceAndKeepTheirToke
                                       mcp_context,
                                       "test"));
     EXPECT_TRUE(json::parse(**missing)["result"]["isError"].get<bool>());
-    // LSR-187 (lake#993): no credential, or a person of another space, reaches nothing.
+    // lake#993: no credential, or a person of another space, reaches nothing.
     {
         auto anonymous = t.context(first);
         anonymous.authorized = false;
@@ -4734,7 +4734,7 @@ TEST_P(WorkspaceRecordStores, McpConnectionStreamsMirrorNotificationsAndDriveThe
                                     {"subscribe_resources", json::array({"memo://inbox"})}}));
     ASSERT_TRUE(streams.ok) << streams.error.message;
     EXPECT_EQ(streams.value["streams"]["input_topic"], "inbox-in");
-    // LSR-190 (lake#996): a stream Lake writes itself is never a connection's topic.
+    // lake#996: a stream Lake writes itself is never a connection's topic.
     for (const char* field : {"input_topic", "output_topic", "notifications_topic"}) {
         for (const char* system : {"agent-tasks.agent-ask-orama", "agent-events", "build-events.b1",
                                    "run-metrics.r1", "app-events.a1", "study-events.s1"}) {
@@ -4800,7 +4800,7 @@ TEST_P(WorkspaceRecordStores, McpConnectionStreamsMirrorNotificationsAndDriveThe
     EXPECT_EQ(worker.pass(owner).results, 0U) << "published once";
 }
 
-// lake#980 (LSR-113): a server that takes longer than the open budget to answer its subscriptions
+// lake#980: a server that takes longer than the open budget to answer its subscriptions
 // is dropped and backs off, so the next pass does not contact it; a pass out of budget starts no
 // connection and resumes where it stopped; changing the connection clears the back-off.
 TEST_P(WorkspaceRecordStores, McpStreamWorkerASlowServerBacksOffAndThePassKeepsItsBudget) {
@@ -6928,7 +6928,7 @@ TEST_P(WorkspaceRecordStores, MethodologiesAreTheWorkspacesOwnAndOramasStayReadO
     const auto no_target =
         t.call(first, "run_methodology", in(first, 0, {{"id", id}, {"dataset", "sales.payers"}}));
     EXPECT_EQ(no_target.error.path, "/target");
-    // LSR-191 (lake#997): a dataset name cannot carry SQL comment syntax past the paging clauses.
+    // lake#997: a dataset name cannot carry SQL comment syntax past the paging clauses.
     for (const char* hostile : {"sales.payers--", "sales.payers-- x", "sales.--payers", "-sales.payers",
                                 "sales..payers", "sales.payers.x"}) {
         const auto refused = t.call(first,
@@ -7278,7 +7278,7 @@ TEST_P(WorkspaceRecordStores, MethodologiesAreTheWorkspacesOwnAndOramasStayReadO
     crashed.phase = "Failed";
     crashed.message = "the methodology's code exited with 1";
     ASSERT_TRUE(t.store->put_methodology_run_status(failing_run, crashed));
-    // A member who may only read the account reads it as it stands (LSR-195, lake#1001): nothing
+    // A member who may only read the account reads it as it stands (lake#1001): nothing
     // is queued under the reader, and no trial is stopped.
     const auto account = store->find_policy_object("customer", first.customer_id);
     ASSERT_TRUE(account) << account.error().message;

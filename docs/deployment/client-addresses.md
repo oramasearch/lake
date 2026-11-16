@@ -126,7 +126,7 @@ global budgets still hold such a caller.
   recoveries, each with a new `X-Real-IP`. From an untrusted peer the 101st is `rate_limited`; from
   a trusted one a new address still has its budget.
 - `OrdersApex.ForwardingHeadersFromAnUntrustedPeerNeverMakeAFreshBucket` (`tests/test_orders.cpp`,
-  lake#1006, LSR-200): with `none` on the main listener, ten orders from one peer, each with a new
+  lake#1006): with `none` on the main listener, ten orders from one peer, each with a new
   `X-Real-IP` and `X-Forwarded-For`, are one client past its limit; the proxy listener still
   counts a new visitor.
 - `HttpServer.ForwardedHeadersAreBelievedOnlyOnTheProxyListener`: with `none` on the main listener,

@@ -594,7 +594,7 @@ TEST(OwnIdentity, ASignInDocumentNamingAnotherIdentityIsRefused) {
     EXPECT_FALSE(lake::control::own_identity::verify_document(base64url(*forged_encoded)));
 }
 
-// LSR-198 (lake#1004): the replay key is what the signature authenticates. An extra member in the
+// lake#1004: the replay key is what the signature authenticates. An extra member in the
 // signature object is refused, and the same signed assertion gives the same key however its
 // signature object is ordered.
 TEST(OwnIdentity, ATaapAssertionHasOneReplayKeyAndNoUnknownSignatureMembers) {

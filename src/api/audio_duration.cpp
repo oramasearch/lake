@@ -63,7 +63,7 @@ std::optional<double> wav_seconds(Bytes data) {
         if (id == "fmt ") {
             byte_rate = le(data, at + 16, 4).value_or(0);
             // The rate the samples imply: a header may overstate byte_rate to shorten the
-            // recording it bills (LSR-112, lake#979), so the smaller of the two is used.
+            // recording it bills (lake#979), so the smaller of the two is used.
             const auto channels = le(data, at + 10, 2).value_or(0);
             const auto sample_rate = le(data, at + 12, 4).value_or(0);
             const auto bits = le(data, at + 22, 2).value_or(0);

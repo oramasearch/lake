@@ -273,7 +273,7 @@ objects of its own folder.
 repository's grants. Drive always decided a path by the nearest object on it that counts
 (`nearest_drive_location`). Before lake#975 the other reads of repository content authorized only
 the repository, so a repository reader without a grant on the cut still read what it protects
-(finding LSR-108 of the 2026-10 security review). Now every one decides each path the way Drive
+(lake#975). Now every one decides each path the way Drive
 does, through `RepositoryPathAccess` (`src/api/repository_path_access.cpp`):
 
 | Read | What a cut the caller cannot read does |

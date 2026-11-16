@@ -495,7 +495,7 @@ TEST(Search, SubstringRegexAndRankedQueriesUseTheirExpectedOrder) {
     ASSERT_TRUE(regex) << regex.error().message;
     EXPECT_EQ(regex->items.size(), 2U);
 
-    // LSR-117 (lake#984): a pattern that can backtrack without end, or an overlong one, is refused.
+    // lake#984: a pattern that can backtrack without end, or an overlong one, is refused.
     for (const std::string pattern : {"/(a+)+$/", "/(x*y?)*/", "/(\\w+\\s?)+z/"}) {
         const auto refused = service.query({pattern, "customer", "", "", 20}, "admin", control);
         ASSERT_FALSE(refused) << pattern;

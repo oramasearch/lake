@@ -290,7 +290,7 @@ TEST_P(NetworkStore, GrantsRevokeWithoutAUnifyingDesiredColumn) {
     verify_audit(created->id, "tunnel_grant");
 }
 
-// lake#983 (LSR-116): a new grant past the workspace's or the account's active grant cap is
+// lake#983: a new grant past the workspace's or the account's active grant cap is
 // refused with quota_exceeded and writes nothing; a revoked grant frees its place, and an account
 // elsewhere is unaffected.
 TEST_P(NetworkStore, ActiveTunnelGrantsAreCappedPerWorkspaceAndPerAccount) {

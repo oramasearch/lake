@@ -77,7 +77,7 @@ operator side is orama-operator's LakeApp `spec.sync.restartGeneration`.
 ### Token rotation
 
 Detaching an app's Zetta rotates its tokens (`set_app_zetta_binding`, `WebAppPatch::rotate_tokens`).
-Decided under Steve's 2026-11-14 delegation (lake#1070): rotation is desired state that the
+By lake#1070, rotation is desired state that the
 operator acknowledges, and Lake stops writing the operator's column. Migration
 `0112_app_token_generation` adds:
 

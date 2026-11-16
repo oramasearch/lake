@@ -5219,7 +5219,7 @@ INSERT INTO schema_migrations (version) VALUES ('0105_agent_model_prices') ON CO
 -- One row per host (the primary key, lowercase), so a host is claimed by one environment at a
 -- time: create_domain inserts the claim in one statement and answers `conflict` when another
 -- environment holds it. The claim carries a random token the tenant publishes as a TXT record at
--- `_lake-challenge.<host>`; verify_domain reads it and sets `verified` (Steve, 2026-11-14). Only a
+-- `_lake-challenge.<host>`; verify_domain reads it and sets `verified`. Only a
 -- verified claim's domain row is written to the operator's orama_control.domains, and the
 -- operator acts only on a domain whose claim here is verified. delete_domain releases the claim.
 -- Multitenancy (which environment of which account holds a name), so in the control plane beside
@@ -5244,7 +5244,7 @@ CREATE INDEX IF NOT EXISTS domain_claims_environment_idx
 CREATE TABLE IF NOT EXISTS domain_claims_guard (applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0106_domain_claims') ON CONFLICT DO NOTHING;
 
--- 0107_order_email_confirmation (lake#1000, LSR-194, docs/api/orders.md#email): an order form's
+-- 0107_order_email_confirmation (lake#1000, docs/api/orders.md#email): an order form's
 -- contact email is anyone's to type, so until the person who sent it follows the confirmation link
 -- the order mails that address only the confirmation and tells support nothing.
 -- `contact_email_confirmed_at` is when they did; NULL until then. A checkout order needs none: its
@@ -5275,7 +5275,7 @@ CREATE TABLE IF NOT EXISTS order_email_confirmation_guard (
 INSERT INTO schema_migrations (version) VALUES ('0107_order_email_confirmation')
     ON CONFLICT DO NOTHING;
 -- ---------------------------------------------------------------------------------------------
--- 0108_retained_usage (lake#988, LSR-121, docs/api/billing.md#a-deleted-workspaces-usage): a
+-- 0108_retained_usage (lake#988, docs/api/billing.md#a-deleted-workspaces-usage): a
 -- deleted workspace's usage that no issued invoice has billed. delete_workspace reads it from the
 -- workspace Zetta before the cascade (billing on) and writes it here in one transaction, so the
 -- month's bill and the model-token limit still count it after the Zetta is gone. Billing records

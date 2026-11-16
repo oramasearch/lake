@@ -153,7 +153,7 @@ Result<void> verify_key(const std::string& key_id, const json& key) {
         return std::unexpected(Error{"invalid_input", "TUF keys must be Ed25519 public keys"});
     }
     // A key object carries only the TUF members, so one public key cannot be given a second id by
-    // adding a member (LSR-199, lake#1005).
+    // adding a member (lake#1005).
     for (const auto& [member, value] : key.items()) {
         if (member != "keytype" && member != "scheme" && member != "keyval" &&
             member != "keyid_hash_algorithms") {
@@ -221,7 +221,7 @@ verify_threshold(const json& document, const json& trusted_root, std::string_vie
         return std::unexpected(Error{"invalid_input", "trusted root role threshold is invalid"});
     }
     // Counted by distinct public key, not by key id: one key listed under two ids signs once
-    // (LSR-199, lake#1005).
+    // (lake#1005).
     std::set<std::string> counted;
     std::set<std::vector<unsigned char>> counted_keys;
     const std::string body = document.at("signed").dump();

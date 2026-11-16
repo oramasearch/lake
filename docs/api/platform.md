@@ -58,7 +58,7 @@ references are tracked separately in #129.
 
 ## Custom domains
 
-A custom domain is claimed before anything routes it (lake#949, Steve, 2026-11-14). Claims are in
+A custom domain is claimed before anything routes it (lake#949). Claims are in
 lake's Postgres control plane, `domain_claims` (migration `0106_domain_claims`,
 [schema](../control-plane/schema.md#domain-claims-migration-0106_domain_claims)): one row per host,
 across every account of this Lake, so a host belongs to one environment at a time. It is

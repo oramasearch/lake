@@ -95,7 +95,7 @@ TEST(Policy, InheritsDownTheGraphAndStopsAtACut) {
     EXPECT_EQ(local->source_object_id, graph.cut);
 }
 
-// LSR-118 (lake#985): a decision made for an agent's credential is confined to its account and
+// lake#985: a decision made for an agent's credential is confined to its account and
 // workspace, whatever the person it acts for may reach elsewhere.
 TEST(Policy, AConfinedDecisionAllowsOnlyObjectsInsideItsAccountAndWorkspace) {
     PolicyGraph graph;
@@ -158,7 +158,7 @@ TEST(Policy, AConfinedDecisionAllowsOnlyObjectsInsideItsAccountAndWorkspace) {
     EXPECT_FALSE(none->allowed);
 }
 
-// LSR-118 (lake#985): the reads a library agent's task may carry leave out secrets, credentials
+// lake#985: the reads a library agent's task may carry leave out secrets, credentials
 // and identity material, and keep the workspace's data.
 TEST(Policy, LibraryAgentReadsLeaveOutSecretsAndCredentials) {
     Registry registry;

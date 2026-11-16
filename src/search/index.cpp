@@ -132,7 +132,7 @@ std::string snippet_for(const std::string& content, const std::string& needle) {
     return snippet;
 }
 
-// A regex query is bounded (LSR-117, lake#984): std::regex backtracks, so the pattern is short and
+// A regex query is bounded (lake#984): std::regex backtracks, so the pattern is short and
 // has no quantified group that itself repeats, only the first kRegexInputBytes of a blob are
 // searched, and a query stops scanning after kRegexScanBudget.
 constexpr std::size_t kRegexPatternBytes = 256;

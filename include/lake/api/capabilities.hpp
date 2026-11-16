@@ -32,7 +32,7 @@ void register_metering_capabilities(Registry& registry);
 // Usage over time (lake#564, docs/api/metering.md#usage-over-time): usage_over_time,
 // usage_limits, set_usage_limit and record_model_usage.
 void register_usage_capabilities(Registry& registry);
-// Before delete_workspace removes a workspace's records (lake#988, LSR-121,
+// Before delete_workspace removes a workspace's records (lake#988,
 // docs/api/billing.md#a-deleted-workspaces-usage): flushes the usage recorder, reads every usage
 // dimension of the workspace from the first day no issued invoice covers (the month after the
 // account's latest invoice that is not void, else the workspace's creation, at most 400 days, the
@@ -242,7 +242,7 @@ void register_workspace_store_capabilities(Registry& registry);
 // by register_workspace_capabilities.
 void register_agent_run_capabilities(Registry& registry);
 // Whether a library agent's task credential that reads for a person (Ask Orama) may carry this
-// capability (LSR-118, lake#985): a read of the workspace's data, never an action, a secret, a
+// capability (lake#985): a read of the workspace's data, never an action, a secret, a
 // credential, a sign-in or recovery ceremony, or identity material such as SSO and SCIM settings.
 // The task's scopes are generated from this list, and every call is still confined to the task's
 // own account and workspace (docs/api/agent-bus.md#a-task-credential-is-confined-to-its-workspace).

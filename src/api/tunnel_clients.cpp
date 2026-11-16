@@ -106,7 +106,7 @@ std::string signed_link_signature(std::string_view key, std::string_view payload
     if (key.empty()) {
         return {};
     }
-    // The instance key never signs a link itself (LSR-266, lake#1009): a key for this one purpose
+    // The instance key never signs a link itself (lake#1009): a key for this one purpose
     // is derived from it first, so a link signature says nothing about the key that seals secrets.
     constexpr std::string_view purpose = "lake signed link v1";
     std::array<unsigned char, EVP_MAX_MD_SIZE> link_key{};

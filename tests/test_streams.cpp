@@ -191,7 +191,7 @@ TEST_F(Streams, TaskCredentialCannotSelectAnotherWorkspaceInTheSameSpace) {
     EXPECT_EQ(events->front().draft.details.value("acting_agent", ""), "agent-project");
 }
 
-// LSR-009 (lake#918): a launch's credential, like a task's, acts only in the workspace it was made
+// lake#918: a launch's credential, like a task's, acts only in the workspace it was made
 // for, whichever workspace a call names.
 TEST_F(Streams, LaunchCredentialCannotSelectAnotherWorkspaceInTheSameSpace) {
     const auto second = workspace->add(store, customer, "second");
@@ -212,7 +212,7 @@ TEST_F(Streams, LaunchCredentialCannotSelectAnotherWorkspaceInTheSameSpace) {
     context.scopes = {"list_streams"};
     const auto refused = call("list_streams", {{"customer_id", customer}, {"workspace_id", second}});
     EXPECT_EQ(refused.error.code, "unauthorized");
-    // The input check of LSR-118 (lake#985) refuses the named workspace first, before the binding
+    // The input check of lake#985 refuses the named workspace first, before the binding
     // of the validated workspace (lake#1286) would; both refuse it.
     EXPECT_NE(refused.error.message.find("acts only in its own workspace"), std::string::npos)
         << refused.error.message;
@@ -224,7 +224,7 @@ TEST_F(Streams, LaunchCredentialCannotSelectAnotherWorkspaceInTheSameSpace) {
               "unauthorized");
 }
 
-// LSR-118 (lake#985): a task credential acts only in its task's account and workspace, also when
+// lake#985: a task credential acts only in its task's account and workspace, also when
 // the input names a resource and no workspace: another account, another account's repository and
 // another workspace's repository of the same account are refused before any handler reads them.
 TEST_F(Streams, TaskCredentialReadsOnlyItsOwnWorkspacesResources) {
@@ -262,7 +262,7 @@ TEST_F(Streams, TaskCredentialReadsOnlyItsOwnWorkspacesResources) {
     EXPECT_TRUE(call("list_streams", {{"customer_id", customer}}).ok);
 }
 
-// LSR-009 (lake#918): a launch's credential reaches only its own workspace through the object its
+// lake#918: a launch's credential reaches only its own workspace through the object its
 // input names, whose workspace the handler derives (here a repository), and its `workspace_act`
 // runs no action its credential does not name. A public repository of another workspace is refused
 // too: the run stays in its own workspace.
@@ -315,7 +315,7 @@ TEST_F(Streams, LaunchCredentialIsBoundThroughObjectsAndRunsNoUnnamedAction) {
         << acted.error.message;
 }
 
-// LSR-181 companion (lake#1055): an agent's dataset work area becomes scopes on its launch
+// lake#1055: an agent's dataset work area becomes scopes on its launch
 // credential, in one canonical form, and a malformed one confines the run to nothing.
 TEST(AgentWorkArea, ADatasetWorkAreaBecomesCanonicalScopes) {
     using lake::control::dataset_work_area;
@@ -344,7 +344,7 @@ TEST(AgentWorkArea, ADatasetWorkAreaBecomesCanonicalScopes) {
         json{{"work_area", {{"kind", "workspace"}, {"detail", ""}}}})));
 }
 
-// LSR-181 companion (lake#1055): a launch credential confined to a dataset work area reaches,
+// lake#1055: a launch credential confined to a dataset work area reaches,
 // called directly as custom Python can, only that work area: another database's table of the same
 // name, an index search, a generic workspace call and another repository are refused before any
 // engine read.
@@ -662,7 +662,7 @@ TEST_F(Streams, ReadsWritesDeletesAndCreatorOwnershipUseSpacePolicy) {
     context.operator_credential = true;
     EXPECT_TRUE(call("delete_stream", drop).ok);
 }
-// LSR-119 (lake#986): a workspace's agent-events carry each turn's answer, which is the person's
+// lake#986: a workspace's agent-events carry each turn's answer, which is the person's
 // who asked. A member reads the events of their own turns only, browsing or selecting a task.
 TEST_F(Streams, AgentEventsShowAMemberOnlyTheirOwnTurns) {
     lake::control::WorkspaceAgentBus events(workspace->service.get(), customer, workspace->id);

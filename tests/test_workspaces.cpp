@@ -6437,7 +6437,7 @@ TEST(Workspaces, SqlNamesTheWordAMisspeltStatementStartsWith) {
     EXPECT_EQ(r.w.caller->calls.size(), before) << "the read-only guard still holds";
 }
 
-// LSR-017 (lake#926): the guard reads the text as a SQL parser does, and refuses anything a second
+// lake#926: the guard reads the text as a SQL parser does, and refuses anything a second
 // parser could split into another statement: a comment, a dollar quote, a backslash in a string, an
 // open quote. None of them reaches the workspace.
 TEST(Workspaces, SqlRefusesTextAParserCouldSplitDifferently) {

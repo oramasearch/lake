@@ -1128,7 +1128,7 @@ liquid::runtime::task<NoticeOutcome> receive_payment_notice(PaymentProviders& pr
     }
     const std::string name(provider->name());
     if (!notice) {
-        // A notice that does not authenticate is anyone's request (LSR-196, lake#1002): it is
+        // A notice that does not authenticate is anyone's request (lake#1002): it is
         // counted, and at most one signed audit event a minute records how many were refused, so
         // unauthenticated traffic cannot append to the central audit log at will.
         static std::atomic<std::uint64_t> refused_since_summary{0};

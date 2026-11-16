@@ -1884,7 +1884,7 @@ TEST(TransparencyTimestamp, OwnerLoopRenewsDueEvidenceThroughRegistry) {
     }));
 }
 
-// LSR-199 (lake#1005): one Ed25519 key listed under a second id (by adding a member to its key
+// lake#1005: one Ed25519 key listed under a second id (by adding a member to its key
 // object) counts once toward a threshold, and a key object with an unknown member is not a TUF key.
 TEST(TransparencyTuf, OneKeyUnderTwoIdsSignsOnce) {
     TemporaryRoot temporary;

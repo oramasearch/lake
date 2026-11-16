@@ -866,7 +866,7 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
                 "this " + (library ? std::string(library->name) : agent_task->agent) +
                     " turn does not grant " + capability);
         }
-        // LSR-009 (lake#918): a launch's or a schedule's credential, which the agent's own code
+        // lake#918: a launch's or a schedule's credential, which the agent's own code
         // holds, runs only the engine actions a run calls directly (agent_run_direct_actions) and
         // the actions its credential names: `workspace_act` alone opens nothing else, so the code
         // never deletes or changes the workspace without a person. Every other change is a
@@ -3250,7 +3250,7 @@ std::string read_only_statement_problem(std::string_view statement) {
                first + "'";
     }
     // Read the text the way a SQL parser does, and refuse anything two parsers could split
-    // differently (LSR-017, lake#926): a comment (`--`, `/*`), a dollar quote, a backslash inside
+    // differently (lake#926): a comment (`--`, `/*`), a dollar quote, a backslash inside
     // a string, or a string or quoted name left open. Only then is a `;` outside them a second
     // statement, refused. The engine sees exactly the text checked here.
     enum class State { plain, string, name };
@@ -3889,7 +3889,7 @@ std::string application_turn_kind(const json& input) {
 // app also needs `context.confirm_public`. Answers the proposal the turn carries.
 liquid::runtime::task<ApiResult>
 verified_confirmed_proposal(const json& input, ApiContext& context, std::string_view agent) {
-    // A confirmation is a person's (LSR-183, lake#989): an agent's credential can never confirm
+    // A confirmation is a person's (lake#989): an agent's credential can never confirm
     // a proposal, however it got the proposal's id and digest.
     if (context.credential_kind.starts_with("agent_")) {
         co_return ApiResult::failure(
@@ -7683,8 +7683,8 @@ void register_agent_run_capabilities(Registry& registry) {
                 if (asking) {
                     body["parent_task_id"] = asking->id;
                 }
-                // A turn an agent asks for never holds more than the asking agent does (LSR-013,
-                // lake#922): delegation attenuates. Its scopes are the ones the caller's own
+                // A turn an agent asks for never holds more than the asking agent does (lake#922):
+                // delegation attenuates. Its scopes are the ones the caller's own
                 // credential carries, plus reading its own task, which every turn needs.
                 if (context.credential_kind.starts_with("agent_")) {
                     std::erase_if(scopes, [&](const std::string& scope) {
@@ -8986,7 +8986,7 @@ void register_agent_bus_capabilities(Registry& registry) {
 // workspace resumes an unfinished deletion and answers the recorded one.
 //
 // Where billing is on, a live workspace is deleted only once its unbilled usage is retained
-// (lake#988, LSR-121, docs/api/billing.md#a-deleted-workspaces-usage): the asynchronous handler
+// (lake#988, docs/api/billing.md#a-deleted-workspaces-usage): the asynchronous handler
 // runs retain_deleted_workspace_usage first and passes `usage_retained`; any other path is
 // refused, so no deletion can drop what an issued bill has not counted yet.
 static ApiResult delete_workspace_cascading(const json& input, ApiContext& context,

@@ -420,7 +420,7 @@ the rows each run holds out. A parameter without a range keeps its default. Befo
 ```
 
 - `dataset` is `<database>.<table>`, each part letters, digits, `_` and single `-` (never `--`, which
-  starts an SQL comment, and never at either end; LSR-191), checked when the run starts; `target` names the column to predict (required when the
+  starts an SQL comment, and never at either end), checked when the run starts; `target` names the column to predict (required when the
   methodology has a target); `features` is optional (every column but the target). Or name
   `project` and `pipeline` of a pipeline whose model step is this methodology; its connect step's
   table, its target and its holdout are used.
@@ -450,7 +450,7 @@ trial is dispatched once however many callers read the experiment.
   run is queued, and a trial whose run ended without a result is ended. They answer `runner` (each
   waiting trial with its `methodology_run`) and `methodology_runs` (every trial's run: `trial`,
   `number`, `run_id`, `phase`, `message`).
-- A read never acts for the reader (LSR-195, lake#1001). `get_experiment` by someone who may only
+- A read never acts for the reader (lake#1001). `get_experiment` by someone who may only
   read the account (no `write` grant) changes nothing: no run is queued, no trial is ended and no run
   is stopped. By someone who may change the account's experiments, it reconciles for the person who
   started the experiment: the runs it queues name the starter, it uses only the image already built

@@ -537,7 +537,7 @@ ApiResult api_error_result(const ApiError& error) {
     return ApiResult::failure(error.code, error.message, error.path);
 }
 
-// The paths of a repository at `ref` the caller may not read (LSR-108, lake#975), decided as Drive
+// The paths of a repository at `ref` the caller may not read (lake#975), decided as Drive
 // decides them: a path below a path object that does not inherit needs a grant there. Empty
 // without asking for the tree when no such object exists. A tree that cannot be read refuses
 // every path (fail closed).

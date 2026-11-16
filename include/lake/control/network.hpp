@@ -106,7 +106,7 @@ struct NetworkPeer : NetworkMetadata {
     std::string desired = "present";
 };
 
-// lake#983 (LSR-116): the most active (unrevoked, unexpired) tunnel grants a workspace and its
+// lake#983: the most active (unrevoked, unexpired) tunnel grants a workspace and its
 // account may hold, checked when a grant is created; 0 means no limit. Every active grant is
 // projected into the cluster's one relay grants document, so a cap keeps one tenant from filling
 // it.

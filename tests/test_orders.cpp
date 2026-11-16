@@ -1989,7 +1989,7 @@ TEST(OrdersApex, OrderFormsCannotUseUpTheCheckoutCap) {
     EXPECT_EQ(paid.headers.at("location"), "https://checkout.stripe.test/c/cs_test_1");
 }
 
-// lake#1000 (LSR-194): one address gets at most `orders_per_email_per_day` order forms' mail, from
+// lake#1000: one address gets at most `orders_per_email_per_day` order forms' mail, from
 // whatever client sends them, and an order is mailed nothing but its confirmation until confirmed.
 TEST(OrdersApex, OneAddressIsMailedAtMostThreeConfirmationsADay) {
     OrderRig rig(true, 100);
@@ -2084,7 +2084,7 @@ TEST(OrdersApex, AbuseIsRefused) {
     EXPECT_EQ(rig.store->unaudited_cloud_order_events(10)->size(), 3U);
 }
 
-// lake#1006 (LSR-200): hosted code that reaches lake directly (a workspace pod on the main port)
+// lake#1006: hosted code that reaches lake directly (a workspace pod on the main port)
 // cannot rotate X-Real-IP or X-Forwarded-For into fresh order buckets. Its peer is not a trusted
 // proxy, so every order counts against its own address: the per-client limit holds and the
 // in-all budget is never used up by it. Only the proxy listener, which only the ingress reaches,

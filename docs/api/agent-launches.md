@@ -37,7 +37,7 @@ older than five minutes.
 per launch, `lal.<launch id>.<secret>`, puts it in a Secret owned by the Job or Deployment, and
 writes only its SHA-256 (`credential_sha256`). lake's stores resolve such a bearer by comparing
 digests in constant time (`context_for`): it acts as the person who launched it, limited to the
-launch's `scopes`, **and only in the launch's own workspace** (LSR-009, lake#918): a call that
+launch's `scopes`, **and only in the launch's own workspace** (lake#918): a call that
 names, or is routed to (`/w/<id>/`), any other workspace is `unauthorized`, whichever account of the
 person it is in. The same holds for a schedule's credential and a task's. A launch that is stopped
 (`desired = absent`) or not yet reported has no usable credential.
@@ -61,7 +61,7 @@ the confirmed change runs as that person. The few engine actions a skill lets ag
 directly (`check_pipeline`, `start_run`, `generate_dataset`, `decide`, `record_outcome`,
 agent-runtime#11) need no scope of their own: `workspace_act`, which every run has, grants those
 five (`control::agent_run_direct_actions`) and the engine's policy decides. **It grants no other
-action** (LSR-009, lake#918): a launch's or a schedule's `workspace_act` of anything else, such as
+action** (lake#918): a launch's or a schedule's `workspace_act` of anything else, such as
 `delete_project`, is `unauthorized` unless its scopes name that action, so code in a run cannot
 change the workspace without a person ([engine-capabilities.md](engine-capabilities.md)). Which reads each skill grants is agent-runtime's decision
 (`skills.py`, published as `skills.json`); lake vendors it with
@@ -73,7 +73,7 @@ leaves out `workspace_id` gets its launch's or schedule's workspace, as a task c
 task's (lake#652). A schedule's runs and a conversation
 service get the same scopes as a launch of the same agent.
 
-**A run's credential stays in its workspace, whatever object a call names** (LSR-009, lake#918).
+**A run's credential stays in its workspace, whatever object a call names** (lake#918).
 Beside the workspace a call names and the `/w/<id>/` route it reaches (lake#1286), Lake checks the
 object a call's input names before the handler runs: a repository (`repository_id`, `repository`,
 or a repository capability's `id`), an app (`app_id`), a build (`build_id`), an application or a
@@ -91,7 +91,7 @@ Verify: `AgentRuns.ARunsKeyCarriesTheReadsOfItsAgentsSkillsAndNoChange` and
 
 ### A run's dataset work area
 
-LSR-181 companion ([lake#1055](https://github.com/oramasearch/lake/issues/1055)). agent-runtime
+[lake#1055](https://github.com/oramasearch/lake/issues/1055). agent-runtime
 confines its model tools to an agent's work area (agent-runtime#23), but a custom Python
 entrypoint holds the launch credential and can call Lake directly, so Lake enforces a dataset work
 area on the credential itself:
@@ -150,8 +150,8 @@ area on the credential itself:
   pipeline actions refused under a scope, and so does Lake.
 - **Runs made before this change are re-created or flagged.** A launch, schedule or conversation
   service whose scopes lack `work_area_recorded` was made before Lake confined runs to their work
-  area and may hold broader scopes than its agent allows; its scopes cannot change. Decided under
-  Steve's 2026-11-14 delegation, taking the recommendation on lake#1055 (re-create them): Lake
+  area and may hold broader scopes than its agent allows; its scopes cannot change. As
+  lake#1055 recommends (re-create them), Lake
   re-creates what it owns, and flags what a person owns.
   - A person's conversation service (`agent_turn` to a Python agent) whose scopes are not the ones
     the agent's record gives now is withdrawn on their next turn and a new one started; the turn
@@ -365,7 +365,7 @@ native agents still answer within the call (a follow-up).
 
 `agent_turn` delivers one message to any agent and returns its answer:
 
-**A confirmation is a person's** (LSR-183, lake#989). `context.confirmed_proposal` sent with an agent's own credential (an `agent_task`, `agent_launch`, `agent_schedule` or `agent_service` credential) is `unauthorized`, and `context.confirmed_promotion` from one grants no promotion scopes. Only a turn a person starts can confirm.
+**A confirmation is a person's** (lake#989). `context.confirmed_proposal` sent with an agent's own credential (an `agent_task`, `agent_launch`, `agent_schedule` or `agent_service` credential) is `unauthorized`, and `context.confirmed_promotion` from one grants no promotion scopes. Only a turn a person starts can confirm.
 
 | Agent | Where the turn goes | What it is handed |
 |---|---|---|

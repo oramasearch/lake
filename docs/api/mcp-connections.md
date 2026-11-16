@@ -76,8 +76,8 @@ address its name resolves to must be public: loopback, private (RFC 1918, unique
 (the cloud metadata address `169.254.169.254` included), carrier-grade NAT, multicast and reserved
 addresses are refused, also through IPv4-mapped, NAT64 and 6to4 IPv6, so a connection cannot reach
 Lake's own network (its Postgres, the workspace Zettas). An IPv6 address is public only inside
-global unicast (`2000::/3`), never Teredo, benchmarking, ORCHID or documentation ranges (LSR-265,
-lake#1008), so IPv4-compatible, local-use NAT64 and site-local forms are refused too. The check runs on the addresses actually
+global unicast (`2000::/3`), never Teredo, benchmarking, ORCHID or documentation ranges (lake#1008),
+so IPv4-compatible, local-use NAT64 and site-local forms are refused too. The check runs on the addresses actually
 connected to, after resolution, so a name that resolves to a private address is refused however it
 was spelled. A Lake started with `LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1` (local development and tests
 only, never a deployment) also reaches loopback and private addresses, and plain `http://` to
@@ -270,7 +270,7 @@ the new `url`.
 so one MCP client configured for Lake reaches Lake and what the workspace connected. Off by
 default, per connection. The schemas are the server's; Lake changes only the name, adds the
 connection's name to the description and sets `readOnlyHint` from the person's decision and
-`openWorldHint: true`. Lake's own capability names never hold `__`. A `tools/call` of such a name is held to what `tools/list` requires (LSR-187, lake#993): with no Lake
+`openWorldHint: true`. Lake's own capability names never hold `__`. A `tools/call` of such a name is held to what `tools/list` requires (lake#993): with no Lake
 credential, or from a person who may not read the workspace, it is refused before the workspace's
 connection records are opened.
 
@@ -314,7 +314,7 @@ Optional, per connection (lake#652):
   The connection records it (`agent_id`). The workspace engine must accept `mcp:<slug>` skills
   ([zetta](https://github.com/oramasearch/zetta) PR from this epic). It runs on demand, on a
   schedule (`schedule_agent`), or from its input stream.
-- **No stream Lake writes itself** is a connection's topic (LSR-190, lake#996): `agent-*`,
+- **No stream Lake writes itself** is a connection's topic (lake#996): `agent-*`,
   `app-events.*`, `build-events.*`, `run-metrics.*`, `study-events.*` and `inbox:*` are refused for
   `input_topic`, `output_topic` and `notifications_topic`, the same rule streams and agent triggers
   use (`system_stream_name`).
@@ -342,7 +342,7 @@ workspace decides whether a job starts. The store root's owner runs them, and on
 (`McpStreamWorker`, on a thread of its own, every `mcp_stream_interval`, 15 s), so two replicas
 never mirror a notification twice; each pass reads at most 64 connections and 20 input events each.
 
-**One slow server cannot hold the others** (lake#980, LSR-113). The pass, with the workspace-stream
+**One slow server cannot hold the others** (lake#980). The pass, with the workspace-stream
 agents and resource repairs that share it, runs on its own thread, never on the maintenance thread
 that samples usage and runs deletions, orders and balances, so those keep their intervals whatever
 an outside server does. Its bounds are `McpStreamLimits`:

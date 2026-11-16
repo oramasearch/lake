@@ -21,8 +21,8 @@ struct AuthorizationDecision {
     bool inherited = false;
 };
 
-// The account and workspace an agent's task, launch or schedule credential was made for (LSR-118,
-// lake#985). While `active`, a decision allows only an object under the customer object whose
+// The account and workspace an agent's task, launch or schedule credential was made for (lake#985).
+// While `active`, a decision allows only an object under the customer object whose
 // external id is `customer_id`, and, when `workspace_id` is set, every repository on its path must
 // belong to that workspace. An empty `customer_id` while active matches no object: a credential
 // whose row could not be read is confined to nothing.

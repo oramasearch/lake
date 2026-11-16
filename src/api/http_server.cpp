@@ -1249,7 +1249,7 @@ public:
             return std::unexpected("OCI repository name is invalid");
         }
         const std::string id = control::new_uuid_v4();
-        // The repository the upload was started for (LSR-192, lake#998): an append or a finish
+        // The repository the upload was started for (lake#998): an append or a finish
         // names it in its URL and is refused when it names another.
         const auto owned =
             write(upload_owner_path(id), std::as_bytes(std::span(repository.data(), repository.size())));
@@ -1264,7 +1264,7 @@ public:
     }
 
     // Whether upload `id` was started for `repository`. An upload without its owner record
-    // (started before LSR-192) belongs to no repository.
+    // (started before lake#998) belongs to no repository.
     bool upload_belongs_to(std::string_view id, std::string_view repository) const {
         if (!safe_component(id)) {
             return false;
@@ -2540,7 +2540,7 @@ oci_content_range(const boost::http::route_params& route) {
     return std::optional<OciContentRange>{{*start, *end}};
 }
 
-// The console's session cookie (LSR-115, lake#982, lake#910). Over HTTPS it is
+// The console's session cookie (lake#982, lake#910). Over HTTPS it is
 // __Host-lake_session: Secure, Path=/ and no Domain, so a tenant app on a subdomain of the Lake can
 // neither set nor shadow it; only that name is read. Over plain HTTP (local development, tests) the
 // prefix is not allowed, and it stays lake_session.
@@ -2563,7 +2563,7 @@ std::string session_cookie_of(const boost::http::route_params& route) {
     return cookie_value(route, session_cookie_name(route));
 }
 
-// An app's session cookie is always Secure, so it always carries the __Host- prefix (LSR-115).
+// An app's session cookie is always Secure, so it always carries the __Host- prefix.
 constexpr std::string_view app_session_cookie = "__Host-lake_app_session";
 
 std::string browser_session_cookie(const boost::http::route_params& route,
@@ -8143,7 +8143,7 @@ struct ApiServer::Impl {
         }
     }
 
-    // lake#980 (LSR-113): the MCP connection streams, and the workspace-stream agents and resource
+    // lake#980: the MCP connection streams, and the workspace-stream agents and resource
     // repairs that share their pass, run on this thread of their own, so an outside MCP server
     // answering slowly delays only that pass, never the maintenance thread's usage samples,
     // deletions, orders or balances. A pass is asked for at most once while one is due.
@@ -10022,7 +10022,7 @@ struct ApiServer::Impl {
                                          "no-store");
         }
         const std::string return_path = app_authorize_path(app_id, redirect_url);
-        // Only a browser session hands an app its session (LSR-208, lake#1058): a bearer sent here
+        // Only a browser session hands an app its session (lake#1058): a bearer sent here
         // is refused, so no script or tool carries a Lake credential to a tenant's app host.
         if (!bearer_of(route).empty()) {
             co_return co_await send_text(route,
@@ -11126,7 +11126,7 @@ struct ApiServer::Impl {
             if (claims && claims->issued_at <= 0) {
                 refusal = "no iat";
             }
-            // The token was issued for one of this Lake's own pages (LSR-012, lake#921): a
+            // The token was issued for one of this Lake's own pages (lake#921): a
             // template token minted for another product sharing the Clerk instance, or with no
             // azp, is refused, so it cannot be exchanged here.
             if (claims && claims->issued_at > 0 &&
@@ -12461,7 +12461,7 @@ struct ApiServer::Impl {
             co_return co_await registry_auth_error(route, authorized.error().access);
         }
         const std::string upload = route_value(route, "upload");
-        // An upload continues only in the repository it was started for (LSR-192, lake#998):
+        // An upload continues only in the repository it was started for (lake#998):
         // push access to one repository is not access to another's upload.
         if (!artifacts.upload_belongs_to(upload, repository)) {
             co_return co_await registry_error(route,
@@ -15211,7 +15211,7 @@ struct ApiServer::Impl {
     // An unsafe request the browser session authenticates must come from lake's own origin, and a
     // /v1 or /mcp POST must be JSON, which no cross-site form or simple request can send.
     // Bearer-authenticated calls are not affected. Empty: the request may proceed.
-    // A route that issues a browser session (LSR-110, lake#977). A cross-site POST carries no
+    // A route that issues a browser session (lake#977). A cross-site POST carries no
     // SameSite=Lax cookie, so these are checked whether or not a session is present: otherwise a
     // page elsewhere could post the attacker's own credential and sign the visitor's browser in
     // as the attacker (login CSRF).

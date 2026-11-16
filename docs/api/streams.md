@@ -48,7 +48,7 @@ The list contains only exposed topics. `agent-events`, `app-events.<app-id>` and
 `build-events.<build-id>` are topics on the selected workspace Zetta. The bus holds only
 `agent-tasks.<agent>` dispatch topics. The list never invents an `agent-turn.<task-id>` row.
 An optional task filter on workspace `agent-events` is checked against that task's persisted
-workspace ID. **A member reads the events of their own turns only** (LSR-119, lake#986): a turn's
+workspace ID. **A member reads the events of their own turns only** (lake#986): a turn's
 events carry its answer, which is the requester's. Browsing drops every event whose task another
 person requested, and selecting such a task is `not_found`. The operator credential reads all of
 them. Agent task

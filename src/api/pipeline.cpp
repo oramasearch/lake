@@ -19,7 +19,7 @@ std::string text(const nlohmann::json& object, const char* key) {
     return found != object.end() && found->is_string() ? found->get<std::string>() : std::string();
 }
 
-// The run status as a class token (LSR-193, lake#999): the engine's status goes into a class
+// The run status as a class token (lake#999): the engine's status goes into a class
 // attribute, so only a short [a-z0-9_-] word is used as it is; anything else is "unknown".
 std::string status_class(std::string_view outcome) {
     const bool safe = !outcome.empty() && outcome.size() <= 32 &&

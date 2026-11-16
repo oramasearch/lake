@@ -1602,7 +1602,7 @@ liquid::runtime::task<ApiResult> update_connection(const json& input, ApiContext
                                          "a topic name is letters, digits, '-', '_' and '.'",
                                          std::string("/") + field);
         }
-        // Lake's own streams are never a connection's topic (LSR-190, lake#996).
+        // Lake's own streams are never a connection's topic (lake#996).
         if (input.contains(field) && !input.at(field).is_null() &&
             system_stream_name(input.at(field).get<std::string>())) {
             co_return ApiResult::failure("invalid_input",
@@ -2907,7 +2907,7 @@ liquid::runtime::task<json> call_exported_mcp_tool(const Registry& registry,
         co_return refused("no such tool: " + name);
     }
     // A caller with no Lake credential, or one who may not read this workspace, never reaches the
-    // workspace's connection records (LSR-187, lake#993): tools/call is held to what tools/list
+    // workspace's connection records (lake#993): tools/call is held to what tools/list
     // already requires.
     if (!context.authorized) {
         co_return refused("this call needs a Lake credential");

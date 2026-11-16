@@ -666,7 +666,7 @@ TEST(PostgresCapabilities, SearchFiltersRepositoryCandidates) {
         uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
     ASSERT_TRUE(store->ping()) << store->ping().error().message;
     const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    // Real rows: a hit whose repository row cannot be read is dropped (LSR-108), so the account
+    // Real rows: a hit whose repository row cannot be read is dropped, so the account
     // and its two repositories exist, each with the policy object create_repository makes.
     const auto user = store->create_user({"taap:postgres-search-" + suffix, "", "Search"});
     ASSERT_TRUE(user) << user.error().message;
@@ -1547,7 +1547,7 @@ TEST(PostgresServices, AServiceIsNeverRoutedToAnotherCustomersWorkspace) {
 
 // lake#1228: restart_app writes restart_generation, the column the operator renders on the pod
 // template; any other change leaves it.
-// lake#987 (LSR-120), against either store: an account at LAKE_WORKSPACES_PER_CUSTOMER live
+// lake#987, against either store: an account at LAKE_WORKSPACES_PER_CUSTOMER live
 // workspaces, or at LAKE_SERVICES_PER_CUSTOMER live services (a workspace's own Zetta is one), is
 // refused its next workspace with quota_exceeded; a deleted workspace stops counting, and another
 // account is unaffected.

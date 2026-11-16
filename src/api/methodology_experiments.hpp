@@ -18,7 +18,7 @@
 // written before the run is queued, so a trial is dispatched once.
 namespace lake::api {
 
-// Who current_experiment acts for (LSR-195, lake#1001).
+// Who current_experiment acts for (lake#1001).
 enum class ExperimentReconcile {
     // The caller started the experiment just now (start_experiment): its runs are the caller's.
     as_caller,

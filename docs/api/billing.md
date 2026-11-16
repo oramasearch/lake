@@ -42,7 +42,7 @@ Billing records are multitenancy, kept in the control plane; usage stays with ea
 
 ## A deleted workspace's usage
 
-[LSR-121](https://github.com/oramasearch/lake/issues/988): deleting a workspace removes its Zetta,
+lake#988: deleting a workspace removes its Zetta,
 and with it the usage a bill reads. Before, `usage_over_time` read only live workspaces, so an
 account that deleted a workspace before its month was invoiced was never billed for what it had
 used, and its model tokens stopped counting against its monthly limit.
@@ -361,7 +361,7 @@ lake asks it once.
 ## Webhooks
 
 `POST /billing/stripe/webhook` receives Stripe's events. It has no lake credential: the
-`Stripe-Signature` header is the credential. **A notice that does not authenticate is not audited one by one** (LSR-196, lake#1002): it is
+`Stripe-Signature` header is the credential. **A notice that does not authenticate is not audited one by one** (lake#1002): it is
 answered `400` and counted, and at most one `billing.payment.notice` `denied` event a minute records
 the reason and `refused_since_last_summary`, so unauthenticated traffic cannot append to the central
 audit log at will.

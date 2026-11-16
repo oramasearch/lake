@@ -104,7 +104,7 @@ AuthorizationDecision decide(const std::string& object_id,
 
 constexpr int max_confinement_depth = 256;
 
-// Whether `object_id` lies inside the cache's confinement (LSR-118, lake#985): its whole parent
+// Whether `object_id` lies inside the cache's confinement (lake#985): its whole parent
 // chain, followed past any inheritance cut, reaches the confined customer's object, and every
 // repository on the chain belongs to the confined workspace when one is set. Anything that cannot
 // be read or proven is outside.

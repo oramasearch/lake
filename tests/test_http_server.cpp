@@ -1144,7 +1144,7 @@ TEST_P(HttpResponseIsolation, FreshSignUpOwnsFirstRepositoryWithZeroInitialMeter
     const std::string cookie = response_cookie_pair(signup);
     ASSERT_TRUE(cookie.starts_with("lake_session=")) << signup;
     // Behind TLS the session is a __Host- cookie: Secure, Path=/, no Domain, so a sibling
-    // subdomain cannot set or shadow it, and the plain name is not read there (LSR-115).
+    // subdomain cannot set or shadow it, and the plain name is not read there.
     {
         auto tls = connect();
         const std::string tls_signin = tls->request(
@@ -1183,8 +1183,8 @@ TEST_P(HttpResponseIsolation, FreshSignUpOwnsFirstRepositoryWithZeroInitialMeter
     EXPECT_TRUE(usage.at("value").at("items").empty());
     EXPECT_EQ(usage.at("value").at("summary").at("storage").at("repositories_bytes"), 0);
     EXPECT_FALSE(usage.at("value").at("over_quota"));
-    // A route that issues a session checks the origin with no session present (LSR-110,
-    // lake#977): a page elsewhere cannot post a credential and sign this browser in.
+    // A route that issues a session checks the origin with no session present (lake#977):
+    // a page elsewhere cannot post a credential and sign this browser in.
     {
         auto browser = connect();
         // Signing in takes no identity document: only sign-up does.
@@ -4509,7 +4509,7 @@ TEST_P(HttpResponseIsolation, ProtectedAppAuthorizationHandsOffAHostOnlySession)
     EXPECT_EQ(response_header(exchanged, "x-orama-user"), principal->user_id);
     EXPECT_EQ(response_header(exchanged, "x-orama-space"), workspace->id);
     const std::string app_cookie_header = response_header(exchanged, "set-cookie");
-    // Always Secure, so always the __Host- name: no sibling host can plant or shadow it (LSR-115).
+    // Always Secure, so always the __Host- name: no sibling host can plant or shadow it.
     EXPECT_TRUE(app_cookie_header.starts_with("__Host-lake_app_session=")) << app_cookie_header;
     EXPECT_NE(app_cookie_header.find("; Path=/; Secure; HttpOnly; SameSite=Lax"),
               std::string::npos);

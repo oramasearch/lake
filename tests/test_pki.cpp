@@ -776,7 +776,7 @@ TEST(Pki, RootRecoveryNeedsSharesPresentedByDistinctParticipants) {
               "forbidden");
     EXPECT_FALSE(rig.claim("dave", ceremony_id).ok); // not an admin, not a participant
     // An agent's task credential acting for a participant is refused too: it is confined to its
-    // task's workspace (lake#918, LSR-118), and one whose task row cannot be read reaches no
+    // task's workspace (lake#918), and one whose task row cannot be read reaches no
     // object, so the policy check refuses it before the handler would.
     auto agent = rig.person("alice");
     agent.credential_kind = "agent_task";

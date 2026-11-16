@@ -868,8 +868,8 @@ const nlohmann::json& agent_task_input(const Capability& capability,
     return resolved;
 }
 
-// The account and workspace an agent's task, launch or schedule credential was made for (LSR-118,
-// lake#985): nullopt for any other credential. A row that cannot be read confines the credential to
+// The account and workspace an agent's task, launch or schedule credential was made for (lake#985):
+// nullopt for any other credential. A row that cannot be read confines the credential to
 // nothing (active, no customer), so it reaches no object.
 std::optional<control::AuthorizationConfinement> agent_confinement(const ApiContext& context) {
     const std::string& session = context.credential_session_id;
@@ -964,7 +964,7 @@ std::optional<ApiResult> agent_input_refusal(const Capability& entry,
 }
 
 // ------------------------------------------------------------------------------------------------
-// A launch's dataset work area (LSR-181 companion, lake#1055, docs/api/agent-launches.md#a-runs-
+// A launch's dataset work area (lake#1055, docs/api/agent-launches.md#a-runs-
 // dataset-work-area). A custom Python entrypoint holds its launch credential and can call Lake
 // directly, so the work area agent-runtime applies to its model tools is enforced here too.
 
@@ -1320,7 +1320,7 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
     }
     const Capability& entry = *state.capability;
     // An agent's task, launch or schedule credential acts as the person who started it, but only
-    // inside that task's account and workspace (LSR-118, lake#985), whether or not the input names
+    // inside that task's account and workspace (lake#985), whether or not the input names
     // a workspace: every policy decision of this call is confined, and an input naming another
     // account's or workspace's resource is refused before a handler reads it.
     if (context.authorized && context.store) {
@@ -1459,7 +1459,7 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
             state.proceed = false;
         }
         // A task, launch or schedule credential acts only in the workspace it was made for
-        // (LSR-009, lake#918), whichever workspace the call names.
+        // (lake#918), whichever workspace the call names.
         if (state.proceed) {
             if (const auto bound = bound_agent_workspace(context);
                 bound && *bound != context.workspace_id) {
@@ -1481,7 +1481,7 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
             state.proceed = false;
         }
     }
-    // LSR-009 (lake#918): an agent's task, launch or schedule credential reaches only its own
+    // lake#918: an agent's task, launch or schedule credential reaches only its own
     // workspace through the object its input names too (a repository, app, build, application or
     // secret mount), whose workspace a handler derives in its body rather than from workspace_id.
     // A public repository of another workspace is refused too: a run stays in its own workspace,

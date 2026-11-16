@@ -159,7 +159,7 @@ TEST(TunnelClients, ALinkIsBoundToItsPlatformVersionExpiryAndKey) {
     EXPECT_TRUE(signed_link_matches(kek, tunnel_client_link_payload("linux-amd64", "0.0.1", expires),
                                     signature));
     EXPECT_TRUE(signed_link_signature({}, "anything").empty());
-    // LSR-266 (lake#1009): the instance key itself never signs a link.
+    // lake#1009: the instance key itself never signs a link.
     {
         const std::string payload = "liquid-hub-upload\nexample";
         std::array<unsigned char, EVP_MAX_MD_SIZE> raw{};

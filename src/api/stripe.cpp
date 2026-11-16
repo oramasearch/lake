@@ -1036,7 +1036,7 @@ std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_vie
         notice.foreign = foreign_object(object, "lake_customer_id", instance);
     }
     if (notice.event_type == "invoice.paid" && object.value("paid_out_of_band", false)) {
-        // Marked paid in Stripe without a payment (LSR-140, lake#1033): anything else holding a
+        // Marked paid in Stripe without a payment (lake#1033): anything else holding a
         // key for this account can do that, so the invoice stays due and the notice is recorded
         // for an operator to review.
         notice.provider_status = "paid_out_of_band";
