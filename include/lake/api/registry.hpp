@@ -126,6 +126,11 @@ using WebhookSender = std::function<WebhookDeliveryResult(
     const std::string& url, const nlohmann::json& headers, const std::string& payload)>;
 using ReplicationRequester = std::function<std::expected<nlohmann::json, ApiError>(
     const std::string& source_url, std::uint64_t after_tree_size)>;
+// The TXT records of a DNS name (lake#949, verify_domain): a record per entry, an empty list when
+// the name has none, an error when no name server answered. It blocks, so a handler runs it with
+// run_blocking. Empty: control::lookup_txt, which asks the host's own name servers.
+using TxtResolver =
+    std::function<std::expected<std::vector<std::string>, std::string>(const std::string& name)>;
 
 // Speech-to-text (docs/api/transcripts.md, lake#561). The audio is held only while it is sent:
 // a transcriber never stores or logs it.
@@ -411,6 +416,8 @@ struct ApiContext {
     // (LAKE_GIT_IMPORT_ROOT, lake#925). Empty: the import is not offered.
     std::string git_import_root;
     WebhookSender webhook_sender;
+    // Reads a custom domain's TXT challenge for verify_domain (lake#949); tests substitute it.
+    TxtResolver txt_resolver;
     // Speech-to-text for transcribe and create_transcript (docs/api/transcripts.md); empty when
     // this lake has no OpenAI key.
     Transcriber transcriber;

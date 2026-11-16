@@ -583,6 +583,7 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "upload_drive_files",
     "validate_methodology",
     "verify",
+    "verify_domain",
     "verify_model_provenance",
     "workspace_act",
     "workspace_openapi",

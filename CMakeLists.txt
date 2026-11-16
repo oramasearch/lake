@@ -240,6 +240,7 @@ add_library(lake-core STATIC
   src/control/lake_identity.cpp
   src/control/saml.cpp
   src/control/browser_keys.cpp
+  src/control/dns_txt.cpp
   src/control/callers.cpp
   src/control/agents.cpp
   src/control/pki.cpp

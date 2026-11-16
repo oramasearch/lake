@@ -22,6 +22,10 @@ A new migration still follows the rules below: idempotent SQL, its row in `schem
 new `*_guard` table created by the newest migration (`LakeManifest.TheGuardTableIsTheNewestMigrations`
 fails otherwise).
 
+`0106_domain_claims` (lake#949) adds `domain_claims`, one row per custom-domain host across every
+account: who holds it and whether they proved control. See
+[Domain claims](#domain-claims-migration-0106_domain_claims). Additive; guard `domain_claims_guard`.
+
 `0105_agent_model_prices` (lake#1230) seeds the `model_tokens` rates of the gpt-6.x models the
 gateway now serves (`gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, `gpt-6-luna`) and the
 long-context classes `<model>@long/input` and `<model>@long/output` of those and `gpt-5.5`, at
@@ -1518,6 +1522,31 @@ vendors lake's schema today (`internal/controller/assets/lake-schema.sql`, until
 orama-operator#936), so an operator release carrying it through `0101_coupons`, with `coupons_guard`
 selected, rolls before a lake image that serves coupons, after the one for `0100_balance_grants`
 (unless lake#1147's `lake migrate` has taken the schema over by then).
+
+## Domain claims (migration `0106_domain_claims`)
+
+`0106_domain_claims` (lake#949, [`../api/platform.md#custom-domains`](../api/platform.md#custom-domains))
+adds `domain_claims`, one row per custom-domain host an environment has claimed. Multitenancy (which
+environment of which account holds a name), so in the control plane beside workspace routing,
+never in a workspace Zetta (Steve, 2026-11-14).
+
+- `host`, the primary key: lowercase (the table checks it), 1 to 253 characters. One claim per host
+  across every account of this Lake;
+- `customer_id`, `workspace_id` and `repository_id` (each cascades) and `environment` (1 to 256
+  characters): the environment that holds it, with index `domain_claims_environment_idx`;
+- `tls`, `acme` or `provided`: what the domain row is written with once verified;
+- `token`, unique, 64 lowercase hex digits: the value of the TXT record `_lake-challenge.<host>`;
+- `state`, `pending` or `verified`, and `verified_at`, set exactly when verified (a check);
+- `created_at`.
+
+`create_domain` inserts with `INSERT … ON CONFLICT (host) DO UPDATE … WHERE` the same repository and
+environment, so of two environments claiming one host at once only one gets a row back; the other
+answers `conflict`. `verify_domain` sets `verified` only on the row whose token it read.
+`delete_domain` deletes the environment's row. The Orama operator reads the verified rows (with each
+repository's `liquid_id`) and acts only on domain rows that match one. Additive: the table, its index
+and `domain_claims_guard`. Apply before the new binary (`lake migrate` from its image); an operator
+that predates it ignores the table and would route an unverified row an older lake image wrote, so
+roll the operator release that reads `domain_claims` first, then the lake image.
 
 ## Browser keys (migration `0102_browser_keys`)
 

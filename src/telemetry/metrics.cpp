@@ -1609,6 +1609,26 @@ public:
     admit_browser_key_call(const std::string& id) override {
         return call("admit_browser_key_call", [&] { return store_->admit_browser_key_call(id); });
     }
+    control::Result<control::DomainClaim> claim_domain(const control::NewDomainClaim& in) override {
+        return call("claim_domain", [&] { return store_->claim_domain(in); });
+    }
+    control::Result<control::DomainClaim> get_domain_claim(const std::string& host) override {
+        return call("get_domain_claim", [&] { return store_->get_domain_claim(host); });
+    }
+    control::Result<control::DomainClaim> verify_domain_claim(const std::string& host,
+                                                              const std::string& repository_id,
+                                                              const std::string& environment,
+                                                              const std::string& token) override {
+        return call("verify_domain_claim", [&] {
+            return store_->verify_domain_claim(host, repository_id, environment, token);
+        });
+    }
+    control::Result<void> release_domain_claim(const std::string& host,
+                                               const std::string& repository_id,
+                                               const std::string& environment) override {
+        return call("release_domain_claim",
+                    [&] { return store_->release_domain_claim(host, repository_id, environment); });
+    }
     control::Result<std::vector<control::Session>>
     list_sessions(const std::string& user_id, const std::string& pool_id) override {
         return call("list_sessions", [&] { return store_->list_sessions(user_id, pool_id); });

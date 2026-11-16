@@ -381,3 +381,9 @@ token and removes unclaimed deliveries. See [recovery.md](../../docs/api/recover
 `order_entitlements.cpp` (lake#972, LSR-105) is the shared subscription-event reducer and deadline evaluator. Both stores serialize subscription/customer/order matching and event deduplication, preserve canceled subscriptions and reject stale renewal snapshots. PostgreSQL exposes time-dependent desired state through `cloud_order_desired_state`; provisioning suspension remains an operator handoff. See [orders](../../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
 
 `authentication_attempt` commits per-account and per-client reservations before credential verification, independently of verification rollback; completion records failures or releases and clears successful account/client reservations. Both stores consume successful TOTP steps and recovery codes atomically; see [identity limits](../../docs/api/identity.md#authentication-attempt-limits) (lake#966).
+
+`dns_txt.cpp` is lake's TXT lookup for custom-domain proof of control (lake#949,
+docs/api/platform.md#custom-domains): the question and answer codecs (`encode_txt_query`,
+`decode_txt_answer`), `/etc/resolv.conf`'s name servers, and `lookup_txt`, one bounded UDP question
+per server with a TCP retry when the answer is truncated. POSIX sockets only; `verify_domain` runs it
+on the blocking pool. Both stores keep the claims (`domain_claims`, migration `0106_domain_claims`).

@@ -386,7 +386,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `get_repository` | read | `id` | repository | [repositories.md](repositories.md) |
 | `list_environments`, `get_environment`, `list_deployments`, `environment_logs` | read | repository id, optional environment, paging and log cursor fields | mirrored platform state or Loki-compatible log page | [platform.md](platform.md) |
 | `set_environment_env`, `unset_environment_env` | action (`write`) | repository, environment, key and plain value where setting | appended control-plane row | [platform.md](platform.md) |
-| `create_domain`, `delete_domain` | action (`deploy`) | repository, environment, host and TLS mode where creating | pending operator request | [platform.md](platform.md) |
+| `create_domain`, `verify_domain`, `delete_domain` | action (`deploy`) | repository, environment, host and TLS mode where creating | the host's claim and its TXT record; verified, the pending operator request | [platform.md](platform.md#custom-domains) |
 | `repository_refs`, `repository_tree`, `repository_file` | read | repository id plus ref or path where required | published refs, tree entries, or one file/blob | [repositories.md](repositories.md) |
 | `list_changes`, `get_change`, `change_diff`, `list_conflicts` | read | repository id plus change id where required | change metadata, per-path diffs with text hunks, or conflicts with kind, region, explanation, proposal, and reasons | [repositories.md](repositories.md) |
 | `resolve_conflict` | action (`write`) | repository id, ref, path, conflict id, resolution kind, and optional base64 blob | conflict/value resolution record and new change | [repositories.md](repositories.md) |

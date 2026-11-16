@@ -192,6 +192,8 @@ const std::vector<std::pair<std::string_view, std::string_view>>& calls_only_cap
         {"create_application_webhook", "an identity record"},
         {"create_customer", "an account"},
         {"create_domain", "a routing record"},
+        // A DNS TXT lookup and, once it matches, the routing record create_domain held back.
+        {"verify_domain", "a routing record"},
         {"create_encryption_key", "a key record"},
         {"create_federation_issuer", "identity configuration"},
         {"create_grant", "a policy record"},

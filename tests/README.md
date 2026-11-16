@@ -1038,3 +1038,9 @@ then succeeds when the account transaction releases its lock (lake#966).
 redirect of browser pages on an alias to the public host while the API is served there
 (`WhiteLabelAliases.*`, a real server), and the registry refusing Lake's own sign-in methods in its
 own pool while `viewer` names the provider (`WhiteLabelSsoOnly.*`).
+
+`test_domain_claims.cpp` covers custom-domain claims (lake#949, docs/api/platform.md#custom-domains):
+`Stores/DomainClaims.*` on both stores (one environment per host across accounts, the same
+environment keeps its token, only the claim's token verifies it, releasing frees the host) and
+`DnsTxt.*` (the TXT question, reading an answer with a CNAME and split records, truncation, NXDOMAIN,
+resolv.conf). The capability flow is in `test_platform.cpp` (`PlatformFixture.*Domain*`).

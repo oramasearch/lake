@@ -295,6 +295,19 @@ struct BrowserKeyAdmission {
     bool allowed = true;
     int retry_after_seconds = 0;
 };
+// A custom domain's claim (lake#949, migration 0106_domain_claims, docs/api/platform.md#custom-
+// domains): which environment of which account holds a host on this Lake, and whether it proved it
+// controls the name. One claim per host across every account. `token` is what the tenant publishes
+// as a TXT record at `_lake-challenge.<host>`; `state` is `pending` until verify_domain reads it,
+// then `verified`. Only a verified claim's domain row reaches the operator.
+inline constexpr std::string_view domain_challenge_label = "_lake-challenge.";
+struct DomainClaim {
+    std::string host, customer_id, workspace_id, repository_id, environment, tls, token, state,
+        verified_at, created_at;
+};
+struct NewDomainClaim {
+    std::string host, customer_id, workspace_id, repository_id, environment, tls, token;
+};
 struct Principal {
     std::string user_id, taap_id, session_id, device_id, pool_id, kind;
     std::vector<std::string> scopes;
@@ -2723,6 +2736,22 @@ public:
     // Counts one call in the key's current minute (shared by every replica, since it is a row):
     // refused once the minute holds `rate_limit_per_minute` calls.
     virtual Result<BrowserKeyAdmission> admit_browser_key_call(const std::string& id) = 0;
+    // Custom-domain claims (lake#949). claim_domain is one statement: it inserts a pending claim
+    // with the caller's token, or, when the same environment already holds the host, answers that
+    // claim (its token and state unchanged, its tls updated); `conflict` when another environment,
+    // of any account, holds it. get_domain_claim is not_found for an unclaimed host.
+    // verify_domain_claim sets `verified` on the environment's claim whose token is still `token`
+    // (not_found otherwise); a verified claim stays verified. release_domain_claim removes the
+    // environment's claim of the host, and does nothing when it holds none.
+    virtual Result<DomainClaim> claim_domain(const NewDomainClaim&) = 0;
+    virtual Result<DomainClaim> get_domain_claim(const std::string& host) = 0;
+    virtual Result<DomainClaim> verify_domain_claim(const std::string& host,
+                                                    const std::string& repository_id,
+                                                    const std::string& environment,
+                                                    const std::string& token) = 0;
+    virtual Result<void> release_domain_claim(const std::string& host,
+                                              const std::string& repository_id,
+                                              const std::string& environment) = 0;
     virtual Result<std::vector<Session>> list_sessions(const std::string& user_id,
                                                        const std::string& pool_id) = 0;
     virtual Result<void> revoke_session(const std::string& user_id,
