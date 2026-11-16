@@ -122,9 +122,10 @@ liquid::runtime::task<ApiResult> import_github_repository(const json& input,
     // The checkout is read only from the caller's own folder of the staging root, never from a
     // server path the caller chose (lake#925).
     if (context.git_import_root.empty()) {
-        co_return ApiResult::failure("unavailable",
-                                     "this lake has no Git import staging root (LAKE_GIT_IMPORT_ROOT)",
-                                     "/git_directory");
+        co_return ApiResult::failure(
+            "not_supported",
+            "this lake has no Git import staging root (LAKE_GIT_IMPORT_ROOT)",
+            "/git_directory");
     }
     const std::string customer_for_checkout = input.at("customer_id");
     const auto checkout = git_import_checkout(context.git_import_root,

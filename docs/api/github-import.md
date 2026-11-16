@@ -18,7 +18,7 @@ customer's own folder of the staging root, `LAKE_GIT_IMPORT_ROOT/<customer_id>/<
 never a server path the caller chooses. It is checked by its text before any filesystem access: an
 absolute path, `..`, `.`, an empty name or a backslash is `invalid_input` at `/git_directory`. Then
 the resolved folder, symbolic links followed, must still lie inside the customer's folder and exist.
-With no `LAKE_GIT_IMPORT_ROOT` the capability answers `unavailable`. The deployment integration
+With no `LAKE_GIT_IMPORT_ROOT` the capability answers `not_supported` (501). The deployment integration
 that fetches the checkout writes it there. An export's temporary Git folder is private (`0700`) and
 named at random (`mkdtemp`), and is never under the staging root. The new repository belongs to `workspace_id`, a live
 workspace of the customer's account (lake#315); a missing or unknown one is `invalid_input` at
