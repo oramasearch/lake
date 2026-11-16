@@ -51,8 +51,13 @@ credential has no person behind it, so they refuse it; operators keep `create_or
   person to type the handle before it calls the capability. The caller's existing direct `admin`
   grant on the converted account is kept.
 - `list_invitations` without `organization_id` returns the pending, unexpired invitations
-  addressed to the caller: `email` invitations matching the caller's email, case-insensitively,
-  and `handle` invitations matching the handle of the caller's personal account. Each item also
+  addressed to the caller: `email` invitations matching the caller's **verified** email,
+  case-insensitively, and `handle` invitations matching the handle of the caller's personal account.
+  An account an SSO provider or SCIM provisioned (it has a SCIM user record) has no verified email:
+  its address is what its identity provider asserted, and lake has no domain proof for a
+  connection, so `email` invitations never reach it ([lake#1297](https://github.com/oramasearch/lake/issues/1297)).
+  Invite it by handle, provision its team by SCIM, or accept on its behalf with `accept_invitation`.
+  The store applies the rule (`Store::list_invitee_invitations` takes the user, not an address). Each item also
   carries `organization_name`, because the invitee cannot read the organization until they join.
 - `join_organization` accepts one of those invitations as the caller. The membership's
   `attestation_digest` is `invitation/<invitation id>` and its `granted_by_taap_id` is the

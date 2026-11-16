@@ -9,6 +9,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include <liquid/runtime.hpp>
 #include <nlohmann/json.hpp>
@@ -25,9 +27,42 @@ namespace lake::control {
 // installed, or nullopt.
 std::optional<std::string> install_zetta_egress_policy(std::string_view allow);
 
+// One request to the operator's POST /v1/service_connection (orama-operator#773,
+// docs/control-plane/services.md#connections-on-demand), and its answer. The exchange is injected
+// (WorkspaceService::set_connection_http): the server's outbound client in lake, a test double in
+// the tests. `ca_bundle` is the control plane's CA certificate (PEM), the only root the exchange
+// trusts. The request carries the Lake's connection credential and the answer carries a
+// connection: neither is ever logged, written to disk or put in an error message.
+struct ServiceConnectionRequest {
+    std::string url;
+    std::string body; // {"service": "<slug>"}
+    std::vector<std::pair<std::string, std::string>> headers;
+    std::string ca_bundle;
+};
+struct ServiceConnectionResponse {
+    int status = 0;
+    std::string body;
+    std::string error; // the transport's failure, never the request
+};
+using ServiceConnectionHttp =
+    std::function<ServiceConnectionResponse(const ServiceConnectionRequest&)>;
+
+// How long a connection fetched from the operator is kept in memory before it is asked again, how
+// long an answer that there is none is kept, and how long a kept connection may still be used
+// while the operator cannot be reached (a roll of the operator, a network blip). Memory only.
+inline constexpr std::chrono::seconds service_connection_ttl{30};
+inline constexpr std::chrono::seconds service_connection_missing_ttl{5};
+inline constexpr std::chrono::seconds service_connection_stale_limit{300};
+
 // A customer's managed services (docs/control-plane/services.md, liquid-bridge decision 46): Zetta
 // and Postgres clusters that lake records in its control Postgres and the Orama operator runs.
-// The operator mounts each Ready service's connection into lake as `<service_dir>/<slug>.json`.
+// lake reads each Ready service's connection in one of two ways:
+//   - on demand (orama-operator#773): when LAKE_SERVICE_CONNECTION_URL is set, lake asks the
+//     operator for one connection when it needs it, with its own credential
+//     (LAKE_SERVICE_CONNECTION_TOKEN_FILE) over TLS to the control plane's CA
+//     (LAKE_SERVICE_CONNECTION_CA_FILE), and keeps it only in memory, briefly;
+//   - from the mount (older operators): `<service_dir>/<slug>.json`, the aggregate Secret
+//     lake-<lake>-services mounted at LAKE_SERVICE_DIR.
 // The customer's workspace, the Zetta cluster Design, Train and Ship delegate to
 // (docs/api/workspaces.md), resolves its Zetta service through workspaces.zetta_service_id.
 struct WorkspaceConfig {
@@ -53,8 +88,21 @@ struct WorkspaceConfig {
     std::map<std::string, std::string> agent_bus_tokens;
     std::map<std::string, int> agent_lease_seconds;
 
+    // On-demand connections (orama-operator#773). The operator renders all three; when the URL is
+    // set, the mount is not read.
+    std::string service_connection_url;        // LAKE_SERVICE_CONNECTION_URL
+    std::string service_connection_token_file; // LAKE_SERVICE_CONNECTION_TOKEN_FILE
+    std::string service_connection_ca_file;    // LAKE_SERVICE_CONNECTION_CA_FILE
+    // How long a fetched connection, and an answer that there is none, are kept in memory.
+    std::chrono::seconds connection_ttl = service_connection_ttl;
+    std::chrono::seconds connection_missing_ttl = service_connection_missing_ttl;
+
+    bool connections_on_demand() const {
+        return !service_connection_url.empty();
+    }
+    // Services are enabled when the operator gives lake either way of reading a connection.
     bool configured() const {
-        return !service_dir.empty();
+        return !service_dir.empty() || connections_on_demand();
     }
 };
 
@@ -155,9 +203,15 @@ public:
     Result<ManagedService> create_service(NewManagedService service);
     Result<ManagedService> delete_service(const std::string& customer_id,
                                           const std::string& service_id);
-    // The operator's mounted connection for a service, or nothing before it is delivered. It
-    // carries the credential: only service_connection returns it, and never to a page.
+    // The operator's connection for a service, or nothing before it is delivered: asked of the
+    // operator when connections are on demand (kept in memory for service_connection_ttl), else
+    // read from the mount. It carries the credential: only service_connection returns it, and
+    // never to a page.
     std::optional<nlohmann::json> connection(const ManagedService& service) const;
+    // The exchange on-demand connections go over. The server installs its outbound client unless
+    // one is already set; without one, an on-demand lake has no connection.
+    void set_connection_http(ServiceConnectionHttp http);
+    bool has_connection_http() const;
 
     // Stores (docs/control-plane/storage.md). Every call is on behalf of `customer_id`; a store of
     // another customer is not_found. A non-empty `workspace_id` narrows the call to that
@@ -171,8 +225,9 @@ public:
     Result<ManagedStore> create_store(NewManagedStore store);
     Result<ManagedStore> delete_store(const std::string& customer_id, const std::string& store_id,
                                       const std::string& workspace_id = {});
-    // The operator's connection for a store, `<service_dir>/<slug>.json` beside the services'
-    // connections, or nothing before it is delivered.
+    // The operator's connection for a store, read the same way as a service's (on demand, or
+    // `<service_dir>/<slug>.json` beside the services' connections), or nothing before it is
+    // delivered.
     std::optional<nlohmann::json> store_connection(const ManagedStore& store) const;
 
     // Legacy default status, and explicit workspace status for data-plane callers.
@@ -206,6 +261,15 @@ private:
         std::string workspace_id;
     };
 
+    // One on-demand connection (orama-operator#773): `value` is empty for an answer that there is
+    // none.
+    struct CachedConnection {
+        std::optional<nlohmann::json> value;
+        std::chrono::steady_clock::time_point fetched;
+        std::chrono::steady_clock::time_point expires;
+    };
+
+    std::optional<nlohmann::json> fetch_connection(const std::string& slug) const;
     WorkspaceState state_of(const std::string& customer_id,
                             const std::optional<ManagedService>& service) const;
     Result<std::optional<ManagedService>> default_service(const std::string& customer_id);
@@ -216,6 +280,9 @@ private:
     std::mutex registry_mutex_;
     std::map<std::string, RegistryEntry> registry_cache_;
     std::uint64_t registry_epoch_ = 0;
+    mutable std::mutex connections_mutex_;
+    ServiceConnectionHttp connection_http_;
+    mutable std::map<std::string, CachedConnection> connections_;
 };
 
 } // namespace lake::control

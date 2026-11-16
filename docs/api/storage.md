@@ -196,8 +196,10 @@ Zettas, the cloud metadata address).
 
 ## Configuration
 
-Stores use the services configuration: `LAKE_SERVICE_DIR` (the mounted Secret
-`lake-<lake>-services`) holds each Ready store's `<slug>.json`. Without it the Storage tab says
+Stores use the services configuration: a store's connection is asked of the operator by its slug
+when `LAKE_SERVICE_CONNECTION_URL` is set ([connections on demand](../control-plane/services.md#connections-on-demand)), else read from
+`LAKE_SERVICE_DIR` (the mounted Secret `lake-<lake>-services`, each Ready store's `<slug>.json`,
+on an older operator). With neither, the Storage tab says
 Design, Train and Ship are not available, and the store capabilities answer `store_unavailable`.
 
 `LAKE_STORE_ALLOW_PRIVATE_ADDRESSES=1` (local development only) lets a store's endpoint be a

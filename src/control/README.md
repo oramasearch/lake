@@ -1,5 +1,14 @@
 # Control stores
 
+`WorkspaceService::connection` (`zetta_workspace.cpp`) reads a service's or store's connection
+in one of two ways (orama-operator#773): with `LAKE_SERVICE_CONNECTION_URL` set it asks the
+operator's `POST /v1/service_connection` for that one slug over the injected
+`ServiceConnectionHttp`, with the Lake's credential file and the control plane's CA (both read on
+every call), keeps the answer in memory only (30 s, 5 s for none, a fetched one used up to 5 minutes
+while the operator is unreachable, dropped on a refused credential) and never logs it; without the
+URL it reads the mounted `<service_dir>/<slug>.json` as before. See
+[connections on demand](../../docs/control-plane/services.md#connections-on-demand).
+
 `InMemoryStore` keeps its records in `std::vector`s: never hold an iterator, pointer or reference
 into one across a `push_back`, `emplace_back` or `erase` on the same vector; copy the id first.
 `upsert_scim_group` read the team's policy object through an iterator after pushing member objects
@@ -124,9 +133,14 @@ token purposes. Memory and PostgreSQL stores insert queued rows, retain operator
 notify `lake_builds` on create/cancel. See `docs/control-plane/builds.md`.
 
 Both stores implement `create_organization_space` and `convert_personal_space` as one transaction
-each, list a user's memberships and the invitations addressed to an email or handles, and keep an
-organization-scope membership's grant on the organization's own space in step with the membership.
-See `docs/api/organizations.md`.
+each, list a user's memberships and the invitations addressed to the user's verified email or
+handles, and keep an organization-scope membership's grant on the organization's own space in step
+with the membership. See `docs/api/organizations.md`. An account with a SCIM user record (SCIM or
+just-in-time SSO provisioned it) has no verified email: `list_invitee_invitations` matches no
+`email` invitation to it, and Clerk sign-in never links to it by address (lake#1297,
+`docs/api/sso.md`). `sign_in_oauth` keeps the provider's address on a new account only when
+`OAuthIdentity::email_verified` is set; otherwise the account has no address (lake#1299,
+`docs/api/identity.md`). `verify_oidc_id_token` reads `email_verified` into `OidcClaims`.
 Agent launches and cron schedules carry the workspace that holds their agent (migration
 `0043_agent_launch_workspaces`, lake#442). Both stores filter launch, schedule and scheduled-run
 lists by it. `expire_unstarted_agent_launches` withdraws, with a `stop_reason`, a launch the

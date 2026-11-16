@@ -89,7 +89,7 @@ The credential is `credentials(kind = 'oauth', pool_id = 'lake', subject = 'cler
 | Situation | Result |
 |---|---|
 | The Clerk subject is already linked | Signs in that user |
-| Not linked, and a lake-pool user has the same email | Links the subject to that user. Clerk verified the address, so it is the same person |
+| Not linked, and a lake-pool user has the same email | Links the subject to that user. Clerk verified the address, so it is the same person. Never an account an SSO provider or SCIM provisioned: its address is only its identity provider's claim ([lake#1297](https://github.com/oramasearch/lake/issues/1297)) |
 | Neither | Creates the user with a **managed key** (a TAAP identity Lake holds), provisions their personal customer with an `admin` grant (as password sign-up does, decision 40), and links the subject |
 
 Policy is keyed on TAAP identities, and a Clerk user arrives without one. So on first sign-in lake

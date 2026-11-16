@@ -5233,7 +5233,13 @@ Result<IssuedSession> InMemoryStore::sign_in_oauth(const OAuthIdentity& input) {
     }
     const std::string now = now_iso8601();
     const std::string identity = "taap:1:ed25519:" + identity_crypto::random_secret();
-    users_.push_back(User{new_uuid_v4(), identity, input.email, input.display_name, now, now});
+    // An address the provider did not say was verified is not kept (lake#1299).
+    users_.push_back(User{new_uuid_v4(),
+                          identity,
+                          input.email_verified ? input.email : std::string(),
+                          input.display_name,
+                          now,
+                          now});
     oauth_credentials_.push_back(OAuthCredential{users_.back().id, pool, subject});
     Device& device = add_device(devices_, users_.back().id, input.device_name);
     IssuedSession issued =
@@ -5243,6 +5249,11 @@ Result<IssuedSession> InMemoryStore::sign_in_oauth(const OAuthIdentity& input) {
     issued.session.reason.clear();
     issued.created_user = true;
     return issued;
+}
+
+bool InMemoryStore::provisioned_by_identity_provider_locked(const std::string& user_id) const {
+    return std::ranges::any_of(scim_users_,
+                               [&](const ScimUser& user) { return user.user_id == user_id; });
 }
 
 Result<ClerkUserProvisioned> InMemoryStore::clerk_user_locked(const ClerkIdentity& input) {
@@ -5257,8 +5268,11 @@ Result<ClerkUserProvisioned> InMemoryStore::clerk_user_locked(const ClerkIdentit
         }
     }
     if (result.user_id.empty() && !input.email.empty()) {
+        // Clerk verified this address, but an account an SSO provider or SCIM provisioned only
+        // claims it: never link to one (lake#1297).
         for (const auto& user : users_) {
-            if (lower(user.email) == lower(input.email)) {
+            if (lower(user.email) == lower(input.email) &&
+                !provisioned_by_identity_provider_locked(user.id)) {
                 result.user_id = user.id;
             }
         }
@@ -8009,11 +8023,19 @@ Result<std::vector<Membership>> InMemoryStore::list_user_memberships(const std::
 }
 
 Result<std::vector<Invitation>>
-InMemoryStore::list_invitee_invitations(const std::string& email,
+InMemoryStore::list_invitee_invitations(const std::string& user_id,
                                         const std::vector<std::string>& handles,
                                         int limit) {
     std::lock_guard lock(mutex_);
     const std::string now = now_iso8601();
+    // The user's address counts only when it is verified: never for an account an SSO provider or
+    // SCIM provisioned (lake#1297).
+    std::string email;
+    const auto user =
+        std::ranges::find_if(users_, [&](const User& item) { return item.id == user_id; });
+    if (user != users_.end() && !provisioned_by_identity_provider_locked(user_id)) {
+        email = user->email;
+    }
     std::vector<Invitation> out;
     for (auto invitation = invitations_.rbegin(); invitation != invitations_.rend(); ++invitation) {
         if (invitation->status == "pending" && invitation->expires_at > now &&

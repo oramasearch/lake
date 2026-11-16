@@ -94,7 +94,8 @@ store ids), each with the customer, service id, kind and name. `start_workspace`
 
 | Variable | Set by | Meaning |
 |---|---|---|
-| `LAKE_SERVICE_DIR` | operator | The mounted Secret `lake-<lake>-services`, one `<slug>.json` per Ready service. Without it, Services, Design, Train and Ship say they are not available |
+| `LAKE_SERVICE_CONNECTION_URL` | operator | Where lake asks the operator for one service's connection when it needs it, with `LAKE_SERVICE_CONNECTION_TOKEN_FILE` and `LAKE_SERVICE_CONNECTION_CA_FILE` ([connections on demand](../control-plane/services.md#connections-on-demand), orama-operator#773). Set, the mount below is not read |
+| `LAKE_SERVICE_DIR` | operator | On an older operator: the mounted Secret `lake-<lake>-services`, one `<slug>.json` per Ready service. With neither this nor the URL, Services, Design, Train and Ship say they are not available |
 | `LAKE_SERVICES_PER_CUSTOMER` | optional | Live services per customer; default `0`, no limit (Steve, 2026-09-26) |
 
 ## Verify

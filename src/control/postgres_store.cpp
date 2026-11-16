@@ -880,7 +880,13 @@ std::optional<OidcClaims> verify_oidc_id_token(std::string_view token,
         subject.empty() || text("nonce") != nonce) {
         return std::nullopt;
     }
-    return OidcClaims{subject, text("email"), text("name"), issued_at, text("sid")};
+    const bool email_verified =
+        claims.contains("email_verified") &&
+        ((claims["email_verified"].is_boolean() && claims["email_verified"].get<bool>()) ||
+         (claims["email_verified"].is_string() &&
+          claims["email_verified"].get<std::string>() == "true"));
+    return OidcClaims{
+        subject, text("email"), text("name"), issued_at, text("sid"), email_verified};
 }
 
 std::expected<VerifiedPasskeyRegistration, std::string>
@@ -3071,11 +3077,22 @@ public:
             });
     }
 
-    Result<std::vector<Invitation>> list_invitee_invitations(const std::string& email,
+    Result<std::vector<Invitation>> list_invitee_invitations(const std::string& user_id,
                                                              const std::vector<std::string>& handles,
                                                              int limit) override {
         return with_tx<std::vector<Invitation>>(
             [&](pqxx::work& tx) -> Result<std::vector<Invitation>> {
+                // The user's address counts only when it is verified: never for an account an SSO
+                // provider or SCIM provisioned, whose address its identity provider asserted
+                // (lake#1297). An unknown user, or one without an address, matches no email.
+                std::string email;
+                const pqxx::result user = tx.exec_params(
+                    "SELECT coalesce(u.email, '') FROM users u WHERE u.id::text = $1 "
+                    "AND NOT EXISTS (SELECT 1 FROM scim_users s WHERE s.user_id = u.id)",
+                    user_id);
+                if (!user.empty()) {
+                    email = user[0][0].as<std::string>();
+                }
                 pqxx::params params;
                 params.append(email);
                 std::string handle_list;
@@ -9641,7 +9658,9 @@ public:
                 rows = tx.exec_params("INSERT INTO users (taap_id, email, display_name, pool_id) "
                                       "VALUES ($1, $2, $3, $4) RETURNING id::text",
                                       identity->identifier,
-                                      nullable(in.email),
+                                      // An address the provider did not say was verified is not
+                                      // kept (lake#1299).
+                                      nullable(in.email_verified ? in.email : std::string()),
                                       in.display_name,
                                       in.pool_id);
                 user_id = rows[0][0].as<std::string>();
@@ -9692,10 +9711,13 @@ public:
             result.user_id = rows[0][0].as<std::string>();
         } else {
             // Clerk verified this address, so an existing lake account with it is the same
-            // person: link it rather than create a second account.
+            // person: link it rather than create a second account. Never an account an SSO
+            // provider or SCIM provisioned: its address is only its identity provider's claim
+            // (lake#1297).
             if (!in.email.empty()) {
                 rows = tx.exec_params("SELECT id::text FROM users WHERE pool_id = 'lake' "
-                                      "AND lower(email) = lower($1)",
+                                      "AND lower(email) = lower($1) AND NOT EXISTS "
+                                      "(SELECT 1 FROM scim_users s WHERE s.user_id = users.id)",
                                       in.email);
             }
             if (!rows.empty()) {

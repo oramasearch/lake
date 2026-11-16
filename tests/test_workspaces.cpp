@@ -6802,3 +6802,226 @@ TEST(FeaturePlanZetta, EachChurnShapeFromTheIssuePlansFromTheDatasetAlone) {
         static_cast<void>(call("delete_dataset", {{"id", "datasets/" + table}}));
     }
 }
+
+// On-demand service connections (orama-operator#773, docs/control-plane/services.md#connections-
+// on-demand): with LAKE_SERVICE_CONNECTION_URL set, lake asks the operator for one connection when
+// it needs one, with its own credential and the control plane's CA, never reads the mount, and
+// keeps the answer only in memory.
+namespace {
+
+struct OnDemandConnections {
+    std::filesystem::path dir =
+        lake::test::fixture_path("service-connections-" + lake::control::new_uuid_v4());
+    std::mutex mutex;
+    std::vector<lake::control::ServiceConnectionRequest> asked;
+    std::function<lake::control::ServiceConnectionResponse(
+        const lake::control::ServiceConnectionRequest&)>
+        answer;
+    std::shared_ptr<lake::control::WorkspaceService> service;
+
+    OnDemandConnections() {
+        std::filesystem::create_directories(dir / "mount");
+        std::ofstream(dir / "token") << "lake_conn_test-credential\n";
+        std::ofstream(dir / "ca.crt") << "-----BEGIN CERTIFICATE-----\ntest\n"
+                                         "-----END CERTIFICATE-----\n";
+        // A mounted file the on-demand path must never read.
+        std::ofstream(dir / "mount" / "svc-mounted.json") << R"({"token":"from-the-mount"})";
+        lake::control::WorkspaceConfig config{(dir / "mount").string(), 0};
+        config.service_connection_url =
+            "https://orama-operator-control-plane.orama-system.svc:9443/v1/service_connection";
+        config.service_connection_token_file = (dir / "token").string();
+        config.service_connection_ca_file = (dir / "ca.crt").string();
+        service = std::make_shared<lake::control::WorkspaceService>(
+            std::move(config), std::make_shared<lake::control::InMemoryStore>(), nullptr);
+        service->set_connection_http([this](const lake::control::ServiceConnectionRequest& r) {
+            std::lock_guard lock(mutex);
+            asked.push_back(r);
+            return answer(r);
+        });
+    }
+    OnDemandConnections(const OnDemandConnections&) = delete;
+    OnDemandConnections& operator=(const OnDemandConnections&) = delete;
+    ~OnDemandConnections() {
+        std::error_code ignored;
+        std::filesystem::remove_all(dir, ignored);
+    }
+
+    static lake::control::ServiceConnectionResponse
+    delivered(const std::string& slug, const json& connection) {
+        return {200, json{{"service", slug}, {"connection", connection}}.dump(), {}};
+    }
+    std::optional<json> connection(const std::string& slug) {
+        lake::control::ManagedService named;
+        named.slug = slug;
+        return service->connection(named);
+    }
+    std::size_t calls() {
+        std::lock_guard lock(mutex);
+        return asked.size();
+    }
+};
+
+} // namespace
+
+TEST(ServiceConnections, EnabledByTheUrlAloneAndTheMountIsNeverRead) {
+    lake::control::WorkspaceConfig mount_only{"/var/run/lake/services", 0};
+    EXPECT_TRUE(mount_only.configured());
+    EXPECT_FALSE(mount_only.connections_on_demand());
+    lake::control::WorkspaceConfig on_demand;
+    on_demand.service_connection_url = "https://control-plane.test/v1/service_connection";
+    EXPECT_TRUE(on_demand.configured()) << "the URL enables services without a mount";
+    EXPECT_TRUE(on_demand.connections_on_demand());
+    EXPECT_FALSE(lake::control::WorkspaceConfig{}.configured());
+
+    OnDemandConnections c;
+    c.answer = [](const lake::control::ServiceConnectionRequest&) {
+        return lake::control::ServiceConnectionResponse{404, R"({"error":"not_found"})", {}};
+    };
+    EXPECT_FALSE(c.connection("svc-mounted")) << "the mounted file is not read on demand";
+    EXPECT_EQ(c.calls(), 1U);
+}
+
+TEST(ServiceConnections, AsksForOneSlugWithItsOwnCredentialAndTheControlPlaneCa) {
+    OnDemandConnections c;
+    c.answer = [](const lake::control::ServiceConnectionRequest& r) {
+        const json body = json::parse(r.body);
+        return OnDemandConnections::delivered(
+            body["service"], {{"kind", "zetta"}, {"token", "ws-token"}, {"endpoint", "http://ws"}});
+    };
+    const auto connection = c.connection("ws-0123456789ab");
+    ASSERT_TRUE(connection);
+    EXPECT_EQ((*connection)["token"], "ws-token");
+    ASSERT_EQ(c.calls(), 1U);
+    const auto& request = c.asked.front();
+    EXPECT_EQ(request.url,
+              "https://orama-operator-control-plane.orama-system.svc:9443/v1/service_connection");
+    EXPECT_EQ(json::parse(request.body), (json{{"service", "ws-0123456789ab"}}));
+    bool authorized = false;
+    for (const auto& [name, value] : request.headers) {
+        if (name == "Authorization") {
+            EXPECT_EQ(value, "Bearer lake_conn_test-credential") << "the file's token, trimmed";
+            authorized = true;
+        }
+    }
+    EXPECT_TRUE(authorized);
+    EXPECT_NE(request.ca_bundle.find("BEGIN CERTIFICATE"), std::string::npos);
+}
+
+TEST(ServiceConnections, AConnectionIsKeptBrieflyInMemoryAndNeverWritten) {
+    OnDemandConnections c;
+    c.answer = [](const lake::control::ServiceConnectionRequest&) {
+        return OnDemandConnections::delivered("svc-db", {{"password", "p"}});
+    };
+    ASSERT_TRUE(c.connection("svc-db"));
+    ASSERT_TRUE(c.connection("svc-db"));
+    EXPECT_EQ(c.calls(), 1U) << "a second read within the TTL is served from memory";
+    std::size_t files = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(c.dir)) {
+        files += entry.is_regular_file() ? 1U : 0U;
+    }
+    EXPECT_EQ(files, 3U) << "only the token, the CA and the pre-existing mounted file";
+
+    // Each slug is asked for on its own.
+    c.answer = [](const lake::control::ServiceConnectionRequest&) {
+        return OnDemandConnections::delivered("svc-other", {{"password", "q"}});
+    };
+    ASSERT_TRUE(c.connection("svc-other"));
+    EXPECT_EQ(c.calls(), 2U);
+}
+
+TEST(ServiceConnections, RefusalsAndMismatchedAnswersGiveNoConnection) {
+    OnDemandConnections c;
+    c.answer = [](const lake::control::ServiceConnectionRequest&) {
+        return OnDemandConnections::delivered("svc-someone-else", {{"password", "p"}});
+    };
+    EXPECT_FALSE(c.connection("svc-mine")) << "an answer for another slug is not used";
+    c.answer = [](const lake::control::ServiceConnectionRequest&) {
+        return lake::control::ServiceConnectionResponse{401, R"({"error":"unauthorized"})", {}};
+    };
+    EXPECT_FALSE(c.connection("svc-refused"));
+    c.answer = [](const lake::control::ServiceConnectionRequest&) {
+        return lake::control::ServiceConnectionResponse{404, R"({"error":"not_found"})", {}};
+    };
+    EXPECT_FALSE(c.connection("svc-missing"));
+    const std::size_t after_missing = c.calls();
+    EXPECT_FALSE(c.connection("svc-missing"));
+    EXPECT_EQ(c.calls(), after_missing) << "an answer that there is none is kept briefly too";
+}
+
+TEST(ServiceConnections, AKeptConnectionCarriesOverAnOperatorOutageButARefusalDropsIt) {
+    OnDemandConnections c;
+    c.answer = [](const lake::control::ServiceConnectionRequest&) {
+        return OnDemandConnections::delivered("svc-db", {{"password", "p"}});
+    };
+    ASSERT_TRUE(c.connection("svc-db"));
+    // With a TTL of zero every later read asks the operator again.
+    lake::control::WorkspaceConfig config = c.service->config();
+    config.connection_ttl = std::chrono::seconds{0};
+    config.connection_missing_ttl = std::chrono::seconds{0};
+    c.service = std::make_shared<lake::control::WorkspaceService>(
+        std::move(config), std::make_shared<lake::control::InMemoryStore>(), nullptr);
+    c.service->set_connection_http([&c](const lake::control::ServiceConnectionRequest& r) {
+        std::lock_guard lock(c.mutex);
+        c.asked.push_back(r);
+        return c.answer(r);
+    });
+    ASSERT_TRUE(c.connection("svc-db"));
+    const std::size_t before = c.calls();
+
+    c.answer = [](const lake::control::ServiceConnectionRequest&) {
+        return lake::control::ServiceConnectionResponse{0, {}, "connection refused"};
+    };
+    auto kept = c.connection("svc-db");
+    ASSERT_TRUE(kept) << "a transport failure keeps the connection fetched moments ago";
+    EXPECT_EQ((*kept)["password"], "p");
+    c.answer = [](const lake::control::ServiceConnectionRequest&) {
+        return lake::control::ServiceConnectionResponse{503, R"({"error":"unavailable"})", {}};
+    };
+    EXPECT_TRUE(c.connection("svc-db")) << "so does an operator that cannot read its Secrets";
+    EXPECT_EQ(c.calls(), before + 2) << "each read still asked the operator";
+
+    c.answer = [](const lake::control::ServiceConnectionRequest&) {
+        return lake::control::ServiceConnectionResponse{401, R"({"error":"unauthorized"})", {}};
+    };
+    EXPECT_FALSE(c.connection("svc-db")) << "a refused credential drops what was kept";
+    c.answer = [](const lake::control::ServiceConnectionRequest&) {
+        return lake::control::ServiceConnectionResponse{0, {}, "connection refused"};
+    };
+    EXPECT_FALSE(c.connection("svc-db")) << "and an outage after it invents nothing";
+
+    c.answer = [](const lake::control::ServiceConnectionRequest&) {
+        return OnDemandConnections::delivered("svc-db", {{"password", "p"}});
+    };
+    ASSERT_TRUE(c.connection("svc-db"));
+    c.answer = [](const lake::control::ServiceConnectionRequest&) {
+        return lake::control::ServiceConnectionResponse{404, R"({"error":"not_found"})", {}};
+    };
+    EXPECT_FALSE(c.connection("svc-db")) << "a withdrawn service is gone at once";
+}
+
+TEST(ServiceConnections, NoCredentialFileMeansNoRequest) {
+    OnDemandConnections c;
+    c.answer = [](const lake::control::ServiceConnectionRequest&) {
+        return OnDemandConnections::delivered("svc-db", {{"password", "p"}});
+    };
+    std::filesystem::remove(c.dir / "token");
+    EXPECT_FALSE(c.connection("svc-db"));
+    EXPECT_EQ(c.calls(), 0U) << "nothing is asked without the Lake's own credential";
+}
+
+TEST(ServiceConnections, WithoutTheUrlTheMountIsReadAsBefore) {
+    const auto dir = lake::test::fixture_path("service-mount-" + lake::control::new_uuid_v4());
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "svc-db.json") << R"({"password":"from-the-mount"})";
+    lake::control::WorkspaceService service(lake::control::WorkspaceConfig{dir.string(), 0},
+                                            std::make_shared<lake::control::InMemoryStore>(),
+                                            nullptr);
+    lake::control::ManagedService named;
+    named.slug = "svc-db";
+    const auto connection = service.connection(named);
+    ASSERT_TRUE(connection);
+    EXPECT_EQ((*connection)["password"], "from-the-mount");
+    EXPECT_FALSE(service.has_connection_http());
+    std::error_code ignored;
+    std::filesystem::remove_all(dir, ignored);
+}

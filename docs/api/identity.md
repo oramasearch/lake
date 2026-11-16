@@ -140,6 +140,15 @@ one it answers `identity_proof_required`. The Postgres store verifies and record
 before creating the user and OAuth credential. A returning linked identity does not need to send
 the document again.
 
+**A sign-up keeps only a verified address** ([lake#1299](https://github.com/oramasearch/lake/issues/1299)).
+An OpenID Connect provider's `email` is kept on the new account only when its ID token says
+`email_verified: true` (a JSON `true`, or the string `"true"` some issuers send). GitHub's address is
+its public profile address, which GitHub allows only from the account's verified addresses, so a
+present one is kept. Otherwise the account is created without an address, so the provider's claim
+never matches an `email` invitation ([organizations.md](organizations.md)) or links an account. The
+stores apply the rule (`OAuthIdentity::email_verified`), whoever calls `sign_in_oauth`. Enterprise
+SSO providers follow [sso.md](sso.md): their accounts' addresses are never verified.
+
 OAuth starts bind each flow to the initiating browser (lake#963, LSR-097). The REST start
 response and the hosted `/apps/<id>/identity/oauth` redirect set a separate, unpredictable HttpOnly cookie;
 its name is `__Host-lake_oauth_<SHA-256(state)>` over HTTPS, with `Secure`, `SameSite=Lax`,

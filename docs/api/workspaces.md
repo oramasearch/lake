@@ -233,8 +233,10 @@ solution operating-state batch remains concurrent and reuses that run result.
   remap; new workspace and service IDs differ. No default is consulted for data-plane calls.
 - **Status.** The operator's `service_status` row: phase, message and `endpoint`, the in-cluster
   address lake calls.
-- **Credential.** The operator mounts `$LAKE_SERVICE_DIR/<slug>.json`, whose `token` is the
-  cluster's admin token. Lake rereads it per call. The bounded in-memory registry cache includes
+- **Credential.** The workspace Zetta's connection, whose `token` is the cluster's admin token:
+  asked of the operator when `LAKE_SERVICE_CONNECTION_URL` is set and kept in memory for 30 s
+  ([connections on demand](../control-plane/services.md#connections-on-demand)), else, on an older operator, `$LAKE_SERVICE_DIR/<slug>.json`,
+  reread per call. The bounded in-memory registry cache includes
   it in the key so token rotation cannot reuse an earlier entry; it is never persisted by Lake.
 - **Ready** means the operator reported `Ready` with an address *and* the token is present. Calls
   before that fail with `workspace_not_ready`.
@@ -436,10 +438,11 @@ and `WorkspaceSql.GatewayRowCap*`.
 
 | Variable | Set by | Meaning |
 |---|---|---|
-| `LAKE_SERVICE_DIR` | operator | Mounted service connections, including the workspace's token |
+| `LAKE_SERVICE_CONNECTION_URL` | operator | Connections asked of the operator one at a time, with `LAKE_SERVICE_CONNECTION_TOKEN_FILE` and `LAKE_SERVICE_CONNECTION_CA_FILE` ([connections on demand](../control-plane/services.md#connections-on-demand)); replaces the mount |
+| `LAKE_SERVICE_DIR` | operator | On an older operator: mounted service connections, including the workspace's token |
 | `LAKE_SERVICES_PER_CUSTOMER` | optional | Live services per customer, the workspace included (default `0`: no limit) |
 
-Without `LAKE_SERVICE_DIR`, the pages say Design, Train and Ship are not available on this lake,
+Without either, the pages say Design, Train and Ship are not available on this lake,
 and the capabilities answer `store_unavailable`. `LAKE_DATA_PLANE_*`, `LAKE_WORKSPACE_DIR` and
 `LAKE_WORKSPACE_URL_TEMPLATE` are no longer read for workspaces.
 

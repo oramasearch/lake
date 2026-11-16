@@ -370,6 +370,12 @@ struct PasskeyAssertion {
 };
 struct OAuthIdentity {
     std::string pool_id, provider, subject, email, display_name, device_name, identity_document;
+    // Whether the provider says the person proved `email` (lake#1299): an OpenID Connect ID token's
+    // `email_verified`, or GitHub's public profile address, which GitHub allows only from the
+    // account's verified addresses. A sign-up keeps `email` only when this is true; otherwise the
+    // account is created without an address, so the address never matches an invitation or links
+    // an account.
+    bool email_verified = false;
 };
 // A person who signed in through Clerk (docs/api/clerk.md). The custodial fields carry a TAAP
 // identity lake minted for them; the store keeps it only when it creates the user.
@@ -1952,9 +1958,13 @@ public:
     // Every organization and team membership held by one user principal, newest first.
     virtual Result<std::vector<Membership>> list_user_memberships(const std::string& user_id,
                                                                   int limit) = 0;
-    // Pending, unexpired invitations addressed to an email address or to one of the handles.
+    // Pending, unexpired invitations addressed to the user `user_id`: to the user's email address,
+    // only when that address is verified, or to one of the handles. An account an SSO provider or
+    // SCIM provisioned holds an address its identity provider asserted and nobody verified (lake
+    // has no domain proof for a connection), so email invitations never reach it (lake#1297); it
+    // is invited by handle, or an administrator accepts on its behalf.
     virtual Result<std::vector<Invitation>>
-    list_invitee_invitations(const std::string& email,
+    list_invitee_invitations(const std::string& user_id,
                              const std::vector<std::string>& handles,
                              int limit) = 0;
 

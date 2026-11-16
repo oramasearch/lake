@@ -1,5 +1,11 @@
 # Public control types
 
+`zetta_workspace.hpp`'s `ServiceConnectionRequest`, `ServiceConnectionResponse` and
+`ServiceConnectionHttp` are the operator's `POST /v1/service_connection` exchange, and
+`WorkspaceConfig::service_connection_*` its three variables (orama-operator#773); `configured()`
+is true with either the URL or the mount. See
+[connections on demand](../../../docs/control-plane/services.md#connections-on-demand).
+
 `User::disabled_at` retains offboarding state for administrative reads and the stream workers.
 Person-owned agent creation, claims, renewal and credential resolution require an active account;
 offboarding withdraws its launches/schedules and invalidates its tasks in the same store operation
@@ -97,7 +103,11 @@ See [the lease contract](../../../docs/api/agent-bus.md).
 
 `store.hpp` declares `NewOrganizationSpace`, `ConvertPersonalSpace` and their `OrganizationSpace`
 result for organizations a person runs, plus `list_user_memberships` and
-`list_invitee_invitations`. See [organizations.md](../../../docs/api/organizations.md).
+`list_invitee_invitations`, which takes the user and matches `email` invitations only to a verified
+address: never for an account SSO or SCIM provisioned (lake#1297). See
+[organizations.md](../../../docs/api/organizations.md). `OAuthIdentity::email_verified` and
+`identity_crypto.hpp`'s `OidcClaims::email_verified` carry whether a provider verified the address;
+an OAuth sign-up keeps it only then (lake#1299, [identity.md](../../../docs/api/identity.md)).
 
 `workspace_records.hpp` declares `WorkspaceRecords` (append, list, get, conditional put,
 remove and update of sealed records in one workspace Zetta's record store) and `RecordSet<Codec>`, the typed collection every table that moves into a

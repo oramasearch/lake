@@ -56,6 +56,15 @@ the durable identity instead of treating the SCIM bearer as that identity. `user
 email value, `displayName`, and `active` map into the lake user. Setting `active` to false or
 deleting the resource revokes every active session and removes SCIM-managed team membership.
 
+**A provisioned address is never verified** ([lake#1297](https://github.com/oramasearch/lake/issues/1297)).
+The address of an account SCIM or just-in-time SSO provisioned is whatever the identity provider
+asserted, and lake has no proof that the connection owns the address's domain. So it is never
+matched as a verified address: an `email` invitation does not reach the account
+([organizations.md](organizations.md)), and a Clerk sign-in with the same address is never linked to
+it ([clerk.md](clerk.md)). Otherwise whoever controls a provider connected to Lake could provision
+another person's address and receive the invitations meant for them, or take over that person's
+Clerk sign-in.
+
 A group create maps `externalId` to a stable team handle and `displayName` to the team display
 name. Member `value` fields may name the server user id returned by SCIM or the provider's
 external user id. PATCH replacement and removal update the source-managed memberships and grants;

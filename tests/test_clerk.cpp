@@ -289,6 +289,39 @@ TEST(Clerk, TemplateTokensVerifyAgainstTheInstanceKeys) {
         << "signed by another instance";
 }
 
+// lake#1299: an ID token's address counts as verified only when the token says so.
+TEST(Oidc, EmailVerifiedIsReadOnlyFromATrueClaim) {
+    ClerkInstance clerk;
+    const long now = std::time(nullptr);
+    const auto with = [&](std::optional<json> email_verified) {
+        json claims{{"iss", ClerkInstance::issuer},
+                    {"aud", "lake"},
+                    {"sub", "user_test"},
+                    {"email", "person@example.test"},
+                    {"iat", now},
+                    {"exp", now + 300}};
+        if (email_verified) {
+            claims["email_verified"] = std::move(*email_verified);
+        }
+        return verify(clerk, clerk.token(std::move(claims)));
+    };
+    const auto verified = with(json(true));
+    ASSERT_TRUE(verified);
+    EXPECT_TRUE(verified->email_verified);
+    EXPECT_EQ(verified->email, "person@example.test");
+    const auto as_text = with(json("true"));
+    ASSERT_TRUE(as_text);
+    EXPECT_TRUE(as_text->email_verified);
+    for (json refused : {json(false), json("false"), json(nullptr), json(1)}) {
+        const auto claims = with(refused);
+        ASSERT_TRUE(claims) << refused.dump();
+        EXPECT_FALSE(claims->email_verified) << refused.dump();
+    }
+    const auto absent = with(std::nullopt);
+    ASSERT_TRUE(absent);
+    EXPECT_FALSE(absent->email_verified);
+}
+
 TEST(Clerk, CustodialIdentitiesAreFreshAndWrapped) {
     const auto first = lake::audit::mint_custodial_identity(test_kek);
     const auto second = lake::audit::mint_custodial_identity(test_kek);
