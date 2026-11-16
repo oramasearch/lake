@@ -48,6 +48,8 @@ categories=(
 )
 # Role addresses a public tree may name.
 allowed_people='(support|security|noreply|no-reply|hello|info)@orama'
+# Home directories of container users (the image's own user, the browser image's), not people.
+allowed_paths='/home/(lake|pptruser)/'
 
 agent_files=(CLAUDE.md AGENTS.md .claude .codex)
 
@@ -67,6 +69,9 @@ for entry in "${categories[@]}"; do
     matches="$(grep_tree "$pattern")"
     if [[ "$name" == people && -n "$matches" ]]; then
         matches="$(grep -v -E "$allowed_people" <<<"$matches" || true)"
+    fi
+    if [[ "$name" == paths && -n "$matches" ]]; then
+        matches="$(grep -v -E "$allowed_paths" <<<"$matches" || true)"
     fi
     count=0
     [[ -n "$matches" ]] && count="$(wc -l <<<"$matches" | tr -d ' ')"
