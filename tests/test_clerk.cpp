@@ -462,6 +462,9 @@ TEST(Clerk, TemplateExchangeChecksLiveAccountStateWithoutCaching) {
     std::atomic<int> status{200};
     std::atomic<int> calls{0};
     lake::api::ServerOptions options;
+    // The origins the test tokens' azp name are this Lake's (lake#921).
+    options.public_host = "lake.example.test";
+    options.host_aliases = {"us.lake.example.test"};
     options.port = 0;
     options.store = store;
     options.instance_kek = std::string(test_kek);
@@ -539,6 +542,9 @@ TEST(HttpServer, ClerkBackendStatusDoesNotBlockOtherRequests) {
     std::promise<void> release;
     auto released = release.get_future();
     lake::api::ServerOptions options;
+    // The origins the test tokens' azp name are this Lake's (lake#921).
+    options.public_host = "lake.example.test";
+    options.host_aliases = {"us.lake.example.test"};
     options.port = 0;
     options.worker_coroutines = 2;
     options.store = std::make_shared<lake::control::InMemoryStore>();
@@ -714,6 +720,9 @@ TEST(HttpServer, ClerkExchangeAcceptsANamelessPersonAndLogsWhyATokenWasRefused) 
     ClerkInstance clerk;
     auto store = std::make_shared<lake::control::InMemoryStore>();
     lake::api::ServerOptions options;
+    // The origins the test tokens' azp name are this Lake's (lake#921).
+    options.public_host = "lake.example.test";
+    options.host_aliases = {"us.lake.example.test"};
     options.port = 0;
     options.store = store;
     options.instance_kek = std::string(test_kek);
@@ -759,6 +768,29 @@ TEST(HttpServer, ClerkExchangeAcceptsANamelessPersonAndLogsWhyATokenWasRefused) 
     EXPECT_EQ(signed_in->status, 302U);
     EXPECT_EQ(active_sessions(), 1) << "the nameless person is signed in (lake#1115)";
 
+    // A template token issued to another product sharing the Clerk instance, or to no origin, is
+    // not exchanged here (LSR-012, lake#921).
+    for (const json& party : {json("https://app.other-product.example.test"), json(nullptr)}) {
+        const long issued = now_unix();
+        json claims{{"iss", ClerkInstance::issuer},
+                    {"aud", "lake"},
+                    {"sub", "user_test"},
+                    {"email", "person@example.test"},
+                    {"iat", issued},
+                    {"exp", issued + 300}};
+        if (!party.is_null()) {
+            claims["azp"] = party;
+        }
+        std::ostringstream quiet;
+        auto* kept = std::cerr.rdbuf(quiet.rdbuf());
+        const auto other_product = exchange(clerk.token(claims));
+        std::cerr.rdbuf(kept);
+        ASSERT_TRUE(other_product);
+        EXPECT_EQ(active_sessions(), 1) << party.dump();
+        EXPECT_NE(quiet.str().find("azp is not one of this Lake's origins"), std::string::npos)
+            << quiet.str();
+    }
+
     const long now = now_unix();
     const std::string refused_token = clerk.token({{"iss", ClerkInstance::issuer},
                                                    {"aud", "other"},
@@ -795,6 +827,9 @@ TEST(Clerk, TheSessionTokenBindsTheBrowserToItsClerkSession) {
     ClerkInstance clerk;
     auto store = std::make_shared<lake::control::InMemoryStore>();
     lake::api::ServerOptions options;
+    // The origins the test tokens' azp name are this Lake's (lake#921).
+    options.public_host = "lake.example.test";
+    options.host_aliases = {"us.lake.example.test"};
     options.port = 0;
     options.store = store;
     options.instance_kek = std::string(test_kek);

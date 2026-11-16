@@ -10938,6 +10938,14 @@ struct ApiServer::Impl {
             if (claims && claims->issued_at <= 0) {
                 refusal = "no iat";
             }
+            // The token was issued for one of this Lake's own pages (LSR-012, lake#921): a
+            // template token minted for another product sharing the Clerk instance, or with no
+            // azp, is refused, so it cannot be exchanged here.
+            if (claims && claims->issued_at > 0 &&
+                !clerk_party_is_this_lake(route, summarize_token(token).authorized_party)) {
+                refusal = "azp is not one of this Lake's origins";
+                claims.reset();
+            }
         }
         ApiContext context = context_for(route);
         context.authentication_method = "clerk";
@@ -14921,6 +14929,49 @@ struct ApiServer::Impl {
             }
         }
         return false;
+    }
+
+    // Whether a Clerk token's `azp` (the origin it was issued to) is one of this Lake's: its
+    // external origin, https://<public host>, an alias, a region's host, the apex, or the origin
+    // this request reached (lake#921). Empty is never.
+    bool clerk_party_is_this_lake(const boost::http::route_params& route, std::string party) const {
+        const auto normal = [](std::string text) {
+            std::ranges::transform(text, text.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            while (text.ends_with('/')) {
+                text.pop_back();
+            }
+            return text;
+        };
+        party = normal(std::move(party));
+        if (party.empty()) {
+            return false;
+        }
+        std::vector<std::string> own;
+        if (!options.external_origin.empty()) {
+            own.push_back(normal(options.external_origin));
+        }
+        for (const std::string& host : options.host_aliases) {
+            own.push_back("https://" + normal(host));
+        }
+        if (!options.public_host.empty()) {
+            own.push_back("https://" + normal(options.public_host));
+        }
+        for (const auto& region : options.regions.list) {
+            if (!region.host.empty()) {
+                own.push_back("https://" + normal(region.host));
+            }
+        }
+        if (!options.regions.apex_host.empty()) {
+            own.push_back("https://" + normal(options.regions.apex_host));
+        }
+        if (route.req.count(boost::http::field::host) != 0) {
+            const std::string host = normal(std::string(route.req.at(boost::http::field::host)));
+            own.push_back("https://" + host);
+            own.push_back("http://" + host);
+        }
+        return std::ranges::find(own, party) != own.end();
     }
 
     std::string cross_site_refusal(const boost::http::route_params& route) const {

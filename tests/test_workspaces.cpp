@@ -3717,6 +3717,13 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
         const auto& promoted_scopes = r.task(agent_promoted.value["task_id"])->scopes;
         EXPECT_EQ(std::ranges::find(promoted_scopes, "promote_trial"), promoted_scopes.end());
     }
+    // Delegation attenuates (lake#922): the asked turn holds only scopes the asking agent holds.
+    for (const auto& scope : r.task(project_delegated.value["task_id"])->scopes) {
+        EXPECT_TRUE(scope == "get_agent_task" ||
+                    std::ranges::find(project_principal->scopes, scope) !=
+                        project_principal->scopes.end())
+            << scope << " was not the Project Agent's";
+    }
 
     // A change to an existing pipeline: the agent is handed the graph, and a finished proposal
     // names the pipeline page where it is reviewed (lake#249).
