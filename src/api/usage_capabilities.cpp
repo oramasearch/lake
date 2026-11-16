@@ -1951,6 +1951,12 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
     // (gpt-6.x) is sent to the Responses API, and its answer comes back as a chat completion. The
     // tokens are the provider's, counted below exactly as for any other answer.
     const bool via_responses = endpoint == "chat/completions" && chat_goes_to_responses(*prepared);
+    // lake#1309: every workspace's prompts share the provider account's cache, so each call names
+    // its workspace's own cache bucket, by a digest that names no workspace. Only OpenAI's own API
+    // is sent the field; another OpenAI-compatible server may refuse a field it does not know.
+    if (endpoint != "embeddings" && context.model_provider_is_openai) {
+        (*prepared)["prompt_cache_key"] = prompt_cache_key(caller->workspace_id);
+    }
     ModelProviderRequest request{endpoint, std::string(), stream};
     if (via_responses) {
         auto translated = chat_request_as_responses(*prepared);
@@ -1978,16 +1984,21 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
     auto passing = std::make_shared<ModelStreamUsage>();
     // A translated stream is counted from the provider's own events and relayed as chat chunks.
     auto rewriting = via_responses ? std::make_shared<ResponsesChatStream>() : nullptr;
+    // What the caller is sent reports no cache hits (lake#1309); the usage is counted from the
+    // provider's own events, before they are scrubbed.
+    auto scrubbing = std::make_shared<ModelStreamScrubber>();
     if (relayed) {
-        request.on_body = [passing, rewriting, sink = context.model_stream, open = true](
+        request.on_body = [passing, rewriting, scrubbing, sink = context.model_stream, open = true](
                               std::string_view piece) mutable {
             passing->feed(piece);
+            std::string translated;
+            std::string_view relay = piece;
             if (rewriting) {
-                const std::string chunks = rewriting->feed(piece);
-                open = open && (chunks.empty() || sink(chunks));
-            } else {
-                open = open && sink(piece);
+                translated = rewriting->feed(piece);
+                relay = translated;
             }
+            const std::string chunks = scrubbing->feed(relay);
+            open = open && (chunks.empty() || sink(chunks));
             return true;
         };
     }
@@ -1997,8 +2008,10 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
         co_return ApiResult::failure("busy", ran.error().message);
     }
     const ModelProviderResponse& response = *ran;
-    if (relayed && rewriting && response.status >= 200 && response.status < 300) {
-        if (const std::string rest = rewriting->finish(); !rest.empty()) {
+    if (relayed && response.status >= 200 && response.status < 300) {
+        const std::string translated = rewriting ? rewriting->finish() : std::string();
+        if (const std::string rest = scrubbing->feed(translated) + scrubbing->finish();
+            !rest.empty()) {
             context.model_stream(rest);
         }
     }
@@ -2059,11 +2072,14 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
              {"streamed", stream}};
     if (relayed) {
         // The caller already has the stream, piece by piece.
-    } else if (stream && via_responses) {
-        ResponsesChatStream whole;
-        out["events"] = whole.feed(response.body) + whole.finish();
     } else if (stream) {
-        out["events"] = response.body;
+        std::string events = response.body;
+        if (via_responses) {
+            ResponsesChatStream whole;
+            events = whole.feed(response.body) + whole.finish();
+        }
+        ModelStreamScrubber scrubbed;
+        out["events"] = scrubbed.feed(events) + scrubbed.finish();
     } else {
         json answer = json::parse(response.body, nullptr, false);
         if (!answer.is_object()) {
@@ -2077,6 +2093,7 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
             }
             answer = std::move(*translated);
         }
+        scrub_cached_tokens(answer);
         out["response"] = std::move(answer);
     }
     co_return ApiResult::success(std::move(out));

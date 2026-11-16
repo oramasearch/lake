@@ -35,6 +35,9 @@ bool is_model_gateway_endpoint(std::string_view endpoint);
 
 // OpenAI's API, unless LAKE_MODEL_PROVIDER_URL names another OpenAI-compatible base.
 inline constexpr std::string_view default_model_provider_url = "https://api.openai.com/v1";
+// Whether a provider URL is OpenAI's own API: empty (the default), or a URL whose host is
+// api.openai.com, compared case-insensitively. A local or other OpenAI-compatible server is not.
+bool is_openai_provider_url(std::string_view url);
 
 // Parse LAKE_MODEL_GATEWAY_MODELS: absent uses the defaults; [] disables the gateway.
 // Malformed lists, duplicate names and unsupported providers are configuration errors.
@@ -103,8 +106,9 @@ bool chat_goes_to_responses(const nlohmann::json& chat);
 // items, keyed by call id), tools become Responses function tools (`strict` false unless asked, as
 // on Chat Completions), and `reasoning_effort`, `max_completion_tokens`/`max_tokens`,
 // `response_format` and `verbosity` move to their Responses fields. `store: false` and
-// `service_tier: default` are kept. A field Responses has no equivalent for (`n` > 1, `stop`,
-// `logprobs`, `logit_bias`, `seed`, penalties, the deprecated `functions`) is invalid_input.
+// `service_tier: default` are kept, and so is the `prompt_cache_key` the gateway set (lake#1309).
+// A field Responses has no equivalent for (`n` > 1, `stop`, `logprobs`, `logit_bias`, `seed`,
+// penalties, the deprecated `functions`) is invalid_input.
 std::expected<nlohmann::json, ApiError> chat_request_as_responses(const nlohmann::json& chat);
 // A Responses answer as the chat completion the caller asked for: `choices[0].message` with the
 // answer's text and its `tool_calls`, `finish_reason` (`tool_calls`, `length`, `content_filter` or
@@ -171,6 +175,32 @@ private:
     ModelUsage usage_;
     std::uint64_t bytes_ = 0;
 };
+
+// lake#1309 (docs/api/model-gateway.md#prompt-caching): every workspace's calls go to the provider
+// under one account, whose prompt cache that account shares, so a cache hit the provider reports
+// would tell one workspace that another recently sent the same prompt prefix. The gateway answers
+// no cache hits: every `cached_tokens` count in an answer is set to 0, wherever it sits
+// (`usage.prompt_tokens_details`, `usage.input_tokens_details`, a stream event's
+// `response.usage`). Counting and billing read only input and output tokens, so they are unchanged.
+void scrub_cached_tokens(nlohmann::json& answer);
+// An event stream as the caller is sent it: each `data:` event that carries a `cached_tokens`
+// count is rewritten with it set to 0, and every other line is passed on byte for byte. Feed it
+// each piece in order; each call returns the whole lines the pieces completed so far. `finish()`
+// returns a last line without its line end.
+class ModelStreamScrubber {
+public:
+    std::string feed(std::string_view piece);
+    std::string finish();
+
+private:
+    static std::string line(std::string_view text);
+    std::string partial_;
+};
+// The `prompt_cache_key` every chat or Responses call to OpenAI's own API is sent with (lake#1309,
+// is_openai_provider_url): a digest of the call's workspace, so the provider keeps each
+// workspace's prompts in a cache bucket of its own. Another provider is sent none.
+// It names no workspace: 32 hexadecimal digits of a SHA-256, after `lake-`.
+std::string prompt_cache_key(std::string_view workspace_id);
 
 // The provider's refusal as a documented error: its own message for a request it refused
 // (engine_error), rate_limited when it is busy, and store_unavailable when it is down or refuses

@@ -164,6 +164,7 @@ struct GatewayRig {
         context.request_id = lake::control::new_uuid_v4();
         context.instance_kek = std::string(kek);
         context.model_provider = fake.provider();
+        context.model_provider_is_openai = true;
         return context;
     }
 
@@ -2380,6 +2381,237 @@ TEST(ModelCompletion, RelaysATranslatedStreamAsChatChunksAndCountsItsUsage) {
     EXPECT_EQ(rig.workspaces.records(rig.home).metric_total("lake_usage",
                                                             {{"dimension", "model_tokens"}}),
               104);
+}
+
+// lake#1309: every workspace's calls share the provider account's prompt cache, so a cache hit the
+// provider reports would tell one workspace that another recently sent the same prompt prefix. The
+// gateway answers every `cached_tokens` count as 0, in every answer shape.
+TEST(ModelGateway, ScrubsEveryCachedTokensCountAndLeavesTheRestAlone) {
+    json chat = chat_answer;
+    chat["usage"]["prompt_tokens_details"] = {{"cached_tokens", 1024}, {"audio_tokens", 0}};
+    lake::api::scrub_cached_tokens(chat);
+    EXPECT_EQ(chat["usage"]["prompt_tokens_details"]["cached_tokens"], 0);
+    EXPECT_EQ(chat["usage"]["prompt_tokens"], 1200);
+    EXPECT_EQ(chat["choices"][0]["message"]["content"], "Churn is 4.2% this month.");
+
+    json responses = responses_tool_call;
+    lake::api::scrub_cached_tokens(responses);
+    EXPECT_EQ(responses["usage"]["input_tokens_details"]["cached_tokens"], 0);
+    EXPECT_EQ(responses["usage"]["input_tokens"], 1200);
+    json event{{"type", "response.completed"}, {"response", responses_tool_call}};
+    lake::api::scrub_cached_tokens(event);
+    EXPECT_EQ(event["response"]["usage"]["input_tokens_details"]["cached_tokens"], 0);
+
+    // A stream: only the event that carries the count is rewritten, however its pieces fall.
+    const std::string usage_event =
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":2048,\"completion_tokens\":2,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":1920}}}\r\n\r\n";
+    const std::string stream =
+        chat_stream.substr(0, chat_stream.find("data: [DONE]")) + usage_event + "data: [DONE]";
+    for (const std::size_t size : {std::size_t{1}, std::size_t{13}, stream.size()}) {
+        lake::api::ModelStreamScrubber scrubber;
+        std::string out;
+        for (std::size_t at = 0; at < stream.size(); at += size) {
+            out += scrubber.feed(std::string_view(stream).substr(at, size));
+        }
+        out += scrubber.finish();
+        EXPECT_EQ(out.find("1920"), std::string::npos) << out;
+        EXPECT_TRUE(out.starts_with(chat_stream.substr(0, chat_stream.find("data: [DONE]"))))
+            << "the events without a count pass byte for byte";
+        EXPECT_NE(out.find("\"cached_tokens\":0"), std::string::npos) << out;
+        EXPECT_NE(out.find("\"prompt_tokens\":2048"), std::string::npos) << out;
+        EXPECT_NE(out.find("}}\r\n\r\ndata: [DONE]"), std::string::npos) << out;
+        EXPECT_TRUE(out.ends_with("data: [DONE]")) << out;
+        EXPECT_EQ(lake::api::model_usage(out, true).input_tokens, 2048U);
+    }
+}
+
+TEST(ModelCompletion, AnswersNoCacheHitsInAnyShapeAndCountsTheSameTokens) {
+    GatewayRig rig;
+    const auto task = rig.task(rig.home, "agent-ask-orama");
+
+    // A JSON answer.
+    json cached = chat_answer;
+    cached["usage"]["prompt_tokens_details"] = {{"cached_tokens", 1152}};
+    rig.fake.answer = {200, cached.dump(), {}};
+    auto plain = rig.task_context(task);
+    const auto answered = rig.call(chat(), plain);
+    ASSERT_TRUE(answered.ok) << answered.error.message;
+    EXPECT_EQ(answered.value["response"]["usage"]["prompt_tokens_details"]["cached_tokens"], 0);
+    EXPECT_EQ(answered.value["response"]["usage"]["prompt_tokens"], 1200);
+    EXPECT_EQ(answered.value["input_tokens"], 1200);
+
+    // A stream, relayed and answered whole.
+    const std::string cached_stream =
+        "data: {\"id\":\"c\",\"model\":\"gpt-5.5-2026-08-01\",\"choices\":[{\"index\":0,"
+        "\"delta\":{\"content\":\"Hi\"}}],\"usage\":null}\n\n"
+        "data: {\"id\":\"c\",\"model\":\"gpt-5.5-2026-08-01\",\"choices\":[],\"usage\":"
+        "{\"prompt_tokens\":2048,\"completion_tokens\":2,\"total_tokens\":2050,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":1920}}}\n\n"
+        "data: [DONE]\n\n";
+    rig.fake.answer = {200, cached_stream, {}};
+    auto relayed_context = rig.task_context(task);
+    std::string relayed;
+    relayed_context.model_stream = [&](std::string_view piece) {
+        relayed += piece;
+        return true;
+    };
+    const auto streamed = rig.call(chat(true), relayed_context);
+    ASSERT_TRUE(streamed.ok) << streamed.error.message;
+    EXPECT_EQ(relayed.find("1920"), std::string::npos) << relayed;
+    EXPECT_NE(relayed.find("\"cached_tokens\":0"), std::string::npos) << relayed;
+    EXPECT_TRUE(relayed.ends_with("data: [DONE]\n\n")) << relayed;
+    EXPECT_EQ(streamed.value["input_tokens"], 2048);
+    auto whole_context = rig.task_context(task);
+    const auto whole = rig.call(chat(true), whole_context);
+    ASSERT_TRUE(whole.ok) << whole.error.message;
+    const std::string events = whole.value["events"];
+    EXPECT_EQ(events.find("1920"), std::string::npos) << events;
+    EXPECT_EQ(events, relayed);
+
+    // A chat completion answered by the Responses API, as a JSON answer and as a stream.
+    rig.choose(rig.home, "gpt-6.1-sol");
+    rig.fake.answer = {200, responses_tool_call.dump(), {}};
+    auto translated_context = rig.task_context(task);
+    const auto translated = rig.call(
+        {{"endpoint", "chat/completions"}, {"request", tool_turn_request}}, translated_context);
+    ASSERT_TRUE(translated.ok) << translated.error.message;
+    EXPECT_EQ(translated.value["response"]["usage"]["prompt_tokens_details"]["cached_tokens"], 0);
+    EXPECT_EQ(translated.value["input_tokens"], 1200);
+
+    std::string cached_responses = responses_stream;
+    const std::string usage = "\"usage\":{\"input_tokens\":40,";
+    cached_responses.replace(cached_responses.find(usage),
+                             usage.size(),
+                             usage + "\"input_tokens_details\":{\"cached_tokens\":32},");
+    rig.fake.answer = {200, cached_responses, {}};
+    json stream_request = tool_turn_request;
+    stream_request["stream"] = true;
+    auto translated_stream_context = rig.task_context(task);
+    std::string translated_stream;
+    translated_stream_context.model_stream = [&](std::string_view piece) {
+        translated_stream += piece;
+        return true;
+    };
+    const auto translated_streamed = rig.call(
+        {{"endpoint", "chat/completions"}, {"request", stream_request}}, translated_stream_context);
+    ASSERT_TRUE(translated_streamed.ok) << translated_streamed.error.message;
+    EXPECT_NE(translated_stream.find("\"prompt_tokens_details\":{\"cached_tokens\":0}"),
+              std::string::npos)
+        << translated_stream;
+    EXPECT_EQ(translated_stream.find("\"cached_tokens\":32"), std::string::npos);
+    EXPECT_EQ(translated_streamed.value["input_tokens"], 40);
+
+    // A Responses call of a launched agent's own code, as a JSON answer and as a stream.
+    rig.fake.answer = {200, responses_tool_call.dump(), {}};
+    auto launch = rig.launch_context(rig.home);
+    const auto direct = rig.call(
+        {{"endpoint", "responses"}, {"request", {{"model", "gpt-5.5"}, {"input", "churn?"}}}},
+        launch);
+    ASSERT_TRUE(direct.ok) << direct.error.message;
+    EXPECT_EQ(direct.value["response"]["usage"]["input_tokens_details"]["cached_tokens"], 0);
+    rig.fake.answer = {200, cached_responses, {}};
+    auto direct_stream = rig.launch_context(rig.home);
+    const auto direct_streamed =
+        rig.call({{"endpoint", "responses"},
+                  {"request", {{"model", "gpt-5.5"}, {"input", "churn?"}, {"stream", true}}}},
+                 direct_stream);
+    ASSERT_TRUE(direct_streamed.ok) << direct_streamed.error.message;
+    const std::string direct_events = direct_streamed.value["events"];
+    EXPECT_EQ(direct_events.find("\"cached_tokens\":32"), std::string::npos) << direct_events;
+    EXPECT_NE(direct_events.find("\"cached_tokens\":0"), std::string::npos) << direct_events;
+    EXPECT_EQ(direct_streamed.value["input_tokens"], 40);
+}
+
+// lake#1309: each workspace's prompts go to a provider cache bucket of their own, named by a
+// digest that carries no workspace id, and a caller cannot name another's.
+TEST(ModelCompletion, SendsEachCallWithItsWorkspacesOwnPromptCacheKey) {
+    GatewayRig rig;
+    const std::string home_key = lake::api::prompt_cache_key(rig.home);
+    const std::string lab_key = lake::api::prompt_cache_key(rig.lab);
+    EXPECT_NE(home_key, lab_key);
+    EXPECT_EQ(home_key, lake::api::prompt_cache_key(rig.home));
+    EXPECT_EQ(home_key.find(rig.home), std::string::npos);
+    EXPECT_EQ(home_key.size(), 37U);
+
+    auto home = rig.task_context(rig.task(rig.home, "agent-ask-orama"));
+    ASSERT_TRUE(rig.call(chat(), home).ok);
+    auto lab = rig.task_context(rig.task(rig.lab, "agent-ask-orama"));
+    ASSERT_TRUE(rig.call(chat(), lab).ok);
+    ASSERT_EQ(rig.fake.calls(), 2U);
+    EXPECT_EQ(json::parse(rig.fake.requests[0].body)["prompt_cache_key"], home_key);
+    EXPECT_EQ(json::parse(rig.fake.requests[1].body)["prompt_cache_key"], lab_key);
+
+    // A chat completion sent to the Responses API keeps it.
+    rig.choose(rig.home, "gpt-6.1-sol");
+    rig.fake.answer = {200, responses_tool_call.dump(), {}};
+    auto tools = rig.task_context(rig.task(rig.home, "agent-ask-orama"));
+    ASSERT_TRUE(
+        rig.call({{"endpoint", "chat/completions"}, {"request", tool_turn_request}}, tools).ok);
+    EXPECT_EQ(rig.fake.requests[2].endpoint, "responses");
+    EXPECT_EQ(json::parse(rig.fake.requests[2].body)["prompt_cache_key"], home_key);
+
+    // Embeddings have no prompt cache.
+    rig.fake.answer = {200,
+                       json{{"object", "list"},
+                            {"model", "text-embedding-3-small"},
+                            {"data", json::array()},
+                            {"usage", {{"prompt_tokens", 8}, {"total_tokens", 8}}}}
+                           .dump(),
+                       {}};
+    auto embedding = rig.launch_context(rig.home);
+    ASSERT_TRUE(rig.call({{"endpoint", "embeddings"},
+                          {"request", {{"model", "text-embedding-3-small"}, {"input", "churn"}}}},
+                         embedding)
+                    .ok);
+    EXPECT_FALSE(json::parse(rig.fake.requests[3].body).contains("prompt_cache_key"));
+
+    // A caller never names the bucket itself.
+    json request = chat()["request"];
+    request["prompt_cache_key"] = lab_key;
+    auto chooser = rig.launch_context(rig.home);
+    const auto refused =
+        rig.call({{"endpoint", "chat/completions"}, {"request", request}}, chooser);
+    EXPECT_EQ(refused.error.code, "invalid_input");
+    EXPECT_EQ(rig.fake.calls(), 4U);
+}
+
+// lake#1309: only OpenAI's own API is sent a `prompt_cache_key`. A local or other
+// OpenAI-compatible server may refuse a field it does not know, so it is sent none; the
+// `cached_tokens` scrub applies to every provider.
+TEST(ModelCompletion, SendsAPromptCacheKeyOnlyToOpenAIsOwnAPI) {
+    using lake::api::is_openai_provider_url;
+    EXPECT_TRUE(is_openai_provider_url(""));
+    EXPECT_TRUE(is_openai_provider_url(lake::api::default_model_provider_url));
+    EXPECT_TRUE(is_openai_provider_url("https://API.OpenAI.com/v1/"));
+    EXPECT_TRUE(is_openai_provider_url("https://api.openai.com:443"));
+    EXPECT_FALSE(is_openai_provider_url("http://127.0.0.1:11434/v1"));
+    EXPECT_FALSE(is_openai_provider_url("https://llm.example.test/openai/v1"));
+    EXPECT_FALSE(is_openai_provider_url("https://api.openai.com.example.test/v1"));
+    EXPECT_FALSE(is_openai_provider_url("https://example.test/api.openai.com"));
+    EXPECT_FALSE(is_openai_provider_url("api.openai.com"));
+
+    GatewayRig rig;
+    json cached = chat_answer;
+    cached["usage"]["prompt_tokens_details"] = {{"cached_tokens", 1152}};
+    rig.fake.answer = {200, cached.dump(), {}};
+    auto local = rig.task_context(rig.task(rig.home, "agent-ask-orama"));
+    local.model_provider_is_openai = false;
+    const auto answered = rig.call(chat(), local);
+    ASSERT_TRUE(answered.ok) << answered.error.message;
+    ASSERT_EQ(rig.fake.calls(), 1U);
+    EXPECT_FALSE(json::parse(rig.fake.requests[0].body).contains("prompt_cache_key"));
+    EXPECT_EQ(answered.value["response"]["usage"]["prompt_tokens_details"]["cached_tokens"], 0);
+
+    rig.choose(rig.home, "gpt-6.1-sol");
+    rig.fake.answer = {200, responses_tool_call.dump(), {}};
+    auto translated = rig.task_context(rig.task(rig.home, "agent-ask-orama"));
+    translated.model_provider_is_openai = false;
+    ASSERT_TRUE(
+        rig.call({{"endpoint", "chat/completions"}, {"request", tool_turn_request}}, translated)
+            .ok);
+    EXPECT_EQ(rig.fake.requests[1].endpoint, "responses");
+    EXPECT_FALSE(json::parse(rig.fake.requests[1].body).contains("prompt_cache_key"));
 }
 
 } // namespace
