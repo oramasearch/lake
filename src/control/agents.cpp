@@ -223,11 +223,17 @@ Result<Bytes> public_key(EVP_PKEY* key) {
     return byte_values(output);
 }
 
+// The `delegation/1` Lake signs for a session (lake#1346), in the shape liquid v0.3.0 requires:
+// Lake's instance identity is both the issuer and the `dispatcher` (liquid#515), the subject is
+// `delegation_subject` of the durable agent, `repository` is the hex id of the repository the
+// session acts for, and `not_after` ends it (liquid#514). The person who asked is not in the
+// statement: the session record and the audit name them.
 Result<std::string> encode_delegation(Store& store,
-                                      const liquid::actor& session,
-                                      const std::string& dispatcher_taap_id,
+                                      const std::string& durable_agent_taap_id,
+                                      const std::string& liquid_repository_id,
                                       const std::vector<std::string>& scopes,
                                       std::chrono::sys_seconds issued,
+                                      std::chrono::sys_seconds not_after,
                                       const audit::IdentityOptions& identity_options) {
     const auto lake_identity = audit::identity(store, identity_options);
     if (!lake_identity) {
@@ -237,14 +243,13 @@ Result<std::string> encode_delegation(Store& store,
     if (!issuer) {
         return std::unexpected(issuer.error());
     }
-    auto subject_key = canonical_public_key(session.public_key, std::format("{:%FT%TZ}", issued));
-    if (!subject_key) {
-        return std::unexpected(subject_key.error());
-    }
-    auto subject = liquid::hash(liquid::algorithm::blake3, *subject_key);
+    liquid::actor agent;
+    agent.taap_id = durable_agent_taap_id;
+    auto subject = liquid::delegation_subject(agent);
     if (!subject) {
         return std::unexpected(liquid_error(subject.error()));
     }
+    const std::string dispatcher = issuer->taap_id;
     liquid::attestation statement{
         .subject = *subject,
         .profile = "delegation/1",
@@ -255,7 +260,10 @@ Result<std::string> encode_delegation(Store& store,
                        {"may_publish", false},
                        {"may_lease", false},
                        {"depth_remaining", std::uint64_t{0}},
-                       {"dispatcher", dispatcher_taap_id}},
+                       {"dispatcher", dispatcher},
+                       {"not_after",
+                        static_cast<std::uint64_t>(not_after.time_since_epoch().count())},
+                       {"repository", liquid_repository_id}},
     };
     auto body = liquid::objects::encode_attestation_body(statement);
     if (!body) {
@@ -286,6 +294,14 @@ Result<std::string> encode_delegation(Store& store,
         return std::unexpected(
             Error{"crypto_error", "could not verify agent delegation: " + valid.error().message});
     }
+    if (auto valid = liquid::validate_delegation(statement); !valid) {
+        return std::unexpected(
+            Error{"crypto_error", "could not verify agent delegation: " + valid.error().message});
+    }
+    if (auto window = liquid::check_delegation_window(statement, issued); !window) {
+        return std::unexpected(
+            Error{"crypto_error", "could not verify agent delegation: " + window.error().message});
+    }
     auto verified = liquid::verify_key_signature(statement.issuer, "attestation", *body, signature);
     if (!verified || !*verified) {
         return std::unexpected(
@@ -306,11 +322,11 @@ bool valid_taap_id(std::string_view value) {
 
 Result<void> validate(const MintRequest& request) {
     if (request.customer_id.empty() || !valid_taap_id(request.durable_agent_taap_id) ||
-        !valid_taap_id(request.dispatcher_taap_id) || request.scopes.empty()) {
+        !valid_taap_id(request.dispatcher_taap_id) || request.scopes.empty() ||
+        request.repository_id.empty() || request.liquid_repository_id.empty()) {
         return std::unexpected(Error{"invalid_input", "agent session fields are required"});
     }
-    if (!request.never_expires &&
-        (request.lifetime_seconds <= 0 || request.lifetime_seconds > 900)) {
+    if (request.lifetime_seconds <= 0 || request.lifetime_seconds > 900) {
         return std::unexpected(
             Error{"invalid_input", "agent session lifetime must be at most fifteen minutes"});
     }
@@ -357,8 +373,7 @@ Result<MintedSession> Service::mint(Store& store,
     }
     const auto expires = issued + std::chrono::seconds(request.lifetime_seconds);
     const std::string issued_at = std::format("{:%FT%TZ}", issued);
-    const std::string expires_at =
-        request.never_expires ? std::string("never") : std::format("{:%FT%TZ}", expires);
+    const std::string expires_at = std::format("{:%FT%TZ}", expires);
     std::array<std::uint8_t, 32> seed{};
     auto key = generate_key(seed);
     if (!key) {
@@ -374,8 +389,13 @@ Result<MintedSession> Service::mint(Store& store,
         OPENSSL_cleanse(seed.data(), seed.size());
         return std::unexpected(actor.error());
     }
-    auto attestation = encode_delegation(
-        store, *actor, request.dispatcher_taap_id, request.scopes, issued, identity_options);
+    auto attestation = encode_delegation(store,
+                                         request.durable_agent_taap_id,
+                                         request.liquid_repository_id,
+                                         request.scopes,
+                                         issued,
+                                         expires,
+                                         identity_options);
     if (!attestation) {
         OPENSSL_cleanse(seed.data(), seed.size());
         return std::unexpected(attestation.error());
@@ -398,9 +418,10 @@ Result<MintedSession> Service::mint(Store& store,
         .public_key = *encoded_public_key,
         .scopes = request.scopes,
         .attestation = *attestation,
-        .expires_unix = request.never_expires ? 0 : expires.time_since_epoch().count(),
+        .expires_unix = expires.time_since_epoch().count(),
         .issued_at = issued_at,
         .expires_at = expires_at,
+        .repository_id = request.repository_id,
     };
     return MintedSession{std::move(record), std::move(*encoded_seed)};
 }
@@ -411,7 +432,14 @@ Result<VerifiedDrip> Service::verify_drip(const AgentSession& session,
     if (!session.revoked_at.empty()) {
         return std::unexpected(Error{"unauthorized", "agent session key has been revoked"});
     }
-    if (!session.never_expires() && clock_().time_since_epoch().count() >= session.expires_unix) {
+    // A key minted before delegations named a repository and an end (lake#1346), never-expiring
+    // ones included, no longer verifies: liquid refuses its delegation.
+    if (session.repository_id.empty() || session.never_expires()) {
+        return std::unexpected(
+            Error{"unauthorized",
+                  "agent session key predates repository-bound delegations; mint a new one"});
+    }
+    if (clock_().time_since_epoch().count() >= session.expires_unix) {
         return std::unexpected(Error{"unauthorized", "agent session key has expired"});
     }
     if (canonical_body.empty() || encoded_signature.empty()) {
@@ -444,7 +472,8 @@ Result<VerifiedDrip> Service::verify_drip(const AgentSession& session,
                         session.dispatcher_taap_id,
                         session.session_taap_id,
                         session.scopes,
-                        session.expires_at};
+                        session.expires_at,
+                        session.repository_id};
 }
 
 } // namespace lake::control::agents

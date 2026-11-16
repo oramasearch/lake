@@ -108,6 +108,7 @@ json session_output(const control::AgentSession& session) {
             {"never_expires", session.never_expires()},
             {"revoked_at", session.revoked_at},
             {"public_key", session.public_key},
+            {"repository_id", session.repository_id},
             {"scopes", session.scopes},
             {"session_taap_id", session.session_taap_id},
             {"transparency_index", session.transparency_index},
@@ -128,25 +129,56 @@ void set_audit_fields(ApiContext& context,
     context.audit_details = {{"operation", operation}};
 }
 
-// Why a never-expiring credential is refused for this customer, or nothing when it is allowed:
-// the instance switch first, then the customer's opt-in (lake#234).
-std::optional<ApiResult> non_expiring_refusal(ApiContext& context, const std::string& customer_id) {
-    if (!context.non_expiring_credentials_allowed) {
-        return ApiResult::failure("unauthorized",
-                                  "this Lake does not allow credentials that never expire "
-                                  "(LAKE_ALLOW_NON_EXPIRING_CREDENTIALS)");
+bool is_uuid(std::string_view value) {
+    if (value.size() != 36) {
+        return false;
     }
-    auto allowed = context.store->customer_allows_non_expiring_credentials(customer_id);
-    if (!allowed) {
-        return from_store_error(allowed.error());
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        const bool dash = index == 8 || index == 13 || index == 18 || index == 23;
+        if (dash ? value[index] != '-'
+                 : std::isxdigit(static_cast<unsigned char>(value[index])) == 0) {
+            return false;
+        }
     }
-    if (!*allowed) {
-        return ApiResult::failure("unauthorized",
-                                  "credentials that never expire are off for this account; an "
-                                  "admin turns on allow_non_expiring_credentials with "
-                                  "set_customer_credential_policy");
+    return true;
+}
+
+// The hex id liquid gave a live repository of `customer_id` (lake#1346): the one lake recorded
+// (`repositories.liquid_id`), else the repository store's own. A session's delegation names it as
+// its `repository` (liquid#515).
+std::expected<std::string, ApiResult> liquid_repository_id(ApiContext& context,
+                                                           const std::string& customer_id,
+                                                           const std::string& repository_id) {
+    const auto refused = [] {
+        return ApiResult::failure("invalid_input",
+                                  "repository_id must name a live repository of this account",
+                                  "/repository_id");
+    };
+    if (!is_uuid(repository_id)) {
+        return std::unexpected(refused());
     }
-    return std::nullopt;
+    auto repository = context.store->get_repository(repository_id);
+    if (!repository) {
+        if (repository.error().code == "not_found") {
+            return std::unexpected(refused());
+        }
+        return std::unexpected(from_store_error(repository.error()));
+    }
+    if (repository->customer_id != customer_id || !repository->deleted_at.empty()) {
+        return std::unexpected(refused());
+    }
+    if (!repository->liquid_id.empty()) {
+        return repository->liquid_id;
+    }
+    if (!context.sync_store) {
+        return std::unexpected(ApiResult::failure(
+            "store_unavailable", "no repository store is configured to read the repository's id"));
+    }
+    auto id = context.sync_store->repository_liquid_id(customer_id, repository_id);
+    if (!id) {
+        return std::unexpected(ApiResult::failure(id.error().code, id.error().message));
+    }
+    return *id;
 }
 
 } // namespace
@@ -156,24 +188,29 @@ void register_agent_capabilities(Registry& registry) {
         .name = "mint_agent_session_key",
         .title = "Mint agent session key",
         .description =
-            "Mint a short-lived signing key delegated to one durable TAAP agent identity.",
-        .input_schema =
-            {{"type", "object"},
-             {"properties",
-              {{"customer_id", {{"type", "string"}}},
-               {"dispatcher_taap_id", {{"type", "string"}}},
-               {"durable_agent_taap_id", {{"type", "string"}}},
-               {"lifetime_seconds", {{"type", "integer"}}},
-               {"never_expires",
-                {{"type", "boolean"},
-                 {"description",
-                  "a key with no expiry, still revocable; only when the customer allows "
-                  "non-expiring credentials (lake#234)"}}},
-               {"scopes", {{"type", "array"}}}}},
-             {"required",
-              json::array(
-                  {"customer_id", "dispatcher_taap_id", "durable_agent_taap_id", "scopes"})},
-             {"additionalProperties", false}},
+            "Mint a short-lived signing key delegated to one durable TAAP agent identity for one "
+            "repository.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"customer_id", {{"type", "string"}}},
+                           {"dispatcher_taap_id", {{"type", "string"}}},
+                           {"durable_agent_taap_id", {{"type", "string"}}},
+                           {"lifetime_seconds", {{"type", "integer"}}},
+                           {"never_expires",
+                            {{"type", "boolean"},
+                             {"description",
+                              "refused when true: every agent session key expires (lake#1346)"}}},
+                           {"repository_id",
+                            {{"type", "string"},
+                             {"description", "the account's repository the session acts for"}}},
+                           {"scopes", {{"type", "array"}}}}},
+                         {"required",
+                          json::array({"customer_id",
+                                       "dispatcher_taap_id",
+                                       "durable_agent_taap_id",
+                                       "repository_id",
+                                       "scopes"})},
+                         {"additionalProperties", false}},
         .output_schema = output_schema(),
         .kind = CapabilityKind::Action,
         .object = "customer",
@@ -202,11 +239,17 @@ void register_agent_capabilities(Registry& registry) {
                 scopes.push_back(input.at("scopes")[index].get<std::string>());
             }
             const int lifetime = input.value("lifetime_seconds", 900);
-            const bool never_expires = input.value("never_expires", false);
-            if (never_expires) {
-                if (auto refused = non_expiring_refusal(context, customer_id)) {
-                    return *refused;
-                }
+            // liquid v0.3.0 refuses a delegation without `not_after` (liquid#514).
+            if (input.value("never_expires", false)) {
+                return ApiResult::failure("invalid_input",
+                                          "agent session keys always expire, after at most "
+                                          "fifteen minutes",
+                                          "/never_expires");
+            }
+            const std::string repository_id = input.at("repository_id").get<std::string>();
+            auto liquid_repository = liquid_repository_id(context, customer_id, repository_id);
+            if (!liquid_repository) {
+                return liquid_repository.error();
             }
             auto minted = context.agents->mint(
                 *context.store,
@@ -214,8 +257,9 @@ void register_agent_capabilities(Registry& registry) {
                  .durable_agent_taap_id = durable_agent,
                  .dispatcher_taap_id = input.at("dispatcher_taap_id").get<std::string>(),
                  .scopes = std::move(scopes),
-                 .lifetime_seconds = lifetime,
-                 .never_expires = never_expires},
+                 .repository_id = repository_id,
+                 .liquid_repository_id = std::move(*liquid_repository),
+                 .lifetime_seconds = lifetime},
                 context.acting_identity,
                 {.configured_seed = context.identity_seed, .instance_kek = context.instance_kek});
             if (!minted) {
@@ -234,10 +278,11 @@ void register_agent_capabilities(Registry& registry) {
             json output = session_output(*stored);
             output["private_key"] = minted->private_key;
             context.audit_object = "agent_session/" + stored->id;
-            context.audit_details = {{"durable_agent_taap_id", durable_agent},
+            context.audit_details = {{"dispatcher_taap_id", stored->dispatcher_taap_id},
+                                     {"durable_agent_taap_id", durable_agent},
                                      {"expires_at", stored->expires_at},
-                                     {"never_expires", stored->never_expires()},
                                      {"operation", "mint"},
+                                     {"repository_id", stored->repository_id},
                                      {"session_taap_id", stored->session_taap_id},
                                      {"transparency_index", stored->transparency_index}};
             return ApiResult::success(std::move(output));
