@@ -11,7 +11,7 @@ twice, so it is written twice from that one file:
 - frontend/src/pages/train/agent-skills.json: the skills the Agent Factory and the agent pages
   offer, with their labels.
 
-    tools/agents/vendor-agent-skills.py ~/dev/oramasearch/codex-work/wt/agent-runtime/issue-7/skills.json
+    tools/agents/vendor-agent-skills.py ../agent-runtime/skills.json
     tools/agents/vendor-agent-skills.py <skills.json> --check   # exit 1 when lake's copy differs
 """
 

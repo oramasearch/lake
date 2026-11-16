@@ -1514,7 +1514,7 @@ TEST(WorkspaceRecords, AnOpportunityStatusChangeRereadsAfterAConcurrentWrite) {
     EXPECT_EQ(listed->at(1).status, "not_yet");
 }
 
-// lake#315 part 2 (decision 54, S10): a repository's description is one sealed settings record in
+// lake#315 part 2 (S10): a repository's description is one sealed settings record in
 // the workspace Zetta of its workspace, keyed by the repository; the routing row holds none of it.
 TEST_P(WorkspaceRecordStores, RepositoryDescriptionsLiveInTheirWorkspace) {
     auto store = make_store();
@@ -1759,7 +1759,7 @@ TEST_P(WorkspaceRecordStores, RepositoryDescriptionsLiveInTheirWorkspace) {
               placed[2].description);
 }
 
-// lake#317, decision 52: an event about a workspace's data goes to that workspace's own audit,
+// lake#317: an event about a workspace's data goes to that workspace's own audit,
 // the chained, sealed collection lake_audit_events of its Zetta, queued on the request path and
 // written by the AuditRecorder's flush; control-plane events, refusals for want of authority and
 // calls that name no workspace stay in the central log. The readers show both.
@@ -2044,7 +2044,7 @@ TEST(AuditRecorder, OverflowReportsWhenDeliveryEvidenceCannotBeRecorded) {
         "other-customer", "other-workspace", lake::audit::pending({.action = "retained"})));
 }
 
-// LSR-098: an unavailable customer's workspaces cannot consume another customer's share,
+// An unavailable customer's workspaces cannot consume another customer's share,
 // including while a flush has detached the queues and new requests arrive.
 TEST_P(WorkspaceRecordStores, AuditQueueIsolatesUnavailableCustomersDuringFlush) {
     auto store = make_store();
@@ -2895,7 +2895,7 @@ TEST_P(WorkspaceRecordStores, PlatformEnvironmentsLiveInTheirRepositorysWorkspac
     control->deployments.push_back(
         platform_deployment(placed[0].repository, "production", "ready", "2026-10-01T00:02:00Z"));
     ASSERT_TRUE(sync());
-    // The newer row, and its phase appended to the workspace's audit (decision 52).
+    // The newer row, and its phase appended to the workspace's audit.
     EXPECT_EQ(writes(placed[0].workspace), before + 2);
     EXPECT_EQ(call(first, "get_environment",
                    {{"repository_id", placed[0].repository}, {"environment", "production"}})
@@ -3715,12 +3715,12 @@ TEST_P(WorkspaceRecordStores, DynamicLeasesLiveInTheirMountsWorkspace) {
     EXPECT_EQ(t.store->get_secret_lease_route(fresh.value["lease"]["id"])->due_us, 0);
 }
 
-// lake#382 (decision 54, S7): the instance transparency log stays with the instance and keeps the
+// lake#382 (S7): the instance transparency log stays with the instance and keeps the
 // leaf a relying party expects for each dynamic-secret lease, renewal and revocation (the
 // identity-exit scenario), even though the lease itself is a record of its mount's workspace and a
 // workspace audit route is available. The three capabilities stay in the central chain, so
 // finish_call appends only the recorded central event's digest commitment. Complete events and
-// routing identifiers stay in private audit (lake#953, LSR-087).
+// routing identifiers stay in private audit (lake#953).
 TEST_P(WorkspaceRecordStores, DynamicSecretsInAWorkspaceKeepTheirInstanceLogLeaf) {
     auto store = make_store();
     if (!store) {
@@ -3831,7 +3831,7 @@ TEST_P(WorkspaceRecordStores, DynamicSecretsInAWorkspaceKeepTheirInstanceLogLeaf
     }
 }
 
-// MCP connections (decision 60, lake#652, docs/api/mcp-connections.md): a connection is a sealed
+// MCP connections (lake#652, docs/api/mcp-connections.md): a connection is a sealed
 // record in its workspace; its token is a workspace secret Lake reads server-side and never
 // answers; a tool runs only once a person allowed it; a change is a person's or an auto-approved
 // agent's; every call is audited in the workspace and metered.
@@ -5046,7 +5046,7 @@ TEST_P(WorkspaceRecordStores, AStreamStartsItsAgentOncePerMessageAsThePersonWhoS
 // against an agent that is gone. Another agent's, another workspace's and a finished launch are
 // left as they are. A launch whose agent was deleted outside lake is withdrawn the first time it
 // reads its agent and the workspace answers not_found.
-// LSR-086: disabling a person ends their delegated authority, including a context already
+// Disabling a person ends their delegated authority, including a context already
 // reconstructed by a stream worker. Another person's automation keeps running.
 void WorkspaceRecordStores::check_delegation_offboarding(bool suspended) {
     auto store = make_store();

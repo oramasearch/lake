@@ -7,8 +7,7 @@ keys. Offline device grants are specified separately in [`offline.md`](offline.m
 ## Authentication attempt limits
 
 Password sign-in, MFA sign-in, MFA enrollment, disable and step-up, recovery-code sign-in and
-recovery completion share ten failed attempts per account per fifteen minutes (lake#966,
-LSR-100). Known accounts use their immutable user id across pools; email lookups use the lowercase
+recovery completion share ten failed attempts per account per fifteen minutes (lake#966). Known accounts use their immutable user id across pools; email lookups use the lowercase
 credential email. Unknown email budgets remain scoped to the requested pool. Unknown credentials and an account cooldown both return `unauthenticated` (REST 401)
 with `invalid credentials`. Real credential verification resets account and client failures;
 a password-only response requiring MFA and an accepted email-recovery start do not reset them.
@@ -99,7 +98,7 @@ on every call, and an active full-authority interactive session (`browser` or `t
 to that user and pool. Tokens (including wildcard and static tokens), device credentials,
 operator credentials and callers without a password credential cannot enroll. A session's age
 does not substitute for the password. Both stores check the proof before changing the seed or
-recovery codes, so a refusal preserves the existing enrollment (lake#959, LSR-093).
+recovery codes, so a refusal preserves the existing enrollment (lake#959).
 Run `ctest --test-dir <build> --timeout 600 -R MfaEnrollment --output-on-failure` with
 `LAKE_TEST_DB_URI` set to exercise first enrollment, replacement and refusals through REST/MCP
 against memory and PostgreSQL. Keep password and session verification in the store transaction
@@ -140,7 +139,7 @@ one it answers `identity_proof_required`. The Postgres store verifies and record
 before creating the user and OAuth credential. A returning linked identity does not need to send
 the document again.
 
-OAuth starts bind each flow to the initiating browser (lake#963, LSR-097). The REST start
+OAuth starts bind each flow to the initiating browser (lake#963). The REST start
 response and the hosted `/apps/<id>/identity/oauth` redirect set a separate, unpredictable HttpOnly cookie;
 its name is `__Host-lake_oauth_<SHA-256(state)>` over HTTPS, with `Secure`, `SameSite=Lax`,
 `Path=/`, no Domain, and a five-minute lifetime. Loopback HTTP development uses `lake_oauth_`
@@ -166,7 +165,7 @@ and pass signature, issuer, audience, expiry, not-before, nonce, subject, and ke
 documents are fetched through Corosio with TLS peer and hostname verification on the blocking pool.
 Malformed tokens and failures with a known key never trigger a fetch; unknown key IDs and valid
 tokens using keys older than an hour share a single-flight refresh with a 60-second cooldown,
-including failures ([bounded key refresh](clerk.md#bounded-key-refresh-lake956-lsr-090), lake#956). GitHub instead verifies
+including failures ([bounded key refresh](clerk.md#bounded-key-refresh-lake956), lake#956). GitHub instead verifies
 the returned access token through `https://api.github.com/user`. Google and GitHub use their fixed
 public endpoints; every other provider's endpoints come from its OpenID Connect discovery document
 (below). Provider registration and each OAuth callback create one signed registry-compatible audit
@@ -230,8 +229,7 @@ consumed on their first completion attempt.
 so an assertion cannot cross pool or origin. Additional pool-origin configuration belongs to the
 user-pools work in #51.
 
-Lake-pool password sign-up does not require an identity document (lake#762, liquid-bridge
-decision 65): without one, Lake mints a **managed key** for the account (as for a first Clerk
+Lake-pool password sign-up does not require an identity document (lake#762): without one, Lake mints a **managed key** for the account (as for a first Clerk
 sign-in) and the person can switch to their own identity later ([Your own
 identity](#your-own-identity)). With one, and always in an application pool, password sign-up takes
 the client-held TAAP/1 document as a base64url-encoded canonical-CBOR `identity_document`. lake decodes and verifies its self-signature through libliquid's public
@@ -258,8 +256,8 @@ document and is refused; the honest initial document signs in.
 
 ### Signing in with a TAAP key: the key must be the identity's
 
-Lake issue [#917](https://github.com/oramasearch/lake/issues/917) (security review finding
-LSR-006): liquid's `verify_document` checks only that a document is signed by the key it carries
+Lake issue #917 (a security review
+finding): liquid's `verify_document` checks only that a document is signed by the key it carries
 and that its identifier ends with the fingerprint it claims. A document carrying a registered
 person's identifier with the caller's own key passed, its assertion verified with that key, and
 Lake issued a session for the person's account. Anyone who knew a TAAP id could sign in as its
@@ -302,10 +300,10 @@ tests) now gives an account the identifier of a bound document, as PostgreSQL do
 document still gets the account an identifier of its own, never the one it claims.
 
 Related: liquid's own `verify()` fell back to whatever key the caller supplied when no chain was
-stored locally ([liquid#383](https://github.com/oramasearch/liquid/issues/383), fixed in
-[liquid#448](https://github.com/oramasearch/liquid/pull/448)). This check does not depend on it:
+stored locally (liquid#383, fixed in
+liquid#448). This check does not depend on it:
 Lake binds the key itself before calling `verify`. Lake's companion change for liquid#448,
-[lake#1021](https://github.com/oramasearch/lake/pull/1021), moves this call to liquid's carried-chain
+lake#1021, moves this call to liquid's carried-chain
 `verify(actor, chain, ...)`, passing the same documents.
 
 To verify: `TaapSignIn.MemoryStoreBindsTheKeyToTheRegisteredIdentity` and
@@ -363,8 +361,8 @@ durable identity.
   (a `browser` or `taap` session): each key ancestor's expiry, revocation and linked device.
   Revoking a key, or any key it descends from, makes all its descendants unusable on their next
   request; children do not survive a revoked parent key.
-- **Signing out never ends a key** (lake#1163; Steve, 2026-10-24: *"don't revoke api keys on
-  signout"*). A sign-in ancestor ends the walk without being checked, except that it must belong
+- **Signing out never ends a key** (lake#1163: signing out never revokes an
+  API key). A sign-in ancestor ends the walk without being checked, except that it must belong
   to the same user and pool: when the browser or TAAP session a key was made from is revoked
   (`/logout`, a Clerk session event, `revoke_session` on it), expires, or loses its device, the
   key and its descendants keep working. A key made in a browser still keeps the expiry it was
@@ -497,7 +495,7 @@ carries only `algorithm`, `signing_key_identifier`, `signing_key_label`, `signat
 
 Enterprise OIDC flows (`start_sso_oidc`, providers `sso-<id>`) carry a `taap_id`, not a document, to
 `sign_in_sso`; caller-chosen TAAP ids there are tracked in
-[lake#872](https://github.com/oramasearch/lake/issues/872). The in-memory store binds no document (it
+lake#872. The in-memory store binds no document (it
 gives each new user a random identity), so it needs no proof.
 
 The hosted application pages and the console run the same two steps: a sign-up or OAuth form that
@@ -532,7 +530,6 @@ invalidates the challenges outstanding, which last five minutes.
 ## Your own identity
 
 **Status: implemented 2026-10-17 (lake#762, migration `0086_identity_links`), not deployed.**
-Decision 65 in liquid-bridge's `docs/decisions.md`.
 
 ### What
 
@@ -648,7 +645,7 @@ quotas, zero-byte metering, transaction failure, and retry behavior are specifie
 Before lake#810 Lake could create an account but not remove one: every end-to-end run left its
 sign-up accounts behind. `delete_account` deletes one, for the person themselves or for the
 operator. It is in the one registry (REST `POST /v1/delete_account`, OpenAPI, MCP) and audited in
-the central log, as every identity event is (decision 52).
+the central log, as every identity event is.
 
 ### Who can delete an account
 
@@ -665,7 +662,7 @@ no personal account); `dry_run: true` deletes nothing and answers the plan below
 
 1. **The workspaces of its personal account**, each through `delete_workspace`, so each is one
    transaction that marks the workspace `deleted` (the Orama operator removes its Zetta from that
-   desired state, decision 51), tombstones its repositories and deletes its apps, with its own
+   desired state), tombstones its repositories and deletes its apps, with its own
    central audit events ([workspaces.md](workspaces.md#deletion)).
 2. **The organizations it alone owns** (it is their only organization-wide `owner`): first their
    workspaces, then each organization through `delete_organization`
@@ -682,7 +679,7 @@ no personal account); `dry_run: true` deletes nothing and answers the plan below
      and offline grant, identity link, SCIM mapping and app hand-off code;
    - the recovery custody it holds for other people's repositories;
    - every membership and every grant naming its TAAP identity;
-   - the seed of an identity Lake minted for it (a Clerk sign-in's, decision 44) is destroyed; the
+   - the seed of an identity Lake minted for it (a Clerk sign-in's) is destroyed; the
      public key stays so the signatures it made still verify, as after lake#762's rotation;
    - of its personal account: the billing contact, usage limits, storage quota override, secret mount
      routes and its policy objects (with every grant on them);
@@ -698,7 +695,7 @@ no personal account); `dry_run: true` deletes nothing and answers the plan below
   longer resolve the identity to a person. Events already written keep what they recorded; see
   *Open questions* below. Each workspace's own audit chain goes with its workspace Zetta.
 - **Invoices, their lines and payment records, the Stripe customer link, and orders.** They are
-  billing records Lake issued (decision 56; orders by `0089`), kept for as long as the invoice. An
+  billing records Lake issued (orders by `0089`), kept for as long as the invoice. An
   unpaid invoice stays collectable; the plan says how many are kept (`kept.invoices`) and how many
   are still due (`kept.open_invoices`).
 

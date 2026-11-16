@@ -1,5 +1,5 @@
 /**
- * Terms of service and privacy policy on sign-up and sign-in (liquid-bridge#15): every form, Clerk's
+ * Terms of service and privacy policy on sign-up and sign-in: every form, Clerk's
  * and lake's own, carries the sentence with the links `viewer.legal` reports, and none when the
  * instance links to neither. `npm test`.
  */

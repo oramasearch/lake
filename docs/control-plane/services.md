@@ -1,6 +1,6 @@
 # Managed services: the lake ↔ operator contract
 
-**Status: implemented in lake 2026-09-25 (liquid-bridge decision 46); the operator side is orama-operator `docs/lake/services.md`.** A customer runs any number of
+**Status: implemented in lake 2026-09-25; the operator side is orama-operator `docs/lake/services.md`.** A customer runs any number of
 services on the Lake's cluster — Zetta clusters and Postgres clusters today. lake records what the
 customer wants in its **control Postgres**; the Orama operator reads it, creates one Kubernetes
 resource per service (an `OramaZettaCluster`, or a CloudNativePG `Cluster` that the CloudNativePG
@@ -10,7 +10,7 @@ operator never decides what a customer may have.
 A customer's workspace is now an explicit [workspace contract row](workspaces.md), with a
 primary Zetta service referenced by `zetta_service_id`. `is_default` remains compatibility
 metadata, not a data-plane routing choice. Migration 0039 replaces the earlier default-service
-workspace model and decision 45's request stream.
+workspace model and the request stream it introduced.
 
 ## Tables (migration `0024_services`, `db/schema.sql`)
 
@@ -97,7 +97,7 @@ For each `Lake` with `spec.services.enabled` (or the deprecated `spec.workspaces
    `Failed` / `service quota reached (<n>)` and starts once there is room. Existing services are
    never refused.
 
-## The catalog (decision 47)
+## The catalog
 
 Each kind is run by one upstream operator, installed from the operator's `helmfile.yaml` and
 watching every namespace. The Orama operator writes that operator's resource, named
@@ -108,7 +108,7 @@ database itself. `instances` is 1–3 and `storage_gi` 1–100 for every kind.
 |---|---|---|---|---|---|---|
 | `zetta` | the Orama operator itself | `OramaZettaCluster` | nodes | cluster Ready | `token` | `http://<name>-zetta.<ns>.svc.cluster.local:4800` |
 | `postgres` | CloudNativePG (`cnpg/cloudnative-pg`) | `postgresql.cnpg.io/v1 Cluster`, `initdb` database `app` owned by `app` | instances | ready instances = instances | `host, port, database, user, password, uri` | `<name>-rw.<ns>.svc.cluster.local:5432` |
-| `kafka` | Strimzi 1.2.0 (`strimzi/strimzi-kafka-operator`) | `kafka.strimzi.io` `Kafka` in KRaft mode with one `KafkaNodePool` (roles controller and broker, `instances` replicas, persistent-claim `storage_gi`), an internal listener on 9092 with TLS (Strimzi's cluster CA) and SCRAM-SHA-512 whose NetworkPolicy peer is the owning Lake only (the workspace's own pods reach it through the workspace's policies), `authorization: simple`, the entity operator, and a `KafkaUser` `<name>-app` with SCRAM-SHA-512 and ACLs limited to the cluster's non-internal topics, its groups and transactional ids, with no cluster administration (the user's name is its login and must be unique in the namespace; [orama-operator#770](https://github.com/oramasearch/orama-operator/issues/770)) | brokers | the `Kafka` `Ready` condition, the `KafkaUser` Secret and the cluster CA Secret exist | `bootstrap, username, password, sasl_mechanism` (`SCRAM-SHA-512`), `security_protocol` (`SASL_SSL`), `ca_certificate` (the cluster CA, PEM) | `<name>-kafka-bootstrap.<ns>.svc.cluster.local:9092` |
+| `kafka` | Strimzi 1.2.0 (`strimzi/strimzi-kafka-operator`) | `kafka.strimzi.io` `Kafka` in KRaft mode with one `KafkaNodePool` (roles controller and broker, `instances` replicas, persistent-claim `storage_gi`), an internal listener on 9092 with TLS (Strimzi's cluster CA) and SCRAM-SHA-512 whose NetworkPolicy peer is the owning Lake only (the workspace's own pods reach it through the workspace's policies), `authorization: simple`, the entity operator, and a `KafkaUser` `<name>-app` with SCRAM-SHA-512 and ACLs limited to the cluster's non-internal topics, its groups and transactional ids, with no cluster administration (the user's name is its login and must be unique in the namespace; orama-operator#770) | brokers | the `Kafka` `Ready` condition, the `KafkaUser` Secret and the cluster CA Secret exist | `bootstrap, username, password, sasl_mechanism` (`SCRAM-SHA-512`), `security_protocol` (`SASL_SSL`), `ca_certificate` (the cluster CA, PEM) | `<name>-kafka-bootstrap.<ns>.svc.cluster.local:9092` |
 | `clickhouse` | Altinity 0.27.4 (`altinity/altinity-clickhouse-operator`) | `clickhouse.altinity.com/v1 ClickHouseInstallation`: one shard of `instances` replicas, a volume claim template of `storage_gi`, user `app` with a generated password (SHA-256 in the spec, the plain password only in the credential), and, when `instances` > 1, a `ClickHouseKeeperInstallation` of one node the installation points at | replicas | the installation's status is `Completed` | `host, http_port` (8123), `native_port` (9000), `user, password, database` (`default`) | `clickhouse-<name>.<ns>.svc.cluster.local:8123` (the installation's own service); Ready also waits for the Keeper when there is one |
 | `tidb` | PingCAP TiDB Operator v1.6.6 (`pingcap/tidb-operator`, stable 1.x; its CRDs applied from the v1.6.6 release first) | `pingcap.com/v1alpha1 TidbCluster`: PD, TiKV and TiDB with `instances` replicas each, TiKV and PD storage of `storage_gi`, `tidb.initializer` with `createPassword`, which reads the root password from the Secret `<name>-init` (key `root`) the Orama operator creates, and `pvReclaimPolicy: Delete` | replicas of each component | PD, TiKV and TiDB report `Normal` and all their members ready | `host, port` (4000), `database` (`app`), `user` (`app`), `password`, `uri` (`mysql://app:…@…:4000/app`). The user is a tenant user the Orama operator creates, with every privilege on its databases and none on TiDB itself; root is never delivered ([orama-operator#771](https://github.com/oramasearch/orama-operator/issues/771)) | `<name>-tidb.<ns>.svc.cluster.local:4000` |
 | `cassandra` | K8ssandra Operator 1.33.0 (`k8ssandra/k8ssandra-operator`, cluster-scoped, needs cert-manager v1.21.2) | `k8ssandra.io/v1alpha1 K8ssandraCluster`, one datacenter of `instances` nodes with `storage_gi` (its datacenter object and Cassandra cluster are named after the slug so two services never collide; the Cassandra datacenter name is `dc1`), Apache Cassandra images only | nodes | the datacenter is `Ready` | `host, port` (9042), `datacenter` (`dc1`), `keyspace` (`app`), `user` (`app`), `password`. The user is a tenant role the Orama operator creates, not a superuser, with rights on its keyspaces only; K8ssandra's superuser is never delivered ([orama-operator#771](https://github.com/oramasearch/orama-operator/issues/771)) | `<slug>-<slug>-service.<ns>.svc.cluster.local:9042` |
@@ -121,14 +121,14 @@ Exact field names follow each operator's pinned CRD; where the table and the CRD
 wins and `docs/lake/services.md` in the operator says what was chosen. Every credential also carries
 `endpoint`. Each resource's `app.kubernetes.io/instance` label is its own name, not the Lake's:
 TiDB builds its pod selectors from that label. SQLite, DuckDB and Polars have no
-upstream operator we would use (lake `.claude/skills` → liquid-bridge `/lake-service`, step 1), so
+upstream operator we would use, so
 the Orama operator runs each directly behind a small web service of ours in its own private repo:
 `lake-sqlite`, `lake-duckdb`, `lake-polars`. `lake-duckdb` has the same API as `lake-sqlite` below.
 `lake-polars` is analytics compute, not a database: `POST /v1/datasets/<name>` uploads CSV, JSONL
 or Parquet (stored as Parquet), `GET /v1/datasets` lists them, `DELETE /v1/datasets/<name>` removes
 one, and `POST /v1/query` `{sql}` runs Polars SQL over them (row cap, timeout, memory limit) and
 answers `{columns, rows}`. For `lake-sqlite`, a small web service we wrote
-(decision 47, amended). Its API: `POST /v1/query` `{sql, params}` answers `{columns, rows}`;
+(amended). Its API: `POST /v1/query` `{sql, params}` answers `{columns, rows}`;
 `POST /v1/exec` answers `{rows_affected, last_insert_id}`; `POST /v1/batch` `{statements: [{sql,
 params}]}` runs them in one transaction; `GET /healthz`. Every call but `/healthz` needs
 `Authorization: Bearer <token>`. There is no replication; the volume is the only copy until
@@ -174,5 +174,5 @@ labels, before writing `Deleted`. Only the Orama operator's own resources are ev
 - Endpoints are in-cluster only: nothing outside the cluster reaches a customer's Postgres or
   Zetta. A Postgres service is usable today as a Zetta connection source and from other services.
 - `spec` cannot be changed after creation (no resize).
-- The operator connects with lake's own database credential; see decision 46 for why a narrower
+- The operator connects with lake's own database credential; a narrower
   role was not worth it yet.

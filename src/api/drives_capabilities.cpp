@@ -655,7 +655,7 @@ struct StoreOpened {
     std::optional<ApiResult> failure;
 };
 
-// The fields of the workspace secret a customer's own bucket names (decision 58: the workspace's
+// The fields of the workspace secret a customer's own bucket names (the workspace's
 // credential, never Orama's), read by Lake in the workspace's secret store with its own authority:
 // the person who created the store showed they could read it (create_store). Kept in this process
 // for a minute, so a download's windows do not each read the secret.

@@ -57,7 +57,7 @@ Orama design tokens, the same IBM Plex faces and the same component classes the 
 
 ## The look
 
-The app follows rev-os's visual language on lake's own colours and type (Steve, 2026-10-10):
+The app follows rev-os's visual language on lake's own colours and type:
 
 - a 2px brand strip;
 - a 232px rail of lake's groups with lucide icons, where the current group is open and lists its
@@ -110,10 +110,10 @@ short:
 - **Effects have block bodies.** `useEffect(() => { … })`; the build checks it
   (`scripts/check-effects.mjs`).
 - **Words, not stored values.** Show labels, not codes; dates through `format.ts`.
-- **The product is Lake, with a capital L** (decision 59, lake#642). Page text says **Lake**, and
+- **The product is Lake, with a capital L** (lake#642). Page text says **Lake**, and
   **Lake Console** where it names the app itself: the bare document title, the brand link's and the
   sign-in brand's accessible names, and `index.html`'s title. Other pages are titled
-  "Lake — <page>". Technical names keep their form: hostnames (`lake.live`, `lake.oramadev.net`),
+  "Lake — <page>". Technical names keep their form: hostnames (`lake.live`, `lake.example.com`),
   the MCP server name `lake`, CLI commands, `LAKE_*` variables, identifiers, paths and anything in
   `<code>`. `tests/name.test.ts` fails the build on a string or JSX text that names the product
   lowercase. The server's messages the pages show say Lake too (the registry's descriptions and
@@ -266,7 +266,7 @@ proves it fails on the two stages that broke, before their COPY lines were added
 Every Markdown the console shows (agent replies in Ask Orama, the Experiments, Application and
 Agent Factory panels, the pipeline's questions, READMEs, issues, comments, releases, change
 messages and the Docs) goes through `Markdown` in `src/lib/markdown.tsx`. Raw HTML stays text, and
-an image is never loaded (lake#943, LSR-082): `![chart](https://…)` renders as the text
+an image is never loaded (lake#943): `![chart](https://…)` renders as the text
 `Image: chart`, in italics, with `Not loaded: <address>` as its tooltip, and the browser requests
 nothing. A reply an agent wrote after reading untrusted content could otherwise name an image at an
 address that carries workspace data, and the browser would send it the moment the reply showed. A

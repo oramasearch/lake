@@ -41,7 +41,7 @@ std::int64_t hour_of(std::int64_t at_ms) {
 const std::vector<UsageDimension>& usage_dimensions() {
     static const std::vector<UsageDimension> dimensions{
         {"storage", "bytes", "last", "Storage"},
-        // What a workspace engine holds on its own volume (decision 61, lake#663): measured and
+        // What a workspace engine holds on its own volume (lake#663): measured and
         // shown, never billed, since the engine's disk is billed as its volume (`volumes`).
         {"engine_storage", "bytes", "last", "Engine Storage", false, false},
         {"transfer", "bytes", "sum", "Transfer"},
@@ -68,7 +68,7 @@ const std::vector<CapabilityMeter>& capability_meters() {
         {"create_workspace",
          {"cpu", "ram", "gpu", "vram", "volumes"},
          "its engine's resources and volume while it runs; what the engine holds on that volume is "
-         "engine_storage, shown and not billed (decision 61)"},
+         "engine_storage, shown and not billed"},
         {"start_workspace",
          {"cpu", "ram", "gpu", "vram", "volumes"},
          "its engine's resources and volume while it runs"},
@@ -91,8 +91,8 @@ const std::vector<CapabilityMeter>& capability_meters() {
         {"run_pipeline", {"cpu", "ram", "gpu", "vram"}, "in the workspace's engine"},
         {"start_experiment", {"cpu", "ram", "gpu", "vram"}, "its trials, in the engine"},
         {"start_solution", {"cpu", "ram", "gpu", "vram"}, "its first run, in the engine"},
-        // What the engine keeps is on its own volume, billed as `volumes` by its size (decision 61,
-        // lake#663); the bytes are engine_storage, shown and never billed.
+        // What the engine keeps is on its own volume, billed as `volumes` by its size
+        // (lake#663); the bytes are engine_storage, shown and never billed.
         {"load_drive_dataset", {"volumes"}, "the dataset, on the engine's volume"},
         // The engine's own capabilities, named in Lake (lake#650): their work and what they keep
         // are the workspace engine's CPU, RAM, GPU and volume.

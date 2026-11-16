@@ -1003,7 +1003,7 @@ INSERT INTO schema_migrations (version) VALUES ('0022_session_lookup') ON CONFLI
 -- Custodial TAAP identities (migration 0023). A person who signs in through Clerk arrives with
 -- no Liquid identity document, and policy is keyed on TAAP identities, so lake mints one on their
 -- first sign-in and holds its Ed25519 seed wrapped under the instance key, as it holds its own
--- (lake_identity). See docs/api/clerk.md and liquid-bridge decision 44.
+-- (lake_identity). See docs/api/clerk.md.
 -- ---------------------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS custodial_identities (
     user_id      uuid        PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -1024,7 +1024,7 @@ INSERT INTO schema_migrations (version) VALUES ('0023_custodial_identities') ON 
 -- cluster: Zetta clusters and Postgres clusters today. lake writes the desired state here; the
 -- Orama operator reads it, creates one OramaZettaCluster or CloudNativePG Cluster per service,
 -- and reports back in service_status. The customer's Design, Train and Ship workspace is its
--- default Zetta service. See docs/control-plane/services.md and liquid-bridge decision 46.
+-- default Zetta service. See docs/control-plane/services.md.
 -- ---------------------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS services (
     id                 uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1074,7 +1074,7 @@ INSERT INTO schema_migrations (version) VALUES ('0024_services') ON CONFLICT DO 
 -- ---------------------------------------------------------------------------------------------
 -- The service catalog (migration 0025): Kafka, ClickHouse, TiDB, Cassandra and Valkey join Zetta
 -- and Postgres, each run by its own upstream operator that the Orama operator drives
--- (docs/control-plane/services.md, liquid-bridge decision 47). Re-adding the constraint is
+-- (docs/control-plane/services.md). Re-adding the constraint is
 -- idempotent: every existing row already satisfies the wider list.
 -- ---------------------------------------------------------------------------------------------
 ALTER TABLE services DROP CONSTRAINT IF EXISTS service_kind_check;
@@ -1091,7 +1091,7 @@ INSERT INTO schema_migrations (version) VALUES ('0025_service_catalog') ON CONFL
 
 -- ---------------------------------------------------------------------------------------------
 -- SQLite services (migration 0026): a small web service over one SQLite database per service,
--- run by the Orama operator itself (docs/control-plane/services.md, liquid-bridge decision 47,
+-- run by the Orama operator itself (docs/control-plane/services.md,
 -- amended). Re-adding the constraint is idempotent.
 -- ---------------------------------------------------------------------------------------------
 ALTER TABLE services DROP CONSTRAINT IF EXISTS service_kind_check;
@@ -1109,8 +1109,8 @@ INSERT INTO schema_migrations (version) VALUES ('0026_sqlite_services') ON CONFL
 
 -- ---------------------------------------------------------------------------------------------
 -- DuckDB and Polars services (migration 0027): each behind a small wrapper service of ours that
--- the Orama operator runs, like lake-sqlite (docs/control-plane/services.md, liquid-bridge
--- decision 47, amended; lake#195). Re-adding the constraint is idempotent.
+-- the Orama operator runs, like lake-sqlite (docs/control-plane/services.md,
+-- lake#195). Re-adding the constraint is idempotent.
 -- ---------------------------------------------------------------------------------------------
 ALTER TABLE services DROP CONSTRAINT IF EXISTS service_kind_check;
 ALTER TABLE services ADD CONSTRAINT service_kind_check
@@ -2930,7 +2930,7 @@ INSERT INTO schema_migrations (version) VALUES ('0062_agent_task_workspaces')
     ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------------------------
--- 0063_audit_workspaces: lake's audit splits by subject (decision 52, lake#317, lake#318,
+-- 0063_audit_workspaces: lake's audit splits by subject (lake#317, lake#318,
 -- docs/api/audit.md#which-log). Control-plane and identity events stay in this table's central
 -- hash chain. Events about a workspace's data go to that workspace's own audit, the sealed
 -- collection lake_audit_events of its Zetta, chained there; lake no longer writes them here.
@@ -3061,7 +3061,7 @@ INSERT INTO schema_migrations (version) VALUES ('0063_audit_workspaces')
     ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------------------------
--- 0064_repository_records: the repository row is routing only (decision 54, S10 and S11).
+-- 0064_repository_records: the repository row is routing only (S10 and S11).
 --
 -- repository_refs is dropped (lake#319). It was a copy of each liquid ref that lake wrote after a
 -- push, a replication and a `refs` read, and that nothing read: the `refs` and `repository_refs`
@@ -3120,7 +3120,7 @@ INSERT INTO schema_migrations (version) VALUES ('0064_repository_records')
     ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------------------------
--- 0065_workspace_deletions: deleting a workspace cascades (decision 54 S12, lake#514,
+-- 0065_workspace_deletions: deleting a workspace cascades (lake#514,
 -- docs/api/workspaces.md#deletion). The transaction that sets a workspace's desired state to
 -- `deleted` also tombstones every repository of the workspace still live or inside its retention
 -- with its retention ended (deleted_at kept where set, retention_until = now(), which releases
@@ -3161,7 +3161,7 @@ INSERT INTO schema_migrations (version) VALUES ('0065_workspace_deletions')
 
 -- ---------------------------------------------------------------------------------------------
 -- 0066_assign_unrouted_repositories: the reviewed assignment 0051 left to a later migration
--- (decision 54 S14, lake#513, docs/api/repositories.md#the-owning-workspace). Each repository
+-- (lake#513, docs/api/repositories.md#the-owning-workspace). Each repository
 -- that still names no workspace (live or tombstoned) is assigned its space's only live workspace
 -- when the space now has exactly one; a space with several or none is left alone and reported
 -- with RAISE WARNING. It runs once. On dev it assigns the `liquid` repository to the workspace
@@ -3254,14 +3254,14 @@ INSERT INTO schema_migrations (version) VALUES ('0066_assign_unrouted_repositori
     ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------------------------
--- 0067_workspace_store: a workspace's liquid store moves into its workspace Zetta (decision 54
--- S1-S3, lake#380, docs/architecture/workspace-store.md). The bytes (packs, index runs, repository
+-- 0067_workspace_store: a workspace's liquid store moves into its workspace Zetta
+-- (lake#380, docs/architecture/workspace-store.md). The bytes (packs, index runs, repository
 -- state, all encrypted with the workspace's data key) live in bucket `lake_store` of the workspace
 -- Zetta; PostgreSQL keeps only this content-free switch. While store_moved_at is NULL the
 -- workspace's repositories are served from its space's store on lake's volume
 -- (<LAKE_STORE_ROOT>/<space>/store); move_workspace_store `switch` copies what is new, verifies
 -- every repository and sets it, after which they are served from the workspace store and the
--- space's store stays on the volume, read-only, until Steve approves removing it. The operator
+-- space's store stays on the volume, read-only, until an operator approves removing it. The operator
 -- does not read the column.
 -- ---------------------------------------------------------------------------------------------
 ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS store_moved_at timestamptz;
@@ -3273,7 +3273,7 @@ INSERT INTO schema_migrations (version) VALUES ('0067_workspace_store')
     ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------------------------
--- 0068_oci_repository_routes: the registry splits (decision 54 S4-S6, lake#383 phase A,
+-- 0068_oci_repository_routes: the registry splits (lake#383 phase A,
 -- docs/api/registry.md#where-a-tenant-image-lives). A tenant OCI repository (`<space>/<name>`,
 -- `<space>/cache/<name>`) belongs to one workspace: its manifests and tags are sealed records in
 -- that workspace Zetta's lake_oci_manifests and lake_oci_tags, and this table is the content-free
@@ -3372,12 +3372,12 @@ INSERT INTO schema_migrations (version) VALUES ('0068_oci_repository_routes')
     ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------------------------
--- 0069_workspace_volumes: the operator's volumes (decision 54 S13, operator#259, operator#260,
+-- 0069_workspace_volumes: the operator's volumes (operator#259, operator#260,
 -- lake#380, docs/control-plane/schema.md#workspace-volumes-migration-0069_workspace_volumes).
 -- After lake#380 a workspace Zetta's volume holds the workspace's liquid store, its tenant images
 -- and its search index, and on a one-node workspace it is the only copy. These are desired state
 -- and observations only: the operator grows each workspace Zetta's claims and takes CSI snapshots
--- from them, and it never talks to a workspace Zetta (decision 51).
+-- from them, and it never talks to a workspace Zetta.
 --
 -- workspaces.storage_gi is the desired size of each of the workspace Zetta's volumes, in GiB. It
 -- never decreases (enforce_workspace_storage_growth): an online-expanded block volume cannot
@@ -3393,7 +3393,7 @@ INSERT INTO schema_migrations (version) VALUES ('0068_oci_repository_routes')
 -- request_volume_snapshot. volume_snapshot_status is written only by the operator: the target's
 -- last VolumeSnapshot, whether it is readyToUse, and when it was taken. Neither table has a
 -- foreign key to workspaces: a deleted workspace's retained snapshots, and what the operator last
--- reported about them, outlive it (decision 54 S12).
+-- reported about them, outlive it.
 -- ---------------------------------------------------------------------------------------------
 ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS storage_gi integer NOT NULL DEFAULT 5;
 ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS storage_gi_observed integer NOT NULL DEFAULT 0;
@@ -3481,7 +3481,7 @@ INSERT INTO schema_migrations (version) VALUES ('0069_workspace_volumes')
     ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------------------------
--- 0070_drop_moved_tables: the retired copies of workspace data are dropped (lake#311, decision 54).
+-- 0070_drop_moved_tables: the retired copies of workspace data are dropped (lake#311).
 -- Each moved into the workspace Zetta of its owner through the operator's one-shot copy
 -- (copy_workspace_records, docs/architecture/workspace-records.md), which the coordinator reports
 -- was run and verified on dev for every collection below, and lake reads and writes none of them:
@@ -3771,7 +3771,7 @@ INSERT INTO schema_migrations (version) VALUES ('0072_usage_limits')
     ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------------------------
--- 0073_billing (lake#564, decision 56): billing records, in the control plane as multitenancy
+-- 0073_billing (lake#564): billing records, in the control plane as multitenancy
 -- (docs/api/billing.md). The price list (plans and a price per usage dimension, keyed on the
 -- dimension names usage_over_time answers), each account's plan over time, and the invoices lake
 -- issues with their line items and payment state. Usage itself stays in each workspace Zetta: a
@@ -3864,7 +3864,7 @@ INSERT INTO schema_migrations (version) VALUES ('0073_billing')
     ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------------------------
--- 0074_payment_provider (lake#620, decision 57): Stripe as the payment provider
+-- 0074_payment_provider (lake#620): Stripe as the payment provider
 -- (docs/api/billing.md#stripe). The provider's id for each account (a Stripe Customer), kept once;
 -- where an invoice is paid (Stripe's hosted invoice page) and the provider's own state of it; and
 -- every provider notice (a Stripe webhook event) applied, by event id, so one is never applied
@@ -4447,7 +4447,7 @@ ALTER TABLE network_tunnel_grant_status ADD COLUMN IF NOT EXISTS relay_ca_pem te
 INSERT INTO schema_migrations (version) VALUES ('0085_network_tunnel_ca') ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------------------------
--- 0086_identity_links (lake#762, liquid-bridge decision 65): every new account starts with a
+-- 0086_identity_links (lake#762): every new account starts with a
 -- managed key (custodial_identities), and the person may later use their own identity instead.
 -- The account keeps its TAAP identifier, so grants, audit and repositories stay with it; its
 -- signing key becomes the person's own key as a linked successor, recorded once here with both
@@ -4621,7 +4621,7 @@ INSERT INTO schema_migrations (version) VALUES ('0089_cloud_orders') ON CONFLICT
 -- 0090_billing_contacts (lake#857, docs/api/billing.md#billing-contact): where an account's
 -- invoices go and the name and address they carry. One row per account, replaced whole by
 -- set_billing_contact, and sent to the payment provider's customer (Stripe's email, name and
--- address). A billing record (decision 56): nothing from a workspace. `name` is the legal or
+-- address). A billing record: nothing from a workspace. `name` is the legal or
 -- company name on the invoice; `country` an ISO 3166-1 alpha-2 code or empty. Kept until the
 -- account is deleted. Idempotent.
 -- ---------------------------------------------------------------------------------------------
@@ -4662,7 +4662,7 @@ INSERT INTO schema_migrations (version) VALUES ('0091_account_deletion') ON CONF
 -- Assertion Consumer Service. `sso_saml_requests` holds each outstanding AuthnRequest (its id only
 -- as a SHA-256 hash), used once within ten minutes; `sso_saml_assertions` holds the hash of each
 -- accepted assertion's id until the assertion expires, so a response is accepted once. Sign-in
--- state (decision 50): nothing from a workspace. Rows go with their provider. Idempotent.
+-- state: nothing from a workspace. Rows go with their provider. Idempotent.
 -- ---------------------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS sso_saml_requests (
     id              uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -4744,7 +4744,7 @@ DO $$ BEGIN
 END $$;
 CREATE TABLE IF NOT EXISTS clerk_revocation_guard (applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0094_clerk_revocation') ON CONFLICT DO NOTHING;
--- 0095_model_token_prices (LSR-095, lake#961, docs/api/model-gateway.md): exact model input/output
+-- 0095_model_token_prices (lake#961, docs/api/model-gateway.md): exact model input/output
 -- billing classes. Preserve historical GPU-style classes; only model_tokens may use model/direction.
 -- ---------------------------------------------------------------------------------------------
 ALTER TABLE billing_plan_prices DROP CONSTRAINT IF EXISTS billing_plan_prices_class_check;
@@ -4760,7 +4760,7 @@ ALTER TABLE billing_invoice_lines ADD CONSTRAINT billing_invoice_lines_class_che
 CREATE TABLE IF NOT EXISTS model_token_prices_guard (
     applied_at timestamptz NOT NULL DEFAULT now()
 );
--- The default gateway models' token prices (Steve, 2026-10-23): OpenAI's published standard
+-- The default gateway models' token prices: OpenAI's published standard
 -- price per million tokens, https://developers.openai.com/api/docs/pricing, read 2026-10-23,
 -- plus 30%, in millionths of a US dollar per 1,000,000 tokens (docs/api/billing.md#rates):
 --   gpt-5.5                 $5.00 in, $30.00 out  ->  6500000 / 39000000 (under 272K context)
@@ -4824,7 +4824,7 @@ $model_token_prices$;
 INSERT INTO schema_migrations (version) VALUES ('0095_model_token_prices') ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------------------------
--- 0096_email_recovery_limits (LSR-102, lake#968): durable anonymous budgets and owner cancellation.
+-- 0096_email_recovery_limits (lake#968): durable anonymous budgets and owner cancellation.
 -- ---------------------------------------------------------------------------------------------
 ALTER TABLE offline_recovery_attempts DROP CONSTRAINT IF EXISTS offline_recovery_attempts_status_check;
 ALTER TABLE offline_recovery_attempts ADD CONSTRAINT offline_recovery_attempts_status_check
@@ -4896,7 +4896,7 @@ FROM (
 ) orders;
 CREATE TABLE IF NOT EXISTS cloud_order_entitlements_guard (applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0097_cloud_order_entitlements') ON CONFLICT DO NOTHING;
--- 0098_authentication_attempts (lake#966, LSR-100): shared, bounded authentication budgets.
+-- 0098_authentication_attempts (lake#966): shared, bounded authentication budgets.
 CREATE TABLE IF NOT EXISTS authentication_attempts (
     key_hash text PRIMARY KEY CHECK (key_hash ~ '^[0-9a-f]{64}$'),
     failures integer NOT NULL CHECK (failures >= 0),
@@ -4909,8 +4909,8 @@ CREATE TABLE IF NOT EXISTS authentication_attempts_guard (
     applied_at timestamptz NOT NULL DEFAULT now()
 );
 INSERT INTO schema_migrations(version) VALUES ('0098_authentication_attempts') ON CONFLICT DO NOTHING;
--- 0099_account_balances (lake#1114, liquid-bridge decision 67, docs/api/billing.md#balance): a
--- prepaid balance per account on lake.live. Billing records, so in the control plane (decision 56):
+-- 0099_account_balances (lake#1114, docs/api/billing.md#balance): a
+-- prepaid balance per account on lake.live. Billing records, so in the control plane:
 -- the account's row (settings, the last refresh, which crossings' emails went, auto top-up), its
 -- credits (paid top-ups, once per provider reference) and its charges (each month's usage at the
 -- list in force, refreshed by the store root's owner; usage itself stays in each workspace Zetta).
@@ -5015,7 +5015,7 @@ INSERT INTO schema_migrations (version) VALUES ('0100_balance_grants') ON CONFLI
 -- 0101_coupons (lake#1156, docs/api/billing.md#coupon-codes): codes the operator puts in ads, each
 -- worth an amount of cloud credit. A redemption is an ordinary grant from Orama (0100), with the
 -- reference `coupon:<coupon id>:<customer id>`, so the spending order, expiry and no-overdraft rules
--- are the grant's. Billing, so in the control plane (decision 56). Codes are stored normalized
+-- are the grant's. Billing, so in the control plane. Codes are stored normalized
 -- (upper case letters and digits). One redemption per account and per verified email (kept as a
 -- SHA-256 digest of the normalized address, never the address); `redemptions` is the count the
 -- total cap is checked against, under the coupon's row lock. Failed attempts are counted per client
@@ -5135,7 +5135,7 @@ INSERT INTO schema_migrations (version) VALUES ('0104_app_restarts') ON CONFLICT
 CREATE TABLE IF NOT EXISTS agent_model_prices_guard (
     applied_at timestamptz NOT NULL DEFAULT now()
 );
--- Steve, 2026-10-26: OpenAI's published standard price per million tokens,
+-- OpenAI's published standard price per million tokens,
 -- https://developers.openai.com/api/docs/pricing and the model pages, read 2026-10-26, plus 30%,
 -- in millionths of a US dollar per 1,000,000 tokens:
 --   gpt-6.1-sol    $2.00 in, $10.00 out  ->  2600000 / 13000000;  long  5200000 / 19500000

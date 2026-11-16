@@ -35,7 +35,7 @@ against the file's directory, so a ConfigMap can hold `brand.json` beside `logo.
 | `LAKE_BRAND_FAVICON` | `favicon` | none | The browser icon, as the logo |
 | `LAKE_BRAND_ACCENT` | `accent` | the design tokens' action blue | The action colour, `#rrggbb` |
 | `LAKE_BRAND_ACCENT_DARK` | `accent_dark` | the accent | The action colour in the dark theme; needs `LAKE_BRAND_ACCENT` |
-| `LAKE_BRAND_SUPPORT_EMAIL` | `support_email` | `LAKE_SUPPORT_EMAIL` (no default) | The address people are told to write to, and the Reply-To of customer email. **Required** for a custom brand, and not on `orama.com`, `lake.live` or `oramadev.net` |
+| `LAKE_BRAND_SUPPORT_EMAIL` | `support_email` | `LAKE_SUPPORT_EMAIL` (no default) | The address people are told to write to, and the Reply-To of customer email. **Required** for a custom brand, and not on the domain of this Lake's own `LAKE_SUPPORT_EMAIL` or `LAKE_RESEND_FROM` |
 | `LAKE_BRAND_EMAIL_FROM` | `email_from` | `LAKE_RESEND_FROM` (no default) | The From of every email, `Name <address>` or an address. **Required** for a custom brand (unless `LAKE_RESEND_FROM` already names the customer's domain), and not on those domains. Its domain must be verified in Resend: SPF and DKIM records in the customer's zone |
 | `LAKE_BRAND_LEGAL_NAME` | `legal_name` | none | The legal name in the footer of the pages and the sign-in screens (`© Acme Data Inc.`) |
 | `LAKE_BRAND_TERMS_URL` | `terms_url` | none | An `https` link to the terms, in the same footer |

@@ -309,7 +309,7 @@ int main(int argc, char** argv) {
     opts.clerk_publishable_key = env_or("LAKE_CLERK_PUBLISHABLE_KEY", "");
     opts.clerk_webhook_secret = env_or("LAKE_CLERK_WEBHOOK_SECRET", "");
     opts.clerk_secret_key = env_or("LAKE_CLERK_SECRET_KEY", "");
-    // The terms and privacy policy sign-up and sign-in link to (liquid-bridge#15): unset keeps
+    // The terms and privacy policy sign-up and sign-in link to: unset keeps
     // Orama's published pages, `off` shows no link, and a malformed URL stops lake.
     for (const auto& [name, value, target, fallback] :
          {std::tuple{"LAKE_TERMS_URL",
@@ -394,8 +394,8 @@ int main(int argc, char** argv) {
         }
         opts.balance = *balance;
     }
-    // Stripe (decision 57, lake#628): lake's own platform credentials, environment variables of
-    // the hosting platform (Railway; spec.env with a secretKeyRef on the dev cluster), never a
+    // Stripe (lake#628): lake's own platform credentials, environment variables of
+    // the hosting platform (for example spec.env with a secretKeyRef), never a
     // user's secret store. Read once here and never logged; a new key takes a restart.
     opts.stripe_keys = {env_or("LAKE_STRIPE_SECRET_KEY", ""), env_or("LAKE_STRIPE_WEBHOOK_SECRET", "")};
     opts.store_root = env_or("LAKE_STORE_ROOT", "");

@@ -92,7 +92,7 @@ target_sources(lake-tests PRIVATE test_oidc_discovery.cpp)
 target_sources(lake-tests PRIVATE test_orders.cpp)
 # Proving you hold an identity document's key before it becomes an account's identity (lake#931).
 target_sources(lake-tests PRIVATE test_identity_proof.cpp)
-# The version and its release page (root CLAUDE.md, *Cutting a release*).
+# The version and its release page (CONTRIBUTING.md, *Cutting a release*).
 target_sources(lake-tests PRIVATE test_release_version.cpp)
 # `lake manifest`: the schema, Stripe events and environment the operator reads (lake#1119).
 target_sources(lake-tests PRIVATE test_manifest.cpp)

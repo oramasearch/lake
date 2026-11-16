@@ -1,10 +1,10 @@
 # The model gateway
 
-**Issue:** [lake#248](https://github.com/oramasearch/lake/issues/248), part of the metering epic
-[lake#658](https://github.com/oramasearch/lake/issues/658) · **Code:** `include/lake/api/model_gateway.hpp`,
+**Issue:** lake#248, part of the metering epic
+lake#658 · **Code:** `include/lake/api/model_gateway.hpp`,
 `src/api/model_gateway.cpp`, `model_completion` in `src/api/usage_capabilities.cpp`, the
 `/openai/v1/*` routes in `src/api/http_server.cpp`; the workspace's model in
-`src/api/workspace_settings_capabilities.cpp` ([lake#1230](https://github.com/oramasearch/lake/issues/1230))
+`src/api/workspace_settings_capabilities.cpp` (lake#1230)
 · **Tests:** `tests/test_model_gateway.cpp`
 
 Every model call an agent makes for a workspace goes through Lake. Lake sends it to the model
@@ -65,7 +65,7 @@ launched on agent-runtime runs in its workspace's namespace with `LAKE_URL` set 
 lands there. The workspace in the path must be the run's own: a call naming another is `unauthorized`
 (403) before the provider is called, and one naming a workspace that does not exist is `not_found`
 (404). That is the only way such an agent reaches a model: its pod holds no provider key
-([orama-operator#779](https://github.com/oramasearch/orama-operator/issues/779)).
+(orama-operator#779).
 
 The path is `/openai/v1/`, not `/v1/`, because `/v1/<name>` is the capability registry's
 ([README](README.md)). Like the OCI registry at `/v2/` and the Hub routes at `/api/models/`, the
@@ -73,7 +73,7 @@ gateway is a protocol route named for its protocol.
 
 ### Supported requests
 
-The gateway accepts a closed set of synchronous, token-metered fields (lake#960, LSR-094).
+The gateway accepts a closed set of synchronous, token-metered fields (lake#960).
 Unknown fields are `invalid_input` before the provider is called, including unknown fields inside
 messages, content parts, tools and stream options. Chat and Responses accept text and function
 tools executed by the caller. Embeddings accept text or token arrays. Function parameter schemas
@@ -98,7 +98,7 @@ replays a chat completion with a tool call as OpenAI returns it.
 This deliberately narrows OpenAI compatibility: a provider adding a field does not enable it on
 Lake. Extend the endpoint schemas in `src/api/model_gateway.cpp` only after verifying that its
 charges are represented in workspace usage, with a refusal test and a supported-request test.
-Model eligibility and pricing are handled separately by lake#961 (LSR-095).
+Model eligibility and pricing are handled separately by lake#961.
 
 Verify with `ModelCompletion.RefusesUnmeteredFeaturesBeforeCallingTheProvider` and
 `ModelGateway.AcceptsTextAndCallerExecutedFunctions`, plus the OpenAI route rejection checks in
@@ -154,7 +154,7 @@ provider has finished it. None of the agents stream today.
 
 ### Tools on the gpt-6 models
 
-**Issue:** [lake#1245](https://github.com/oramasearch/lake/issues/1245) · **Code:**
+**Issue:** lake#1245 · **Code:**
 `responses_for_tools_models`, `chat_goes_to_responses`, `chat_request_as_responses`,
 `responses_answer_as_chat` and `ResponsesChatStream` in `src/api/model_gateway.cpp`; the call in
 `model_completion` (`src/api/usage_capabilities.cpp`).
@@ -367,7 +367,7 @@ The prompt and the answer are never in the audit.
 
 | Variable | Meaning |
 |---|---|
-| `LAKE_OPENAI_API_KEY` | Orama's provider key, a platform environment variable of the Lake pod (on the dev cluster, `spec.env` from Secret `lake-prod-openai`). Unset, the gateway answers `not_supported` |
+| `LAKE_OPENAI_API_KEY` | The operator's provider key, a platform environment variable of the Lake pod (for example `spec.env` from a Secret). Unset, the gateway answers `not_supported` |
 | `LAKE_MODEL_PROVIDER_URL` | an OpenAI-compatible base URL; default `https://api.openai.com/v1` |
 | `LAKE_MODEL_GATEWAY_MODELS` | JSON array of exact model/provider objects, such as `[{"model":"gpt-5.5","provider":"openai"}]`; absent defaults to `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, `gpt-6-luna`, `gpt-5.5`, `gpt-5`, `gpt-4o` and `text-embedding-3-small`; `[]` disables all model calls |
 
@@ -375,7 +375,7 @@ Only the `openai` provider protocol is supported, using the configured base URL 
 Malformed configuration, duplicate model names and unsupported providers stop startup. Names are
 case-sensitive and never trimmed, decoded or expanded to snapshot or fine-tuning aliases. An
 unlisted name returns `invalid_input` at `/request/model` before any provider call, through the
-OpenAI routes (including workspace paths), REST and MCP alike (LSR-095, lake#961).
+OpenAI routes (including workspace paths), REST and MCP alike (lake#961).
 
 With billing off, the configured allowlist is sufficient. With billing on, the current UTC month's
 published price list must also have exactly one positive `model_tokens` price for each of
@@ -387,7 +387,7 @@ with `store_unavailable`. Even an embedding model needs both rates, although it 
 output tokens. Publish approved rates with `set_price_list` before enabling a model. Choose rates
 for the configured provider; an allowlist entry never derives prices from its name.
 
-**The default models are priced by the schema** (Steve, 2026-10-23: the provider's published
+**The default models are priced by the schema** (the provider's published
 per-token price plus 30%). Migration `0095_model_token_prices` seeds them once, on a fresh and an
 existing control plane alike, in millionths of a US dollar per 1,000,000 tokens, from
 OpenAI's published standard price ([pricing](https://developers.openai.com/api/docs/pricing), read 2026-10-23):
@@ -399,8 +399,7 @@ OpenAI's published standard price ([pricing](https://developers.openai.com/api/d
 | `gpt-4o` | $2.50 / $10.00 | $3.25 / $13.00 | 3250000 / 13000000 |
 | `text-embedding-3-small` | $0.02 / none | $0.026 / $0.026 | 26000 / 26000 |
 
-Migration `0105_agent_model_prices` (lake#1230, Steve 2026-10-26: *"let's use the latest and ensure
-the price is covered properly"*) adds the gpt-6.x models and the long-context rates the same way, from
+Migration `0105_agent_model_prices` (lake#1230) adds the gpt-6.x models and the long-context rates the same way, from
 the same page and the model pages, read 2026-10-26:
 
 | Model | OpenAI input / output (per 1M) | Lake input / output (per 1M) | `unit_micros` input / output | `@long` input / output |
@@ -441,8 +440,8 @@ agents use the gateway.
 
 ## The workspace's model
 
-People choose the model their agents use (lake#1230; Steve, 2026-10-26: *"let's the users choose"*,
-*"default to sol"*). Each workspace has a setting `agent_model`, one of the chat models this Lake
+People choose the model their agents use (lake#1230), with `gpt-6.1-sol` as the
+default. Each workspace has a setting `agent_model`, one of the chat models this Lake
 serves (the configured list without embedding models), read with `get_workspace_settings` and set with
 `set_workspace_settings` ([workspaces.md](workspaces.md#settings)). **Unset means `gpt-6.1-sol`**
 (`default_agent_model`). Its tool calls go through the provider's Responses API

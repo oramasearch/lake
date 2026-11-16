@@ -224,7 +224,7 @@ std::string platform_host_problem(std::string_view requested, const ApiContext& 
     if (!context.public_host.empty()) {
         const std::string own = lower(context.public_host);
         reserved.push_back(own);
-        // The zone the Lake's host is in (`oramadev.net` for `lake-dev.oramadev.net`), when the
+        // The zone the Lake's host is in (`example.com` for `lake.example.com`), when the
         // host is below one; a two-label host (`lake.live`) is the zone itself.
         if (std::ranges::count(own, '.') >= 2) {
             reserved.push_back(own.substr(own.find('.') + 1));

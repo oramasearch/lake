@@ -21,7 +21,7 @@ class WorkspaceService;
 
 namespace lake::api {
 
-// The per-workspace request series (decision 54 S9, lake#384, docs/serving/telemetry.md#the-
+// The per-workspace request series (lake#384, docs/serving/telemetry.md#the-
 // workspace-request-series). Lake's process telemetry stays with the instance; each workspace
 // Zetta also gets a counter `lake_requests` in its labelled time series (zetta docs/data/
 // time-series.md), labelled `route` (the route pattern), `capability` (when the request is a

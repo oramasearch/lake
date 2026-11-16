@@ -1,4 +1,4 @@
-// A connection's streams (decision 60, lake#652, docs/api/mcp-connections.md#a-connections-agent-
+// A connection's streams (lake#652, docs/api/mcp-connections.md#a-connections-agent-
 // and-streams): the store root's owner, and only it, mirrors each connection's notifications to its
 // notifications topic, starts a job of the connection's agent for each new event on its input
 // topic, and publishes each finished job's result to its output topic. Runs on a thread of its own

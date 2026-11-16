@@ -1,4 +1,4 @@
-// lake#383 phase B (decision 54 S5): a tenant image's blobs live in its workspace's liquid store.
+// lake#383 phase B: a tenant image's blobs live in its workspace's liquid store.
 //
 // A real lake server runs with workspace stores on FakeZettaObjects (Zetta's object routes, as
 // tests/zetta_object_fixture.hpp specifies them) and workspace records on RecordWorkspaces. Each

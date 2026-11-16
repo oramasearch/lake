@@ -197,7 +197,7 @@ export function mergeReadings(readings: Reading[]): Reading | null {
 
 /** What a dimension's tile says about the bill (lake#658): build, run and instance time are
  * measured and shown as detail, and never billed, since compute is billed as CPU, RAM, GPU and GPU
- * memory. What a workspace engine holds on its own volume (`engine_storage`, decision 61,
+ * memory. What a workspace engine holds on its own volume (`engine_storage`,
  * lake#663) is shown and not billed: the volume is, by its size. Null for a dimension the price
  * list bills. */
 export function billingNote(d: Pick<Dimension, "billed"> & { dimension?: string }): string | null {

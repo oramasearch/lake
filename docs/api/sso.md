@@ -117,8 +117,8 @@ ignored) is the same
 verification through the registry, for a client that relays the response itself; it answers the
 session instead of a cookie. Both refuse a response that answers no outstanding request.
 
-**What a response must be.** Verification is Lake's own (`src/control/saml.cpp`, no XML library;
-the bridge's *We write our own* rule and decision 32), and it fails closed:
+**What a response must be.** Verification is Lake's own (`src/control/saml.cpp`, no XML library:
+Lake writes its own verifier), and it fails closed:
 
 - **XML.** A strict reader: one root, an optional XML declaration, comments (dropped), the five
   predefined entities and character references. DTDs, other entities, CDATA and processing
@@ -187,9 +187,9 @@ also set (a Lake signs in through Clerk or through the customer's provider, neve
   page's same-origin `return_to`, OIDC calls `start_sso_oidc`.
 - **Users must be provisioned through SCIM for now.** A first sign-in creates a user only with
   just-in-time provisioning and a TAAP id in the sign-in, which a person from the customer's IdP
-  does not carry. Minting a managed key for such a person, as a Clerk sign-in does (decision 65), is
-  [lake#1166](https://github.com/oramasearch/lake/issues/1166). Enterprise OIDC also waits for
-  [lake#1022](https://github.com/oramasearch/lake/issues/1022) on Postgres; SAML works.
+  does not carry. Minting a managed key for such a person, as a Clerk sign-in does, is
+  lake#1166. Enterprise OIDC also waits for
+  lake#1022 on Postgres; SAML works.
 
 The runbook, with the Clerk alternative, is
 [`clerk.md`](clerk.md). Tests:

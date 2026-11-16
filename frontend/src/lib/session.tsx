@@ -11,7 +11,7 @@ import { prefetchRead, setSignedIn, setWorkspace, useRead } from "./api";
 /** A workspace the viewer can choose. */
 export type WorkspaceChoice = { id: string; name: string; customer_id: string; status?: string };
 /** A space (customer) the viewer can act in, with its live workspaces. The UI never names the
- * viewer's own space: its workspaces read "Your workspaces" (Steve, 2026-10-10). `personal` marks the
+ * viewer's own space: its workspaces read "Your workspaces". `personal` marks the
  * viewer's own individual customer. */
 export type SpaceChoice = { id: string; name: string; label: string; personal: boolean; kind?: string; workspaces: WorkspaceChoice[] };
 
@@ -34,7 +34,7 @@ export type Viewer = {
   clerk: { enabled: boolean; publishable_key?: string; frontend_api?: string };
   password_sign_up: boolean;
   /** The terms of service and privacy policy sign-up and sign-in link to (LAKE_TERMS_URL,
-   * LAKE_PRIVACY_URL, liquid-bridge#15); an empty URL means no link. */
+   * LAKE_PRIVACY_URL); an empty URL means no link. */
   legal?: { terms_url: string; privacy_url: string };
   /** The customer's identity provider when it is this Lake's only way in (lake#1136), else null. */
   sign_in_sso?: { provider_id: string; protocol: string; name: string } | null;

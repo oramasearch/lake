@@ -149,7 +149,7 @@ std::string later() {
 
 } // namespace
 
-// LSR-099: policy administrators may manage ordinary members, but ownership needs the
+// Policy administrators may manage ordinary members, but ownership needs the
 // organization's owners. Exercise the same contract through the registry and both stores.
 TEST_P(Deletions, OwnershipRequiresAnOrganizationOwnerOnEveryMembershipPath) {
     LAKE_STORE_OR_SKIP(store);

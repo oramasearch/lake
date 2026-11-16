@@ -18,7 +18,7 @@ the operator's ordered poll remains the recovery path when a notification is los
 Migration `0038_workspace_data_plane` adds immutable `workspace_id`, required on create. Event
 publishers pass that ID explicitly; `build-events.<id>` lives in that workspace, with 24-hour /
 5,000-event retention and cleanup after the terminal replay window. Operator adoption is tracked
-in [orama-operator#216](https://github.com/oramasearch/orama-operator/issues/216).
+in orama-operator#216.
 
 `desired` is `queued` or `cancelled`. Observed `phase` is `Queued`, `Running`, `Succeeded`,
 `Failed` or `Cancelled`. Cancellation retains the row and asks the operator to remove only the Job

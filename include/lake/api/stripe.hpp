@@ -1,6 +1,6 @@
 #pragma once
 
-// Stripe, lake's payment provider (decision 57, lake#620, docs/api/billing.md#stripe). Lake's own
+// Stripe, lake's payment provider (lake#620, docs/api/billing.md#stripe). Lake's own
 // client for Stripe's REST API (form-encoded requests with a bearer key and an Idempotency-Key on
 // every write), never Stripe's SDK, and the check of Stripe's webhook signatures. The HTTP
 // exchange is the server's outbound client, injected as a StripeHttp the tests replace with a

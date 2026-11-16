@@ -27,8 +27,7 @@ pull receives zero bytes, and the source and destination trees match.
 Repository capabilities use the repository policy object. Read capabilities allow anonymous
 access only when the repository is public; action capabilities require repository `write`
 access. Without `revision`, `get_dataset` and `get_model` read private workspace metadata and
-require a signed-in Lake caller with `read` on the customer that owns the workspace (lake#970,
-LSR-104). Supplying `customer_id` and `workspace_id` grants no access. The shared workspace
+require a signed-in Lake caller with `read` on the customer that owns the workspace (lake#970). Supplying `customer_id` and `workspace_id` grants no access. The shared workspace
 customer resolver requires authentication before accepting either an explicit customer or an
 Application Agent task's customer; Registry enforces credential scopes and customer `read` before
 dispatch. All capabilities are registered once for `/v1/openapi.json` and `POST /mcp`.
@@ -139,7 +138,7 @@ trained one. The engine's page is zetta `docs/ml/model-import.md`.
   - a random-forest or decision-tree classifier (averaged probabilities, not a logistic link);
   - categorical splits, and exponential objectives.
 
-  The random-forest classifier is [lake#697](https://github.com/oramasearch/lake/issues/697).
+  The random-forest classifier is lake#697.
 
 **Download.** `export_model` is a named engine read: `read` on the account, recorded as
 `export_model` in the workspace's audit. It answers a model version's weights as a file:

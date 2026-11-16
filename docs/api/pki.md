@@ -24,7 +24,7 @@ the API boundary. Lifetimes are positive and capped at one hour.
 ### Certificate identities
 
 Lake encodes each subject alternative name directly as one typed ASN.1 `GENERAL_NAME`
-(lake#946, LSR-084). Caller text never enters OpenSSL's extension configuration parser. X.509
+(lake#946). Caller text never enters OpenSSL's extension configuration parser. X.509
 SVIDs and agent certificates contain exactly one URI SAN; ACME certificates contain exactly one
 DNS SAN. Tunnel certificates use the same encoder for their grant URI, with the existing
 recipient-only authorization. Generic client and device subjects remain common names only.

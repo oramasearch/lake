@@ -11,7 +11,7 @@
 #include "lake/api/registry.hpp"
 #include "lake/audit/audit.hpp"
 
-// Reading lake's audit across its two logs (decision 52, docs/api/audit.md#which-log): the
+// Reading lake's audit across its two logs (docs/api/audit.md#which-log): the
 // central chain in PostgreSQL and each workspace's chain in its own Zetta. The audit capabilities
 // use these; nothing here writes.
 namespace lake::api {

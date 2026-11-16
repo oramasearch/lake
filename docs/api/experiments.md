@@ -238,7 +238,7 @@ params, series, summaries and artifacts for relative/wall-time views and paramet
 **Held-out scores (zetta#1239).** The score that decides between runs is measured on rows the model
 never trained on: `held_out_auc`, `held_out_log_loss`, `held_out_accuracy` (classifiers),
 `held_out_rmse`, `held_out_mae` (regressors) and `held_out_rows`. Engines with
-https://github.com/oramasearch/zetta/pull/1245 or later record them as one-point series at the end
+zetta#1245 or later record them as one-point series at the end
 of training, so they appear in `summary` (and in `compare_runs`); older runs have them only in
 `get_run_report` and on the model (`list_models` `metrics`). The run and compare pages show them in
 a **Held-Out Scores** table, one row per run with the best marked, rather than as curves.
@@ -290,7 +290,7 @@ split) and budgets (10 trials, 2 in parallel, 10 minutes, no cost cap), field by
 Objective metrics are named by the run report's keys: `held_out_auc`, `held_out_log_loss`,
 `held_out_accuracy`, `held_out_rmse`, `held_out_mae`. Zetta accepts older spellings
 (`validation.auc`, `ROC-AUC`, `auc`, `log loss`, …) as aliases and stores the canonical name
-([zetta#1217](https://github.com/oramasearch/zetta/issues/1217)).
+(zetta#1217).
 
 Every experiment capability passes a Zetta error's `path` through unchanged, so
 `{"ok":false,"error":{"code":"invalid_input","message":"required; set from_defaults: true …","path":"/objective"}}`
@@ -375,4 +375,4 @@ token gates. The [UI contract](../ui/experiments.md) records browser checks and 
 
 The current engine contract has no `delete_study` or `delete_run`. Deletion requires an upstream
 operation and its retention semantics; no local hiding or destructive SQL substitute is defined.
-Experiment deletion is explicitly deferred to [Zetta #1158](https://github.com/oramasearch/zetta/issues/1158).
+Experiment deletion is explicitly deferred to Zetta #1158.

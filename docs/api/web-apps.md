@@ -77,14 +77,14 @@ and `test`, plus every name that starts with `lake-` or `orama`. Operators add d
 names with the comma-separated `LAKE_APPS_RESERVED_NAMES`; surrounding whitespace is ignored.
 `create_app` returns `invalid_input`, `<name> is reserved`, at `/name` before it writes desired
 state. An omitted, null, or empty `host` remains the default `<name>.<LAKE_APPS_WILDCARD>`, so
-`reports` with `LAKE_APPS_WILDCARD=oramadev.net` becomes `reports.oramadev.net`.
+`reports` with `LAKE_APPS_WILDCARD=example.com` becomes `reports.example.com`.
 
 An explicit `host` is held to the same names (lake#947): its label, the part before
-`.<LAKE_APPS_WILDCARD>`, may not be a reserved name, so `{name: "ok", host: "app.oramadev.net"}` is
+`.<LAKE_APPS_WILDCARD>`, may not be a reserved name, so `{name: "ok", host: "app.example.com"}` is
 refused with `invalid_input`, `<host> is reserved: <label> is a reserved name`, at `/host`. Nor may it
 be one of the Lake's own hosts: its `LAKE_PUBLIC_HOST`, its `LAKE_APEX_HOST` or the host of any region in
 `LAKE_REGIONS` (`<host> is a host of the Lake itself`, at `/host`). Those sit one label beneath the
-wildcard when the wildcard is the zone itself, as `oramadev.net` is on the managing cluster.
+wildcard when the wildcard is the zone itself, as `example.com` is on the managing cluster.
 
 Application Agent must propose a non-reserved name and should leave `host` unset unless the person
 asked for a specific address. Its `create_app` tool description identifies platform-host names as
@@ -92,7 +92,7 @@ reserved, and the confirmed turn receives the same validation as every other cal
 
 The operator owns the separate existing-record check: before publishing DNS, it must refuse a host
 that already has a DNS record it does not own and report the conflict through App status. That
-behavior belongs to the [`LakeApp` controller](https://github.com/oramasearch/orama-operator/issues/193);
+behavior belongs to the `LakeApp` controller (orama-operator#193);
 Lake does not probe or replace DNS records.
 
 Changing `auth` to `none` requires `confirm_public: true`, and so does creating an app with `auth`

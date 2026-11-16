@@ -223,7 +223,7 @@ struct ServerOptions {
     // keeps lake's own sign-in, as an on-prem install uses. See docs/api/clerk.md.
     std::string clerk_publishable_key;
     // The terms of service and privacy policy sign-up and sign-in link to (LAKE_TERMS_URL,
-    // LAKE_PRIVACY_URL, liquid-bridge#15); `viewer` reports them as `legal`. Empty: no link.
+    // LAKE_PRIVACY_URL); `viewer` reports them as `legal`. Empty: no link.
     std::string terms_url = std::string(default_terms_url);
     std::string privacy_url = std::string(default_privacy_url);
     // LAKE_CLERK_SECRET_KEY: checks current ban/lock state at every template exchange.
@@ -255,7 +255,7 @@ struct ServerOptions {
     // An injected transcriber (tests); empty: OpenAI over the server's outbound client when
     // `openai_api_key` is set.
     Transcriber transcriber;
-    // MCP connections (decision 60, docs/api/mcp-connections.md#the-client): whether a connection
+    // MCP connections (docs/api/mcp-connections.md#the-client): whether a connection
     // may reach loopback and private addresses (LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1, local
     // development and tests only), and an injected transport (tests); null: the server's own.
     bool mcp_allow_private_addresses = false;
@@ -293,13 +293,13 @@ struct ServerOptions {
     control::callers::JwtVerifier* jwt_verifier = nullptr;
     control::callers::CloudIdentityVerifier* cloud_identity_verifier = nullptr;
     control::callers::FederationIssuerPolicy* federation_issuer_policy = nullptr;
-    // Billing (lake#564, decision 56, docs/api/billing.md): on only where LAKE_BILLING=on (Orama
+    // Billing (lake#564, docs/api/billing.md): on only where LAKE_BILLING=on (Orama
     // Cloud). Off, as on an enterprise install, the billing capabilities are not registered, so
     // REST, OpenAPI, MCP, the web app's billing pages and the billing Docs guide are absent; usage
     // tracking is unaffected. `payment_providers` says how invoices are paid (tests inject one);
     // null: Stripe with `stripe_keys` (LAKE_STRIPE_SECRET_KEY, LAKE_STRIPE_WEBHOOK_SECRET: lake's
     // own platform credentials, environment variables of the hosting platform, never a user's
-    // secret store; decision 57, lake#628), else the manual provider with `billing_instructions`
+    // secret store; lake#628), else the manual provider with `billing_instructions`
     // (LAKE_BILLING_INSTRUCTIONS). `stripe_api_base` is Stripe's API origin (a fake's in tests).
     bool billing = false;
     std::shared_ptr<PaymentProviders> payment_providers;
@@ -348,7 +348,7 @@ struct ServerOptions {
     std::size_t metering_max_pending = 4096;
     // Events about a workspace's data are queued in memory and appended to that workspace's audit
     // by the owner loop at this interval, at once when half of `audit_max_pending` is held, and
-    // once more on stop (docs/api/audit.md#workspace-audit, decision 52). Zero writes on every
+    // once more on stop (docs/api/audit.md#workspace-audit). Zero writes on every
     // drain() tick.
     std::chrono::milliseconds audit_flush_interval{std::chrono::seconds(1)};
     std::size_t audit_max_pending = 65536;

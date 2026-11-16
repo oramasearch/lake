@@ -177,7 +177,7 @@ TEST(Docs, LinksBetweenGuidesResolve) {
     }
 }
 
-// The product speaks of workspaces, never of a "space" or a "personal space" (Steve, 2026-10-10),
+// The product speaks of workspaces, never of a "space" or a "personal space",
 // and never uses the banned word. Code spans and blocks may name fields such as `customer_id`.
 TEST(Docs, GuidesSpeakOfWorkspaces) {
     const std::regex space(R"re(\bspaces?\b)re", std::regex::icase);
@@ -252,7 +252,7 @@ TEST(Docs, GuidesNameZettaOnlyWhereAPersonChoosesIt) {
     }
 }
 
-// The product's name is Lake, with a capital L (decision 59, lake#642). Prose never names it
+// The product's name is Lake, with a capital L (lake#642). Prose never names it
 // lowercase; technical names keep their form: code spans and blocks (`claude mcp add lake`), a
 // hostname or dotted name (lake.example.com, lake.example.net), a path or link (/skills/lake/SKILL.md,
 // oramasearch/lake), an identifier (lake_tok_, lake-theme, LAKE_KEY), the ciphertext prefix
@@ -303,7 +303,7 @@ TEST(Docs, GuidesCallTheProductLake) {
 }
 
 // A person runs an AI training experiment, as an experiment tracker says it, never a "study"
-// (Steve, 2026-10-10, lake#561). The engine's names (`study-events.*`, Experiments Agent's `study`
+// (lake#561). The engine's names (`study-events.*`, Experiments Agent's `study`
 // field) appear only in code spans and blocks, which the prose leaves out.
 TEST(Docs, GuidesSpeakOfExperiments) {
     const std::regex study(R"re(\bstud(y|ies)\b)re", std::regex::icase);
@@ -455,7 +455,7 @@ TEST(Docs, WordingFaultsAreFoundOnlyInProse) {
 }
 
 // Every word a person or an agent reads about Lake's tools says Lake and never "space"
-// (decision 59, lake#642, lake#647): all of llms.txt, llms-full.txt and the skill, every
+// (lake#642, lake#647): all of llms.txt, llms-full.txt and the skill, every
 // description, summary and title in OpenAPI (both audiences) and in MCP's tools/list (both
 // audiences), the registry's descriptions and input schemas included, and the apex's three
 // documents (lake#1110). Account, workspace or organization is said instead, whichever is true.

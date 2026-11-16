@@ -62,7 +62,7 @@ function Welcome({ name }: { name?: string }) {
         <Sparkles size={13} aria-hidden /> Ask Orama
       </p>
       <h1>{greeting(name)}</h1>
-      {/* The positioning (Steve, 2026-10-17): AI sovereignty, said without telling anyone what to do. */}
+      {/* The positioning: AI sovereignty, said without telling anyone what to do. */}
       <p className="ask-home-badge">
         <Crown size={14} aria-hidden /> AI sovereignty
       </p>

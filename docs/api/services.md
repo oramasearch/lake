@@ -7,11 +7,11 @@ creating a workspace: use `create_workspace` or the Workspaces page for that lif
 The primary workspace Zetta cannot be deleted through `delete_service`; use the typed-name
 workspace deletion so desired state remains consistent between the two controllers.
 
-**Status: implemented 2026-09-25 (liquid-bridge decision 46).** A customer runs any number of
+**Status: implemented 2026-09-25.** A customer runs any number of
 managed services on the Lake's cluster: **Zetta** clusters (the engine behind Design, Train and
 Ship), **Postgres**, **Kafka**, **ClickHouse**, **TiDB**, **Cassandra**, **Valkey** as a
-preview, and **SQLite** behind `lake-sqlite`, a small web service of ours (liquid-bridge
-decision 47, amended). Each kind is run by its own upstream operator that the Orama
+preview, and **SQLite** behind `lake-sqlite`, a small web service of
+ours. Each kind is run by its own upstream operator that the Orama
 operator drives; which one, and what a service's connection holds, is the catalog table in
 [`../control-plane/services.md`](../control-plane/services.md). lake records what the customer wants; the Orama operator creates
 and deletes the clusters and reports back. The contract between them — tables, phases, Secrets,
@@ -35,7 +35,7 @@ writes the connection (orama-operator#183), so this lasts seconds, not the minut
   lake reading the connection. The measured table is below under *Start times*; re-measure when
   node size, images or operators change.
 - **New service:** kind (Zetta first and preselected, then the rest by name; no kind is marked
-  preview — decision 47), name (lowercase letters, digits and `-`, starting with a letter), 1–3
+  preview), name (lowercase letters, digits and `-`, starting with a letter), 1–3
   instances, 1–100 GiB of storage. An account may run any number of services unless the operator
   of the lake sets `LAKE_SERVICES_PER_CUSTOMER`; the page states a limit only when one is set.
 - **Show connection** (every kind but Zetta, once Ready): answers with the page itself, showing
@@ -95,7 +95,7 @@ store ids), each with the customer, service id, kind and name. `start_workspace`
 | Variable | Set by | Meaning |
 |---|---|---|
 | `LAKE_SERVICE_DIR` | operator | The mounted Secret `lake-<lake>-services`, one `<slug>.json` per Ready service. Without it, Services, Design, Train and Ship say they are not available |
-| `LAKE_SERVICES_PER_CUSTOMER` | optional | Live services per customer; default `0`, no limit (Steve, 2026-09-26) |
+| `LAKE_SERVICES_PER_CUSTOMER` | optional | Live services per customer; default `0`, no limit |
 
 ## Verify
 
@@ -123,12 +123,12 @@ reads the pods' Ready transition from Kubernetes, deletes the service, and print
 Ready), `connected` (lake reads the connection) — with the operator's messages, then the median and
 p90 per kind. `ready_seconds` is the median of `connected`.
 
-Measured 2026-09-26 on lake.oramadev.net (`3dbbfcd`, operator `main-375debd`), one AKS node,
+Measured 2026-09-26 on lake.example.com (`3dbbfcd`, operator `main-375debd`), one AKS node,
 one service at a time, instances 1, 1 GiB. Seconds from *Create*:
 
 | Kind | Operator saw it | Pods Ready | Operator Ready | Usable (`connected`) | `ready_seconds` | Before lake#197 |
 |---|---|---|---|---|---|---|
-| Zetta | 1.7 | 38.5 | 41.4 | 41.4 | 30 (Steve, 2026-09-26) | — |
+| Zetta | 1.7 | 38.5 | 41.4 | 41.4 | 30 | — |
 | Postgres | 1.7 | 40.2 | 43.7 | 43.7 | 45 | ~2 min |
 | SQLite | 1.7 | 21.5 | 24.0 | 24.0 | 25 | 52–123 |
 | DuckDB | 1.7 | 23.5 | 26.5 | 26.5 | 30 | 62–113 |
@@ -153,7 +153,7 @@ cluster is quiet, and whenever node size, images or operators change.
 
 - **Valkey is a preview.** Its operator is `v1alpha1` and its upstream says it is not ready for
   production; do not put a customer commitment behind it.
-- **No backups yet** for any kind; each operator's backup tooling is future work (decision 47).
+- **No backups yet** for any kind; each operator's backup tooling is future work.
 - **SQLite has one instance and no replication:** its volume is the only copy until backups
   exist. It is reached over `lake-sqlite`'s HTTP API with a bearer token, not the SQLite file format.
 - Addresses are inside the cluster only. A Postgres service is reachable from the customer's other

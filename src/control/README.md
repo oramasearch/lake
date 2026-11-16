@@ -189,7 +189,7 @@ the Python templates in `methodology_templates.cpp`, the copy of one of Orama's,
 Dockerfile, the validation sample and the metrics a result may carry. The stores keep the content-free
 `methodology_runs` dispatch rows and the operator's `methodology_run_status` (migration `0078`), and
 resolve a run's `lmr.` credential by its digest.
-`mcp_connections.cpp` is a workspace's MCP connections (decision 60, lake#652): one record per
+`mcp_connections.cpp` is a workspace's MCP connections (lake#652): one record per
 connection in `lake_mcp_connections`, found by the space, unique by name and prefix, changed and
 deleted at the revision read (`change_mcp_connection` rereads on a conflict), with the prefix rule
 and the OAuth sign-in states in `lake_mcp_oauth_states`, taken once by a delete at the revision read.
@@ -297,7 +297,7 @@ lake#375). The stores keep only the dispatch half: `create_agent_task` inserts n
 the caller's `id` and `parent_task_id`), `record_agent_task_event` moves the phase and clears lake's
 notice, and `fail_agent_task` and the expiry update write lake's text to `agent_task_status.notice`.
 `0070` drops the retired content columns (`body`, `message`, `result`).
-`workspace_audit.cpp` keeps a workspace's audit (decision 52, lake#317): its chain in
+`workspace_audit.cpp` keeps a workspace's audit (lake#317): its chain in
 `lake_audit_events`, the n-th event at the blind key of `sequence:<n>` written `if_absent`
 (`append_workspace_audit_event` signs it after the chain's end and passes a place another writer
 took), the tail search, copied central events under their id, the filtered newest-first listing,
@@ -380,7 +380,7 @@ XML library. Both stores keep the outstanding AuthnRequests and the accepted ass
 (`begin_saml`, `consume_saml`; migration `0092_saml_sign_in`), each accepted once.
 
 Ownership changes in both stores require a current organization-scope owner or the reserved
-operator (LSR-099, lake#965). The checks cover membership creation, invitation creation and
+operator (lake#965). The checks cover membership creation, invitation creation and
 acceptance, role changes and removal; PostgreSQL locks the organization before reading owner
 authority and counts. Self-service joins recheck the inviter. See the
 [ownership contract](../../docs/api/organizations.md#delegated-administration) and the shared
@@ -405,11 +405,11 @@ watermark; never API keys, static tokens or devices. See [the contract](../../do
 Clerk suspension and permanent disablement use `User::may_act()` for bearer issuance,
 delegation and stream authority. Suspended users' agent credentials are withdrawn just as on
 offboarding; a later unban permits new work without restoring old credentials (lake#948).
-Email recovery (lake#968, LSR-102) reuses pending attempts and enforces account, client and global
+Email recovery (lake#968) reuses pending attempts and enforces account, client and global
 budgets inside both stores before queuing mail or device notices. PostgreSQL keeps atomic budgets
 in `offline_recovery_budgets` (migration `0096_email_recovery_limits`); cancellation clears the
 token and removes unclaimed deliveries. See [recovery.md](../../docs/api/recovery.md).
-`order_entitlements.cpp` (lake#972, LSR-105) is the shared subscription-event reducer and deadline evaluator. Both stores serialize subscription/customer/order matching and event deduplication, preserve canceled subscriptions and reject stale renewal snapshots. PostgreSQL exposes time-dependent desired state through `cloud_order_desired_state`; provisioning suspension remains an operator handoff. See [orders](../../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
+`order_entitlements.cpp` (lake#972) is the shared subscription-event reducer and deadline evaluator. Both stores serialize subscription/customer/order matching and event deduplication, preserve canceled subscriptions and reject stale renewal snapshots. PostgreSQL exposes time-dependent desired state through `cloud_order_desired_state`; provisioning suspension remains an operator handoff. See [orders](../../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
 
 `authentication_attempt` commits per-account and per-client reservations before credential verification, independently of verification rollback; completion records failures or releases and clears successful account/client reservations. Both stores consume successful TOTP steps and recovery codes atomically; see [identity limits](../../docs/api/identity.md#authentication-attempt-limits) (lake#966).
 

@@ -2,9 +2,8 @@
 
 How a workspace becomes a locked-down sandbox with only declared paths, end to end: what a person
 does in Lake, what Lake records and where, what the operator enforces, and what carries the bytes.
-Epic: [lake#724](https://github.com/oramasearch/lake/issues/724) (Lake's half),
-[orama-operator#437](https://github.com/oramasearch/orama-operator/issues/437) (the operator's),
-tracked across repositories in [orama-bridge#186](https://github.com/oramasearch/orama-bridge/issues/186).
+Epic: lake#724 (Lake's half),
+orama-operator#437 (the operator's).
 
 Related pages:
 - **The design and its decisions (D1–D8)**: the operator's
@@ -20,8 +19,7 @@ Related pages:
 
 ## What it gives a customer
 
-Steve, 2026-10-13: *"let's make sure that our workspaces are locked down sandboxes ... and that all
-network and dns connections are explicit"*.
+Workspaces are locked-down sandboxes, and every network and DNS connection is explicit.
 
 | A customer can | Lake capability | Enforced by |
 |---|---|---|
@@ -52,7 +50,7 @@ connection, and is labelled so.
    0085: tunnel client/relay CAs
    NOTIFY lake_network
         │
-        ▼ reads Postgres only (decision 51)
+        ▼ reads Postgres only
  orama-operator (identical on every cluster)
    NetworkSandbox · Connection · EgressRule · Tunnel · PeerConnection
         │                                   │
@@ -65,7 +63,7 @@ connection, and is labelled so.
 ### Lake: what is declared
 
 - **Desired state in Postgres** (decision D1). It is the multitenancy-and-dispatch exception: the
-  operator never reads a workspace Zetta (decision 51), so what it must enforce lives where it
+  operator never reads a workspace Zetta, so what it must enforce lives where it
   reads.
   - Lake writes four desired tables. The operator writes only their `*_status` twins.
   - `network_guard` tells the operator the schema is present; it reads nothing until it exists.
@@ -141,8 +139,7 @@ Every hop is mutual TLS 1.3. Its architecture is in
 
 ## Where things stand
 
-The live and in-review state is tracked in [orama-bridge#186](https://github.com/oramasearch/orama-bridge/issues/186)
-and [`design/status.md`](../design/status.md):
+The live and in-review state is tracked in [`design/status.md`](../design/status.md):
 - `NetworkSandbox`, tenant RBAC and `Connection` are live on every cluster.
 - Lake's tables, capabilities, tunnel grants and scoped credentials are in review (#732–#735).
 - The remaining operator kinds and the Network section are in progress.

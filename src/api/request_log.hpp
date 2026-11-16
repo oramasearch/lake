@@ -2,7 +2,7 @@
 
 // The per-request JSON line lake writes to stdout (docs/serving/telemetry.md#request-logs).
 //
-// Decision 54 S9 (lake#384): request logs are instance operations data, so they carry no customer
+// lake#384: request logs are instance operations data, so they carry no customer
 // content. A line names the route pattern, never the raw path: a path can carry a repository,
 // package, image or file name. The identifiers the route captured (`:repository_id`,
 // `:workspace_id`, `:customer_id`, …) are logged as named fields when they are UUIDs; any other

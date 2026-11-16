@@ -16,7 +16,7 @@ to another workspace.
 | **App** | Desired state that Lake records and the Orama operator runs: a name, a mode, a source or image, a framework and a port, plus replicas, access, bindings and environment. |
 | **Runtime app** (*From a repository*) | Runs a revision of a Lake repository on Lake's app runtime. The source is `{repository, revision, path, entrypoint}`; with no entrypoint the runtime reads the app's `app.toml`. |
 | **Image app** (*From an image*) | Runs a container image you name. |
-| **Address** | `https://<name>.<the lake's app domain>` unless a host is given. On lake.oramadev.net an app named `reports` is `reports.oramadev.net`. |
+| **Address** | `https://<name>.<the lake's app domain>` unless a host is given. On lake.example.com an app named `reports` is `reports.example.com`. |
 | **Access** | **Lake Sign-In** (the default): only members of the app's workspace reach it, after signing in to Lake. **Public**: anyone with the address, which needs an explicit confirmation. |
 | **Bindings** | Read-only access to the workspace's data, and connections to services of your account. |
 | **Generation** | Every change to an app's desired state increases its generation; the operator reports the generation it has applied. |

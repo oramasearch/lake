@@ -75,7 +75,7 @@ organization with `customer_id`; the new organization object becomes a child of 
 
 Only a current **organization-scope owner**, or the instance operator, may create an `owner`
 membership or invitation, assign `owner`, or change or remove an existing owner, including a
-team owner (LSR-099, lake#965). A team owner or a direct `admin` grant does not satisfy this rule.
+team owner (lake#965). A team owner or a direct `admin` grant does not satisfy this rule.
 Both stores check ownership inside the membership write. PostgreSQL serializes these
 writes on the organization row, so authority and the last-owner count cannot be raced by another
 membership change. Organization creation and personal-account conversion establish the initial

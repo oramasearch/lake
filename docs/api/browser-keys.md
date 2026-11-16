@@ -95,7 +95,7 @@ A revoked key, an unknown one, or one whose workspace was deleted is `401 unauth
 
 ## Where it lives
 
-Credentials are multitenancy (decision 53, the keystore beside sessions and tokens), so a browser
+Credentials are multitenancy (the keystore beside sessions and tokens), so a browser
 key is a row of lake's PostgreSQL control plane, never in a workspace Zetta: table `browser_keys`
 (migration `0102_browser_keys`, guard `browser_keys_guard`). The row holds the secret's SHA-256,
 the binding (account, workspace, index, model), the origins, the calls a minute and the current

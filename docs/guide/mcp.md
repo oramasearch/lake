@@ -10,7 +10,7 @@ as you: it can never do more than the key you give it.
 
 | Term | What it is |
 |---|---|
-| **Endpoint** | `https://<your lake>/mcp`, for example `https://lake.oramadev.net/mcp`. JSON-RPC 2.0 over streamable HTTP, protocol version `2025-06-18`. |
+| **Endpoint** | `https://<your lake>/mcp`, for example `https://lake.example.com/mcp`. JSON-RPC 2.0 over streamable HTTP, protocol version `2025-06-18`. |
 | **Key** | A Lake API token sent as `Authorization: Bearer <key>`. The same keys work for MCP and REST. |
 | **Tool** | One capability. Its name, input schema and output schema are exactly those of the REST operation. |
 | **Read tool** | A tool that changes nothing, marked `readOnlyHint: true`. Only a tool that deletes, destroys, removes or revokes something is marked `destructiveHint: true`, so a client asks you before those; a tool that is safe to call twice is marked `idempotentHint: true`. |
@@ -43,14 +43,14 @@ that page only. A key made on **Developer → API** works here too.
 Step 2, **Set Up Your Client**, has a tile per client. Choose yours; the page shows the file the
 setup goes in, the blocks with your address and key filled in, and how to check it worked. Without
 a key the blocks read the key from `LAKE_KEY` in your environment, in the syntax each client
-expands. The setups below show `https://lake.oramadev.net/mcp`; use your own Lake's address.
+expands. The setups below show `https://lake.example.com/mcp`; use your own Lake's address.
 
 ### Claude Code
 
 Run in a terminal:
 
 ```
-claude mcp add --transport http lake https://lake.oramadev.net/mcp --header "Authorization: Bearer $LAKE_KEY"
+claude mcp add --transport http lake https://lake.example.com/mcp --header "Authorization: Bearer $LAKE_KEY"
 ```
 
 Add `--scope user` to use Lake in every project, or `--scope project` to share it through the
@@ -63,7 +63,7 @@ The CLI and the IDE extension share `~/.codex/config.toml`:
 
 ```
 [mcp_servers.lake]
-url = "https://lake.oramadev.net/mcp"
+url = "https://lake.example.com/mcp"
 bearer_token_env_var = "LAKE_KEY"
 ```
 
@@ -71,7 +71,7 @@ Put `export LAKE_KEY="<your lake key>"` in your shell profile; Codex reads the k
 environment, so it is never written into the file. Or add it with one command:
 
 ```
-codex mcp add lake --url https://lake.oramadev.net/mcp --bearer-token-env-var LAKE_KEY
+codex mcp add lake --url https://lake.example.com/mcp --bearer-token-env-var LAKE_KEY
 ```
 
 Check: `codex mcp list` in a terminal, or `/mcp` inside Codex.
@@ -87,7 +87,7 @@ through `mcp-remote`, which needs Node.js 18 or later:
   "mcpServers": {
     "lake": {
       "command": "npx",
-      "args": ["-y", "mcp-remote", "https://lake.oramadev.net/mcp", "--header", "Authorization:${LAKE_AUTH_HEADER}"],
+      "args": ["-y", "mcp-remote", "https://lake.example.com/mcp", "--header", "Authorization:${LAKE_AUTH_HEADER}"],
       "env": {"LAKE_AUTH_HEADER": "Bearer <LAKE_KEY>"}
     }
   }
@@ -103,7 +103,7 @@ Desktop; Lake appears in a new chat's tools menu.
 `~/.cursor/mcp.json` for every project, or `.cursor/mcp.json` for one:
 
 ```json
-{"mcpServers": {"lake": {"url": "https://lake.oramadev.net/mcp", "headers": {"Authorization": "Bearer ${env:LAKE_KEY}"}}}}
+{"mcpServers": {"lake": {"url": "https://lake.example.com/mcp", "headers": {"Authorization": "Bearer ${env:LAKE_KEY}"}}}}
 ```
 
 `${env:LAKE_KEY}` is read from the environment Cursor was started in. Check: Cursor → Settings →
@@ -115,7 +115,7 @@ Copilot's agent mode reads `.vscode/mcp.json` in your project:
 
 ```json
 {
-  "servers": {"lake": {"type": "http", "url": "https://lake.oramadev.net/mcp", "headers": {"Authorization": "Bearer ${input:lake-key}"}}},
+  "servers": {"lake": {"type": "http", "url": "https://lake.example.com/mcp", "headers": {"Authorization": "Bearer ${input:lake-key}"}}},
   "inputs": [{"type": "promptString", "id": "lake-key", "description": "lake MCP key", "password": true}]
 }
 ```
@@ -130,7 +130,7 @@ Palette.
 servers take `serverUrl`, not `url`:
 
 ```json
-{"mcpServers": {"lake": {"serverUrl": "https://lake.oramadev.net/mcp", "headers": {"Authorization": "Bearer ${env:LAKE_KEY}"}}}}
+{"mcpServers": {"lake": {"serverUrl": "https://lake.example.com/mcp", "headers": {"Authorization": "Bearer ${env:LAKE_KEY}"}}}}
 ```
 
 Cascade → MCP servers → Refresh picks the file up.
@@ -141,13 +141,13 @@ Cascade → MCP servers → Refresh picks the file up.
 streamable HTTP (`url` would be SSE); merge `mcpServers` into the settings you have:
 
 ```json
-{"mcpServers": {"lake": {"httpUrl": "https://lake.oramadev.net/mcp", "headers": {"Authorization": "Bearer ${LAKE_KEY}"}}}}
+{"mcpServers": {"lake": {"httpUrl": "https://lake.example.com/mcp", "headers": {"Authorization": "Bearer ${LAKE_KEY}"}}}}
 ```
 
 Or add it with one command:
 
 ```
-gemini mcp add --transport http --header "Authorization: Bearer $LAKE_KEY" lake https://lake.oramadev.net/mcp
+gemini mcp add --transport http --header "Authorization: Bearer $LAKE_KEY" lake https://lake.example.com/mcp
 ```
 
 Check: `/mcp` inside Gemini CLI, or `gemini mcp list`.
@@ -158,15 +158,15 @@ Any client that speaks MCP's streamable HTTP transport and can send an `Authoriz
 connects the same way. With `curl`:
 
 ```
-curl -s https://lake.oramadev.net/mcp \
+curl -s https://lake.example.com/mcp \
   -H "Authorization: Bearer $LAKE_KEY" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
 
-curl -s https://lake.oramadev.net/mcp \
+curl -s https://lake.example.com/mcp \
   -H "Authorization: Bearer $LAKE_KEY" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 
-curl -s https://lake.oramadev.net/mcp \
+curl -s https://lake.example.com/mcp \
   -H "Authorization: Bearer $LAKE_KEY" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_workspaces","arguments":{"customer_id":"<customer id>"}}}'
 ```
@@ -197,7 +197,7 @@ Step 3 gives your agent Lake's rules, so it calls the right tool in the right or
 from a terminal:
 
 ```
-mkdir -p ~/.claude/skills/lake && curl -fsSL https://lake.oramadev.net/skills/lake/SKILL.md -o ~/.claude/skills/lake/SKILL.md
+mkdir -p ~/.claude/skills/lake && curl -fsSL https://lake.example.com/skills/lake/SKILL.md -o ~/.claude/skills/lake/SKILL.md
 ```
 
 Use `.claude/skills/lake/` instead to install it for one project. For Codex and Gemini CLI the page

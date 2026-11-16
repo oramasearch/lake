@@ -21,7 +21,7 @@ invalid signer signature before it creates a repository. The signer's `taap_id` 
 equal `taap:1:ed25519:` followed by the uppercase, unpadded base32 encoding of the SHA-512/256
 digest of its decoded Ed25519 public key, the same derivation Lake uses to mint its identity.
 Changing that identity to another instance's name and re-signing with a fresh key is refused
-with `invalid_signature` (LSR-088, lake#954). Rotation mints a new key-derived name and remains
+with `invalid_signature` (lake#954). Rotation mints a new key-derived name and remains
 portable.
 
 This verifies the archive's consistency and possession of its signing key. It does not establish
@@ -67,7 +67,7 @@ exports.
 ## What an archive never carries
 
 Export needs only read on the repository, so the archive carries nothing a reader cannot read
-otherwise (LSR-024, lake#933):
+otherwise (lake#933):
 
 - **No webhook signing secret.** A `webhook` record keeps its `url` and `events` and loses
   `secret`, as `list_webhooks` answers it. Whoever held the secret could sign deliveries the
@@ -94,10 +94,10 @@ manifest and whether Git was requested; the returned archive is the download pay
 `workspace_id` records where it came from and is never reused. A missing or unknown workspace is
 `invalid_input` at `/workspace_id`. The source description and visibility are retained. A destination name collision or a failed liquid transfer leaves the import refused.
 
-A review is imported without its `approval` (LSR-077): an approval is lake's record of who approved
+A review is imported without its `approval`: an approval is lake's record of who approved
 in the repository it was given in, and a signed archive proves only who exported it, so an
 imported review never satisfies a protected branch's `required_review`. Its state is kept as
-history. See [forge](forge.md#who-may-approve-lsr-077).
+history. See [forge](forge.md#who-may-approve).
 
 Imported artifact evidence also carries `import_provenance`; its `verification` is `untrusted`
 and its attestations have `verified: false`. A release's carried `artifacts` move under

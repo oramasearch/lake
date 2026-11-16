@@ -528,7 +528,7 @@ const std::vector<std::pair<std::string_view, std::string_view>>& engine_storage
 }
 
 // Whether a `lake_storage` kind is held on a workspace engine's own volume: billed as the
-// volume, so shown as engine_storage and never as storage (decision 61, lake#663).
+// volume, so shown as engine_storage and never as storage (lake#663).
 bool engine_held(std::string_view kind) {
     for (const auto& [engine, name] : engine_storage_kinds()) {
         if (name == kind) {
@@ -1019,7 +1019,7 @@ read_usage(ApiContext& context, const UsageQuery& query, bool retain = false) {
                         std::string dimension =
                             fixed_dimension.empty() ? labels["dimension"] : fixed_dimension;
                         // What the engine holds on its own volume is engine_storage, never
-                        // billed storage (decision 61, lake#663).
+                        // billed storage (lake#663).
                         if (dimension == "storage" && engine_held(labels["kind"])) {
                             dimension = "engine_storage";
                         }

@@ -6,7 +6,7 @@ each, on the site and through the API.
 
 ## Concepts
 
-- **Two ways to sign in, depending on your Lake.** A hosted Lake (such as `lake.oramadev.net`)
+- **Two ways to sign in, depending on your Lake.** A hosted Lake (such as `lake.example.com`)
   signs people in through Clerk, with an email code. A Lake without Clerk, such as one installed
   on your own servers, uses Lake's own sign-in: a password with optional multi-factor
   authentication, a passkey, or a configured social provider. You see one or the other, never both.
@@ -21,7 +21,7 @@ each, on the site and through the API.
 ## Create an Account
 
 **With Clerk.** Press **Create account** in the top bar (where your Lake allows sign-up) and follow
-Clerk's steps. Some lakes create accounts only by invitation; on `lake.oramadev.net`, an
+Clerk's steps. Some lakes create accounts only by invitation; on `lake.example.com`, an
 administrator adds people.
 
 **With Lake's own sign-up** (`/sign-up`, on a Lake without Clerk; under Clerk the password

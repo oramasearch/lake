@@ -114,9 +114,9 @@ instance identity and must not share that database with a server using another k
 
 ```sh
 DB=lake_test_119
-createdb -h 127.0.0.1 -U stevesperandeo "$DB"
-psql -h 127.0.0.1 -U stevesperandeo -d "$DB" -f db/schema.sql
-export LAKE_TEST_DB_URI="postgresql://stevesperandeo@127.0.0.1:5432/$DB"
+createdb -h 127.0.0.1 -U lake "$DB"
+psql -h 127.0.0.1 -U lake -d "$DB" -f db/schema.sql
+export LAKE_TEST_DB_URI="postgresql://lake@127.0.0.1:5432/$DB"
 export LAKE_INSTANCE_KEK=$(openssl rand -hex 32)
 mkdir -p .cache/issue-119/tmp
 export TMPDIR="$PWD/.cache/issue-119/tmp"
@@ -124,17 +124,17 @@ python3 -m venv .cache/test-python
 .cache/test-python/bin/python -m pip install jsonschema
 cmake -S . -B build -G Ninja \
   -DPython3_EXECUTABLE="$PWD/.cache/test-python/bin/python" \
-  -DLAKE_ZETTA_SOURCE_DIR=/Users/stevesperandeo/dev/homer6/orama-work/modules/zetta-bridge/modules/zetta
+  -DLAKE_ZETTA_SOURCE_DIR=../zetta
 cmake --build build -j 6
 ctest --test-dir build --output-on-failure
 cmake -S . -B build-shared -G Ninja -DBUILD_SHARED_LIBS=ON \
   -DPython3_EXECUTABLE="$PWD/.cache/test-python/bin/python" \
-  -DLAKE_ZETTA_SOURCE_DIR=/Users/stevesperandeo/dev/homer6/orama-work/modules/zetta-bridge/modules/zetta
+  -DLAKE_ZETTA_SOURCE_DIR=../zetta
 cmake --build build-shared -j 6
 DB=lake_test_119_shared
-createdb -h 127.0.0.1 -U stevesperandeo "$DB"
-psql -h 127.0.0.1 -U stevesperandeo -d "$DB" -f db/schema.sql
-export LAKE_TEST_DB_URI="postgresql://stevesperandeo@127.0.0.1:5432/$DB"
+createdb -h 127.0.0.1 -U lake "$DB"
+psql -h 127.0.0.1 -U lake -d "$DB" -f db/schema.sql
+export LAKE_TEST_DB_URI="postgresql://lake@127.0.0.1:5432/$DB"
 ctest --test-dir build-shared --output-on-failure
 ```
 

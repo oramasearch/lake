@@ -247,7 +247,7 @@ in the workspace in the same way, with the `stop_reason` *Stopped: the agent `<i
 in this workspace, so the run cannot start.* The pod's next restart finds its credential no longer
 resolves, and the operator removes it. A person's `get_agent`, or a run reading another agent, stops
 nothing. The operator needs no change: it already removes the workloads of absent launches and
-schedules, and it never reads a workspace Zetta (decision 51), so it cannot tell that an agent is
+schedules, and it never reads a workspace Zetta, so it cannot tell that an agent is
 gone.
 
 Verify: `ctest --test-dir build -R DeletingAnAgentStopsItsLaunchesAndSchedules`
@@ -255,7 +255,7 @@ Verify: `ctest --test-dir build -R DeletingAnAgentStopsItsLaunchesAndSchedules`
 
 ## Stream triggers
 
-**Offboarding stops delegated automation (lake#951, LSR-086).** Launch, schedule and task
+**Offboarding stops delegated automation (lake#951).** Launch, schedule and task
 credentials require a present, enabled user. Disabling an account withdraws its launches and
 schedules and invalidates its tasks and leases atomically; creating new person-owned work and
 claiming or renewing tasks also checks the account under the offboarding lock. This protects a

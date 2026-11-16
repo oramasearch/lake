@@ -1,8 +1,8 @@
 # Zetta parity: every Zetta capability in lake
 
-**Status: plan, 2026-09-26 (Steve: "the pipeline is a central object in lake/zetta … full
-visibility, displayability, mutability … 100% feature parity of zetta in lake").** Tracking:
-https://github.com/oramasearch/lake/issues/185.
+**Status: plan, 2026-09-26.** The pipeline is a central object in lake and Zetta: it is fully
+visible, displayable and changeable, and lake has full feature parity with Zetta. Tracking:
+lake#185.
 
 lake delegates Design, Train and Ship to the customer's own Zetta cluster, its workspace
 ([`../api/workspaces.md`](../api/workspaces.md)). Parity means every capability Zetta offers a
@@ -86,9 +86,9 @@ Each Zetta capability, where it lives in lake, and the phase that delivers it. �
 | `create_workspace_profile`, `get_workspace_profile`, `update_workspace_profile` | Organization → Workspace profile | 5 |
 | `create_plan`, `get_plan`, `update_plan` | Organization → Usage (workspace plan and quotas) | 5 |
 | `server_info`, `versions` | Services, the workspace row's details | 5 |
-| `add_nodes`, `cloud_inspect`, `detect_provisioners`, `deployment_profile` | **not exposed.** Infrastructure belongs to lake's services and the operator (decision 46): a workspace's size is its service's `instances`, set from the Services page | — |
+| `add_nodes`, `cloud_inspect`, `detect_provisioners`, `deployment_profile` | **not exposed.** Infrastructure belongs to lake's services and the operator: a workspace's size is its service's `instances`, set from the Services page | — |
 
-`sql` is exposed read-only because the workspace is the customer's own cluster (decision 45): a
+`sql` is exposed read-only because the workspace is the customer's own cluster: a
 `SELECT` over its data reveals nothing another customer owns. Its writes, users and administrative
 statements stay out of reach.
 
@@ -97,7 +97,7 @@ statements stay out of reach.
 - **One registry.** Each capability joins the `workspace_query` / `workspace_act` allow-lists
   (`src/api/workspace_capabilities.cpp`), so it is authorized on the customer and audited before it
   reaches Zetta, and REST and MCP get it with the page.
-- **Pure renderers, forms, no client JavaScript** (lake `CLAUDE.md`). The graph is SVG laid out on
+- **Pure renderers, forms, no client JavaScript** (lake `CONTRIBUTING.md`). The graph is SVG laid out on
   the server.
 - **Every page is proven in the browser** (`tools/e2e/README.md`); the walkthrough
   grows a step per phase.
@@ -106,15 +106,15 @@ statements stay out of reach.
 
 ## Tracking
 
-**Phases 3–5 are paused (Steve, 2026-09-26): do not implement them until the pause is lifted.**
+**Phases 3–5 are paused (2026-09-26): do not implement them until the pause is lifted.**
 
 | Phase | Issue |
 |---|---|
-| Tracking | https://github.com/oramasearch/lake/issues/185 |
-| 1 — the pipeline page | https://github.com/oramasearch/lake/issues/180 |
-| 2 — data | https://github.com/oramasearch/lake/issues/181 |
-| 3 — models and search | https://github.com/oramasearch/lake/issues/182 |
-| 4 — agents | https://github.com/oramasearch/lake/issues/183 |
-| 5 — operations | https://github.com/oramasearch/lake/issues/184 |
+| Tracking | lake#185 |
+| 1 — the pipeline page | lake#180 |
+| 2 — data | lake#181 |
+| 3 — models and search | lake#182 |
+| 4 — agents | lake#183 |
+| 5 — operations | lake#184 |
 
 Each closes with the PR that ships it and the browser proof.

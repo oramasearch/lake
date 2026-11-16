@@ -568,7 +568,7 @@ struct ApiContext {
     std::string audit_kind;
     std::string audit_object;
     nlohmann::json audit_details = nlohmann::json::object();
-    // The workspace a call acted on, for its audit event (decision 52, audit_routing.hpp): the
+    // The workspace a call acted on, for its audit event (audit_routing.hpp): the
     // input's `workspace_id` once Registry::call has validated it, or one a handler resolved.
     std::string audit_workspace_id;
     // The workspace Registry::call validated and its account, kept so the event's attribution
@@ -584,7 +584,7 @@ struct ApiContext {
     // calls, speech-to-text seconds and model tokens are added here, off the request path. Null:
     // nothing is recorded.
     UsageRecorder* usage_recorder = nullptr;
-    // Lake's MCP client transport (decision 60, docs/api/mcp-connections.md): the server's outbound
+    // Lake's MCP client transport (docs/api/mcp-connections.md): the server's outbound
     // transport, or a test's. Null: a workspace's MCP connections cannot reach their servers.
     std::shared_ptr<McpHttp> mcp_http;
     // OpenID Connect discovery for generic OAuth and enterprise OIDC providers (lake#837): the

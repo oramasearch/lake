@@ -4174,7 +4174,7 @@ bool eventually(Condition condition, std::chrono::milliseconds limit = 10s) {
     return true;
 }
 
-// Overlapping rollout (decision 49): a successor starts on the same volume and the same workspace
+// Overlapping rollout: a successor starts on the same volume and the same workspace
 // Zettas while its predecessor still serves. Once the predecessor begins to drain it releases each
 // workspace store's lease, and the successor's pre-open takes each one at once, before the root is
 // handed over; the first request to each workspace then needs no open (no new lease), and the

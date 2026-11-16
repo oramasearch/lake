@@ -11,7 +11,7 @@
 #include "lake/api/registry.hpp"
 #include "lake/audit/audit.hpp"
 
-// Where an audit event is written (decision 52, lake#317, docs/api/audit.md#which-log). Lake's
+// Where an audit event is written (lake#317, docs/api/audit.md#which-log). Lake's
 // audit splits by subject:
 //
 // - the **central** hash-chained log in lake's PostgreSQL keeps control-plane and identity events:

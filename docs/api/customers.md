@@ -27,11 +27,11 @@ Users and organizations are identity; the **customer is the tenant** and owns ev
 ```sh
 H='Authorization: Bearer <token>'
 curl -H "$H" -H 'content-type: application/json' \
-  -d '{"email":"ada@example.com","display_name":"Ada"}' https://lake.oramadev.net/v1/create_user
+  -d '{"email":"ada@example.com","display_name":"Ada"}' https://lake.example.com/v1/create_user
 curl -H "$H" -H 'content-type: application/json' \
-  -d '{"customer_type":"individual","user_id":"<user id>"}' https://lake.oramadev.net/v1/create_customer
-curl -H "$H" 'https://lake.oramadev.net/v1/list_customers?limit=5'
-curl -H "$H" 'https://lake.oramadev.net/v1/get_customer?customer_id=<customer id>'
+  -d '{"customer_type":"individual","user_id":"<user id>"}' https://lake.example.com/v1/create_customer
+curl -H "$H" 'https://lake.example.com/v1/list_customers?limit=5'
+curl -H "$H" 'https://lake.example.com/v1/get_customer?customer_id=<customer id>'
 ```
 
 `get_customer` names the account `customer_id`, as every other capability does (lake#450). The old

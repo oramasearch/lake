@@ -1,6 +1,6 @@
 #pragma once
 
-// Lake as an MCP client (decision 60, lake#652, docs/api/mcp-connections.md): the protocol a
+// Lake as an MCP client (lake#652, docs/api/mcp-connections.md): the protocol a
 // workspace's MCP connection speaks to a remote MCP server, Streamable HTTP or the older HTTP+SSE
 // transport. Everything here is pure: the HTTP exchange is injected as an McpHttp, which the
 // server implements over its outbound client (src/api/http_server.cpp, the one TU that names HTTP

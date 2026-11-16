@@ -1,8 +1,7 @@
 # When a resource fails: notifications, repair, change and auto-fix
 
-lake#1207. Steve, 2026-10-25: *"let's build a skill to notify the user and allow them to try and fix
-the issue, with additionally auto commits/drips, or additional instructions to modify/update a app
-with more instructions"*.
+lake#1207. When a resource fails, Lake notifies the person and lets them try to fix it: by an
+automatic fix committed as a drip, or by giving more instructions to change the app.
 
 When something a person deployed fails, Lake tells them where they will see it, offers an agent to
 fix it, and, if they opt in, lets the agent fix it by itself a bounded number of times. The same
@@ -11,12 +10,12 @@ agent can also change the resource from more instructions.
 The mechanism is **general over the resource kind**. A notification and a repair record name a
 `resource_kind` and a `resource_id`. Apps (`app`, repaired by the Application Agent) are the only
 kind today; custom agents built in Agent Factory (`agent`, repaired by agent-creator) are
-[lake#1209](https://github.com/oramasearch/lake/issues/1209), which plugs into the same records,
+lake#1209, which plugs into the same records,
 capabilities and pass ([below](#adding-a-resource-kind-lake1209)).
 
 ## Where it lives
 
-Both are workspace data (umbrella rule: everything goes in the workspace Zetta), so both are sealed
+Both are workspace data (workspace rule: everything goes in the workspace Zetta), so both are sealed
 records in the workspace Zetta of the resource's workspace, found by the resource's account
 ([workspace records](../architecture/workspace-records.md)). Lake's Postgres gains nothing; there
 is no migration and nothing for the operator to vendor.

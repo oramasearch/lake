@@ -1,7 +1,7 @@
 # Workspace Records
 
-Refs [lake#370](https://github.com/oramasearch/lake/issues/370) and
-[lake#311](https://github.com/oramasearch/lake/issues/311). This is the one mechanism lake uses to
+Refs lake#370 and
+lake#311. This is the one mechanism lake uses to
 keep its records in the workspace Zetta that owns them. Every follow-up that moves a table or store
 out of lake's PostgreSQL uses it and applies the [checklist](#checklist-for-each-follow-up) below.
 That covers lake#315, #316–#384 and the other "Move … into workspace Zettas" issues.
@@ -13,14 +13,14 @@ its signing keys and webhooks (lake#352, lake#355), the first credentials. Secre
 are the first collections that hold key material, and dynamic-secret leases (lake#362) the first
 whose lifecycle a scheduled loop drives, from a central due index.
 An application's settings (lake#351) are the first record split out of a routing row that stays
-central; a repository's description (lake#315 part 2, decision 54) is the second, and the first
+central; a repository's description (lake#315 part 2) is the second, and the first
 whose record exists only once something was written (a repository with no description has none). Repository environments and the platform mirror (lake#358, lake#359) are the first whose
 policy objects stay in the control store under a derived id, so authorization never reads the
 workspace. An application's authorization codes (lake#363) are the first one-use codes: issued
 `if_absent`, redeemed by a delete at the revision read, and the first collection with a retention.
 Agent tasks (lake#374, lake#375) are the first dispatch rows split in two: the claim, its lease
 and the bus stay in PostgreSQL, and what was written for each task is a record of its workspace.
-A workspace's audit (lake#317, decision 52) is the first collection that is a hash chain: each
+A workspace's audit (lake#317) is the first collection that is a hash chain: each
 event claims its place with one `if_absent` write keyed by that place, appended off the request
 path by a bounded in-process queue.
 A tenant image's manifests and tags (lake#383 phase A) are the first records whose source is not a
@@ -41,7 +41,7 @@ deleted at the revision read; Orama's catalogue solutions stay the engine's and 
 The quickstart process (lake#1128) keeps its state the same way: `lake_quickstarts`, one record per
 quickstart found by the account, written if absent and then at the revision read; the dataset, index
 and model it made stay the engine's ([quickstart.md](../api/quickstart.md#where-it-lives)).
-A workspace's MCP connections (decision 60, lake#652) follow too: `lake_mcp_connections`, found by
+A workspace's MCP connections (lake#652) follow too: `lake_mcp_connections`, found by
 the account, edited and deleted at the revision read, with each connection's credential a workspace
 secret it only names; an OAuth sign-in in progress is a `lake_mcp_oauth_states` record kept ten
 minutes and deleted when it is taken ([mcp-connections.md](../api/mcp-connections.md#where-things-live)).
@@ -67,8 +67,8 @@ still open.
 
 | Part | State |
 |---|---|
-| `WorkspaceRecords`, `RecordSet<Codec>` | Implemented on Zetta's keyed record store ([zetta#1231](https://github.com/oramasearch/zetta/issues/1231), merged in zetta PR #1233 to `dev`, `82f617e`). Unit tests run against an engine fake; an opt-in test runs against a real Zetta node built from that commit. |
-| Append-only collections | Implemented. `ask_messages` and `auth_app_webhook_events` have moved; the `ask_messages` table is dropped (migration `0050`, lake#483). The events about a workspace's data (`audit_events`, lake#317, migration `0063`) are a chain in that workspace: the n-th event is keyed by the blind index of `sequence:<n>`, written `if_absent`, so replicas never fork it; control-plane events stay in the central `audit_events` chain (decision 52, [audit.md](../api/audit.md#which-log)). |
+| `WorkspaceRecords`, `RecordSet<Codec>` | Implemented on Zetta's keyed record store (zetta#1231, merged in zetta PR #1233 to `dev`, `82f617e`). Unit tests run against an engine fake; an opt-in test runs against a real Zetta node built from that commit. |
+| Append-only collections | Implemented. `ask_messages` and `auth_app_webhook_events` have moved; the `ask_messages` table is dropped (migration `0050`, lake#483). The events about a workspace's data (`audit_events`, lake#317, migration `0063`) are a chain in that workspace: the n-th event is keyed by the blind index of `sequence:<n>`, written `if_absent`, so replicas never fork it; control-plane events stay in the central `audit_events` chain ([audit.md](../api/audit.md#which-log)). |
 | Mutable records and claims (`get`, conditional `put`, `remove`, `update`) | Implemented and tested. `opportunities` (lake#376) has moved: derived keys written `if_absent`, status changes conditional on the revision read. `stream_owners` (lake#379) claims a topic name with `if_absent` and releases it with `remove(id, if_revision)`. `drive_share_links` (lake#350) has moved: revocation is a conditional `put` on the revision read. `auth_app_webhook_deliveries` (lake#357) claims each attempt with `if_absent` and settles it with `if_revision`. `metering_usage` (lake#348) adds to an hourly counter with `if_revision`, and `metering_build_records` (lake#349) records each build result once with `if_absent`. `forge_records` (lake#341) has moved into the workspace of each record's repository: edits are conditional `put`s on the revision read, and the push path reads branch protection once before the push. `auth_app_users` and `auth_app_organizations` (lake#353, lake#354) have moved into the application's workspace: a status change or rename is a conditional `put` on the revision read, and a pool user's email and an organization's TAAP identity and name are claims written `if_absent` in the same collection. `auth_app_signing_keys` (lake#352) is one key ring per application, rotated with one `if_revision` write; `auth_app_webhooks` (lake#355) are written once with `if_absent`. `auth_applications` (lake#351): each application's settings are one record keyed by it, written `if_absent` at registration, and a theme change is an `if_revision` write reread on a conflict; the table keeps the content-free routing row. `platform_environments` and `platform_mirror` (lake#358, lake#359) have moved into the workspace of each repository: an environment is written `if_absent` under its derived id, and a mirror row is replaced only by a newer operator-control row, at the revision read. The five secrets tables (lake#328-#332) have moved into the workspace of each mount's route: version and key-version numbers are claimed `if_absent` and pointers moved `if_revision`, and every delete, undelete, destroy and data-key rewrap is a conditional `put`. `secrets_dynamic_leases` (lake#362) has moved into its mount's workspace: renew, revoke and the scheduled expiry each rewrite the lease at the revision read, so a renewal never revives a revoked or expired lease. `auth_app_authorization_codes` (lake#363) has moved into the application's workspace: a code is written `if_absent` under a blind key, redeemed by `remove(id, if_revision)` so only one exchange wins, and expired by the collection's `retention_ms` (five minutes). `agent_tasks` (lake#374, lake#375): each task's request, messages and answer are one record in its own workspace, written `if_absent` before the dispatch row and changed only after PostgreSQL accepted an event, conditionally on the revision read; a finished answer is never changed. The claim and its lease stay one PostgreSQL statement. `repositories` (lake#315 part 2): each repository's description is one record keyed by it, written `if_absent` before the routing row at create (and removed if the row is refused), changed `if_revision` and reread on a conflict; the table keeps the routing row. `oci_manifests`, `oci_tags` and `oci_blobs` (lake#383 phase A): a tenant image's manifests, content-addressed and written `if_absent`, its tags, moved at the revision read (never torn, still last-writer-wins between concurrent pushes), and the blobs the account pushed into the workspace, in the workspace its repository is routed to by `oci_repository_routes`. Since phase B a blob record also names the blob's object in the workspace's liquid store: written `if_absent` by an upload, or given its object at the revision read by the copy. |
 | `copy_workspace_records` (the operator's one-shot copy and verify) | Implemented for `audit_events` (the central events about a workspace's data, copied as they are; the central chain stays) `oci_tags` (the instance registry's tenant tags and the manifests they name, lake#383) and `oci_blobs` (the tenant blobs the instance registry holds, streamed into each workspace's liquid store and verified by SHA-256, lake#383 phase B). Every other collection left the list with its source: `ask_messages` (migration `0050`), and `opportunities`, `stream_owners`, `drive_share_links`, `auth_app_webhook_events`, `auth_app_webhook_deliveries`, `metering_usage`, `metering_build_records`, `forge_records`, `auth_app_users`, `auth_app_organizations`, `auth_app_signing_keys`, `auth_app_webhooks`, the five `secrets_*` collections, `secrets_dynamic_leases`, `auth_applications`, `platform_mirror`, `platform_environments`, `auth_app_authorization_codes`, `agent_tasks` and `repositories` (migration `0070`, lake#311), each after its copy was verified on dev. A request for any of them is `invalid_input`. |
 | Dropping the moved tables from PostgreSQL | Done. `ask_messages` is dropped by migration `0050_drop_ask_messages` (lake#483). Every other moved table, and the content columns of `auth_applications` (name, origins, redirect URIs, theme), `agent_tasks`/`agent_task_status` (body, message, result) and `repositories` (description), are dropped by migration `0070_drop_moved_tables` (lake#311), which refuses rows with no recorded workspace owner; copy and verify are a manual gate before applying it ([schema.md](../control-plane/schema.md#drop-moved-tables-migration)). The routing rows, the routes and the `workspace_assignments` record stay. `repository_refs` was dropped without a copy by migration `0064` (lake#319): nothing read it, and the liquid repository holds the refs. `audit_events` is not dropped: the split copied its workspace events and the central chain keeps every row. |
@@ -97,7 +97,7 @@ A page that reads one collection therefore pays one workspace round trip.
 | Shape | Examples (follow-up) | How |
 |---|---|---|
 | Append-only log, read back by key | `ask_messages` (#370), `sso_provisioning_logs` (#333), `auth_app_webhook_events` (#356), `agent_cron_runs` (#372), `offline_recovery_notifications` (#339) | `append`: one `put_record` with `if_absent`. `list` is newest first by the lookup index, then put in order. Set `retention_ms` where a purge applies. |
-| Hash-chained log written off the request path | `audit_events` of a workspace (#317, **moved**, decision 52) | Each event is signed with its predecessor's digest and written at the blind key of `sequence:<n>` with `if_absent`; a writer that loses a place reads it, searches on for the end and signs again. Calls only queue events (`AuditRecorder`); the owner loop flushes every second. `list` with a `keep` predicate walks until enough events match. `retention_ms` 0. |
+| Hash-chained log written off the request path | `audit_events` of a workspace (#317, **moved**) | Each event is signed with its predecessor's digest and written at the blind key of `sequence:<n>` with `if_absent`; a writer that loses a place reads it, searches on for the end and signs again. Calls only queue events (`AuditRecorder`); the owner loop flushes every second. `list` with a `keep` predicate walks until enough events match. `retention_ms` 0. |
 | Work items sent once, with retry history | `auth_app_webhook_deliveries` (#357) | One record per attempt, keyed by `index_of(collection, "<item>\n<attempt>")`. Claim it pending with `put(if_absent)` before the side effect and settle it with `put(if_revision)` after: only the caller whose claim succeeded performs it. |
 | Mutable rows found by id | `opportunities` (#376, **moved**), `drive_share_links` (#350, **moved**), `repositories` description (#315 part 2, **moved**; the routing row stays), `apps` (#377), `stores` (#365), `forge_records` (#341, **moved**), `auth_app_users` (#353, **moved**), `auth_app_organizations` (#354, **moved**), `auth_applications` settings (#351, **moved**; the routing row stays), `platform_environments` (#358, **moved**), `platform_mirror` (#359, **moved**), `oci_tags` (#383, **moved**; manifests in `oci_manifests`, content-addressed and written once), `transcripts` (#561, new: born in the workspace, never in PostgreSQL, [transcripts.md](../api/transcripts.md)), `drives` and `drive_entries` (#561, new, [drives.md](../api/drives.md)), `solutions` (#597, new, [solutions.md](../api/solutions.md)) | `get`, then `put` with `if_revision`, or `update`, which retries on `409` by rereading. `remove` with `if_revision`. A mirror row is written only when the stored row is older than the operator's. |
 | One-use codes, sessions, replay evidence, claims | `sessions` (#323), `identity_oauth_flows` (#326), `identity_webauthn_challenges` (#327), `identity_taap_assertions` (#361), `auth_app_authorization_codes` (#363, **moved**), `offline_recovery_attempts` (#336) | Consume with `remove(id, if_revision)`. Only one caller succeeds; the others get `conflict` or `not_found`. Expiry is the collection's `retention_ms`. |
@@ -387,7 +387,7 @@ and are not run by this change.
 2. Have the operator vendor `db/schema.sql` through `0062_agent_task_workspaces` and select
    `agent_task_workspaces_guard`. Apply the schema, then read the warnings
    `agent task content not copied (needs_selection|workspace_deleted)`. The operator reads no
-   column of either table (decision 51; its `*_pgx.go` reads only the guard tables), so it needs no
+   column of either table (its `*_pgx.go` reads only the guard tables), so it needs no
    other change.
 3. Deploy the lake image built from this change. Requests, messages and answers are read and
    written only in each task's workspace. **Until step 4 finishes, an earlier task shows no
@@ -482,7 +482,7 @@ migration `0066_assign_unrouted_repositories` assigns it (its description's row 
 
 ## Cutover runbook: tenant images, dev cluster
 
-Migration `0068_oci_repository_routes` (lake#383 phase A, decision 54 S4-S6). Tenant images move
+Migration `0068_oci_repository_routes` (lake#383 phase A). Tenant images move
 from the instance registry's `manifests/` into their routed workspace's records; blobs stay in
 `blobs/` until phase B (lake#380). Dev holds one account's images (7 manifests). These steps are for
 the coordinator and are not run by this change.
@@ -538,7 +538,7 @@ and are not run by this change.
 4. Unresolved rows: `workspace_not_switched` (switch it, then rerun), `blob_missing` and
    `blob_corrupt` (push the image again, or rerun its build; cache repositories may simply be
    rebuilt). From then on a copied blob is read only from its workspace store.
-5. Once `verify` answers `complete: true` on every page, file the change that removes, with Steve's
+5. Once `verify` answers `complete: true` on every page, file the change that removes, with an operator's
    approval, the files listed in `instance_paths` of every verify page (null until every routed
    workspace was read and `oci_tags` is complete; advisory: check each path again against the
    records and the instance's repositories when it is removed), the tenant pointers under
@@ -760,8 +760,8 @@ own. These steps are for the coordinator and are not run by this change.
 
 **Done.** On dev (lake `20261003c`, revision `5858129`; workspace Zetta `dev-82f617ea`), the copy
 for `ask_messages` gave: plan 15 assigned, 0 unresolved, one workspace; copy 15 copied, 0 already
-present, 0 failed; verify `complete: true`, 15 verified, 0 missing, 0 mismatched. Steve approved the
-drop on 2026-10-03, and migration `0050_drop_ask_messages` (guard `drop_ask_messages_guard`,
+present, 0 failed; verify `complete: true`, 15 verified, 0 missing, 0 mismatched. The drop was
+approved on 2026-10-03, and migration `0050_drop_ask_messages` (guard `drop_ask_messages_guard`,
 lake#483) drops the table; `copy_workspace_records` no longer accepts the collection. Steps 1 to 7
 below are kept as the pattern the later runbooks refer to. Applying `0050` on dev is the
 coordinator's: the operator vendors `db/schema.sql` and selects `drop_ask_messages_guard`.

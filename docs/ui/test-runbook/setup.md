@@ -6,19 +6,18 @@ Do this once per run, before any section file.
 
 | Environment | URL | Use it for | Sign-in | Clerk instance for a ticket |
 |---|---|---|---|---|
-| testing | `https://lake-testing.oramadev.net` | A version release (the `testing` gate) | Clerk | `lake-testing` application, production instance (Secret `clerk-lake-testing`) |
-| dev | `https://lake-dev.oramadev.net` | Any other run: a change, a roll, a single section | Clerk | `lake-testing` application, development instance (`CLERK_INSTANCE=ins_3JpNNvZd4jnehvW6XsKWcMq6MKx`, Secret `clerk-lake-dev`) |
-| staging | `https://lake-staging.oramadev.net` | Only when a release asks for a staging check | Clerk | `Orama Lake` application, development instance |
+| testing | `https://lake-testing.example.com` | A version release (the `testing` gate) | Clerk | a Clerk production instance |
+| dev | `https://lake-dev.example.com` | Any other run: a change, a roll, a single section | Clerk | a Clerk development instance (`CLERK_INSTANCE=ins_...`) |
+| staging | `https://lake-staging.example.com` | Only when a release asks for a staging check | Clerk | a Clerk development instance |
 | local | `http://127.0.0.1:4900` (`./build/lake`) | The cases marked *Lake without Clerk*: Lake's own sign-in, sign-up, passkeys, MFA, OAuth | Lake's own pages | none: sign up at `/sign-up` |
 
-Never run this runbook on `lake.live`, `eu.lake.live` or `us.lake.live` (production) without Steve's
-go-ahead, and never on `lake.oramadev.net` (retired 2026-10-24). Create a Clerk user in the Clerk
-dashboard.
+Never run this runbook against a production deployment. Your Clerk application and instance ids
+come from your own Clerk dashboard.
 
 ### Confirm the version
 
 ```sh
-curl -s https://lake-testing.oramadev.net/v1/server_info | python3 -c 'import json,sys;v=json.load(sys.stdin)["value"];print(v["version"],v["revision"],"billing:",v["billing"],"online_payment:",v["online_payment"],"deployments:",v["deployments"],"region:",v["region"])'
+curl -s https://lake-testing.example.com/v1/server_info | python3 -c 'import json,sys;v=json.load(sys.stdin)["value"];print(v["version"],v["revision"],"billing:",v["billing"],"online_payment:",v["online_payment"],"deployments:",v["deployments"],"region:",v["region"])'
 ```
 
 - `version` must be the version under test (`0.4.0` for this runbook). On 2026-10-22 every
@@ -65,8 +64,8 @@ workspace** ([04-workspaces.md](04-workspaces.md)); it takes a minute or two to 
 ## Signing in
 
 On a Clerk environment, mint a one-time ticket through Clerk's Backend API, with the
-environment's secret key in `CLERK_SECRET_KEY` (from its `clerk-lake-<env>` Secret on the managing
-cluster, never written to a file) and its instance id in `CLERK_INSTANCE`, and open the sign-in page
+environment's secret key in `CLERK_SECRET_KEY` (from wherever your deployment keeps it, never
+written to a file) and its instance id in `CLERK_INSTANCE`, and open the sign-in page
 with it ([`../../../tools/e2e/README.md`](../../../tools/e2e/README.md)):
 
 ```sh

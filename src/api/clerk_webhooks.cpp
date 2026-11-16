@@ -51,7 +51,7 @@ std::int64_t now_seconds() {
 }
 
 // The primary email when Clerk has verified it; empty otherwise, so an unverified address never
-// links to an existing account or claims one (decision 44 trusts only Clerk's verification).
+// links to an existing account or claims one (lake trusts only Clerk's verification).
 std::string verified_primary_email(const nlohmann::json& data) {
     const std::string primary = data.value("primary_email_address_id", "");
     if (!data.contains("email_addresses") || !data.at("email_addresses").is_array()) {

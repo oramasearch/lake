@@ -1,6 +1,6 @@
 # Tunnel Client Downloads
 
-Lake issue [#745](https://github.com/oramasearch/lake/issues/745), part 2. A person granted
+Lake issue #745, part 2. A person granted
 Developer Access runs the tunnel client, `zetta-tunnel`, on their own machine
 ([tunnel credentials](tunnel-grants.md)). Lake hands the client out itself, so the Get credentials
 drawer can give a working install line instead of assuming the client is installed.

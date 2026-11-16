@@ -1,4 +1,4 @@
-// Billing (lake#564, decision 56, docs/api/billing.md): the price list (usage only, lake#635: one
+// Billing (lake#564, docs/api/billing.md): the price list (usage only, lake#635: one
 // rate per dimension, no plans, no fee, nothing included), the bill worked out from usage read
 // through usage_over_time, invoices with their frozen lines and payment state, the manual provider,
 // and the switch that leaves billing absent on an enterprise install.
@@ -367,7 +367,7 @@ TEST(Billing, AMonthsBillIsWorkedOutFromTheUsageOfEveryWorkspace) {
     rig.recorder.sample(rig.lab, "repositories", gib, day1);
     rig.recorder.sample(rig.home, "drive_files", 3 * gib, day2);
     rig.recorder.sample(rig.lab, "repositories", gib, day2);
-    // What an engine holds on its own volume is not billed as storage (decision 61, lake#663).
+    // What an engine holds on its own volume is not billed as storage (lake#663).
     rig.recorder.sample(rig.home, "workspace_data", 10 * gib, day1);
     rig.recorder.sample(rig.lab, "models", 10 * gib, day2);
     rig.flush();
@@ -960,7 +960,7 @@ TEST(UsageContract, TransferFromAnyRecorderCallerIsShownAndBilled) {
     EXPECT_EQ((*billed)["amount_micros"], 200'000) << "4 GiB at $0.05";
 }
 
-// LSR-095: the bill reads the model/direction classes instead of blending all model tokens.
+// The bill reads the model/direction classes instead of blending all model tokens.
 TEST(Billing, ModelInputAndOutputHaveExactPricesAndCannotFallBackToTheBlendedRate) {
     BillingRig rig;
     const auto last = this_month() - std::chrono::months{1};

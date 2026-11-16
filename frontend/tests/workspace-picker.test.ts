@@ -25,19 +25,19 @@ import {
 } from "../src/lib/workspacePicker.ts";
 
 const ws = (customer: string, ...names: string[]) => names.map((name, i) => ({ id: `${customer}-${i}`, name, customer_id: customer }));
-const mine: PickerSpace = { id: "c1", name: "steve-x7f2", label: "Your workspaces", personal: true, kind: "individual", workspaces: ws("c1", "workspace", "Churn study", "Forecasts") };
+const mine: PickerSpace = { id: "c1", name: "ada-x7f2", label: "Your workspaces", personal: true, kind: "individual", workspaces: ws("c1", "workspace", "Churn study", "Forecasts") };
 const acme: PickerSpace = { id: "c2", name: "acme-research", label: "acme-research", personal: false, kind: "organization", workspaces: ws("c2", "Production", "Staging") };
 const north: PickerSpace = { id: "c3", name: "Northwind Café", label: "Northwind Café", personal: false, kind: "organization", workspaces: [] };
-const viewer = { display_name: "Steve Sperandeo", email: "steve@example.com" };
+const viewer = { display_name: "Ada Lovelace", email: "ada@example.com" };
 
 test("a group's header is the owner as written, with its kind and initial", () => {
-  assert.equal(ownerName(mine, viewer), "Steve Sperandeo", "the person, never the generated handle");
+  assert.equal(ownerName(mine, viewer), "Ada Lovelace", "the person, never the generated handle");
   assert.equal(ownerName(mine, { email: "s@example.com" }), "s@example.com");
   assert.equal(ownerName(mine, {}), "You");
   assert.equal(ownerName(acme, viewer), "acme-research", "as written: no upper-casing");
   assert.equal(ownerKind(mine), "Your account");
   assert.equal(ownerKind(acme), "Organization");
-  assert.equal(initialOf("Steve Sperandeo"), "S");
+  assert.equal(initialOf("Ada Lovelace"), "A");
   assert.equal(initialOf("  ux-review-2026"), "U");
   assert.equal(initialOf("élan"), "É");
   assert.equal(initialOf("--"), "?");
@@ -66,7 +66,7 @@ test("filtering keeps matching workspaces and drops owners left empty", () => {
   assert.deepEqual(prod.map((g) => [g.id, g.workspaces.map((w) => w.name)]), [["c2", ["Production"]]]);
   const byOwner = filterGroups([mine, acme], viewer, "acme");
   assert.deepEqual(byOwner.map((g) => g.workspaces.length), [2], "an owner's name matches its workspaces");
-  const words = filterGroups([mine, acme], viewer, "steve fore");
+  const words = filterGroups([mine, acme], viewer, "ada fore");
   assert.deepEqual(words.flatMap((g) => g.workspaces.map((w) => w.name)), ["Forecasts"], "every word must match");
   const accents = filterGroups([{ ...north, workspaces: ws("c3", "Café ops") }], viewer, "cafe");
   assert.equal(accents.length, 1, "accents are ignored");
@@ -86,7 +86,7 @@ test("the person's own account comes first, then each organization in lake's ord
 
 test("a workspace deleted since it was linked or remembered falls back to one the person can reach", () => {
   const empty: PickerSpace = { ...acme, workspaces: [] };
-  // Steve's screenshot: the remembered organization's only workspace was deleted.
+  // A reported case: the remembered organization's only workspace was deleted.
   const gone = resolveWorkspace([empty, mine], { fromPath: null, remembered: "deleted-ws", suggested: null });
   assert.deepEqual(gone, { id: "c1-0", replace: false, remember: "c1-0" }, "the person's own first workspace, stored in place of the stale one");
   const linked = resolveWorkspace([empty, mine], { fromPath: "deleted-ws", remembered: "deleted-ws", suggested: null });

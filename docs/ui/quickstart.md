@@ -18,7 +18,7 @@ and, for a model, see its answers beside each result, on the page and on the web
 
 ## Step 4: Decide What to Build
 
-lake#1182, approved by Steve on 2026-10-25. Before it, step 4 guessed a column to predict and ended
+lake#1182, approved on 2026-10-25. Before it, step 4 guessed a column to predict and ended
 in *Nothing to Predict Yet* when there was none. Now it is a conversation.
 
 - **It opens by itself.** Once the search index is published, nothing is training and the balance
@@ -49,7 +49,7 @@ in *Nothing to Predict Yet* when there was none. Now it is a conversation.
 
 ## Every state has one next step
 
-lake#1204 (Steve, 2026-10-25: *"I confirmed, but it left me asking, 'what next?'"*). Each state of
+lake#1204: after confirming, a person should never be left asking what comes next. Each state of
 the Quickstart says, for a person, what is happening and what to do; no capability names and no
 engine errors (the engine's reason is kept in the error's `detail` for an agent, never shown).
 

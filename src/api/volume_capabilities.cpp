@@ -1,10 +1,10 @@
-// The operator's volumes (migration 0069, operator#259, operator#260, decision 54 S13,
+// The operator's volumes (migration 0069, operator#259, operator#260,
 // docs/api/volumes.md): set_workspace_storage grows a workspace Zetta's volumes,
 // request_volume_snapshot asks for a snapshot now, and volume_snapshots reads every snapshot
 // policy with what the operator last reported. Each is desired state or an observation in lake's
-// PostgreSQL; the operator acts on it and never talks to a workspace Zetta (decision 51). They are
+// PostgreSQL; the operator acts on it and never talks to a workspace Zetta. They are
 // for the operator credential and the instance administrator only, and their audit events stay in
-// the central log (decision 52): volumes are control plane, not a workspace's data.
+// the central log: volumes are control plane, not a workspace's data.
 
 #include "lake/api/capabilities.hpp"
 

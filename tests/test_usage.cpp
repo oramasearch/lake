@@ -1174,7 +1174,7 @@ TEST(UsageSample, RecordsWhatTheEngineHoldsByKind) {
     const std::string not_measured = read.value["not_measured"].dump();
     EXPECT_NE(not_measured.find("inside workspace lab"), std::string::npos) << not_measured;
     EXPECT_EQ(not_measured.find("home"), std::string::npos) << not_measured;
-    // Decision 61 (lake#663): what an engine holds on its own volume is shown as engine_storage,
+    // lake#663: what an engine holds on its own volume is shown as engine_storage,
     // never billed; the volume is billed, as `volumes`.
     const json* engine = dimension(read.value, "engine_storage");
     ASSERT_NE(engine, nullptr);
@@ -1187,7 +1187,7 @@ TEST(UsageSample, RecordsWhatTheEngineHoldsByKind) {
     EXPECT_TRUE((*storage)["billed"].get<bool>());
 }
 
-// Decision 61 (lake#663): storage is billed for what Lake holds outside an engine's volume
+// lake#663: storage is billed for what Lake holds outside an engine's volume
 // (repositories, images, transcripts, drive files), never for what the engine holds on it.
 TEST(UsageOverTime, StorageIsWhatLakeHoldsAndTheEngineVolumeIsNotBilledTwice) {
     UsageRig rig;

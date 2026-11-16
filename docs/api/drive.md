@@ -28,7 +28,7 @@ folder object, so repository policy remains the default. Move authorization chec
 source and destination location. Repository mutations use the same store authorization callback
 through REST, MCP, the compatible upload routes, and `lake` store drives.
 
-## Nested Mutation Permissions (lake#962, LSR-096)
+## Nested Mutation Permissions (lake#962)
 
 A write grant on a folder does not authorize its non-inheriting descendants. Uploads check every
 final path after joining the selected folder with each item's relative path. An overwrite also
@@ -149,7 +149,7 @@ offers the left value, right value, an available reviewed proposal, or prepared 
 and goes through `resolve_conflict`; it does not edit Liquid state directly.
 
 The consumer sync client, three-tree reconciliation, `liquid history <path>`, and first-class
-local conflict values belong to [liquid #195](https://github.com/oramasearch/liquid/issues/195).
+local conflict values belong to liquid #195.
 Lake uses the push and pull protocol documented in [`sync.md`](sync.md).
 
 ## Verification

@@ -92,10 +92,10 @@ and returns the conflict digest, selected value digest, and change digest. Both 
 the registry and appear under `outputSchema.properties.value` in `tools/list`.
 
 ```sh
-curl -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' https://lake.oramadev.net/mcp
+curl -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' https://lake.example.com/mcp
 curl -H "Authorization: Bearer <token>" -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_customers","arguments":{"limit":5}}}' \
-  https://lake.oramadev.net/mcp
+  https://lake.example.com/mcp
 ```
 
 ## Developer → MCP, llms.txt and the Lake skill (lake#202)

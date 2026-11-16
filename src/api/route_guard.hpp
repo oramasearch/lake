@@ -33,7 +33,7 @@ namespace lake::api {
 struct RouteFailure {
     std::string route;      // the registered route pattern
     std::string method;
-    std::string path;       // for the handler's caller; never logged (decision 54 S9)
+    std::string path;       // for the handler's caller; never logged
     std::string request_id; // the caller's X-Request-Id, or a new one
     std::string message;    // what the exception said; logged, never sent to the client
 };

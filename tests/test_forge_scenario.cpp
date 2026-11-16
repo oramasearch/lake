@@ -392,7 +392,7 @@ TEST(PostgresForgeScenario, DripsReviewRebaseAndGraphEvidenceLandEndToEnd) {
     EXPECT_EQ(mapped->front().anchor.line, 3U);
     ASSERT_TRUE(mapped->front().mapped);
     EXPECT_TRUE(mapped->front().mapped->moved);
-    // The operator opened the review, so a second person approves it (LSR-077).
+    // The operator opened the review, so a second person approves it.
     const auto reviewer_user = control->create_user({"taap:1:ed25519:forge-reviewer-" + suffix,
                                                      "forge-reviewer-" + suffix + "@example.test",
                                                      "Forge Reviewer"});

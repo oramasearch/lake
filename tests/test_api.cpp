@@ -3296,7 +3296,7 @@ TEST(IdentityHttp, ApiSignUpIssuesAndResolvesHttpOnlySessions) {
     server.stop();
 }
 
-// lake#912 (LSR-001): a session of an identity application's pool carries no Lake grants, even
+// lake#912: a session of an identity application's pool carries no Lake grants, even
 // when its user's TAAP identity is a Lake account's. `pool_session` mints a session in `pool_id`
 // for a user with `taap_id` (the Lake account `user_id` carries it) the way each store can.
 void expect_application_sessions_carry_no_lake_grants(
@@ -4650,7 +4650,7 @@ TEST(Repositories, BelongToOneWorkspaceOfTheirSpace) {
     EXPECT_EQ(github.error.code, "invalid_input");
     EXPECT_EQ(github.error.path, "/customer_id");
 
-    // Deleting a workspace deletes its repositories with it (lake#514, decision 54 S12): the
+    // Deleting a workspace deletes its repositories with it (lake#514): the
     // live one is tombstoned with its retention ended, and the workspace takes no new one.
     const ApiResult removed = s.call(
         "delete_workspace",
@@ -4816,7 +4816,7 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
             .create_grant(
                 {"taap:1:ed25519:reader", object->id, "read", "grant-proof", "admin", "test"})
             .has_value());
-    // An approved review travels as history, without its approval (LSR-077).
+    // An approved review travels as history, without its approval.
     const ApiResult review = source.call(
         "create_review", {{"repository_id", repository.value["id"]}, {"change_id", "change-1"}});
     ASSERT_TRUE(review.ok) << review.error.message;
@@ -5044,7 +5044,7 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
 }
 
 // A webhook's signing secret never leaves lake in an archive, and only a repository administrator's
-// archive names who holds access (LSR-024, lake#933). An imported webhook signs with a new secret.
+// archive names who holds access (lake#933). An imported webhook signs with a new secret.
 TEST(Export, AnArchiveCarriesNoWebhookSecretAndGrantsOnlyForAnAdministrator) {
     Surface source;
     RepositoryFixtureStore source_store;
@@ -5505,7 +5505,7 @@ TEST(Forge, BranchProtectionRequiresAnApprovedReview) {
     const ApiResult review = surface.call(
         "create_review", {{"repository_id", repository_id}, {"change_id", "change-1"}});
     ASSERT_TRUE(review.ok) << review.error.message;
-    // Someone other than the pusher, with review on the repository, approves (LSR-077).
+    // Someone other than the pusher, with review on the repository, approves.
     const auto object = surface.store.find_policy_object("repository", repository_id);
     ASSERT_TRUE(object);
     ASSERT_TRUE(surface.store.create_grant({"taap:1:ed25519:reviewer",
@@ -5530,7 +5530,7 @@ TEST(Forge, BranchProtectionRequiresAnApprovedReview) {
     EXPECT_TRUE(approved.releases.empty()) << "no rule asks for verification";
 }
 
-// LSR-077: a required review is satisfied only by someone other than the pusher who holds `review`
+// A required review is satisfied only by someone other than the pusher who holds `review`
 // when the push is evaluated, and never by the person who opened the review.
 TEST(Forge, ARequiredReviewNeedsASecondPersonWithReview) {
     Surface surface;
@@ -5823,7 +5823,7 @@ TEST(Repositories, PublicRepositoryContentCapabilitiesUseTheRepositoryStore) {
     EXPECT_EQ(artifact.value["trace"]["id"], "trace-1");
 }
 
-// lake#913 (LSR-002): a policy object counts only inside its own account. One account cannot
+// lake#913: a policy object counts only inside its own account. One account cannot
 // create objects carrying another account's resource identifiers (a folder, an environment, the
 // account's secret mounts), and objects already in the store that carry them, made before the
 // fix, are never adopted: the account the identifiers name keeps its resources.
@@ -6363,7 +6363,7 @@ TEST(Drive, SharingByEmailOrHandleIsAttestedByLake) {
     EXPECT_EQ(with({{"role", "read"}}).error.code, "invalid_input");
 }
 
-// LSR-089: sharing must attenuate authority for both live grants and bearer links.
+// Sharing must attenuate authority for both live grants and bearer links.
 TEST(Drive, SharingCannotGrantActionsTheCallerDoesNotHold) {
     Surface surface;
     DriveWorkspaces workspaces(surface);
@@ -7641,7 +7641,7 @@ TEST(ModelProvenance, SignedDatasetChainVerifiesAndTamperingIsRefused) {
         .at = at,
         .subject_kind = liquid::attestation_subject_kind::artifact,
         .slsa_provenance = liquid::slsa_provenance_v1{
-            .build_definition = {.build_type = "https://lake.orama.com/training/v1",
+            .build_definition = {.build_type = "https://lake.example.com/training/v1",
                                  .external_parameters = {{"train", "--epochs", "3"},
                                                          "/workspace",
                                                          {{"CUDA", "12.8"}}},
@@ -8804,7 +8804,7 @@ TEST(StorelessStartup, LakeWithNoControlStoreServesAndStopsCleanly) {
     EXPECT_EQ(startup->at("store"), "none");
 }
 
-// lake#915 (LSR-004): the replication credential never defaults to the admin token, and a peer list
+// lake#915: the replication credential never defaults to the admin token, and a peer list
 // that is not a list of origins stops startup.
 TEST(ReplicationStartup,TheReplicationCredentialNeverDefaultsToTheAdminToken) {
     TemporarySyncRoot temporary;
@@ -9257,7 +9257,7 @@ TEST(PostgresSync, PushAndPullUsePostgresControlPlane) {
     ASSERT_TRUE(contents) << contents.error().message;
     EXPECT_EQ(*contents, sync_bytes("postgres-backed sync"));
 
-    // Decision 52: a push and a pull are the repository's data, so their events are in the
+    // A push and a pull are the repository's data, so their events are in the
     // audit of the repository's workspace, written by the server's flush (here, its stop), and
     // not in the central log.
     const auto events = lake::test::audit_events(*control, {.limit = 100});
@@ -9332,7 +9332,7 @@ TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
     lake::test::RecordWorkspaces workspaces(control, database_uri);
     workspaces.ready(repository->workspace_id);
     options.workspaces = workspaces.service;
-    // Branch protection decisions go to the repository's workspace audit (decision 52); each
+    // Branch protection decisions go to the repository's workspace audit; each
     // drain() below writes what the pushes queued.
     options.audit_flush_interval = std::chrono::milliseconds(0);
     ApiServer server(options);
@@ -9385,7 +9385,7 @@ TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
     EXPECT_EQ(review_refusal->reason,
               "branch protection rejects main: an approved review is required");
 
-    // An approval lake recorded, by a reviewer who is not the pusher (LSR-077).
+    // An approval lake recorded, by a reviewer who is not the pusher.
     const auto repository_object = control->find_policy_object("repository", repository->id);
     ASSERT_TRUE(repository_object) << repository_object.error().message;
     const std::string reviewer = "taap:1:ed25519:branch-reviewer-" + suffix;
@@ -10338,7 +10338,7 @@ TEST(Identity, ClerkTurnsOffLakePoolPasswordSignUpAndSignIn) {
     EXPECT_EQ(s.call("sign_in_password", outsider).error.code, "unauthenticated");
 }
 
-// Sign-up and sign-in link to the instance's terms and privacy policy (liquid-bridge#15): viewer
+// Sign-up and sign-in link to the instance's terms and privacy policy: viewer
 // reports them to anyone, signed in or not, and an empty URL means no link.
 TEST(WebApp, ViewerReportsTheTermsAndPrivacyLinks) {
     Surface s;

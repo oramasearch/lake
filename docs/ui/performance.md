@@ -99,7 +99,7 @@ so they still say which capabilities are slow.
 
 ### The dev site, 2026-10-02
 
-Read-only GETs against `lake.oramadev.net` (`oramasearch/lake:20261002b`) as the test user, five
+Read-only GETs against `lake.example.com` (`oramasearch/lake:20261002b`) as the test user, five
 requests per page, signed in through a Clerk ticket ([../../tools/e2e/README.md](../../tools/e2e/README.md)).
 Every page made the workspace calls its budget says, in one round, so the time is in the calls
 themselves:
@@ -138,7 +138,7 @@ These are Zetta capabilities that are slow themselves, read from the reference c
   read `shared_snapshot()` (no copy) and look up `agent_key(id)` directly; the same full copy is in
   `decision_policy.cpp`, `roi_readout.cpp` and `replicated_blob_store.cpp`.
 - **`list_datasets` and `system.datasets`.** Both come from `Node::datasets()`, which scans every
-  table's rows and directories to summarize it ([zetta#1195](https://github.com/oramasearch/zetta/issues/1195)).
+  table's rows and directories to summarize it (zetta#1195).
   Lake's projected SQL only shrinks the answer. The Pipeline, Project and Solution dataset pickers
   and Usage still wait for it.
 - **`list_models`** took 43–142 ms for 15 models, so the Models page's main read stays near

@@ -227,7 +227,7 @@ handlers. Lake therefore sets that parser ceiling to the larger of 64 MiB and
 | Forms and other string bodies | 64 MiB. The common string reader counts bytes while receiving them. |
 | Liquid sync, model and dataset publication, drive uploads, packages, debug artifacts, SCIM and other specialized adapters | 64 MiB or a smaller route-specific bound. Their bounded buffers and parsers remain in force. |
 
-JSON admission (lake#944, LSR-083) resolves the bearer or browser session before reading input.
+JSON admission (lake#944) resolves the bearer or browser session before reading input.
 Credentials are resolved again after transfer so a revocation or expiry during the upload is
 still enforced by the final registry gate.
 Protected REST calls without an accepted credential answer 401 and `WWW-Authenticate` before
@@ -323,7 +323,7 @@ are recorded in [`../build/dependencies.md`](../build/dependencies.md).
 
 ## Statuses Behind Cloudflare
 
-lake on `lake.oramadev.net` is reached through Cloudflare. Cloudflare answers an origin's `502` or
+lake on `lake.example.com` is reached through Cloudflare. Cloudflare answers an origin's `502` or
 `504` with its own HTML page (*"Error 502: Bad gateway … The origin web server returned an invalid
 or incomplete response"*) and drops lake's body; it passes `500`, `501` and `503` and every 4xx
 through unchanged (Cloudflare's *Custom Errors* and *Error 502/504* pages). Until lake#572 lake
@@ -356,8 +356,8 @@ runs is logged as one JSON line on stdout:
 {"ts":"…","level":"error","event":"handler_exception","method":"GET","route":"/ship/packages","request_id":"…","error":"…"}
 ```
 
-Like the request log line, it names the route pattern and never the raw path (decision 54 S9,
-lake#384, [telemetry.md](telemetry.md#request-logs)).
+Like the request log line, it names the route pattern and never the raw path
+(lake#384, [telemetry.md](telemetry.md#request-logs)).
 
 The request id is the caller's `X-Request-Id`, or a new UUID. The request is then answered `500`
 with `Cache-Control: no-store` and `X-Request-Id`: a standalone HTML error page
@@ -420,7 +420,7 @@ from lake's own origin and `data:` URLs (the Drive image previews). With Clerk o
 pages add `https://img.clerk.com`, the host Clerk's sign-in form shows its logos and provider icons
 from.
 
-Why (lake#943, LSR-082): an agent's reply is Markdown, and an agent may have read untrusted content
+Why (lake#943): an agent's reply is Markdown, and an agent may have read untrusted content
 (a document, a dataset row, an MCP tool's result) that tells it to name an image at an address
 carrying workspace data. A browser that loaded that image would send the data to the address's
 server without anyone clicking. The console's Markdown never loads an image at all; it shows
@@ -530,8 +530,8 @@ Consumer Service, `POST /v1/saml/<provider id>/acs`: the identity provider's for
 by design, and the route never reads the session a cookie carries; it verifies the signed response
 and replaces the session (lake#836).
 
-**Why.** Ship apps are hosted one label below the platform's zone (`<name>.oramadev.net` beside
-`lake.oramadev.net`), so customer app code is *same-site* with lake and a browser sends
+**Why.** Ship apps are hosted one label below the platform's zone (`<name>.example.com` beside
+`lake.example.com`), so customer app code is *same-site* with lake and a browser sends
 `lake_session` with its requests whatever the cookie's `SameSite`. Before this, an app page could
 make a signed-in person's browser run any action as a "simple" `text/plain` request or a form post
 (inventory §4.4). Requiring JSON forces a CORS preflight, which lake's wildcard CORS cannot satisfy

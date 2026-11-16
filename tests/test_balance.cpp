@@ -1,4 +1,4 @@
-// The prepaid account balance (lake#1114, liquid-bridge decision 67, docs/api/billing.md#balance):
+// The prepaid account balance (lake#1114, docs/api/billing.md#balance):
 // the balance's view and its math, top-ups credited once per payment from Stripe's webhook, the
 // charges refreshed from usage (a month's charge is its bill, a failed read holds the balance, an
 // issued invoice freezes its month), the 402 gate on the capabilities that start paid work and

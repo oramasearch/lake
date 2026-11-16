@@ -102,7 +102,7 @@ struct ForgeRecord {
 // A row of the retired forge_records table with its recorded owner (migration 0054): its
 // repository's workspace, or empty with the reason it is not copied (`needs_selection` while the
 // repository has no workspace, `workspace_deleted` when that workspace is gone).
-// A central audit event about a workspace's data, recorded before decision 52, with the
+// A central audit event about a workspace's data, recorded before the audit split, with the
 // workspace its copy goes to (lake#317, migration 0063). An empty workspace_id stays central.
 struct LegacyAuditEvent {
     audit::Event event;
@@ -264,7 +264,7 @@ struct IssuedSession {
 // a minute. It belongs to the workspace, not to the sign-in that made it: it lives until it is
 // revoked or reaches its optional expiry. Its secret is `lbk.<id>.<secret>`; the control plane
 // keeps its SHA-256 and binding beside the other credentials (`browser_keys`, migration
-// 0102_browser_keys, multitenancy: decision 53) and never the secret.
+// 0102_browser_keys, multitenancy) and never the secret.
 inline constexpr std::string_view browser_key_credential_prefix = "lbk.";
 // The most origins one key lists, and its default and largest calls a minute.
 inline constexpr std::size_t browser_key_max_origins = 20;
@@ -344,8 +344,8 @@ struct NewPasswordUser {
     // The new user's id, chosen by the caller so that an application's workspace can record the
     // user before lake's own row exists (lake#353); empty: the store chooses one.
     std::string user_id;
-    // The managed key lake minted for a lake-pool sign-up without an identity document (lake#762,
-    // decision 65); empty when the person brought their own document.
+    // The managed key lake minted for a lake-pool sign-up without an identity document
+    // (lake#762); empty when the person brought their own document.
     std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
     // Required with identity_document (lake#931).
     IdentityProof identity_proof;
@@ -459,7 +459,7 @@ struct UsageLimit {
     int warn_percent = 80;
     std::string updated_at;
 };
-// Billing records (migration 0073, lake#564, decision 56, docs/api/billing.md): the price list and
+// Billing records (migration 0073, lake#564, docs/api/billing.md): the price list and
 // the invoices lake issues. Control-plane multitenancy; usage stays in each workspace Zetta and
 // only the quantity billed per dimension is frozen on a line. Amounts are integer millionths of the
 // currency's unit. Lake is priced by usage only (lake#635): each publication of the price list is
@@ -521,7 +521,7 @@ struct BillingContact {
     std::string customer_id, email, name, line1, line2, city, postal_code, state, country;
     std::string updated_at;
 };
-// A prepaid account balance (migration 0099, lake#1114, liquid-bridge decision 67,
+// A prepaid account balance (migration 0099, lake#1114,
 // docs/api/billing.md#balance): billing, so in the control plane. Credits are paid top-ups and
 // grants from Orama (lake#1134); charges
 // are the account's usage priced at the list in force, one row a month (usage stays in each
@@ -914,7 +914,7 @@ struct NewWorkspace {
 struct WorkspacePatch {
     std::optional<std::string> name, environment, desired;
 };
-// Deleting a workspace cascades (decision 54 S12, lake#514, docs/api/workspaces.md#deletion).
+// Deleting a workspace cascades (lake#514, docs/api/workspaces.md#deletion).
 // One object it destroyed: a repository (`live`, or `tombstoned` inside its retention, when the
 // workspace was deleted), an app, a build it cancelled, or a tenant image repository (`name` is
 // the OCI repository, `<space>/<name>` or `<space>/cache/<name>`, and `id` is empty).
@@ -989,7 +989,7 @@ struct AccountDeletion {
     std::int64_t invoices_kept = 0, open_invoices = 0;
     std::string deleted_at; // empty for a dry run
 };
-// Where a tenant image repository lives (lake#383, decision 54 S4-S6, migration 0068): the
+// Where a tenant image repository lives (lake#383, migration 0068): the
 // content-free central route from `<space>/<name>` (the space by its customer id, `name` the path
 // below it, `<image>` or `cache/<image>`) to the workspace whose Zetta holds the repository's
 // manifests and tags. It holds no manifest, digest or tag. The route never changes: its workspace,
@@ -997,7 +997,7 @@ struct AccountDeletion {
 struct OciRepositoryRoute {
     std::string customer_id, name, workspace_id, created_at, updated_at;
 };
-// The volume snapshot policy of one target (migration 0069, operator#260, decision 54 S13):
+// The volume snapshot policy of one target (migration 0069, operator#260):
 // `store` (lake's own store volume) or a workspace id. Content-free: a five-field cron schedule
 // in UTC, how many snapshots the operator keeps, and `requested_at`, a one-off request the
 // operator honors when it is newer than the target's last snapshot. `status` is the operator's
@@ -1166,7 +1166,7 @@ inline std::string managed_service_slug(std::string_view prefix, std::string_vie
     }
     return hex.size() == 32 ? std::string(prefix) + "-" + hex.substr(0, 12) : std::string();
 }
-// The service catalog (docs/control-plane/services.md, liquid-bridge decision 47), in menu
+// The service catalog (docs/control-plane/services.md), in menu
 // order. The schema's service_kind_check lists the same keys.
 // `ready_seconds` is how long a new service of the kind usually takes from Create to Ready on
 // lake's Services page, measured with tools/e2e/start-times.py and rounded up to 5 s
@@ -1177,7 +1177,7 @@ struct ServiceKind {
     int ready_seconds = 60;
 };
 inline constexpr ServiceKind service_kinds[] = {
-    {"zetta", "Zetta", 30},          // Steve, 2026-09-26 (measured once at 41 s)
+    {"zetta", "Zetta", 30},          // chosen 2026-09-26 (measured once at 41 s)
     {"cassandra", "Cassandra", 420}, // not yet measured without a node scale-up (lake#197)
     {"clickhouse", "ClickHouse", 75},
     {"duckdb", "DuckDB", 30},
@@ -1225,7 +1225,7 @@ struct ManagedStore {
     std::string workspace_id;
     // Where the store's contents are (lake#664, in `stores.spec`): for the customer's own bucket
     // (r2, s3, b2, gcs, azure) its name, endpoint and the folder in it the store covers, and the
-    // workspace secret that opens it (decision 58: the workspace's credential, never Orama's);
+    // workspace secret that opens it (the workspace's credential, never the operator's);
     // for a `lake` store the liquid repository that keeps it. Empty otherwise.
     std::string bucket, endpoint_url, prefix;
     std::string credential_mount_id, credential_name;
@@ -1983,7 +1983,7 @@ public:
     virtual Result<void> set_repository_liquid_id(const std::string& id,
                                                   const std::string& liquid_id) = 0;
     virtual Result<std::vector<Repository>> repositories_without_liquid_id(int limit) = 0;
-    // The central audit events about a workspace's data (decision 52, lake#317), for the
+    // The central audit events about a workspace's data (lake#317), for the
     // one-shot copy into workspace Zettas only. Assigning records the workspace of each event
     // whose action is one of `workspace_actions` and that was not refused for want of authority,
     // as migration 0063 does, for events an earlier lake wrote after it. Listing pages the

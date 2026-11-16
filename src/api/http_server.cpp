@@ -7449,7 +7449,7 @@ private:
     std::map<std::string, std::shared_ptr<const boost::corosio::tls_context>> tls_contexts_;
 };
 
-// The MCP connections' transport (decision 60, lake#652, docs/api/mcp-connections.md#the-client):
+// The MCP connections' transport (lake#652, docs/api/mcp-connections.md#the-client):
 // McpHttp over the same capy/corosio stack as OutboundHttpClient, on its own io thread so a slow
 // MCP server never holds up Stripe or speech-to-text. Every address a name resolves to must be
 // public unless the transport allows private addresses (tests, LAKE_MCP_ALLOW_PRIVATE_ADDRESSES),
@@ -7895,7 +7895,7 @@ struct ApiServer::Impl {
     std::unique_ptr<MeteringRecorder> metering_recorder;
     std::chrono::steady_clock::time_point next_metering_flush{};
     MeteringRecorder::Totals reported_metering;
-    // Events about a workspace's data on their way to its audit (decision 52); null without
+    // Events about a workspace's data on their way to its audit; null without
     // workspaces, when every event is central.
     std::unique_ptr<AuditRecorder> audit_recorder;
     std::chrono::steady_clock::time_point next_audit_flush{};
@@ -9307,7 +9307,7 @@ struct ApiServer::Impl {
                                 {{"kind", route_pattern.ends_with("/mcp") ? "mcp" : "api"}});
         }
 
-        // Route patterns and identifiers only, never the raw path (decision 54 S9).
+        // Route patterns and identifiers only, never the raw path.
         RequestLogEntry entry{.ts = log_timestamp(),
                               .method = method,
                               .route = std::string(route_pattern),
@@ -9607,7 +9607,7 @@ struct ApiServer::Impl {
             return *timing->context;
         }
         ApiContext ctx;
-        // Authentication budgets count the address the trusted ingress hop decided (LSR-103).
+        // Authentication budgets count the address the trusted ingress hop decided.
         ctx.client_address = order_client_address(route);
         // A capability that long-polls gives its HTTP worker back (lake#534).
         if (server) {
@@ -12201,7 +12201,7 @@ struct ApiServer::Impl {
     }
 
     // Resolves a tenant repository to its workspace through oci_repository_routes, before any
-    // workspace is read (lake#383, decision 54 S6). A build's first push routes it from the
+    // workspace is read (lake#383). A build's first push routes it from the
     // build's workspace; anything else needs a route that exists (create_image_repository names
     // the workspace explicitly). A workload credential reaches only its own workspace's routes.
     std::expected<TenantImage, RegistryRefusal> tenant_image(const boost::http::route_params& route,
@@ -12524,7 +12524,7 @@ struct ApiServer::Impl {
     // PATCH to the same upload can append to the bytes being checked and stored. Off the server
     // thread, those bytes are checked against the digest and streamed into the workspace's liquid
     // store, the stored object must have the size that was hashed, and the blob record maps the
-    // digest to the object (decision 54 S5). The claimed file is removed once the record is
+    // digest to the object. The claimed file is removed once the record is
     // written; if the record cannot be written it goes back under its upload id, so a retry of the
     // same completion works; a store that is unavailable or over quota removes it. A workspace
     // still served from its space's store keeps phase A: the bytes go into the instance registry
@@ -14003,7 +14003,7 @@ struct ApiServer::Impl {
     }
 
     // The address an anonymous order and an authentication attempt are counted against (lake#838,
-    // LSR-103, lake#1083, lake#1132). From the proxy listener (LAKE_PROXY_PORT), whatever the peer,
+    // lake#1083, lake#1132). From the proxy listener (LAKE_PROXY_PORT), whatever the peer,
     // or from a trusted proxy on the main listener (LAKE_TRUSTED_PROXY_CIDRS): X-Real-IP, which the
     // ingress (ingress-nginx) always sets itself, overwriting any the sender sent; else the last
     // X-Forwarded-For hop, the one the nearest proxy appended; else the proxy's own address. From
@@ -14767,7 +14767,7 @@ struct ApiServer::Impl {
     }
 
     // Appends the queued workspace events to their workspaces' audits, off the request path
-    // (decision 52), and reports what was written, kept or dropped as counters.
+    //, and reports what was written, kept or dropped as counters.
     void flush_audit() {
         if (!audit_recorder) {
             return;
@@ -17396,7 +17396,7 @@ void ApiServer::stop() {
         impl.workspace_release_thread.join();
     impl.work_cv.notify_all();
     // In-flight requests have finished: write the repository usage they counted (lake#348) and
-    // the workspace audit events they queued (decision 52).
+    // the workspace audit events they queued.
     impl.flush_metering();
     impl.flush_audit();
     impl.flush_request_series();

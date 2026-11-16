@@ -1,7 +1,7 @@
 # Apps: Lake and operator contract
 
-The shared contract is [lake#293](https://github.com/oramasearch/lake/issues/293), implemented by
-[orama-operator#199](https://github.com/oramasearch/orama-operator/pull/199). Apps are distinct from
+The shared contract is lake#293, implemented by
+orama-operator#199. Apps are distinct from
 the application identity pools in [apps.md](../api/apps.md). The customer API is
 [web-apps.md](../api/web-apps.md).
 
@@ -28,7 +28,7 @@ Migration `0041_app_forward_auth` adds the short-lived, single-use authorization
 to hand a Lake session to an app host without widening the Lake cookie domain. The current
 deployment guard is `app_forward_auth_guard`; the operator must vendor the schema.
 Workspace assignment and event-client cutover are tracked in
-[orama-operator#216](https://github.com/oramasearch/orama-operator/issues/216).
+orama-operator#216.
 
 | Columns | Writer |
 |---|---|
@@ -64,7 +64,7 @@ customer lock. Hosts are unique and must be one label beneath `LAKE_APPS_WILDCAR
 `restart_app` bumps `generation` like every edit and also sets `restart_generation` to that new
 generation (migration `0104_app_restarts`, lake#1228). Before, a restart changed only `generation`:
 the operator rendered the same pod template, Kubernetes replaced nothing, and the App kept serving
-the old process (Steve pressed Restart on production on 2026-10-26 and had to delete the pod by
+the old process (a Restart on 2026-10-26 needed the pod deleted by
 hand). The operator reads `restart_generation` and, when it is above 0, writes it on the pod
 template as the annotation `orama.cloud/lake-app-restart`, so each restart is a new template and
 the Deployment rolls its pods. No other edit changes it, so scaling or changing access never

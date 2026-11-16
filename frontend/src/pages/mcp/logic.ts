@@ -274,7 +274,7 @@ export function viaLabel(via: string | null | undefined, agent?: string | null):
   return "—";
 }
 
-/** What the re-export switch says before it is turned on (decision 60). */
+/** What the re-export switch says before it is turned on. */
 export function exportWarning(serverName: string): string {
   return `Anyone who may call Lake's tools in this workspace will be able to call these tools, and Lake calls ${serverName} for them with this connection's credential. Lake's permission on the workspace is the only gate.`;
 }

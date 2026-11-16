@@ -170,7 +170,7 @@ the page (`&change=1` in the address, so Back and a reload keep it):
   answers (lake#1259): walked on lake-dev on 2026-10-27, the operator read Ready 2 seconds after the
   deploy, while the old replica still answered until 7 seconds, then a 502, then the new version from
   8 seconds. The operator counts the old replica as ready while the new one starts
-  ([orama-operator#1049](https://github.com/oramasearch/orama-operator/issues/1049)), so one reload at
+  (orama-operator#1049), so one reload at
   Ready showed the old App. A Failed or Degraded App is reported above the frame instead. **Reload** and
   **Open in a new tab** are always in the header.
 - **A confirmed proposal** stays in the thread with *You confirmed it; what happened is below*, not

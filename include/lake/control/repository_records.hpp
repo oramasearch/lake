@@ -14,7 +14,7 @@
 
 namespace lake::control {
 
-// A repository's settings (lake#315 part 2, decision 54 S10): its description, and later settings
+// A repository's settings (lake#315 part 2): its description, and later settings
 // (default branch, topics) under the same schema version rules, kept in the workspace Zetta of the
 // repository's workspace (docs/architecture/workspace-records.md). Lake's PostgreSQL keeps only the
 // routing row (`repositories`: id, space, workspace, name, visibility, tombstone), which finds the

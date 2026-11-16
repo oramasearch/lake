@@ -1,4 +1,4 @@
-// Lake as an MCP client (decision 60, lake#652, docs/api/mcp-connections.md#the-client). Pure
+// Lake as an MCP client (lake#652, docs/api/mcp-connections.md#the-client). Pure
 // protocol over an injected McpHttp: no HTTP library is named here.
 
 #include "lake/api/mcp_client.hpp"

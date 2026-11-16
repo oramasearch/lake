@@ -1,8 +1,8 @@
 # The agent bus: agent traffic over Zetta pub/sub
 
-**Issue:** [lake#269](https://github.com/oramasearch/lake/issues/269); where a task lives:
-[lake#374](https://github.com/oramasearch/lake/issues/374),
-[lake#375](https://github.com/oramasearch/lake/issues/375) · **Code:**
+**Issue:** lake#269; where a task lives:
+lake#374,
+lake#375 · **Code:**
 `include/lake/control/agent_bus.hpp`, `src/control/agent_bus.cpp`, the bus capabilities in
 `src/api/workspace_capabilities.cpp` · **Tests:** `AgentRuns.LibraryAgentsTakeTasksAndAnswerOverTheBus`,
 `HttpResponseIsolation.LibraryAgentsFinishEveryTurnKindWithoutAWorkspaceEcho`, the Ask Orama,
@@ -158,7 +158,7 @@ its `AGENT_SERVICE_TOKEN`. The person's code in that pod therefore cannot call a
 one launch's token does not open another. Lake and the operator roll together for it. Long
 polls accept up to 60 seconds (`wait_ms`), but the authorized upstream currently caps each receive
 at 30 seconds; Lake clamps accordingly and allows a 40-second transport timeout. Runtime idle
-backoff is required until [Zetta's longer poll](https://github.com/oramasearch/zetta/issues/1174)
+backoff is required until Zetta's longer poll (zetta#1174)
 lands. The at-most-one-receive-per-minute deployment acceptance is not claimed by this PR.
 
 ## A task credential is confined to its workspace
@@ -412,7 +412,7 @@ retry notice as the task's message, the indexed migration and schema reapplicati
 with local PostgreSQL in static and shared builds; see [local builds](../build/local.md).
 To change policy, update both stores, config bounds, schema checks and these tests together.
 
-The [#389 regression](https://github.com/oramasearch/lake/issues/389) is covered locally by a fake
+The #389 regression is covered locally by a fake
 library agent receiving, claiming, publishing progress and publishing its result without a
 workspace field. The HTTP test runs `app`, `solution:` and `experiment` turns against both stores,
 checks dispatch metadata, and reads workspace data with the task credential through the original
@@ -422,8 +422,8 @@ exercises Ask Orama and the Ship App proposal flow without echoing workspace IDs
 
 `tools/e2e/agents.py <base-url> <token-file> <customer-id> <workspace-id> [T1 …]` is the agents' live scenario
 suite: each library agent over the bus, as the person whose key it holds, with a pass condition per
-scenario. T1–T10 are the scenarios tracked at https://github.com/oramasearch/lake/issues/276
-through https://github.com/oramasearch/lake/issues/285. T11 builds a data App with
+scenario. T1–T10 are the scenarios tracked at lake#276
+through lake#285. T11 builds a data App with
 Application Agent, confirms the exact proposal, waits for deployment, and requests its URL. It
 prints one line per scenario and exits 1 when one fails. T12 gives Experiments Agent a goal,
 confirms its exact experiment, waits for trials and requests the explanation. Run the relevant scenario
@@ -438,7 +438,7 @@ the repository's isolated database fixture.
 
 ```sh
 export TMPDIR="$PWD/.cache/proof-tmp"
-export LAKE_TEST_DB_URI=postgresql://stevesperandeo@127.0.0.1:5432/lake_issue414_proof_20260930
+export LAKE_TEST_DB_URI=postgresql://lake@127.0.0.1:5432/lake_issue414_proof_20260930
 ctest --test-dir build --output-on-failure -j 1
 ctest --test-dir build-shared --output-on-failure -j 1
 ```

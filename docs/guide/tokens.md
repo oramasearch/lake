@@ -137,7 +137,7 @@ instead of offering the form.
 ## Using a Key
 
 ```
-curl -s https://lake.oramadev.net/v1/list_repositories?limit=5 \
+curl -s https://lake.example.com/v1/list_repositories?limit=5 \
   -H "Authorization: Bearer $LAKE_KEY"
 ```
 
