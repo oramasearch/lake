@@ -493,7 +493,11 @@ std::vector<std::string> dataset_work_area_scopes(const nlohmann::json& agent) {
     std::vector<std::string> scopes;
     const nlohmann::json detail = area->value("detail", nlohmann::json());
     bool malformed = !detail.is_string();
-    std::string_view rest = detail.is_string() ? detail.get_ref<const std::string&>() : "";
+    // Both arms are views: a `const std::string&` beside "" would make the ternary a temporary
+    // std::string, and the view would outlive it.
+    std::string_view rest = detail.is_string()
+                                ? std::string_view(detail.get_ref<const std::string&>())
+                                : std::string_view();
     while (!malformed && !rest.empty()) {
         const std::size_t comma = rest.find(',');
         std::string_view item = rest.substr(0, comma);
