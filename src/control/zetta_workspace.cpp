@@ -659,10 +659,15 @@ Result<WorkspaceEndpoint> WorkspaceService::endpoint(const std::string& customer
     return WorkspaceEndpoint{state.endpoint, token};
 }
 
-liquid::runtime::task<ZettaControlResult<nlohmann::json>> WorkspaceService::call(
-    std::string customer_id, std::string workspace_id, std::string capability,
-    bool read, nlohmann::json input,
-    std::function<void(std::chrono::nanoseconds)> observe, bool cache_definitions) {
+liquid::runtime::task<ZettaControlResult<nlohmann::json>>
+WorkspaceService::call(std::string customer_id,
+                       std::string workspace_id,
+                       std::string capability,
+                       bool read,
+                       nlohmann::json input,
+                       std::function<void(std::chrono::nanoseconds)> observe,
+                       bool cache_definitions,
+                       std::optional<std::vector<std::string>> dataset_scope) {
     const auto started = std::chrono::steady_clock::now();
     const auto found = workspace(customer_id, workspace_id);
     if (!found) {

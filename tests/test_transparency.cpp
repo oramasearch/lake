@@ -2155,9 +2155,13 @@ TEST(TransparencyScenario, ExportedBundleVerifiesOfflineAndSplitViewIsDetected) 
     auto verifier_repository = liquid::runtime::block_on(
         liquid::repository::create(temporary.path() / "offline-verifier"));
     ASSERT_TRUE(verifier_repository) << verifier_repository.error().message;
+    // The log's key and witness policy are pinned locally, never taken from the log.
+    const liquid::transparency::log_trust offline_trust{offline.bundle_.identity,
+                                                             offline.bundle_.configuration};
     const auto verified = liquid::runtime::block_on(
         verifier.verify_inclusion(*verifier_repository,
                                   decode_base64url(attestation),
+                                  offline_trust,
                                   liquid::transparency::bootstrap_policy::pinned));
     ASSERT_TRUE(verified) << verified.error().message;
     EXPECT_FALSE(verified->bootstrap_warning);
@@ -2273,9 +2277,13 @@ TEST(TransparencyScenario, ProofBundleIsPagedByTileRangeAndCapped) {
     auto verifier_repository =
         liquid::runtime::block_on(liquid::repository::create(temporary.path() / "paged-verifier"));
     ASSERT_TRUE(verifier_repository) << verifier_repository.error().message;
+    // The log's key and witness policy are pinned locally, never taken from the log.
+    const liquid::transparency::log_trust paged_trust{offline.bundle_.identity,
+                                                           offline.bundle_.configuration};
     const auto verified = liquid::runtime::block_on(
         verifier.verify_inclusion(*verifier_repository,
                                   decode_base64url(attestation),
+                                  paged_trust,
                                   liquid::transparency::bootstrap_policy::pinned));
     ASSERT_TRUE(verified) << verified.error().message;
 

@@ -903,7 +903,11 @@ void register_web_app_capabilities(Registry& registry) {
             // they confirmed its proposal (lake#891).
             json confirmed = json::object();
             if (!env->second.empty() && context.credential_kind == "agent_task") {
-                confirmed = co_await confirmed_secret_references(context);
+                // A failed read confirms nothing, so every reference is checked as the caller.
+                auto references = co_await confirmed_secret_references(context);
+                if (references) {
+                    confirmed = std::move(*references);
+                }
             }
             auto checked = co_await check_secret_references(
                 env->second, input.at("workspace_id").get<std::string>(), context, confirmed);
