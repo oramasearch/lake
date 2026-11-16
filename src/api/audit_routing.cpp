@@ -619,33 +619,38 @@ std::string text(const nlohmann::json& input, const char* key) {
                : std::string();
 }
 
-// The workspace a workspace capability's input names through its object. Each read is one
-// indexed PostgreSQL lookup of a routing row; no workspace is called.
-std::string object_workspace(const Capability* capability,
-                             const nlohmann::json& input,
-                             const ApiContext& context) {
+} // namespace
+
+NamedObjectWorkspace named_object_workspace(const Capability* capability,
+                                            const nlohmann::json& input,
+                                            const ApiContext& context) {
+    if (context.store == nullptr) {
+        return {};
+    }
     control::Store& store = *context.store;
     const std::string object = capability ? capability->object : std::string();
-    const auto repository_workspace = [&store](const std::string& id) -> std::string {
+    const auto repository_workspace = [&store](const std::string& id) -> NamedObjectWorkspace {
         if (id.empty()) {
             return {};
         }
         const auto repository = store.get_repository(id);
-        return repository ? repository->workspace_id : std::string();
+        return repository ? NamedObjectWorkspace{repository->workspace_id,
+                                                 repository->visibility == "public"}
+                          : NamedObjectWorkspace{};
     };
     for (const char* key : {"repository_id", "repository"}) {
-        if (auto found = repository_workspace(text(input, key)); !found.empty()) {
+        if (auto found = repository_workspace(text(input, key)); !found.workspace_id.empty()) {
             return found;
         }
     }
     if (object == "repository") {
-        if (auto found = repository_workspace(text(input, "id")); !found.empty()) {
+        if (auto found = repository_workspace(text(input, "id")); !found.workspace_id.empty()) {
             return found;
         }
     }
     if (const std::string mount = text(input, "mount_id"); !mount.empty()) {
         if (const auto route = store.get_secret_mount_route(mount)) {
-            return route->workspace_id;
+            return {route->workspace_id};
         }
     }
     std::string application = text(input, "application_id");
@@ -654,19 +659,41 @@ std::string object_workspace(const Capability* capability,
     }
     if (!application.empty()) {
         if (const auto found = store.get_application(application)) {
-            return found->workspace_id;
+            return {found->workspace_id};
         }
     }
     if (const std::string app = text(input, "app_id"); !app.empty()) {
         if (const auto found = store.get_web_app(app)) {
-            return found->workspace_id;
+            return {found->workspace_id};
         }
     }
     if (const std::string build = text(input, "build_id"); !build.empty()) {
         if (const auto found = store.get_build(build)) {
-            return found->workspace_id;
+            return {found->workspace_id};
         }
     }
+    return {};
+}
+
+namespace {
+
+// The workspace a workspace capability's input names through its object. Each read is one
+// indexed PostgreSQL lookup of a routing row; no workspace is called.
+std::string object_workspace(const Capability* capability,
+                             const nlohmann::json& input,
+                             const ApiContext& context) {
+    control::Store& store = *context.store;
+    if (auto named = named_object_workspace(capability, input, context);
+        !named.workspace_id.empty()) {
+        return named.workspace_id;
+    }
+    const auto repository_workspace = [&store](const std::string& id) -> std::string {
+        if (id.empty()) {
+            return {};
+        }
+        const auto repository = store.get_repository(id);
+        return repository ? repository->workspace_id : std::string();
+    };
     // An app or build credential acts for its app or build (Registry's token checks set these).
     const std::string& audited = context.audit_object;
     if (audited.starts_with("app/") && uuid_shaped(audited.substr(4))) {

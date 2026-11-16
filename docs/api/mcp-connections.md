@@ -339,9 +339,23 @@ Optional, per connection (Steve's design in lake#652):
 The streams act with the authority of **the person who last set the agent or a stream**
 (`streams_set_by`), as a schedule's runs act as whoever set the schedule: their permission on the
 workspace decides whether a job starts. The store root's owner runs them, and only it
-(`McpStreamWorker`, on the server's maintenance thread, every `mcp_stream_interval`, 15 s), so two
-replicas never mirror a notification twice; each pass reads at most 64 connections and 20 input
-events each.
+(`McpStreamWorker`, on a thread of its own, every `mcp_stream_interval`, 15 s), so two replicas
+never mirror a notification twice; each pass reads at most 64 connections and 20 input events each.
+
+**One slow server cannot hold the others** (lake#980, LSR-113). The pass, with the workspace-stream
+agents and resource repairs that share it, runs on its own thread, never on the maintenance thread
+that samples usage and runs deletions, orders and balances, so those keep their intervals whatever
+an outside server does. Its bounds are `McpStreamLimits`:
+
+| Bound | Value | Past it |
+|---|---|---|
+| A pass | 10 s | no further connection is started; the next pass begins at the workspace where this one stopped, so every workspace is reached in turn (`lake_mcp_stream_passes_stopped_early_total`) |
+| Opening one connection's stream: `initialize` and its subscriptions (at most 50) | 5 s | the remaining subscriptions are not sent, the session is dropped and the connection backs off, with a problem naming it |
+| One exchange of a stream session | 5 s | the exchange fails (a call's own exchanges keep 30 s) |
+| Back-off after a failure (a failed `initialize`, an open past its budget, a stream that errs, no credential) | 30 s, doubled each further failure, at most 15 min | the server is not contacted again until it ends (`lake_mcp_stream_backoffs_total`); a success, or a change to the connection's URL, transport, secret or subscriptions, clears it |
+
+Input events and finished results (steps 2 and 3) are not held by a back-off: they read the
+workspace's own streams, not the outside server.
 
 **Only the workspaces that stream are called** (lake#685). The connection's dispatch row says it
 `streams` when it has a notifications topic, an agent with an input topic, or finished jobs'
@@ -460,6 +474,10 @@ sends it neither the refresh token nor a pending sign-in's code and verifier, an
 neither the old sign-in nor the pending one is used. `...McpConnectionStreamsMirrorNotificationsAndDriveTheAgent`:
 notifications mirrored to their topic after a subscription, one job per input event as the person,
 and its result published once on the output topic.
+`...McpStreamWorkerASlowServerBacksOffAndThePassKeepsItsBudget` (lake#980): a server that answers
+past the open budget is dropped and not contacted on the next pass, a pass with a zero budget
+starts no connection and resumes at the same workspace, and a change to the connection clears the
+back-off.
 `...McpConnectionDispatchNamesExportsAndStreamingWorkspacesOnly`: no row for a connection that
 neither streams nor re-exports, the endpoint digest changing on export and on an allow-list change
 (and not on a refresh that changes nothing), a session that listed not told again, the worker

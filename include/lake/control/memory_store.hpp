@@ -45,9 +45,11 @@ public:
     Result<NetworkEgressRule> get_network_egress_rule(const NetworkScope&,
                                                       const std::string& id) override;
     Result<std::vector<NetworkEgressRule>> list_network_egress_rules(const NetworkScope&) override;
-    Result<NetworkTunnelGrant> create_network_tunnel_grant(const NetworkScope&,
-                                                           const NetworkTunnelGrantSpec&,
-                                                           const NetworkActor&) override;
+    Result<NetworkTunnelGrant>
+    create_network_tunnel_grant(const NetworkScope&,
+                                const NetworkTunnelGrantSpec&,
+                                const NetworkActor&,
+                                const NetworkTunnelGrantLimits&) override;
     Result<NetworkTunnelGrant> update_network_tunnel_grant(const NetworkScope&,
                                                            const std::string& id,
                                                            const NetworkTunnelGrantSpec&,
@@ -586,6 +588,7 @@ public:
                                     const std::string& challenge) override;
     Result<AccountIdentity> link_own_identity(const IdentityLink&) override;
     Result<std::string> account_for_identity(const std::string& taap_id) override;
+    Result<std::string> registered_identity_document(const std::string& taap_id) override;
     Result<void> register_oauth_provider(const OAuthProvider&) override;
     Result<OAuthProvider> get_oauth_provider(const std::string& pool_id,
                                              const std::string& provider) override;
@@ -678,13 +681,15 @@ private:
     Result<void> check_network_target_locked(const NetworkScope&,
                                              const std::string& kind,
                                              const std::string& id) const;
+    // `grant_limits` applies to a tunnel grant's create only (lake#983).
     template <class Row>
     Result<Row> change_network(const NetworkScope&,
                                const std::string& id,
                                const nlohmann::json& spec,
                                const NetworkActor&,
                                const std::string& operation,
-                               std::vector<Row>& rows);
+                               std::vector<Row>& rows,
+                               const NetworkTunnelGrantLimits* grant_limits = nullptr);
     template <class Row>
     Result<Row>
     get_network(const NetworkScope&, const std::string& id, const std::vector<Row>& rows);
@@ -862,6 +867,9 @@ private:
     std::vector<IdentityLinkChallengeRecord> identity_link_challenges_;
     // user id -> its own identity, linked as the managed key's successor.
     std::map<std::string, IdentityLink> identity_links_;
+    // The initial identity document each documented sign-up registered, by its TAAP identifier
+    // (PostgreSQL's identity_documents, lake#1020).
+    std::map<std::string, std::string> identity_documents_;
     std::map<std::string, std::string> identity_linked_at_;
     std::vector<WebAuthnChallengeRecord> webauthn_challenges_;
     std::vector<OAuthProvider> oauth_providers_;

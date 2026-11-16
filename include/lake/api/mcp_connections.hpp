@@ -4,6 +4,7 @@
 // capabilities over them, and what Lake's own MCP endpoint needs to re-export a connection's
 // allowed tools under its prefix.
 
+#include <chrono>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -42,7 +43,8 @@ liquid::runtime::task<nlohmann::json> call_exported_mcp_tool(const Registry& reg
                                                              nlohmann::json arguments);
 
 // The stream worker (docs/api/mcp-connections.md#a-connections-agent-and-streams), run by the store
-// root's owner only, on its maintenance thread: for each Ready workspace's connections, it mirrors
+// root's owner only, on a thread of its own (lake#980), never the maintenance thread that samples
+// usage and runs deletions and orders: for each Ready workspace's connections, it mirrors
 // the server's notifications to the connection's notifications topic (one session kept open per
 // connection between passes, its subscriptions renewed when they change), starts a job of the
 // connection's agent for each new event on its input topic, as the person who set the streams, and
@@ -53,11 +55,31 @@ struct McpStreamPass {
     std::size_t notifications = 0;
     std::size_t turns = 0;
     std::size_t results = 0;
+    // lake#980: connections whose server is not contacted this pass because earlier attempts
+    // failed, and whether the pass stopped at its time budget or connection count before reaching
+    // every workspace (the next pass starts where this one stopped).
+    std::size_t backing_off = 0;
+    bool stopped_early = false;
     std::vector<std::string> problems;
+};
+// Bounds on what one outside server can cost a pass (lake#980, LSR-113).
+struct McpStreamLimits {
+    // A pass starts no further connection once this much time has gone; the next pass resumes at
+    // the workspace where it stopped, so every workspace is reached in turn.
+    std::chrono::milliseconds pass_budget{10'000};
+    // Opening one connection's session: initialize, then each resource subscription. Past it the
+    // remaining subscriptions are not sent, the session is dropped and the connection backs off.
+    std::chrono::milliseconds connection_budget{5'000};
+    // One HTTP exchange of a stream session (a call's own exchanges keep McpLimits' 30 s).
+    std::chrono::milliseconds exchange_timeout{5'000};
+    // After a failure the connection's server is not contacted again for `backoff_first`, doubled
+    // after each further failure up to `backoff_max`; one success clears it.
+    std::chrono::milliseconds backoff_first{30'000};
+    std::chrono::milliseconds backoff_max{15 * 60'000};
 };
 class McpStreamWorker {
 public:
-    McpStreamWorker();
+    explicit McpStreamWorker(McpStreamLimits limits = {});
     ~McpStreamWorker();
     McpStreamPass pass(ApiContext& context);
 

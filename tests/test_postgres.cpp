@@ -1418,6 +1418,79 @@ TEST(PostgresServices, CreateListAndWithdrawFollowTheContract) {
 
 // lake#1228: restart_app writes restart_generation, the column the operator renders on the pod
 // template; any other change leaves it.
+// lake#987 (LSR-120), against either store: an account at LAKE_WORKSPACES_PER_CUSTOMER live
+// workspaces, or at LAKE_SERVICES_PER_CUSTOMER live services (a workspace's own Zetta is one), is
+// refused its next workspace with quota_exceeded; a deleted workspace stops counting, and another
+// account is unaffected.
+static void expect_workspace_limits(lake::control::Store& store, const std::string& suffix) {
+    const auto first_user = store.create_user(
+        {"taap:1:ed25519:wsl-a-" + suffix, "wsl-a-" + suffix + "@example.com", "Limits A"});
+    const auto other_user = store.create_user(
+        {"taap:1:ed25519:wsl-b-" + suffix, "wsl-b-" + suffix + "@example.com", "Limits B"});
+    ASSERT_TRUE(first_user) << first_user.error().message;
+    ASSERT_TRUE(other_user) << other_user.error().message;
+    const auto account =
+        store.create_customer({"individual", first_user->id, "", "wsl-a-" + suffix});
+    const auto other = store.create_customer({"individual", other_user->id, "", "wsl-b-" + suffix});
+    ASSERT_TRUE(account) << account.error().message;
+    ASSERT_TRUE(other) << other.error().message;
+
+    const auto limited = [](const std::string& customer_id, const std::string& name) {
+        lake::control::NewWorkspace input{customer_id, name, "prod", "taap:x"};
+        input.max_workspaces = 2;
+        return input;
+    };
+    const auto one = store.create_workspace(limited(account->id, "one"));
+    ASSERT_TRUE(one) << one.error().message;
+    const auto two = store.create_workspace(limited(account->id, "two"));
+    ASSERT_TRUE(two) << two.error().message;
+    const auto three = store.create_workspace(limited(account->id, "three"));
+    ASSERT_FALSE(three);
+    EXPECT_EQ(three.error().code, "quota_exceeded");
+    const auto listed = store.list_workspaces(account->id);
+    ASSERT_TRUE(listed);
+    EXPECT_EQ(listed->size(), 2U) << "nothing is written when the limit refuses";
+
+    // Another account still creates one.
+    const auto elsewhere = store.create_workspace(limited(other->id, "one"));
+    EXPECT_TRUE(elsewhere) << elsewhere.error().message;
+
+    // No limit (0) is the default.
+    EXPECT_TRUE(store.create_workspace({account->id, "unlimited", "prod", "taap:x"}));
+
+    // A deleted workspace no longer counts.
+    lake::control::WorkspacePatch deleted;
+    deleted.desired = "deleted";
+    ASSERT_TRUE(store.update_workspace(one->id, deleted));
+    ASSERT_TRUE(store.update_workspace(two->id, deleted));
+    EXPECT_TRUE(store.create_workspace(limited(account->id, "after")));
+
+    // The workspace's own Zetta counts against the service limit.
+    lake::control::NewWorkspace by_services{other->id, "two", "prod", "taap:x"};
+    by_services.max_services = 1;
+    const auto refused = store.create_workspace(by_services);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "quota_exceeded");
+    by_services.max_services = 2;
+    EXPECT_TRUE(store.create_workspace(by_services));
+}
+
+TEST(WorkspaceLimits, MemoryStoreRefusesTheNextWorkspaceOnly) {
+    lake::control::InMemoryStore store;
+    expect_workspace_limits(store, lake::control::new_uuid_v4().substr(0, 8));
+}
+
+TEST(WorkspaceLimits, PostgresStoreRefusesTheNextWorkspaceOnly) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    expect_workspace_limits(*store, lake::control::new_uuid_v4().substr(0, 8));
+}
+
 TEST(PostgresWebApps, ARestartRecordsTheGenerationTheOperatorRollsThePodsOn) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {

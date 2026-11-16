@@ -16,6 +16,18 @@ is written to a network row or returned by these capabilities.
 The instance must have its existing PKI/instance-KEK configuration; missing signing capability or
 unreadable protected CA keys fail closed.
 
+### How many grants (lake#983, LSR-116)
+
+Every active grant (not revoked, not expired) is projected into the cluster's one relay grants
+document, which the relay refuses past 1 MiB or 10,000 entries, so one tenant must not be able to
+fill it for every other. `grant_network_tunnel` is refused with `quota_exceeded` (HTTP 507) when the
+workspace already holds `LAKE_TUNNEL_GRANTS_PER_WORKSPACE` active grants (default 100) or its account
+`LAKE_TUNNEL_GRANTS_PER_CUSTOMER` (default 500); `0` turns a cap off. The store counts in the same
+transaction as the insert, under the account's row lock, so concurrent grants cannot both pass, and
+a refused grant writes nothing. Revoking a grant, or its expiry, frees its place. Updating an
+existing grant is not counted again. The operator's own bound on the relay projection (one
+tenant's grants partitioned or capped there) is orama-operator#782.
+
 After the operator reports `status.phase: Ready`, an `observed_generation` matching the desired
 generation, a nonempty relay `endpoint` and `relay_ca_pem`, the recipient calls
 `POST /v1/issue_network_tunnel_certificate` (or the MCP tool with that name):
@@ -97,7 +109,8 @@ grant/connect/revoke/session-ends end-to-end proof.
 
 ## Verification and changes
 
-`TunnelCredentials` runs against memory and PostgreSQL and covers CSR signing and rejected
+`NetworkStore.ActiveTunnelGrantsAreCappedPerWorkspaceAndPerAccount` (memory and PostgreSQL) covers
+the grant caps. `TunnelCredentials` runs against memory and PostgreSQL and covers CSR signing and rejected
 requests, validity bounds, recipient-only authorization, admin-only mutations, revocation,
 expiry, trust pinning and signed audit. `NetworkCapabilities` exercises provider authorization,
 scope, bounds and the pending default. `PostgresNetwork` covers migration columns/defaults,

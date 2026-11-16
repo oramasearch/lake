@@ -66,7 +66,8 @@ Result<Row> InMemoryStore::change_network(const NetworkScope& scope,
                                           const nlohmann::json& spec,
                                           const NetworkActor& actor,
                                           const std::string& operation,
-                                          std::vector<Row>& rows) {
+                                          std::vector<Row>& rows,
+                                          const NetworkTunnelGrantLimits* grant_limits) {
     if (auto checked = network_detail::validate_scope(scope); !checked) {
         return std::unexpected(checked.error());
     }
@@ -118,6 +119,26 @@ Result<Row> InMemoryStore::change_network(const NetworkScope& scope,
                     return user.id == spec.at("user_id").get<std::string>();
                 })) {
                 return std::unexpected(StoreError{"invalid_input", "no tunnel user"});
+            }
+            // lake#983: counted under the store's lock, as PostgreSQL counts under the account's
+            // row lock.
+            if (create && grant_limits != nullptr) {
+                std::size_t in_workspace = 0;
+                std::size_t in_account = 0;
+                for (const NetworkTunnelGrant& grant : rows) {
+                    if (grant.customer_id != scope.customer_id ||
+                        !network_tunnel_grant_active(grant)) {
+                        continue;
+                    }
+                    ++in_account;
+                    if (grant.workspace_id == scope.workspace_id) {
+                        ++in_workspace;
+                    }
+                }
+                if (auto refused = network_detail::tunnel_grant_limit_refusal(
+                        *grant_limits, in_workspace, in_account)) {
+                    return std::unexpected(*refused);
+                }
             }
         }
         auto value = network_detail::metadata_json(result);
@@ -279,10 +300,13 @@ Result<void> InMemoryStore::set_network_egress_rule_status(const std::string& id
     return set_network_status(id, status, network_egress_rules_);
 }
 
-Result<NetworkTunnelGrant> InMemoryStore::create_network_tunnel_grant(
-    const NetworkScope& scope, const NetworkTunnelGrantSpec& spec, const NetworkActor& actor) {
+Result<NetworkTunnelGrant>
+InMemoryStore::create_network_tunnel_grant(const NetworkScope& scope,
+                                           const NetworkTunnelGrantSpec& spec,
+                                           const NetworkActor& actor,
+                                           const NetworkTunnelGrantLimits& limits) {
     return change_network(
-        scope, "", network_detail::encode(spec), actor, "create", network_tunnel_grants_);
+        scope, "", network_detail::encode(spec), actor, "create", network_tunnel_grants_, &limits);
 }
 
 Result<NetworkTunnelGrant>

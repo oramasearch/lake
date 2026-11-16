@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -101,6 +102,15 @@ struct NetworkPeerSpec {
 struct NetworkPeer : NetworkMetadata {
     NetworkPeerSpec spec;
     std::string desired = "present";
+};
+
+// lake#983 (LSR-116): the most active (unrevoked, unexpired) tunnel grants a workspace and its
+// account may hold, checked when a grant is created; 0 means no limit. Every active grant is
+// projected into the cluster's one relay grants document, so a cap keeps one tenant from filling
+// it.
+struct NetworkTunnelGrantLimits {
+    std::size_t per_workspace = 0; // LAKE_TUNNEL_GRANTS_PER_WORKSPACE
+    std::size_t per_customer = 0;  // LAKE_TUNNEL_GRANTS_PER_CUSTOMER
 };
 
 // A grant is effective until it is revoked or its UTC expiry passes. Operator status can lag,

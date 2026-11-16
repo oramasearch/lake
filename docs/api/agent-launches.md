@@ -59,8 +59,11 @@ and gives the credential:
 A skill's changes are never scopes: agent-runtime turns them into proposals a person confirms, and
 the confirmed change runs as that person. The few engine actions a skill lets agent-runtime call
 directly (`check_pipeline`, `start_run`, `generate_dataset`, `decide`, `record_outcome`,
-agent-runtime#11) need no scope of their own: `workspace_act`, which every run has, grants each named
-engine action ([engine-capabilities.md](engine-capabilities.md)), and the engine's policy decides. Which reads each skill grants is agent-runtime's decision
+agent-runtime#11) need no scope of their own: `workspace_act`, which every run has, grants those
+five (`control::agent_run_direct_actions`) and the engine's policy decides. **It grants no other
+action** (LSR-009, lake#918): a launch's or a schedule's `workspace_act` of anything else, such as
+`delete_project`, is `unauthorized` unless its scopes name that action, so code in a run cannot
+change the workspace without a person ([engine-capabilities.md](engine-capabilities.md)). Which reads each skill grants is agent-runtime's decision
 (`skills.py`, published as `skills.json`); lake vendors it with
 `tools/agents/vendor-agent-skills.py <agent-runtime>/skills.json` into
 `src/control/agent_skills.cpp` (and the labels into
@@ -69,6 +72,17 @@ engine action ([engine-capabilities.md](engine-capabilities.md)), and the engine
 leaves out `workspace_id` gets its launch's or schedule's workspace, as a task credential gets its
 task's (lake#652). A schedule's runs and a conversation
 service get the same scopes as a launch of the same agent.
+
+**A run's credential stays in its workspace, whatever object a call names** (LSR-009, lake#918).
+Beside the workspace a call names and the `/w/<id>/` route it reaches (lake#1286), Lake checks the
+object a call's input names before the handler runs: a repository (`repository_id`, `repository`,
+or a repository capability's `id`), an app (`app_id`), a build (`build_id`), an application or a
+secret mount. When its routing row puts it in another workspace than the task's, launch's or
+schedule's own, the call is `unauthorized` (*this agent credential belongs to another workspace
+than the one … would act in*), in any account of the person. A public repository stays readable,
+as it is to anyone. The lookup is `named_object_workspace` (`src/api/audit_routing.cpp`), the
+same routing read the audit uses to place a call's event. Verify:
+`Streams.LaunchCredentialIsBoundThroughObjectsAndRunsNoUnnamedAction`.
 
 Verify: `AgentRuns.ARunsKeyCarriesTheReadsOfItsAgentsSkillsAndNoChange` and
 `AgentRuns.EverySkillLakeOffersIsOneAgentRuntimeDefines` (tests/test_workspaces.cpp).

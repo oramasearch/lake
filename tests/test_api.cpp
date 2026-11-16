@@ -7576,6 +7576,200 @@ TEST(ModelProvenance, SignedDatasetChainVerifiesAndTamperingIsRefused) {
     server.stop();
 }
 
+// A person's key in a LIQUID_HOME of its own, so Lake's process identity store never holds it.
+struct ForeignSigner {
+    liquid::signer signer;
+    std::string document; // base64url canonical CBOR, as `liquid identity show --document` prints
+};
+
+ForeignSigner foreign_signer_at(const std::filesystem::path& home) {
+    const char* previous = std::getenv("LIQUID_HOME");
+    const std::optional<std::string> saved =
+        previous == nullptr ? std::nullopt : std::optional<std::string>{previous};
+    setenv("LIQUID_HOME", home.c_str(), 1);
+    auto signer = liquid::runtime::block_on(liquid::identity_detail::local_signer());
+    if (saved) {
+        setenv("LIQUID_HOME", saved->c_str(), 1);
+    } else {
+        unsetenv("LIQUID_HOME");
+    }
+    EXPECT_TRUE(signer) << (signer ? "" : signer.error().message);
+    const auto document = signer->document();
+    EXPECT_TRUE(document);
+    const auto encoded = liquid::encode_identity_document(*document);
+    EXPECT_TRUE(encoded);
+    const std::string raw(reinterpret_cast<const char*>(encoded->data()), encoded->size());
+    return ForeignSigner{std::move(*signer), lake::control::identity_crypto::base64url_encode(raw)};
+}
+
+liquid::attestation sign_attestation_as(liquid::signer& signer, liquid::attestation value) {
+    value.issuer = signer.identity();
+    auto body = liquid::objects::encode_attestation_body(value);
+    EXPECT_TRUE(body) << body.error().message;
+    auto signed_value = liquid::runtime::block_on(signer.sign("attestation", *body));
+    EXPECT_TRUE(signed_value) << signed_value.error().message;
+    auto signature = liquid::encode_attestation_signature(*signed_value);
+    EXPECT_TRUE(signature) << signature.error().message;
+    value.signature = std::move(*signature);
+    return value;
+}
+
+// lake#1020: a provenance chain a registered person signed verifies through the identity document
+// they registered with Lake (`identity_documents`), which Lake passes to liquid as the issuer's
+// chain; the same chain signed by an identity no account registered is refused as an unknown
+// signer.
+TEST(ModelProvenance, ARegisteredIssuerVerifiesThroughTheirDocumentAndAnUnknownOneDoesNot) {
+    TemporarySyncRoot temporary;
+    auto control = std::make_shared<lake::control::InMemoryStore>();
+    ForeignSigner trainer = foreign_signer_at(temporary.path() / "trainer-home");
+    ForeignSigner stranger = foreign_signer_at(temporary.path() / "stranger-home");
+
+    lake::control::NewPasswordUser sign_up;
+    sign_up.pool_id = "lake";
+    sign_up.email = "registered-trainer@example.test";
+    sign_up.password = "correct horse battery staple";
+    sign_up.display_name = "Trainer";
+    sign_up.device_name = "laptop";
+    sign_up.identity_document = trainer.document;
+    const auto session = control->sign_up_password(sign_up);
+    ASSERT_TRUE(session) << session.error().message;
+    const auto customer = lake::test::personal_customer(*control, session->session.user_id);
+    ASSERT_TRUE(customer) << customer.error().message;
+
+    // The store answers the registered document, and nothing for the stranger.
+    const auto registered =
+        control->registered_identity_document(trainer.signer.identity().taap_id);
+    ASSERT_TRUE(registered) << registered.error().message;
+    EXPECT_EQ(*registered, trainer.document);
+    const auto unknown = control->registered_identity_document(stranger.signer.identity().taap_id);
+    ASSERT_FALSE(unknown);
+    EXPECT_EQ(unknown.error().code, "not_found");
+
+    const auto dataset =
+        control->create_repository({customer->id,
+                                    "registered-dataset",
+                                    "",
+                                    "private",
+                                    lake::test::repository_workspace(*control, customer->id)});
+    const auto model =
+        control->create_repository({customer->id,
+                                    "registered-model",
+                                    "",
+                                    "private",
+                                    lake::test::repository_workspace(*control, customer->id)});
+    ASSERT_TRUE(dataset);
+    ASSERT_TRUE(model);
+    auto dataset_source =
+        liquid::runtime::block_on(liquid::repository::create(temporary.path() / "dataset"));
+    auto model_source =
+        liquid::runtime::block_on(liquid::repository::create(temporary.path() / "model"));
+    ASSERT_TRUE(dataset_source);
+    ASSERT_TRUE(model_source);
+    ASSERT_TRUE(liquid::runtime::block_on(
+        dataset_source->write("training.jsonl", bytes("{\"example\":1}\n"))));
+    const auto dataset_change = liquid::runtime::block_on(dataset_source->cut("dataset"));
+    ASSERT_TRUE(dataset_change);
+    ASSERT_TRUE(
+        liquid::runtime::block_on(model_source->write("weights.bin", bytes("trained weights"))));
+    const auto model_change = liquid::runtime::block_on(model_source->cut("model"));
+    ASSERT_TRUE(model_change);
+
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "issuer-chain-test";
+    options.admin_token = "issuer-chain-admin";
+    options.instance_kek = "issuer-chain-test-instance-kek";
+    options.store_root = (temporary.path() / "lake").string();
+    options.store = control;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string origin = "http://127.0.0.1:" + std::to_string(server.port());
+    liquid::sync_endpoint dataset_endpoint(
+        origin + "/v1/repositories/" + dataset->id,
+        liquid::sync_endpoint_options{.bearer_token = "issuer-chain-admin"});
+    liquid::sync_endpoint model_endpoint(
+        origin + "/v1/repositories/" + model->id,
+        liquid::sync_endpoint_options{.bearer_token = "issuer-chain-admin"});
+    ASSERT_TRUE(liquid::runtime::block_on(dataset_endpoint.push(*dataset_source)));
+    ASSERT_TRUE(liquid::runtime::block_on(model_endpoint.push(*model_source)));
+
+    const auto at = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    const auto chain_signed_by = [&](liquid::signer& signer) {
+        liquid::attestation model_statement{
+            .subject = model_change->value,
+            .profile = "model_provenance/1",
+            .at = at,
+            .subject_kind = liquid::attestation_subject_kind::model,
+            .attributes = {{"training_dataset", liquid::to_string(dataset_change->value)},
+                           {"training_code", liquid::to_string(dataset_change->value)}}};
+        const liquid::slsa_resource_descriptor resource{
+            "liquid:training",
+            {{"blake3", liquid::to_string(dataset_change->value)}},
+            std::nullopt};
+        liquid::attestation run_statement{
+            .subject = model_change->value,
+            .profile = "slsa_provenance/1",
+            .at = at,
+            .subject_kind = liquid::attestation_subject_kind::artifact,
+            .slsa_provenance = liquid::slsa_provenance_v1{
+                .build_definition = {.build_type = "https://lake.orama.com/training/v1",
+                                     .external_parameters = {{"train", "--epochs", "3"},
+                                                             "/workspace",
+                                                             {{"CUDA", "12.8"}}},
+                                     .internal_parameters = {.toolchain = resource,
+                                                             .sandbox = resource,
+                                                             .platform = {{"os", "linux"}}},
+                                     .resolved_dependencies = {resource}},
+                .run_details = {
+                    .builder = {signer.identity().taap_id},
+                    .metadata = {"run-1020", "2026-11-14T00:00:00Z", "2026-11-14T00:01:00Z"},
+                    .byproducts = {resource}}}};
+        const auto model_encoded =
+            liquid::encode_attestation(sign_attestation_as(signer, std::move(model_statement)));
+        const auto run_encoded =
+            liquid::encode_attestation(sign_attestation_as(signer, std::move(run_statement)));
+        EXPECT_TRUE(model_encoded);
+        EXPECT_TRUE(run_encoded);
+        return nlohmann::json{{"id", model->id},
+                              {"revision", "main"},
+                              {"dataset_repository_id", dataset->id},
+                              {"dataset_revision", "main"},
+                              {"model_attestation", base64_bytes(*model_encoded)},
+                              {"run_attestation", base64_bytes(*run_encoded)}};
+    };
+
+    const std::string strange = http_request(server.port(),
+                                             "POST",
+                                             "/v1/attach_model_provenance",
+                                             chain_signed_by(stranger.signer).dump(),
+                                             "application/json",
+                                             {},
+                                             "Bearer issuer-chain-admin");
+    EXPECT_NE(strange.find(" 400 "), std::string::npos) << strange;
+    EXPECT_NE(strange.find("unknown signer"), std::string::npos) << strange;
+
+    const std::string attached = http_request(server.port(),
+                                              "POST",
+                                              "/v1/attach_model_provenance",
+                                              chain_signed_by(trainer.signer).dump(),
+                                              "application/json",
+                                              {},
+                                              "Bearer issuer-chain-admin");
+    EXPECT_NE(attached.find(" 200 "), std::string::npos) << attached;
+    EXPECT_TRUE(response_json(attached)["value"]["verified"]) << attached;
+    const std::string verified =
+        http_request(server.port(),
+                     "POST",
+                     "/v1/verify_model_provenance",
+                     nlohmann::json({{"id", model->id}, {"revision", "main"}}).dump(),
+                     "application/json",
+                     {},
+                     "Bearer issuer-chain-admin");
+    EXPECT_NE(verified.find(" 200 "), std::string::npos) << verified;
+    EXPECT_TRUE(response_json(verified)["value"]["verified"]) << verified;
+    server.stop();
+}
+
 TEST(RepositoryHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
     TemporaryRepositoryRoot root;
     const auto store = std::make_shared<lake::control::InMemoryStore>();

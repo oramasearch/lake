@@ -217,6 +217,57 @@ TEST_F(Streams, LaunchCredentialCannotSelectAnotherWorkspaceInTheSameSpace) {
               "unauthorized");
 }
 
+// LSR-009 (lake#918): a launch's credential reaches only its own workspace through the object its
+// input names, whose workspace the handler derives (here a repository), and its `workspace_act`
+// runs no action its credential does not name. A public repository stays readable.
+TEST_F(Streams, LaunchCredentialIsBoundThroughObjectsAndRunsNoUnnamedAction) {
+    const auto second = workspace->add(store, customer, "second");
+    const auto own = store->create_repository({customer, "own", "", "private", workspace->id});
+    const auto foreign = store->create_repository({customer, "foreign", "", "private", second});
+    const auto open = store->create_repository({customer, "open", "", "public", second});
+    ASSERT_TRUE(own && foreign && open);
+    lake::control::NewAgentLaunch row;
+    row.customer_id = customer;
+    row.agent_id = "a-1";
+    row.agent_name = "Watcher";
+    row.mode = "job";
+    row.trigger = "manual";
+    row.scopes = {"repository_tree", "workspace_act"};
+    row.created_by_taap_id = "taap:stream-owner";
+    row.workspace_id = workspace->id;
+    const auto launch = store->create_agent_launch(row);
+    ASSERT_TRUE(launch) << launch.error().message;
+    context.session_credential = true;
+    context.operator_credential = false;
+    context.credential_kind = "agent_launch";
+    context.credential_session_id = "launch:" + launch->id;
+    context.scopes = row.scopes;
+    const auto tree = [&](const std::string& id) {
+        context.request_id = lake::control::new_uuid_v4();
+        const auto result = liquid::runtime::block_on(
+            registry.call_async("repository_tree", {{"id", id}, {"ref", "main"}}, context));
+        EXPECT_TRUE(result);
+        return *result;
+    };
+    const auto refused = tree(foreign->id);
+    EXPECT_EQ(refused.error.code, "unauthorized");
+    EXPECT_NE(refused.error.message.find("another workspace"), std::string::npos)
+        << refused.error.message;
+    EXPECT_EQ(tree(own->id).error.message.find("another workspace"), std::string::npos);
+    EXPECT_EQ(tree(open->id).error.message.find("another workspace"), std::string::npos)
+        << "a public repository is readable by anyone";
+
+    // workspace_act alone runs no action: the run's code proposes, a person confirms.
+    const auto acted = call("workspace_act",
+                            {{"customer_id", customer},
+                             {"capability", "delete_project"},
+                             {"input", {{"project", "p-1"}}}});
+    EXPECT_EQ(acted.error.code, "unauthorized");
+    EXPECT_NE(acted.error.message.find("does not grant the workspace action delete_project"),
+              std::string::npos)
+        << acted.error.message;
+}
+
 TEST_F(Streams, DeletedAppsAndExpiredBuildsAreReapedWithoutTouchingLiveTopics) {
     const auto app = store->create_web_app({.customer_id = customer, .workspace_id = workspace->id,
         .name = "deleted-app", .mode = "image", .image = "app:v1", .host = "deleted.test"});

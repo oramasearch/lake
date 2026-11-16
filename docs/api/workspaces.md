@@ -437,7 +437,26 @@ and `WorkspaceSql.GatewayRowCap*`.
 | Variable | Set by | Meaning |
 |---|---|---|
 | `LAKE_SERVICE_DIR` | operator | Mounted service connections, including the workspace's token |
-| `LAKE_SERVICES_PER_CUSTOMER` | optional | Live services per customer, the workspace included (default `0`: no limit) |
+| `LAKE_SERVICES_PER_CUSTOMER` | optional | Live services per customer, each workspace's own Zetta included (default `0`: no limit). `create_workspace` and the first workspace's request count it too (lake#987) |
+| `LAKE_WORKSPACES_PER_CUSTOMER` | optional | Live (not deleted) workspaces per customer (default `0`: no limit, lake#987) |
+
+### Per-account workspace limit (lake#987, LSR-120)
+
+Each workspace becomes a namespace with its own Zetta and a volume, so one account could otherwise
+take shared capacity from every other. `create_workspace`, and the first workspace an account's
+request makes, count in the same transaction as the insert, under the customer's row lock:
+
+- the account's live workspaces (`desired` not `deleted`) against `LAKE_WORKSPACES_PER_CUSTOMER`;
+- the account's live services (`desired = 'present'`) against `LAKE_SERVICES_PER_CUSTOMER`, since
+  the new workspace's Zetta service row is one. Before, that row was inserted outside the check
+  `create_service` makes.
+
+Over either, the call answers `quota_exceeded` (HTTP 507, as `create_service` at its limit) and nothing is written; another account
+is unaffected. A deleted workspace no longer counts. Both default to `0`, no limit; the values for
+lake.live are the operator's to render (the Lake's `spec.env`), and the operator's own instance-wide
+`spec.workspaces.maxWorkspaces` stays as a second bound. Verify:
+`WorkspaceLimits.MemoryStoreRefusesTheNextWorkspaceOnly` and
+`WorkspaceLimits.PostgresStoreRefusesTheNextWorkspaceOnly` (`tests/test_postgres.cpp`).
 
 Without `LAKE_SERVICE_DIR`, the pages say Design, Train and Ship are not available on this lake,
 and the capabilities answer `store_unavailable`. `LAKE_DATA_PLANE_*`, `LAKE_WORKSPACE_DIR` and

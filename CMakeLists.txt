@@ -145,6 +145,8 @@ set(BOOST_ENABLE_CMAKE ON)
 FetchContent_Declare(
   boost_core_libs
   URL https://github.com/boostorg/boost/releases/download/boost-1.91.0-1/boost-1.91.0-1-cmake.tar.xz
+  # The SHA-256 Boost publishes beside the archive (lake#1003); a changed archive fails configure.
+  URL_HASH SHA256=cc5dc5006ecbdf0051f90979be31b4eee5987d9ae14ae9fb9c03cfa43fa3cdad
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
   EXCLUDE_FROM_ALL
 )
@@ -442,7 +444,8 @@ endforeach()
 if(LAKE_BUILD_TESTS)
   FetchContent_Declare(googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG        v1.17.0)
+    # v1.17.0, pinned by commit so a moved tag cannot change it (lake#1003).
+    GIT_TAG        52eb8108c5bdec04579160ae17225d66034bd723)
   set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(googletest)

@@ -469,8 +469,12 @@ ApiResult grant_tunnel(const json& input, ApiContext& context) {
                                          .port = input.at("port"),
                                          .expires_at = input.at("expires_at"),
                                          .client_ca_pem = authority->root_certificate_pem};
+    // lake#983 (LSR-116): the store refuses past the active grant caps, counted with the insert.
+    const control::NetworkTunnelGrantLimits limits{
+        .per_workspace = context.tunnel_grants_per_workspace,
+        .per_customer = context.tunnel_grants_per_customer};
     const auto granted =
-        context.store->create_network_tunnel_grant(scope, spec, network_actor(context));
+        context.store->create_network_tunnel_grant(scope, spec, network_actor(context), limits);
     if (!granted) {
         return store_failure(granted.error());
     }

@@ -4796,6 +4796,89 @@ TEST_P(WorkspaceRecordStores, McpConnectionStreamsMirrorNotificationsAndDriveThe
     EXPECT_EQ(worker.pass(owner).results, 0U) << "published once";
 }
 
+// lake#980 (LSR-113): a server that takes longer than the open budget to answer its subscriptions
+// is dropped and backs off, so the next pass does not contact it; a pass out of budget starts no
+// connection and resumes where it stopped; changing the connection clears the back-off.
+TEST_P(WorkspaceRecordStores, McpStreamWorkerASlowServerBacksOffAndThePassKeepsItsBudget) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    lake::test::McpTestServer server;
+    server.slow_subscribe_ms = 300;
+    t.mcp_http = lake::api::make_mcp_http(true);
+    const auto& first = t.spaces[0];
+    const std::string home = first.workspaces[0];
+    const auto in = [&](json input) {
+        input["customer_id"] = first.customer_id;
+        input["workspace_id"] = home;
+        return input;
+    };
+    const auto created =
+        t.call(first, "create_mcp_connection", in({{"name", "Slow"}, {"url", server.url()}}));
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string id = created.value["id"];
+    const auto streams =
+        t.call(first,
+               "update_mcp_connection",
+               in({{"id", id},
+                   {"notifications_topic", "slow-notices"},
+                   {"subscribe_resources", json::array({"memo://a", "memo://b", "memo://c"})}}));
+    ASSERT_TRUE(streams.ok) << streams.error.message;
+
+    lake::api::ApiContext owner;
+    owner.store = t.store.get();
+    owner.workspaces = t.service.get();
+    owner.instance_kek = std::string(kek);
+    owner.registry = &t.registry;
+    owner.mcp_http = t.mcp_http;
+    owner.mcp_allow_private_addresses = true;
+    // Creating and updating the connection talks to the server itself; count from here.
+    const std::size_t before = server.calls("initialize").size();
+    const std::size_t subscribes_before = server.calls("resources/subscribe").size();
+
+    // Out of budget before it starts: nothing is contacted, and the workspace comes first next.
+    {
+        lake::api::McpStreamWorker spent({.pass_budget = std::chrono::milliseconds(0)});
+        const auto done = spent.pass(owner);
+        EXPECT_TRUE(done.stopped_early);
+        EXPECT_EQ(done.connections, 0U);
+        EXPECT_EQ(server.calls("initialize").size(), before);
+    }
+
+    lake::api::McpStreamWorker worker({.connection_budget = std::chrono::milliseconds(200),
+                                       .exchange_timeout = std::chrono::milliseconds(2'000),
+                                       .backoff_first = std::chrono::minutes(10)});
+    const auto opened = worker.pass(owner);
+    EXPECT_EQ(opened.connections, 1U);
+    ASSERT_EQ(server.calls("initialize").size(), before + 1);
+    EXPECT_LT(server.calls("resources/subscribe").size(), subscribes_before + 3)
+        << "the subscriptions past the budget are not sent";
+    EXPECT_TRUE(std::ranges::any_of(opened.problems, [](const std::string& problem) {
+        return problem.find("tried again later") != std::string::npos;
+    }));
+
+    // Backing off: the next pass leaves the server alone.
+    const auto waiting = worker.pass(owner);
+    EXPECT_EQ(waiting.backing_off, 1U);
+    EXPECT_EQ(server.calls("initialize").size(), before + 1);
+
+    // A changed connection starts afresh, and a prompt server is mirrored as before.
+    server.slow_subscribe_ms = 0;
+    ASSERT_TRUE(t.call(first,
+                       "update_mcp_connection",
+                       in({{"id", id}, {"subscribe_resources", json::array({"memo://a"})}}))
+                    .ok);
+    const std::size_t updated = server.calls("initialize").size();
+    const auto fresh = worker.pass(owner);
+    EXPECT_EQ(fresh.backing_off, 0U);
+    EXPECT_EQ(server.calls("initialize").size(), updated + 1);
+    for (const auto& problem : fresh.problems) {
+        ADD_FAILURE() << problem;
+    }
+}
+
 // lake#677: an agent started by a workspace stream. The streams are sealed records in the
 // workspace; each message that arrives after one is set starts one job of the agent with the
 // message as its input, as the person who set it; deleting the agent removes them, and a trigger

@@ -854,6 +854,26 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
                 "this " + (library ? std::string(library->name) : agent_task->agent) +
                     " turn does not grant " + capability);
         }
+        // LSR-009 (lake#918): a launch's or a schedule's credential, which the agent's own code
+        // holds, runs only the engine actions a run calls directly (agent_run_direct_actions) and
+        // the actions its credential names: `workspace_act` alone opens nothing else, so the code
+        // never deletes or changes the workspace without a person. Every other change is a
+        // proposal a person confirms with their own credential.
+        const auto direct = [&](std::string_view name) {
+            return std::ranges::find(control::agent_run_direct_actions, name) !=
+                   control::agent_run_direct_actions.end();
+        };
+        if (!read &&
+            (context.credential_kind == "agent_launch" ||
+             context.credential_kind == "agent_schedule") &&
+            !direct(capability) && !direct(engine_capability_name(capability)) &&
+            !has_scope(context, capability) &&
+            !has_scope(context, engine_capability_name(capability))) {
+            co_return ApiResult::failure(
+                "unauthorized",
+                "an agent run's credential does not grant the workspace action " + capability +
+                    "; a person confirms changes with their own credential");
+        }
         if (!read && agent_task && agent_task->agent == "agent-project" &&
             capability == "compile_intent") {
             co_return co_await project_agent_compile_check(context, input, *agent_task);
@@ -8959,8 +8979,17 @@ void register_workspace_capabilities(Registry& registry) {
                     return ApiResult::success({{"workspaces", result}});
                 }
                 if (creating) {
-                    const auto row = context.store->create_workspace({input.at("customer_id"),
-                        input.at("name"), input.at("environment"), context.acting_identity});
+                    // lake#987: the account's workspace and service caps, counted by the store.
+                    control::NewWorkspace request{input.at("customer_id"),
+                                                  input.at("name"),
+                                                  input.at("environment"),
+                                                  context.acting_identity};
+                    if (context.workspaces != nullptr) {
+                        request.max_workspaces =
+                            context.workspaces->config().max_workspaces_per_customer;
+                        request.max_services = context.workspaces->config().max_per_customer;
+                    }
+                    const auto row = context.store->create_workspace(request);
                     return row ? ApiResult::success(control::workspace_json(*row, operator_view(context))) : store_failure(row.error());
                 }
                 const auto row = context.store->get_workspace(input.at("workspace_id"));

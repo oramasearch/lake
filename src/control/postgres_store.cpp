@@ -730,6 +730,18 @@ std::string claimed_taap_id(std::string_view identity_document) {
     return document ? document->subject.taap_id : std::string{};
 }
 
+std::optional<liquid::identity_document> decode_document(std::string_view identity_document) {
+    const std::vector<unsigned char> bytes = from_base64url(identity_document);
+    if (bytes.empty()) {
+        return std::nullopt;
+    }
+    auto document = liquid::decode_identity_document(as_bytes_of(bytes));
+    if (!document) {
+        return std::nullopt;
+    }
+    return std::move(*document);
+}
+
 std::expected<VerifiedTaapSignIn, std::string>
 verify_taap_sign_in(std::string_view identity_document,
                     std::string_view pool_id,
@@ -3878,6 +3890,32 @@ public:
             if (!existing.empty()) {
                 return std::unexpected(StoreError{"conflict", "a workspace with this name already exists"});
             }
+            // lake#987 (LSR-120): counted under the customer's row lock taken above, so two
+            // concurrent creates cannot both pass.
+            if (input.max_workspaces != 0) {
+                const auto live = tx.exec_params(
+                    "SELECT count(*) FROM workspaces WHERE customer_id = $1::uuid AND desired <> "
+                    "'deleted'",
+                    input.customer_id);
+                if (live[0][0].as<std::size_t>() >= input.max_workspaces) {
+                    return std::unexpected(StoreError{"quota_exceeded",
+                                                      "this account already has " +
+                                                          std::to_string(input.max_workspaces) +
+                                                          " workspaces, the most it may have"});
+                }
+            }
+            if (input.max_services != 0) {
+                const auto live = tx.exec_params(
+                    "SELECT count(*) FROM services WHERE customer_id = $1::uuid AND desired = "
+                    "'present'",
+                    input.customer_id);
+                if (live[0][0].as<std::size_t>() >= input.max_services) {
+                    return std::unexpected(StoreError{
+                        "quota_exceeded",
+                        "this account already runs " + std::to_string(input.max_services) +
+                            " services, and a workspace's Zetta is one"});
+                }
+            }
             const std::string id = new_uuid_v4();
             const std::string service_id = new_uuid_v4();
             tx.exec_params("INSERT INTO workspaces (id, customer_id, name, environment) "
@@ -4534,12 +4572,14 @@ public:
         return {};
     }
 
+    // `grant_limits` applies to a tunnel grant's create only (lake#983).
     template <class Row>
     Result<Row> change_network(const NetworkScope& scope,
                                const std::string& supplied_id,
                                const nlohmann::json& spec,
                                const NetworkActor& actor,
-                               const std::string& operation) {
+                               const std::string& operation,
+                               const NetworkTunnelGrantLimits* grant_limits = nullptr) {
         if (auto checked = network_detail::validate_scope(scope); !checked) {
             return std::unexpected(checked.error());
         }
@@ -4588,6 +4628,25 @@ public:
                                                    spec.at("user_id").get<std::string>())
                                         .empty()) {
                     return std::unexpected(StoreError{"invalid_input", "no tunnel user"});
+                }
+                // lake#983 (LSR-116): the account's row lock serializes its grant creates, so two
+                // concurrent creates cannot both pass the count.
+                if (table.tunnel && create && grant_limits != nullptr &&
+                    (grant_limits->per_workspace != 0 || grant_limits->per_customer != 0)) {
+                    tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid FOR UPDATE",
+                                   scope.customer_id);
+                    const auto active = tx.exec_params(
+                        "SELECT count(*) FILTER (WHERE workspace_id = $2::uuid), count(*) "
+                        "FROM network_tunnel_grants WHERE customer_id = $1::uuid "
+                        "AND revoked_at IS NULL AND expires_at > now()",
+                        scope.customer_id,
+                        scope.workspace_id);
+                    if (auto refused = network_detail::tunnel_grant_limit_refusal(
+                            *grant_limits,
+                            active[0][0].as<std::size_t>(),
+                            active[0][1].as<std::size_t>())) {
+                        return std::unexpected(*refused);
+                    }
                 }
                 write_network_spec(tx, table, scope, id, spec, actor, create);
             } else {
@@ -4687,11 +4746,13 @@ public:
         return list_network<NetworkEgressRule>(scope);
     }
 
-    Result<NetworkTunnelGrant> create_network_tunnel_grant(const NetworkScope& scope,
-                                                           const NetworkTunnelGrantSpec& spec,
-                                                           const NetworkActor& actor) override {
+    Result<NetworkTunnelGrant>
+    create_network_tunnel_grant(const NetworkScope& scope,
+                                const NetworkTunnelGrantSpec& spec,
+                                const NetworkActor& actor,
+                                const NetworkTunnelGrantLimits& limits) override {
         return change_network<NetworkTunnelGrant>(
-            scope, "", network_detail::encode(spec), actor, "create");
+            scope, "", network_detail::encode(spec), actor, "create", &limits);
     }
 
     Result<NetworkTunnelGrant> update_network_tunnel_grant(const NetworkScope& scope,
@@ -10137,6 +10198,20 @@ public:
             if (rows.empty()) {
                 return std::unexpected(
                     StoreError{"not_found", "no account acts for this identity"});
+            }
+            return rows[0][0].as<std::string>();
+        });
+    }
+    Result<std::string> registered_identity_document(const std::string& taap_id) override {
+        return with_tx<std::string>([&](pqxx::work& tx) -> Result<std::string> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT d.document #>> '{}' FROM identity_documents d JOIN users u "
+                "ON u.id = d.user_id WHERE u.taap_id = $1 "
+                "UNION ALL SELECT own_document FROM identity_links WHERE own_taap_id = $1 LIMIT 1",
+                taap_id);
+            if (rows.empty() || rows[0][0].is_null()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no account registered this identity"});
             }
             return rows[0][0].as<std::string>();
         });

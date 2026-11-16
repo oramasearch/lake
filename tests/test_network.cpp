@@ -256,7 +256,7 @@ TEST_P(NetworkStore, EgressReplacesCidrWithDnsAndCanBeWithdrawn) {
 
 TEST_P(NetworkStore, GrantsRevokeWithoutAUnifyingDesiredColumn) {
     auto spec = tunnel_spec();
-    auto created = store->create_network_tunnel_grant(scope, spec, actor);
+    auto created = store->create_network_tunnel_grant(scope, spec, actor, {});
     ASSERT_TRUE(created) << created.error().message;
     EXPECT_FALSE(created->revoked_at);
     observe("tunnel_grant", created->id);
@@ -286,6 +286,35 @@ TEST_P(NetworkStore, GrantsRevokeWithoutAUnifyingDesiredColumn) {
     EXPECT_TRUE(store->get_network_tunnel_grant(scope, created->id)->revoked_at);
     EXPECT_EQ(store->list_network_tunnel_grants(scope)->size(), 1u);
     verify_audit(created->id, "tunnel_grant");
+}
+
+// lake#983 (LSR-116): a new grant past the workspace's or the account's active grant cap is
+// refused with quota_exceeded and writes nothing; a revoked grant frees its place, and an account
+// elsewhere is unaffected.
+TEST_P(NetworkStore, ActiveTunnelGrantsAreCappedPerWorkspaceAndPerAccount) {
+    const NetworkTunnelGrantLimits limits{.per_workspace = 2, .per_customer = 3};
+    auto first = store->create_network_tunnel_grant(scope, tunnel_spec(), actor, limits);
+    ASSERT_TRUE(first) << first.error().message;
+    ASSERT_TRUE(store->create_network_tunnel_grant(scope, tunnel_spec(), actor, limits));
+    const auto over_workspace =
+        store->create_network_tunnel_grant(scope, tunnel_spec(), actor, limits);
+    ASSERT_FALSE(over_workspace);
+    EXPECT_EQ(over_workspace.error().code, "quota_exceeded");
+    EXPECT_EQ(store->list_network_tunnel_grants(scope)->size(), 2u);
+
+    // The account's other workspace has room for one more before the account's cap.
+    auto other_spec = tunnel_spec();
+    other_spec.target_id = other_target;
+    ASSERT_TRUE(store->create_network_tunnel_grant(other_scope, other_spec, actor, limits));
+    const auto over_account =
+        store->create_network_tunnel_grant(other_scope, other_spec, actor, limits);
+    ASSERT_FALSE(over_account);
+    EXPECT_EQ(over_account.error().code, "quota_exceeded");
+
+    // Revoking frees a place; no limit (0) is not refused at all.
+    ASSERT_TRUE(store->revoke_network_tunnel_grant(scope, first->id, actor));
+    EXPECT_TRUE(store->create_network_tunnel_grant(scope, tunnel_spec(), actor, limits));
+    EXPECT_TRUE(store->create_network_tunnel_grant(scope, tunnel_spec(), actor, {}));
 }
 
 TEST_P(NetworkStore, PeersRoundTripNamedExportsAndImports) {
@@ -368,14 +397,14 @@ TEST_P(NetworkStore, InvalidAndForeignWritesLeaveRowsAndAuditAlone) {
               "invalid_input");
     auto tunnel = tunnel_spec();
     tunnel.expires_at = "2026-02-30T00:00:00Z";
-    EXPECT_EQ(store->create_network_tunnel_grant(scope, tunnel, actor).error().code,
+    EXPECT_EQ(store->create_network_tunnel_grant(scope, tunnel, actor, {}).error().code,
               "invalid_input");
     tunnel.expires_at = "2000-01-01T00:00:00Z";
-    EXPECT_EQ(store->create_network_tunnel_grant(scope, tunnel, actor).error().code,
+    EXPECT_EQ(store->create_network_tunnel_grant(scope, tunnel, actor, {}).error().code,
               "invalid_input");
     tunnel = tunnel_spec();
     tunnel.user_id = new_uuid_v4();
-    EXPECT_EQ(store->create_network_tunnel_grant(scope, tunnel, actor).error().code,
+    EXPECT_EQ(store->create_network_tunnel_grant(scope, tunnel, actor, {}).error().code,
               "invalid_input");
     auto peer = peer_spec();
     peer.exports[0]["target_id"] = other_target;
@@ -408,7 +437,7 @@ TEST_P(NetworkStore, SourcesIncludeServicesAgentsAndLiveTunnels) {
     spec.source_kind = "agent";
     spec.source_id = launch->id;
     ASSERT_TRUE(store->create_network_connection(scope, spec, actor));
-    auto grant = store->create_network_tunnel_grant(scope, tunnel_spec(), actor);
+    auto grant = store->create_network_tunnel_grant(scope, tunnel_spec(), actor, {});
     ASSERT_TRUE(grant);
     spec.source_kind = "tunnel";
     spec.source_id = grant->id;
@@ -442,7 +471,7 @@ protected:
 };
 
 TEST_F(PostgresNetwork, TunnelTrustMigrationKeepsExistingGrantsAndIsIdempotent) {
-    const auto created = store->create_network_tunnel_grant(scope, tunnel_spec(), actor);
+    const auto created = store->create_network_tunnel_grant(scope, tunnel_spec(), actor, {});
     ASSERT_TRUE(created);
     observe("tunnel_grant", created->id);
     pqxx::connection connection(uri);
@@ -719,7 +748,7 @@ TEST_F(PostgresNetwork, NotificationsCoverAllDesiredWritesAndExcludeStatusAndRol
     expect_note(e->id);
     ASSERT_TRUE(store->withdraw_network_egress_rule(scope, e->id, actor));
     expect_note(e->id);
-    auto t = store->create_network_tunnel_grant(scope, tunnel_spec(), actor);
+    auto t = store->create_network_tunnel_grant(scope, tunnel_spec(), actor, {});
     ASSERT_TRUE(t);
     expect_note(t->id);
     ASSERT_TRUE(store->update_network_tunnel_grant(scope, t->id, tunnel_spec(), actor));
@@ -787,7 +816,7 @@ TEST_F(PostgresNetwork, AuditFailureRollsBackTheDesiredMutationAndNotification) 
 }
 
 TEST_F(PostgresNetwork, ExpiredGrantCannotBeRenewedOrUsedAsAConnectionSource) {
-    auto grant = store->create_network_tunnel_grant(scope, tunnel_spec(), actor);
+    auto grant = store->create_network_tunnel_grant(scope, tunnel_spec(), actor, {});
     ASSERT_TRUE(grant);
     {
         pqxx::connection connection(uri);

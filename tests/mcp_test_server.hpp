@@ -49,6 +49,7 @@ public:
     std::string required_bearer;       // non-empty: 401 without it, naming the resource metadata
     bool expire_session_once = false;  // the next request with a session answers 404 once
     int slow_ms = 0;                   // waits before answering a tools/call
+    int slow_subscribe_ms = 0;         // waits before answering a resources/subscribe (lake#980)
     std::size_t huge_bytes = 0;        // a tools/call answer padded past this many bytes
     bool garbage = false;              // tools/call answers bytes that are not JSON
     bool wrong_id_first = false;       // an answer with another id comes before the real one
@@ -547,6 +548,9 @@ private:
                      {{{"uri", "memo://inbox"}, {"name", "Inbox"}, {"mimeType", "text/plain"}}})}};
         }
         if (method == "resources/subscribe") {
+            if (slow_subscribe_ms > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(slow_subscribe_ms));
+            }
             std::lock_guard lock(mutex_);
             subscribed_.insert(params.value("uri", ""));
             return json::object();

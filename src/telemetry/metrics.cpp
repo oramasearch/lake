@@ -256,9 +256,11 @@ public:
     control::Result<control::NetworkTunnelGrant>
     create_network_tunnel_grant(const control::NetworkScope& scope,
                                 const control::NetworkTunnelGrantSpec& spec,
-                                const control::NetworkActor& actor) override {
-        return call("create_network_tunnel_grant",
-                    [&] { return store_->create_network_tunnel_grant(scope, spec, actor); });
+                                const control::NetworkActor& actor,
+                                const control::NetworkTunnelGrantLimits& limits) override {
+        return call("create_network_tunnel_grant", [&] {
+            return store_->create_network_tunnel_grant(scope, spec, actor, limits);
+        });
     }
     control::Result<control::NetworkTunnelGrant>
     update_network_tunnel_grant(const control::NetworkScope& scope,
@@ -1561,6 +1563,10 @@ public:
     }
     control::Result<std::string> account_for_identity(const std::string& taap_id) override {
         return call("account_for_identity", [&] { return store_->account_for_identity(taap_id); });
+    }
+    control::Result<std::string> registered_identity_document(const std::string& taap_id) override {
+        return call("registered_identity_document",
+                    [&] { return store_->registered_identity_document(taap_id); });
     }
     control::Result<void> register_oauth_provider(const control::OAuthProvider& value) override {
         return call("register_oauth_provider",

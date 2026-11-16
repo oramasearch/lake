@@ -41,6 +41,20 @@ std::span<const std::string_view> workspace_audit_capabilities();
 // Migration 0063 and the copy assign the central events of these actions to their workspace.
 std::vector<std::string> workspace_audit_actions();
 
+// The workspace of the object a call's input names (a repository by `repository_id`, `repository`
+// or a repository capability's `id`; a secret mount; an application; an app by `app_id`; a build by
+// `build_id`), read from its routing row before the handler runs; empty when the input names none
+// or the row cannot be read. `public_repository` is set when the object is a public repository,
+// which anyone may read. Each lookup is one indexed PostgreSQL read (lake#918 uses it to bind an
+// agent's credential to its workspace whatever the handler derives).
+struct NamedObjectWorkspace {
+    std::string workspace_id;
+    bool public_repository = false;
+};
+NamedObjectWorkspace named_object_workspace(const Capability* capability,
+                                            const nlohmann::json& input,
+                                            const ApiContext& context);
+
 // Where one event goes. `workspace_id` and `customer_id` are set only for the workspace log.
 struct AuditRoute {
     AuditLog log = AuditLog::Central;
