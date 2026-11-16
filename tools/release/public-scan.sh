@@ -6,7 +6,8 @@
 # It greps every file Git tracks (or a given revision's tree) for generic patterns: personal
 # company addresses, internal hosts, local home-directory paths, agent instruction files and
 # private-repository names. It prints a count per category and, with --list, every matching line.
-# It exits 1 when anything matches and 0 when the tree is clean.
+# It exits 1 when anything matches and 0 when the tree is clean. Agent instruction files
+# (CLAUDE.md, AGENTS.md) are listed for information and do not fail the scan: they stay.
 #
 # The patterns are deliberately generic, so this script is safe to publish. A release review may
 # run a stricter, private pattern list as well; see docs/open-source/README.md.
@@ -43,8 +44,9 @@ categories=(
     'hosts|[A-Za-z0-9.-]+\.oramadev\.net'
     # Local home-directory paths.
     'paths|(/Users/[A-Za-z][A-Za-z0-9._-]+/|/home/[a-z][a-z0-9._-]+/)'
-    # Private umbrella and bridge repositories.
-    'private-refs|(orama-bridge|liquid-bridge|zetta-bridge|orama-work)'
+    # Private umbrella repositories. zetta-bridge and liquid-bridge are named on purpose: they are
+    # the build's documented sources, submodules of the public lake-platform repository.
+    'private-refs|(orama-bridge|orama-work)'
 )
 # Role addresses a public tree may name.
 allowed_people='(support|security|noreply|no-reply|hello|info)@orama'
@@ -90,8 +92,7 @@ for path in "${agent_files[@]}"; do
         [[ -n "$(git ls-files -- "$path")" ]] && found_agents+=("$path")
     fi
 done
-printf '%-14s %s\n' agent-files "${#found_agents[@]}"
-total=$((total + ${#found_agents[@]}))
+printf '%-14s %s (kept; not counted)\n' agent-files "${#found_agents[@]}"
 if ((list && ${#found_agents[@]} > 0)); then
     printf '    %s\n' "${found_agents[@]}"
 fi
