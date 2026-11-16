@@ -1119,7 +1119,10 @@ private:
             // `100 Continue` goes out at the route's first read of the body, so a route that
             // refuses without reading never invites the body.
             connection.timed.expect_continue(expects_continue(rp) && !connection.parser.is_complete());
-            auto routed = co_await connection.fr.dispatch(rp.req.method(), rp.url, rp);
+            // Dispatched by the method's text: the router throws on a method it does not know,
+            // which would close the connection unanswered; by its text such a request reaches
+            // the trailing handler, which answers 501 (lake#1341).
+            auto routed = co_await connection.fr.dispatch(rp.req.method_text(), rp.url, rp);
             const bool invited = !connection.timed.continue_pending();
             connection.timed.expect_continue(false);
             if (routed.failed()) {

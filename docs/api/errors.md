@@ -173,6 +173,7 @@ These are not capability results but use the same envelope:
 
 - `GET /v1/<name>` for an action, or `POST` for a read: 405 `method_not_allowed`, naming the method.
 - An unknown route: 404 `not_found`.
+- A method HTTP does not define, on any path: 501 `not_supported` ([http.md](../serving/http.md#methods-lake-does-not-know), lake#1341).
 - A JSON body over 64 MiB: 413 `size_invalid`; a body that is not JSON: 400 `invalid_input`.
 - An empty query key (`/v1/server_info?`, `?&limit=5`) is ignored; it never becomes a field.
 
