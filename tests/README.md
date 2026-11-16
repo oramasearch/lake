@@ -1088,3 +1088,9 @@ schedules are flagged `recreate`. See [agent-launches.md](../docs/api/agent-laun
 `WebApps.OperatorHashesRestrictEveryPurposeAndRotationRevokesOldTokens` check lake#1070: with an
 operator that reports no generation, rotation clears the hashes; with one that does, it leaves them
 and the unacknowledged generation revokes them until the operator writes the next.
+`Sso.OrganizationAdminCannotBindItsProviderToAnotherCustomersApplicationPool` (lake#1318) acts
+as an organization administrator through a grant and checks that `register_sso_provider` refuses
+another customer's application pool for a new provider and for an update, leaving the provider in
+Lake's pool, and that the operator is refused an unknown pool and accepted an existing one.
+`PostgresIdentity.SsoProviderBindsOnlyAnExistingPool` checks the PostgreSQL store refuses a pool no
+application has. See [which pool](../docs/api/sso.md#which-pool-a-provider-signs-in-to).

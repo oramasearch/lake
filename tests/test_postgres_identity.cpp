@@ -819,6 +819,66 @@ TEST(PostgresIdentity, SsoFederationAndScimDeactivation) {
     EXPECT_FALSE(store->get_scim_group(provider->id, group->team_id));
 }
 
+// lake#1318: the store binds a provider to Lake's pool or to an application's pool that exists,
+// never to a pool no application has.
+TEST(PostgresIdentity, SsoProviderBindsOnlyAnExistingPool) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || *uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    std::unique_ptr<lake::control::Store> store =
+        lake::control::make_postgres_store(uri, std::string(test_instance_kek));
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto owner = store->create_user({"taap:1:ed25519:sso-pool-owner-" + suffix,
+                                           "sso-pool-owner-" + suffix + "@example.test",
+                                           "Pool owner"});
+    ASSERT_TRUE(owner) << owner.error().message;
+    const auto space =
+        store->create_customer({"individual", owner->id, "", "sso-pool-owner-" + suffix});
+    ASSERT_TRUE(space) << space.error().message;
+    const std::string application_id = lake::control::new_uuid_v4();
+    const auto application = store->create_application(
+        {.id = application_id,
+         .customer_id = space->id,
+         .pool_id = "app:" + application_id,
+         .workspace_id = lake::test::repository_workspace(*store, space->id)});
+    ASSERT_TRUE(application) << application.error().message;
+    const auto organization = store->create_organization(
+        {"taap:1:ed25519:sso-pool-org-" + suffix, "SSO pool organization", ""});
+    ASSERT_TRUE(organization) << organization.error().message;
+
+    const auto provider = [&](const std::string& pool_id, const std::string& name) {
+        return store->register_sso_provider({organization->id,
+                                             pool_id,
+                                             name + "-" + suffix,
+                                             "oidc",
+                                             "https://oidc.stub.example/" + name + "/" + suffix,
+                                             "",
+                                             "",
+                                             "lake-stub-client",
+                                             "lake-stub-secret",
+                                             "lake-stub-scim-token-" + name + "-" + suffix,
+                                             nlohmann::json::object(),
+                                             true});
+    };
+    const auto unknown = provider("app:" + lake::control::new_uuid_v4(), "unknown");
+    ASSERT_FALSE(unknown);
+    EXPECT_EQ(unknown.error().code, "invalid_input");
+    const auto lake_pool = provider("", "lake");
+    ASSERT_TRUE(lake_pool) << lake_pool.error().message;
+    EXPECT_EQ(lake_pool->pool_id, "lake");
+    // An update of an existing provider is held to the same rule and keeps its pool.
+    const auto moved = provider("app:" + lake::control::new_uuid_v4(), "lake");
+    ASSERT_FALSE(moved);
+    EXPECT_EQ(moved.error().code, "invalid_input");
+    const auto kept = store->get_sso_provider(lake_pool->id);
+    ASSERT_TRUE(kept) << kept.error().message;
+    EXPECT_EQ(kept->pool_id, "lake");
+    const auto bound = provider("app:" + application_id, "application");
+    ASSERT_TRUE(bound) << bound.error().message;
+    EXPECT_EQ(bound->pool_id, "app:" + application_id);
+}
+
 TEST(PostgresOfflineRecovery, GrantsRecoveryPathsAndRepositoryKeyCustody) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || *uri == '\0') {

@@ -49,6 +49,9 @@ the API with them included:
 - For SAML, send `"protocol": "saml"` with `metadata` and `signing_certificate` instead of the
   client id and secret.
 - `attribute_mapping` (an object) maps the provider's attribute names to Lake's.
+- Leave out `pool_id`: an organization's provider signs people in to Lake's own pool, and any other
+  pool is refused unless the operator registers it
+  ([which pool](../api/sso.md#which-pool-a-provider-signs-in-to)).
 - MCP: `register_sso_provider` with the same input.
 
 ## Test a Provider

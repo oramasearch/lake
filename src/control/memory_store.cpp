@@ -6624,10 +6624,18 @@ Result<SsoProvider> InMemoryStore::register_sso_provider(const NewSsoProvider& i
             })) {
         return std::unexpected(StoreError{"not_found", "organization does not exist"});
     }
+    // A provider signs people in to Lake's pool or to an application's pool that exists
+    // (lake#1318).
+    const std::string pool = input.pool_id.empty() ? "lake" : input.pool_id;
+    if (pool != "lake" && std::ranges::none_of(applications_, [&](const Application& value) {
+            return value.pool_id == pool;
+        })) {
+        return std::unexpected(StoreError{"invalid_input", "application pool does not exist"});
+    }
     const std::string now = now_iso8601();
     for (SsoProvider& provider : sso_providers_) {
         if (provider.organization_id == input.organization_id && provider.name == input.name) {
-            provider.pool_id = input.pool_id.empty() ? "lake" : input.pool_id;
+            provider.pool_id = pool;
             provider.protocol = input.protocol;
             provider.issuer = input.issuer;
             provider.metadata = input.metadata;
@@ -6660,7 +6668,7 @@ Result<SsoProvider> InMemoryStore::register_sso_provider(const NewSsoProvider& i
     }
     SsoProvider provider{new_uuid_v4(),
                          input.organization_id,
-                         input.pool_id.empty() ? "lake" : input.pool_id,
+                         pool,
                          input.name,
                          input.protocol,
                          input.issuer,

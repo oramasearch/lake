@@ -11257,7 +11257,16 @@ public:
             return std::unexpected(
                 StoreError{"invalid_input", "provider protocol configuration is incomplete"});
         }
+        const std::string pool = input.pool_id.empty() ? "lake" : input.pool_id;
         return with_tx<SsoProvider>([&](pqxx::work& tx) -> Result<SsoProvider> {
+            // A provider signs people in to Lake's pool or to an application's pool that exists
+            // (lake#1318).
+            if (pool != "lake" &&
+                tx.exec_params("SELECT 1 FROM auth_applications WHERE pool_id = $1", pool)
+                    .empty()) {
+                return std::unexpected(
+                    StoreError{"invalid_input", "application pool does not exist"});
+            }
             std::string encrypted_secret;
             if (input.protocol == "oidc") {
                 const auto encrypted =
@@ -11292,7 +11301,7 @@ public:
                     "EXCLUDED.jit_provisioning, enabled = true RETURNING " +
                     sso_provider_columns,
                 input.organization_id,
-                input.pool_id.empty() ? "lake" : input.pool_id,
+                pool,
                 input.name,
                 input.protocol,
                 input.issuer,

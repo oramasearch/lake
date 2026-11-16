@@ -14,6 +14,7 @@
 #include "lake/control/memory_store.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/saml.hpp"
+#include "repository_test_support.hpp"
 #include "saml_test_support.hpp"
 
 namespace {
@@ -233,6 +234,77 @@ TEST(Sso, SignedSamlResponseIsVerifiedBeforeSignIn) {
     EXPECT_TRUE(std::ranges::any_of(audit.value.at("items"), [](const json& event) {
         return event.at("action") == "sign_in_saml" && event.at("outcome") == "denied";
     }));
+}
+
+// lake#1318: register_sso_provider authorizes `admin` on the organization only, and an
+// application's pool id is in every one of its tokens. An organization's provider therefore signs
+// people in to Lake's own pool; only the operator may bind one to an application's pool, and the
+// store refuses a pool no application has.
+TEST(Sso, OrganizationAdminCannotBindItsProviderToAnotherCustomersApplicationPool) {
+    SsoSurface surface;
+    const auto owner =
+        surface.store.create_user({"taap:1:ed25519:pool-owner", "owner@example.test", "Owner"});
+    ASSERT_TRUE(owner) << owner.error().message;
+    const auto space = surface.store.create_customer({"individual", owner->id, "", "pool-owner"});
+    ASSERT_TRUE(space) << space.error().message;
+    const std::string application_id = lake::control::new_uuid_v4();
+    const std::string victim_pool = "app:" + application_id;
+    const auto application = surface.store.create_application(
+        {.id = application_id,
+         .customer_id = space->id,
+         .pool_id = victim_pool,
+         .workspace_id = lake::test::repository_workspace(surface.store, space->id)});
+    ASSERT_TRUE(application) << application.error().message;
+
+    const ApiResult organization =
+        surface.call("create_organization", {{"display_name", "Attacker organization"}});
+    ASSERT_TRUE(organization.ok) << organization.error.message;
+    const std::string organization_id = organization.value.at("id");
+    const auto object = surface.store.find_policy_object("organization", organization_id);
+    ASSERT_TRUE(object);
+    const std::string administrator = "taap:1:ed25519:organization-admin";
+    ASSERT_TRUE(surface
+                    .call("create_grant",
+                          {{"principal_taap_id", administrator},
+                           {"object_id", object->id},
+                           {"role", "admin"}})
+                    .ok);
+
+    surface.context.operator_credential = false;
+    surface.context.acting_identity = administrator;
+    surface.context.scopes = {"*"};
+    json input = provider_input(organization_id, "corporate", "oidc", "https://idp.attacker.test");
+    input["jit_provisioning"] = true;
+    const ApiResult own = surface.call("register_sso_provider", input);
+    ASSERT_TRUE(own.ok) << own.error.message;
+    EXPECT_EQ(own.value.at("pool_id"), "lake");
+
+    // Neither a new provider nor an update of the existing one may name the victim's pool.
+    for (const std::string name : {"corporate", "hijack"}) {
+        SCOPED_TRACE(name);
+        input["name"] = name;
+        input["pool_id"] = victim_pool;
+        const ApiResult refused = surface.call("register_sso_provider", input);
+        EXPECT_FALSE(refused.ok);
+        EXPECT_EQ(refused.error.code, "invalid_input");
+    }
+    const auto providers = surface.store.list_sso_providers(organization_id, 10);
+    ASSERT_TRUE(providers) << providers.error().message;
+    ASSERT_EQ(providers->size(), 1U);
+    EXPECT_EQ(providers->front().pool_id, "lake");
+
+    // The operator may bind a provider to an application's pool, but only one that exists.
+    surface.context.operator_credential = true;
+    surface.context.acting_identity = "admin";
+    input["name"] = "operator-bound";
+    input["pool_id"] = "app:" + lake::control::new_uuid_v4();
+    const ApiResult unknown = surface.call("register_sso_provider", input);
+    EXPECT_FALSE(unknown.ok);
+    EXPECT_EQ(unknown.error.code, "invalid_input");
+    input["pool_id"] = victim_pool;
+    const ApiResult bound = surface.call("register_sso_provider", input);
+    ASSERT_TRUE(bound.ok) << bound.error.message;
+    EXPECT_EQ(bound.value.at("pool_id"), victim_pool);
 }
 
 TEST(Scim, UserUpdateGroupReplacementAndDeactivationRevokeSessions) {

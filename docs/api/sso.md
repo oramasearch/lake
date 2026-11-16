@@ -8,7 +8,9 @@ just-in-time provisioning choice, and a per-provider SCIM bearer token. SAML pro
 metadata and a signing certificate. OIDC providers require a client id and a client secret.
 The client secret is encrypted at rest and the SCIM token is stored only as an Argon2id hash.
 Provider reads never return either value. `test_sso_provider` validates the persisted protocol
-configuration and records its test time.
+configuration and records its test time. An organization's provider signs people in to Lake's own
+pool; only the operator may bind one to an application's pool
+([which pool](#which-pool-a-provider-signs-in-to)).
 
 `create_federation_issuer` creates one `(organization, issuer, claim)` policy row; a provider
 assertion is accepted only when its issuer equals the registered issuer and every asserted claim
@@ -164,6 +166,29 @@ SHA-256 hash, the device name, TAAP id and return path, ten-minute expiry, `used
 both cascading with their provider, and the guard `saml_sign_in_guard`
 ([schema.md](../control-plane/schema.md#saml-sign-in-migration)).
 
+## Which Pool a Provider Signs In To
+
+**lake#1318.** A provider's `pool_id` decides whose users its sign-ins create and whose sessions
+they issue: `sign_in_sso` writes the credential and the session in that pool. Before this change
+`register_sso_provider` stored any `pool_id` it was given, while it authorizes only `admin` on the
+organization in `organization_id`. An application's pool id (`app:<application id>`) is no secret,
+since every token of the application carries it, so an organization administrator could bind their
+own identity provider to another customer's application pool and have Lake issue sessions there.
+Only the application-record check of `application_session_result` then revoked them.
+
+- **The capability** answers `invalid_input` for any `pool_id` other than `lake` (or absent, which
+  means `lake`) unless the caller is the operator (the admin token). This holds for a new provider
+  and for an update of an existing one, so a provider never moves into another pool.
+- **Both stores** refuse a `pool_id` other than `lake` that no application has (`invalid_input`,
+  *application pool does not exist*), as password sign-up already does: the in-memory store looks
+  for an application with that pool, PostgreSQL for an `auth_applications` row.
+- **Nothing that worked is lost.** Single sign-on into an application's pool did not work before:
+  the user has no record in the application's workspace, so the session was revoked.
+
+**Verify:** `Sso.OrganizationAdminCannotBindItsProviderToAnotherCustomersApplicationPool`
+(`tests/test_sso.cpp`) and, with `LAKE_TEST_DB_URI`, `PostgresIdentity.SsoProviderBindsOnlyAnExistingPool`
+(`tests/test_postgres_identity.cpp`).
+
 ## The customer's provider as the only way in
 
 **lake#1136.** A white-labelled Lake can make one enterprise provider the only way in for people:
@@ -227,6 +252,11 @@ the ACS, start and metadata routes end to end (sign-in once, replay of the respo
 assertion refused, audit); and the store's once-only request and assertion records in memory and
 on Postgres. `Sso.SignedSamlResponseIsVerifiedBeforeSignIn` runs `sign_in_saml` through the
 registry.
+`Sso.OrganizationAdminCannotBindItsProviderToAnotherCustomersApplicationPool` registers a provider
+as an organization administrator (a grant, not the admin token), is refused another customer's
+application pool for a new provider and for an update, and checks the operator is refused an
+unknown pool and accepted an existing one (lake#1318); `PostgresIdentity.SsoProviderBindsOnlyAnExistingPool`
+checks the PostgreSQL store's half.
 `ScimHttp.RecordedClientSessionProvisionsUsersGroupsAndRevokesAccess` replays the HTTP sequence:
 failed bearer authentication, two user creates, filtered list, user PATCH, group create, filtered
 member removal, user delete, group delete, and session/access revocation. The Postgres identity

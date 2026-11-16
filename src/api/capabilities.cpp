@@ -4381,7 +4381,10 @@ void register_sso_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "register_sso_provider",
         .title = "Register SSO provider",
-        .description = "Register or update an organization SAML or OpenID Connect provider.",
+        .description =
+            "Register or update an organization SAML or OpenID Connect provider. It signs "
+            "people in to Lake's own pool; only the operator may give a pool_id other "
+            "than lake, and only an existing application's.",
         .input_schema = provider_input,
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
@@ -4392,9 +4395,21 @@ void register_sso_capabilities(Registry& registry) {
             if (!context.store) {
                 return no_store();
             }
+            // An organization's provider signs people in to Lake's own pool. Only the operator may
+            // bind one to an application's pool: the policy check above is on the organization,
+            // and an application's pool id is no secret (lake#1318).
+            std::string pool_id = input.value("pool_id", "lake");
+            if (pool_id.empty()) {
+                pool_id = "lake";
+            }
+            if (pool_id != "lake" && !context.operator_credential) {
+                return ApiResult::failure("invalid_input",
+                                          "an organization's SSO provider signs people in to "
+                                          "Lake's own pool; pool_id must be \"lake\"");
+            }
             return one_result(context.store->register_sso_provider(
                 {input.value("organization_id", ""),
-                 input.value("pool_id", "lake"),
+                 pool_id,
                  input.value("name", ""),
                  input.value("protocol", ""),
                  input.value("issuer", ""),
