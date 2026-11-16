@@ -26,7 +26,7 @@ REST and MCP expose the same registry, customer policy and signed audit records.
 | `restart_app`, `stop_app`, `start_app` | `app_id` | lifecycle intent; a restart sets `restart_generation`, which the operator puts on the pod template so the pods are replaced ([restart](../control-plane/web-apps.md#restart), lake#1228) |
 | `scale_app` | `app_id`, replicas | desired count within customer quota |
 | `set_app_zetta_binding` | `app_id`, attached | attach or detach read-only workspace access |
-| `bind_service_to_app` | `app_id`, service_id | bind a service from the same customer |
+| `bind_service_to_app` | `app_id`, service_id | bind a service of the app's own workspace; needs `admin` on the account, as `service_connection` does, since the app receives the service's credential (lake#945) |
 | `set_app_stores` | `app_id`, `stores: [{store_id, mount_path?, read_only?}]` | replace the workspace storage the app mounts ([storage.md](storage.md#mounting-a-store)): a volume at a path (one workload per volume, else `conflict`), a bucket as `STORE_<NAME>_*` environment variables; new generation and a `stores` event |
 | `unbind_service_from_app` | `app_id`, service_id | detach an existing service binding |
 | `create_service_and_bind_to_app` | `app_id`, service kind/name and optional size | create and bind in one call |
@@ -40,6 +40,8 @@ The agreed runtime and binding values are:
 >
 > `bindings_json` is exactly
 > `{"zetta": {"scopes": ["read"]} | null, "services": ["<service_id>", ...]}`.
+
+A service binding hands the app that service's connection credential, so it needs `admin` on the account (the right `service_connection` needs) and a service of **the app's own workspace**. A service of another workspace is `not_found` by id and by name (lake#945).
 
 `create_app`, `update_app` and `bind_service_to_app` accept a live service's id or its unique name
 in the customer; the stored binding is always the id. An ambiguous or unknown name is `not_found`.

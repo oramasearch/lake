@@ -726,6 +726,28 @@ TEST(WebApps, ServiceBindingsAcceptAUniqueServiceName) {
     EXPECT_EQ(apps.call("bind_service_to_app", {{"app_id", id}, {"service_id", "no-such-db"}})
                   .error.code,
               "not_found");
+
+    // lake#945: a service of another workspace of the account is never bound, by id or by name,
+    // and a member who may write but not administer the account cannot bind one at all.
+    const std::string elsewhere = apps.workspace->add(apps.store, apps.customer_id, "elsewhere");
+    lake::control::NewManagedService foreign{apps.customer_id, "postgres", "ledger", apps.owner.taap_id};
+    foreign.workspace_id = elsewhere;
+    const auto other_service = apps.store->create_service(foreign);
+    ASSERT_TRUE(other_service) << other_service.error().message;
+    for (const std::string reference : {other_service->id, std::string("ledger")}) {
+        EXPECT_EQ(apps.call("bind_service_to_app", {{"app_id", id}, {"service_id", reference}})
+                      .error.code,
+                  "not_found")
+            << reference;
+    }
+    const auto account = apps.store->find_policy_object("customer", apps.customer_id);
+    ASSERT_TRUE(account);
+    ASSERT_TRUE(apps.store->create_grant(
+        {apps.other.taap_id, account->id, "write", "test-attestation", "admin", ""}));
+    const auto writer = apps.call(
+        apps.other, "bind_service_to_app", {{"app_id", id}, {"service_id", service_id}});
+    EXPECT_FALSE(writer.ok);
+    EXPECT_EQ(writer.error.code, "unauthorized") << writer.error.message;
 }
 
 namespace {
