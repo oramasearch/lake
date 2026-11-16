@@ -164,6 +164,7 @@ struct GatewayRig {
         context.request_id = lake::control::new_uuid_v4();
         context.instance_kek = std::string(kek);
         context.model_provider = fake.provider();
+        context.model_provider_is_openai = true;
         return context;
     }
 
@@ -2573,6 +2574,44 @@ TEST(ModelCompletion, SendsEachCallWithItsWorkspacesOwnPromptCacheKey) {
         rig.call({{"endpoint", "chat/completions"}, {"request", request}}, chooser);
     EXPECT_EQ(refused.error.code, "invalid_input");
     EXPECT_EQ(rig.fake.calls(), 4U);
+}
+
+// lake#1309: only OpenAI's own API is sent a `prompt_cache_key`. A local or other
+// OpenAI-compatible server may refuse a field it does not know, so it is sent none; the
+// `cached_tokens` scrub applies to every provider.
+TEST(ModelCompletion, SendsAPromptCacheKeyOnlyToOpenAIsOwnAPI) {
+    using lake::api::is_openai_provider_url;
+    EXPECT_TRUE(is_openai_provider_url(""));
+    EXPECT_TRUE(is_openai_provider_url(lake::api::default_model_provider_url));
+    EXPECT_TRUE(is_openai_provider_url("https://API.OpenAI.com/v1/"));
+    EXPECT_TRUE(is_openai_provider_url("https://api.openai.com:443"));
+    EXPECT_FALSE(is_openai_provider_url("http://127.0.0.1:11434/v1"));
+    EXPECT_FALSE(is_openai_provider_url("https://llm.example.test/openai/v1"));
+    EXPECT_FALSE(is_openai_provider_url("https://api.openai.com.example.test/v1"));
+    EXPECT_FALSE(is_openai_provider_url("https://example.test/api.openai.com"));
+    EXPECT_FALSE(is_openai_provider_url("api.openai.com"));
+
+    GatewayRig rig;
+    json cached = chat_answer;
+    cached["usage"]["prompt_tokens_details"] = {{"cached_tokens", 1152}};
+    rig.fake.answer = {200, cached.dump(), {}};
+    auto local = rig.task_context(rig.task(rig.home, "agent-ask-orama"));
+    local.model_provider_is_openai = false;
+    const auto answered = rig.call(chat(), local);
+    ASSERT_TRUE(answered.ok) << answered.error.message;
+    ASSERT_EQ(rig.fake.calls(), 1U);
+    EXPECT_FALSE(json::parse(rig.fake.requests[0].body).contains("prompt_cache_key"));
+    EXPECT_EQ(answered.value["response"]["usage"]["prompt_tokens_details"]["cached_tokens"], 0);
+
+    rig.choose(rig.home, "gpt-6.1-sol");
+    rig.fake.answer = {200, responses_tool_call.dump(), {}};
+    auto translated = rig.task_context(rig.task(rig.home, "agent-ask-orama"));
+    translated.model_provider_is_openai = false;
+    ASSERT_TRUE(
+        rig.call({{"endpoint", "chat/completions"}, {"request", tool_turn_request}}, translated)
+            .ok);
+    EXPECT_EQ(rig.fake.requests[1].endpoint, "responses");
+    EXPECT_FALSE(json::parse(rig.fake.requests[1].body).contains("prompt_cache_key"));
 }
 
 } // namespace

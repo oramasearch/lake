@@ -1952,8 +1952,9 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
     // tokens are the provider's, counted below exactly as for any other answer.
     const bool via_responses = endpoint == "chat/completions" && chat_goes_to_responses(*prepared);
     // lake#1309: every workspace's prompts share the provider account's cache, so each call names
-    // its workspace's own cache bucket, by a digest that names no workspace.
-    if (endpoint != "embeddings") {
+    // its workspace's own cache bucket, by a digest that names no workspace. Only OpenAI's own API
+    // is sent the field; another OpenAI-compatible server may refuse a field it does not know.
+    if (endpoint != "embeddings" && context.model_provider_is_openai) {
         (*prepared)["prompt_cache_key"] = prompt_cache_key(caller->workspace_id);
     }
     ModelProviderRequest request{endpoint, std::string(), stream};

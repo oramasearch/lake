@@ -35,6 +35,9 @@ bool is_model_gateway_endpoint(std::string_view endpoint);
 
 // OpenAI's API, unless LAKE_MODEL_PROVIDER_URL names another OpenAI-compatible base.
 inline constexpr std::string_view default_model_provider_url = "https://api.openai.com/v1";
+// Whether a provider URL is OpenAI's own API: empty (the default), or a URL whose host is
+// api.openai.com, compared case-insensitively. A local or other OpenAI-compatible server is not.
+bool is_openai_provider_url(std::string_view url);
 
 // Parse LAKE_MODEL_GATEWAY_MODELS: absent uses the defaults; [] disables the gateway.
 // Malformed lists, duplicate names and unsupported providers are configuration errors.
@@ -193,8 +196,9 @@ private:
     static std::string line(std::string_view text);
     std::string partial_;
 };
-// The `prompt_cache_key` every chat or Responses call is sent with (lake#1309): a digest of the
-// call's workspace, so the provider keeps each workspace's prompts in a cache bucket of its own.
+// The `prompt_cache_key` every chat or Responses call to OpenAI's own API is sent with (lake#1309,
+// is_openai_provider_url): a digest of the call's workspace, so the provider keeps each
+// workspace's prompts in a cache bucket of its own. Another provider is sent none.
 // It names no workspace: 32 hexadecimal digits of a SHA-256, after `lake-`.
 std::string prompt_cache_key(std::string_view workspace_id);
 

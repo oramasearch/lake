@@ -145,8 +145,8 @@ So:
   carries the count is rewritten (as `data: ` and its JSON with the count set to 0); every other
   line reaches the caller byte for byte. The provider's other usage fields are passed on as
   reported.
-- **Each workspace has its own cache bucket.** Every `chat/completions` and `responses` call is sent
-  with `prompt_cache_key` set to `lake-` and the first 32 hexadecimal digits of a SHA-256 of the
+- **Each workspace has its own cache bucket.** Every `chat/completions` and `responses` call to
+  OpenAI's own API is sent with `prompt_cache_key` set to `lake-` and the first 32 hexadecimal digits of a SHA-256 of the
   call's workspace id, so OpenAI routes each workspace's prompts to a cache of their own and the
   response time no longer says much about another workspace's prompts. The key names no workspace.
   A chat completion sent to the Responses API keeps it. Embeddings have no prompt cache and are
@@ -156,12 +156,16 @@ So:
   provider's own answer before the scrub. A cached input token is counted and billed as any other
   input token.
 
-An OpenAI-compatible provider other than OpenAI (`LAKE_MODEL_PROVIDER_URL`) must accept
-`prompt_cache_key` or ignore it.
+The key goes only to OpenAI's own API: `LAKE_MODEL_PROVIDER_URL` unset, or a URL whose host is
+`api.openai.com`, compared case-insensitively (`is_openai_provider_url`). A local or other
+OpenAI-compatible server may refuse a field it does not know, so a call to any other provider URL
+carries no `prompt_cache_key`. Such a provider keeps its own cache, if it has one, and Lake cannot
+separate it by workspace. The `cached_tokens` scrub applies to every provider.
 
 Verify with `ModelGateway.ScrubsEveryCachedTokensCountAndLeavesTheRestAlone`,
 `ModelCompletion.AnswersNoCacheHitsInAnyShapeAndCountsTheSameTokens` and
-`ModelCompletion.SendsEachCallWithItsWorkspacesOwnPromptCacheKey`.
+`ModelCompletion.SendsEachCallWithItsWorkspacesOwnPromptCacheKey` and
+`ModelCompletion.SendsAPromptCacheKeyOnlyToOpenAIsOwnAPI`.
 
 ### Streaming
 
@@ -408,7 +412,7 @@ The prompt and the answer are never in the audit.
 | Variable | Meaning |
 |---|---|
 | `LAKE_OPENAI_API_KEY` | The operator's provider key, a platform environment variable of the Lake pod (for example `spec.env` from a Secret). Unset, the gateway answers `not_supported` |
-| `LAKE_MODEL_PROVIDER_URL` | an OpenAI-compatible base URL; default `https://api.openai.com/v1` |
+| `LAKE_MODEL_PROVIDER_URL` | an OpenAI-compatible base URL; default `https://api.openai.com/v1`. Only a host of `api.openai.com` is sent [`prompt_cache_key`](#prompt-caching) |
 | `LAKE_MODEL_GATEWAY_MODELS` | JSON array of exact model/provider objects, such as `[{"model":"gpt-5.5","provider":"openai"}]`; absent defaults to `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, `gpt-6-luna`, `gpt-5.5`, `gpt-5`, `gpt-4o` and `text-embedding-3-small`; `[]` disables all model calls |
 
 Only the `openai` provider protocol is supported, using the configured base URL and key.

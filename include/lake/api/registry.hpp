@@ -426,6 +426,10 @@ struct ApiContext {
     // The model gateway's provider (model_completion, docs/api/model-gateway.md); empty when this
     // lake has no OpenAI key.
     ModelProvider model_provider;
+    // Whether `model_provider` is OpenAI's own API (LAKE_MODEL_PROVIDER_URL empty or naming the
+    // host api.openai.com): only then is a call sent with a `prompt_cache_key` (lake#1309), since
+    // another OpenAI-compatible server may refuse a field it does not know.
+    bool model_provider_is_openai = false;
     std::vector<GatewayModel> model_gateway_models = default_gateway_models();
     // The caller's event stream (lake#665): set by the `/openai/v1/*` route, a streamed
     // model_completion hands it each piece of the provider's event stream as it arrives, instead of

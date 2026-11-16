@@ -9771,6 +9771,7 @@ struct ApiServer::Impl {
         ctx.oidc_discovery = oidc_discovery;
         ctx.store_browser = store_browser;
         ctx.model_provider = model_provider;
+        ctx.model_provider_is_openai = is_openai_provider_url(options.model_provider_url);
         ctx.model_gateway_models = options.model_gateway_models;
         ctx.payments = payments;
         ctx.order_entitlement_grace_seconds = options.order_entitlement_grace_seconds;

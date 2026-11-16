@@ -6,6 +6,7 @@
 #include "lake/control/identity_crypto.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <format>
 #include <optional>
 #include <set>
@@ -689,6 +690,26 @@ std::string ModelStreamScrubber::line(std::string_view text) {
         out += '\r';
     }
     return out;
+}
+
+bool is_openai_provider_url(std::string_view url) {
+    if (url.empty()) {
+        return true;
+    }
+    const std::size_t scheme = url.find("://");
+    if (scheme == std::string_view::npos) {
+        return false;
+    }
+    std::string_view authority = url.substr(scheme + 3);
+    authority = authority.substr(0, authority.find_first_of("/?#"));
+    if (const std::size_t at = authority.rfind('@'); at != std::string_view::npos) {
+        authority.remove_prefix(at + 1);
+    }
+    const std::string_view host = authority.substr(0, authority.find(':'));
+    constexpr std::string_view openai = "api.openai.com";
+    return std::ranges::equal(host, openai, [](char a, char b) {
+        return std::tolower(static_cast<unsigned char>(a)) == b;
+    });
 }
 
 std::string prompt_cache_key(std::string_view workspace_id) {
