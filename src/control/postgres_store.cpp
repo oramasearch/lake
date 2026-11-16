@@ -9330,7 +9330,7 @@ public:
                                 "secs => $2) WHERE id IN (SELECT id FROM cloud_orders WHERE "
                                 // lake#1000: mail other than the confirmation goes only once the
                                 // address is confirmed (cloud_order_contact_confirmed).
-                                "((((path = 'checkout' OR contact_email_confirmed_at IS NOT NULL) "
+                                "(((path = 'checkout' OR contact_email_confirmed_at IS NOT NULL) "
                                 "AND ((state IN ('submitted', 'paid', 'failed') AND "
                                 "support_emailed_state IS DISTINCT FROM state) OR (state IN "
                                 "('submitted', 'paid', 'ready', 'failed') AND "
