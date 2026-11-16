@@ -237,12 +237,6 @@ liquid::runtime::task<ApiResult> export_repository(const json& input, ApiContext
     if (!records) {
         co_return forge_records_failure(records.error());
     }
-    json forge_values = json::array();
-    for (const control::ForgeRecord& record : *records) {
-        if (record.kind != "export" && record.kind != "github_import") {
-            forge_values.push_back(exported_forge_record(record));
-        }
-    }
     const auto portable = co_await blocking_call(
         [&] {
             return context.sync_store->export_portable(
@@ -257,6 +251,25 @@ liquid::runtime::task<ApiResult> export_repository(const json& input, ApiContext
     const auto object = context.store->find_policy_object("repository", repository->id);
     if (!object) {
         co_return store_error(object.error());
+    }
+    // A webhook's receiver URL is often a credential and its deliveries replay signed events, so
+    // they are a writer's to read (`list_webhooks` needs write); a reader's archive carries
+    // neither (lake#1314).
+    const auto writes = control::authorize(
+        *context.store, context.acting_identity, object->id, "write", context.authorization_cache);
+    if (!writes) {
+        co_return store_error(writes.error());
+    }
+    json forge_values = json::array();
+    for (const control::ForgeRecord& record : *records) {
+        if (record.kind == "export" || record.kind == "github_import") {
+            continue;
+        }
+        const bool webhook_record = record.kind == "webhook" || record.kind == "webhook_delivery";
+        if (webhook_record && !writes->allowed) {
+            continue;
+        }
+        forge_values.push_back(exported_forge_record(record));
     }
     // Who holds access is an administrator's to read (`list_grants` needs admin), so the archive of
     // a caller without admin on the repository carries no grants (lake#933).

@@ -5289,7 +5289,8 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
 }
 
 // A webhook's signing secret never leaves lake in an archive, and only a repository administrator's
-// archive names who holds access (lake#933). An imported webhook signs with a new secret.
+// archive names who holds access (lake#933). A reader's archive carries no webhook and no delivery,
+// whose URL is often a credential (lake#1314). An imported webhook signs with a new secret.
 TEST(Export, AnArchiveCarriesNoWebhookSecretAndGrantsOnlyForAnAdministrator) {
     Surface source;
     RepositoryFixtureStore source_store;
@@ -5307,32 +5308,42 @@ TEST(Export, AnArchiveCarriesNoWebhookSecretAndGrantsOnlyForAnAdministrator) {
          {"name", "hooked"}});
     ASSERT_TRUE(repository.ok) << repository.error.message;
     const std::string repository_id = repository.value["id"];
-    const std::string secret = "lsr-024-webhook-signing-secret";
+    const std::string secret = "export-webhook-signing-secret";
+    const std::string url = "https://example.test/lake/T000/B000/receiver-token";
     ASSERT_TRUE(source
                     .call("create_webhook",
                           {{"repository_id", repository_id},
-                           {"url", "https://example.test/lake"},
+                           {"url", url},
                            {"events", json::array({"issue"})},
                            {"secret", secret}})
                     .ok);
+    // An issue makes a delivery attempt, which an archive would carry beside the webhook.
+    ASSERT_TRUE(
+        source.call("create_issue", {{"repository_id", repository_id}, {"title", "Trigger hook"}})
+            .ok);
     const auto object = source.store.find_policy_object("repository", repository_id);
     ASSERT_TRUE(object) << object.error().message;
     const std::string reader = "taap:1:ed25519:export-reader";
     ASSERT_TRUE(source.store
                     .create_grant({reader, object->id, "read", "reader-proof", "admin", "test"})
                     .has_value());
+    const std::string writer = "taap:1:ed25519:export-writer";
+    ASSERT_TRUE(
+        source.store.create_grant({writer, object->id, "write", "writer-proof", "admin", "test"})
+            .has_value());
 
-    const auto webhooks_of = [](const json& archive) {
+    const auto records_of = [](const json& archive, std::string_view kind) {
         json found = json::array();
         for (const json& record : archive["payload"]["forge"]) {
-            if (record.value("kind", "") == "webhook") {
+            if (record.value("kind", "") == kind) {
                 found.push_back(record);
             }
         }
         return found;
     };
+    const auto webhooks_of = [&](const json& archive) { return records_of(archive, "webhook"); };
 
-    // A reader's archive: the webhook's endpoint and events, never its secret, and no grants.
+    // A reader's archive: no webhook, no delivery, no secret and no grants; the issue stays.
     source.ctx.acting_identity = reader;
     source.ctx.operator_credential = false;
     const ApiResult read_export =
@@ -5340,11 +5351,26 @@ TEST(Export, AnArchiveCarriesNoWebhookSecretAndGrantsOnlyForAnAdministrator) {
     ASSERT_TRUE(read_export.ok) << read_export.error.message;
     const json& read_archive = read_export.value["archive"];
     EXPECT_EQ(read_export.value.dump().find(secret), std::string::npos);
-    const json read_webhooks = webhooks_of(read_archive);
-    ASSERT_EQ(read_webhooks.size(), 1u);
-    EXPECT_EQ(read_webhooks[0]["value"]["url"], "https://example.test/lake");
-    EXPECT_FALSE(read_webhooks[0]["value"].contains("secret"));
+    EXPECT_EQ(read_export.value.dump().find(url), std::string::npos);
+    EXPECT_EQ(webhooks_of(read_archive), json::array());
+    EXPECT_EQ(records_of(read_archive, "webhook_delivery"), json::array());
+    EXPECT_EQ(records_of(read_archive, "issue").size(), 1u);
     EXPECT_EQ(read_archive["payload"]["grants"], json::array());
+
+    // A writer's archive: the webhook's endpoint and events and its delivery, never its secret,
+    // and no grants.
+    source.ctx.acting_identity = writer;
+    const ApiResult write_export =
+        source.call("export_repository", {{"repository_id", repository_id}});
+    ASSERT_TRUE(write_export.ok) << write_export.error.message;
+    const json& write_archive = write_export.value["archive"];
+    EXPECT_EQ(write_export.value.dump().find(secret), std::string::npos);
+    const json write_webhooks = webhooks_of(write_archive);
+    ASSERT_EQ(write_webhooks.size(), 1u);
+    EXPECT_EQ(write_webhooks[0]["value"]["url"], url);
+    EXPECT_FALSE(write_webhooks[0]["value"].contains("secret"));
+    EXPECT_EQ(records_of(write_archive, "webhook_delivery").size(), 1u);
+    EXPECT_EQ(write_archive["payload"]["grants"], json::array());
 
     // An administrator's archive keeps the grants, still without the secret.
     source.ctx.acting_identity = "admin";
@@ -5374,7 +5400,7 @@ TEST(Export, AnArchiveCarriesNoWebhookSecretAndGrantsOnlyForAnAdministrator) {
                          {{"customer_id", target_customer.value["id"]},
                           {"workspace_id", destination.workspace(target_customer.value["id"])},
                           {"name", "hooked-copy"},
-                          {"archive", read_archive}});
+                          {"archive", write_archive}});
     ASSERT_TRUE(imported.ok) << imported.error.message;
     std::string delivered_payload;
     std::string delivered_signature;
@@ -5703,6 +5729,72 @@ TEST(Forge, WebhookDeliveryRetriesAndRetainsAnEventLog) {
     EXPECT_TRUE(retried.value["value"]["delivered"]);
     EXPECT_EQ(retried.value["value"]["attempt"], 2);
     EXPECT_EQ(calls, 2);
+}
+
+// A webhook's receiver URL is often a credential and a delivery replays a signed event, so a
+// repository reader cannot list either; a writer, who can manage them, can (lake#1314).
+TEST(Forge, OnlyAWriterListsWebhooksAndTheirDeliveries) {
+    Surface surface;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository =
+        surface.call("create_repository",
+                     {{"customer_id", customer.value["id"]},
+                      {"workspace_id", surface.workspace(customer.value["id"])},
+                      {"name", "hooks"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const std::string repository_id = repository.value["id"];
+    const std::string url = "https://example.test/lake/T000/B000/receiver-token";
+    ASSERT_TRUE(surface
+                    .call("create_webhook",
+                          {{"repository_id", repository_id},
+                           {"url", url},
+                           {"events", json::array({"issue"})},
+                           {"secret", "list-secret"}})
+                    .ok);
+    ASSERT_TRUE(
+        surface.call("create_issue", {{"repository_id", repository_id}, {"title", "Trigger hook"}})
+            .ok);
+    const auto object = surface.store.find_policy_object("repository", repository_id);
+    ASSERT_TRUE(object) << object.error().message;
+    const std::string reader = "taap:1:ed25519:webhook-reader";
+    ASSERT_TRUE(
+        surface.store.create_grant({reader, object->id, "read", "reader-proof", "admin", "test"})
+            .has_value());
+    const std::string writer = "taap:1:ed25519:webhook-writer";
+    ASSERT_TRUE(
+        surface.store.create_grant({writer, object->id, "write", "writer-proof", "admin", "test"})
+            .has_value());
+    EXPECT_EQ(surface.registry.find("list_webhooks")->action, "write");
+    EXPECT_EQ(surface.registry.find("list_webhook_deliveries")->action, "write");
+
+    surface.ctx.operator_credential = false;
+    surface.ctx.acting_identity = reader;
+    // The reader still reads the repository's issues.
+    const ApiResult issues = surface.call("list_issues", {{"repository_id", repository_id}});
+    ASSERT_TRUE(issues.ok) << issues.error.message;
+    EXPECT_EQ(issues.value["items"].size(), 1u);
+    for (const std::string name : {"list_webhooks", "list_webhook_deliveries"}) {
+        const ApiResult refused = surface.call(name, {{"repository_id", repository_id}});
+        EXPECT_FALSE(refused.ok) << name;
+        EXPECT_EQ(refused.error.code, "unauthorized") << name;
+        EXPECT_EQ(refused.value.dump().find(url), std::string::npos) << name;
+    }
+
+    surface.ctx.acting_identity = writer;
+    const ApiResult webhooks = surface.call("list_webhooks", {{"repository_id", repository_id}});
+    ASSERT_TRUE(webhooks.ok) << webhooks.error.message;
+    ASSERT_EQ(webhooks.value["items"].size(), 1u);
+    EXPECT_EQ(webhooks.value["items"][0]["value"]["url"], url);
+    EXPECT_FALSE(webhooks.value["items"][0]["value"].contains("secret"));
+    const ApiResult deliveries =
+        surface.call("list_webhook_deliveries", {{"repository_id", repository_id}});
+    ASSERT_TRUE(deliveries.ok) << deliveries.error.message;
+    EXPECT_EQ(deliveries.value["items"].size(), 1u);
 }
 
 TEST(Forge, BranchProtectionRequiresAnApprovedReview) {
