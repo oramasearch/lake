@@ -98,6 +98,13 @@ Signature check (`src/control/saml.cpp`, no XML library), with audience, recipie
 time, `InResponseTo` and once-only assertion checks; unsolicited responses are refused. Not
 deployed; the operator must vendor the schema and select `saml_sign_in_guard`. See
 [`docs/api/sso.md#saml-sign-in`](docs/api/sso.md#saml-sign-in).
+SCIM bearer authentication checks one provider's hash (lake#1316, migration
+`0121_scim_token_selectors`): each provider keeps an HMAC-SHA-256 selector of its SCIM token keyed
+from `LAKE_INSTANCE_KEK`; `authenticate_scim` looks it up and runs one Argon2id check, a made-up
+token none, outside the shared connection's transaction and the memory store's lock. Providers
+registered before 0121 are still tried by hash until their first success records the selector. Not
+deployed; the operator must vendor the schema and select `scim_token_selectors_guard`. See
+[`docs/api/sso.md#scim-bearer-authentication`](docs/api/sso.md#scim-bearer-authentication).
 Generic Lake OAuth and enterprise OIDC providers are read through OpenID Connect discovery
 (lake#837, no migration): `<issuer>/.well-known/openid-configuration`, whose `issuer` must equal the
 configured one, gives the authorization, token and JWKS endpoints, cached an hour; the fetches are
@@ -1047,7 +1054,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `agent_model_prices_guard` in the source tree, versioned by content hash).
+  `scim_token_selectors_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

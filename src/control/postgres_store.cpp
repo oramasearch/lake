@@ -492,6 +492,10 @@ std::string hash_secret(std::string_view secret) {
            hex(derived.data(), derived.size());
 }
 
+namespace {
+std::atomic<std::uint64_t> argon2id_verifications{0};
+} // namespace
+
 bool verify_secret(std::string_view encoded, std::string_view secret) {
     std::array<std::string, 6> parts;
     std::size_t start = 0;
@@ -530,6 +534,7 @@ bool verify_secret(std::string_view encoded, std::string_view secret) {
         OSSL_PARAM_construct_uint("memcost", &memory_kib),
         OSSL_PARAM_construct_end(),
     };
+    argon2id_verifications.fetch_add(1, std::memory_order_relaxed);
     const int result = EVP_KDF_derive(context, derived.data(), derived.size(), parameters);
     EVP_KDF_CTX_free(context);
     return result == 1 && CRYPTO_memcmp(derived.data(), expected.data(), derived.size()) == 0;
@@ -553,6 +558,10 @@ bool verify_secret_against_dummy(std::string_view secret) {
 
 std::uint64_t dummy_secret_verifications() {
     return dummy_verifications.load(std::memory_order_relaxed);
+}
+
+std::uint64_t secret_verifications() {
+    return argon2id_verifications.load(std::memory_order_relaxed);
 }
 
 std::string new_totp_secret() {
@@ -10733,14 +10742,18 @@ public:
             if (token_hash.empty()) {
                 return std::unexpected(StoreError{"store_error", "could not hash SCIM token"});
             }
+            const Result<std::string> token_selector = scim_token_selector(input.scim_token);
+            if (!token_selector) {
+                return std::unexpected(token_selector.error());
+            }
             const pqxx::result rows = tx.exec_params(
                 std::string("INSERT INTO sso_providers (organization_id, pool_id, name, protocol, "
                             "issuer, ") +
                     "metadata, signing_certificate, client_id, encrypted_client_secret, "
                     "scim_token_hash, "
-                    "attribute_mapping, jit_provisioning) VALUES ($1::uuid, $2, $3, $4, $5, $6, "
-                    "$7, $8, "
-                    "decode(NULLIF($9, ''), 'hex'), $10, $11::jsonb, $12) ON CONFLICT "
+                    "attribute_mapping, jit_provisioning, scim_token_selector) VALUES ($1::uuid, "
+                    "$2, $3, $4, $5, $6, $7, $8, "
+                    "decode(NULLIF($9, ''), 'hex'), $10, $11::jsonb, $12, $13) ON CONFLICT "
                     "(organization_id, name) "
                     "DO UPDATE SET pool_id = EXCLUDED.pool_id, protocol = EXCLUDED.protocol, "
                     "issuer = "
@@ -10748,6 +10761,7 @@ public:
                     "EXCLUDED.signing_certificate, client_id = EXCLUDED.client_id, "
                     "encrypted_client_secret = "
                     "EXCLUDED.encrypted_client_secret, scim_token_hash = EXCLUDED.scim_token_hash, "
+                    "scim_token_selector = EXCLUDED.scim_token_selector, "
                     "attribute_mapping = EXCLUDED.attribute_mapping, jit_provisioning = "
                     "EXCLUDED.jit_provisioning, enabled = true RETURNING " +
                     sso_provider_columns,
@@ -10762,7 +10776,8 @@ public:
                 encrypted_secret,
                 token_hash,
                 input.attribute_mapping.dump(),
-                input.jit_provisioning);
+                input.jit_provisioning,
+                *token_selector);
             return sso_provider_of(rows[0]);
         });
     }
@@ -10885,18 +10900,44 @@ public:
         });
     }
 
+    // A SCIM request names its provider by the token's selector and runs one Argon2id check; a
+    // token no provider's selector matches runs none (lake#1316). Only providers registered before
+    // migration 0121 have no selector: they are still tried by hash, and the first success records
+    // the selector. The hashes are checked outside the shared connection's transaction.
     Result<SsoProvider> authenticate_scim(const std::string& bearer_token) override {
-        return with_tx<SsoProvider>([&](pqxx::work& tx) -> Result<SsoProvider> {
-            const pqxx::result rows = tx.exec(std::string("SELECT ") + sso_provider_columns +
-                                              ", scim_token_hash FROM sso_providers "
-                                              "WHERE enabled ORDER BY created_at");
-            for (const pqxx::row& row : rows) {
-                if (identity_crypto::verify_secret(row[15].as<std::string>(), bearer_token)) {
-                    return sso_provider_of(row);
-                }
+        const Result<std::string> selector = scim_token_selector(bearer_token);
+        if (!selector) {
+            return std::unexpected(selector.error());
+        }
+        const Result<std::vector<ScimTokenCandidate>> selected = scim_token_candidates(
+            "scim_token_selector = $1 ORDER BY created_at, id LIMIT 1", *selector);
+        if (!selected) {
+            return std::unexpected(selected.error());
+        }
+        if (!selected->empty()) {
+            const ScimTokenCandidate& candidate = selected->front();
+            if (identity_crypto::verify_secret(candidate.token_hash, bearer_token)) {
+                return candidate.provider;
             }
             return std::unexpected(StoreError{"unauthorized", "SCIM bearer token is invalid"});
-        });
+        }
+        const Result<std::vector<ScimTokenCandidate>> legacy =
+            scim_token_candidates("scim_token_selector IS NULL ORDER BY created_at, id", "");
+        if (!legacy) {
+            return std::unexpected(legacy.error());
+        }
+        for (const ScimTokenCandidate& candidate : *legacy) {
+            if (!identity_crypto::verify_secret(candidate.token_hash, bearer_token)) {
+                continue;
+            }
+            const Result<void> recorded =
+                record_scim_token_selector(candidate.provider.id, candidate.token_hash, *selector);
+            if (!recorded) {
+                return std::unexpected(recorded.error());
+            }
+            return candidate.provider;
+        }
+        return std::unexpected(StoreError{"unauthorized", "SCIM bearer token is invalid"});
     }
 
     Result<SsoProvider> test_sso_provider(const std::string& id) override {
@@ -13806,6 +13847,61 @@ private:
         }
         return issue_session(
             tx, user_id, in.pool_id, in.device_name, "browser", "", {"*"}, "", 60 * 60 * 24 * 30);
+    }
+
+    struct ScimTokenCandidate {
+        SsoProvider provider;
+        std::string token_hash;
+    };
+
+    // The enabled providers `condition` selects, with their SCIM token hashes. `selector` is the
+    // condition's $1 when it names one.
+    Result<std::vector<ScimTokenCandidate>> scim_token_candidates(const std::string& condition,
+                                                                  const std::string& selector) {
+        return with_tx<std::vector<ScimTokenCandidate>>(
+            [&](pqxx::work& tx) -> Result<std::vector<ScimTokenCandidate>> {
+                const std::string query = std::string("SELECT ") + sso_provider_columns +
+                                          ", scim_token_hash FROM sso_providers WHERE enabled "
+                                          "AND " +
+                                          condition;
+                const pqxx::result rows =
+                    selector.empty() ? tx.exec(query) : tx.exec_params(query, selector);
+                std::vector<ScimTokenCandidate> candidates;
+                for (const pqxx::row& row : rows) {
+                    candidates.push_back({sso_provider_of(row), row[15].as<std::string>()});
+                }
+                return candidates;
+            });
+    }
+
+    // Records the selector of a provider registered before migration 0121 once its token has
+    // been verified, unless its token was replaced meanwhile.
+    Result<void> record_scim_token_selector(const std::string& provider_id,
+                                            const std::string& token_hash,
+                                            const std::string& selector) {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec_params("UPDATE sso_providers SET scim_token_selector = $2 WHERE id = $1::uuid "
+                           "AND scim_token_selector IS NULL AND scim_token_hash = $3",
+                           provider_id,
+                           selector,
+                           token_hash);
+            return {};
+        });
+    }
+
+    // HMAC-SHA-256 of a SCIM token under a key derived from LAKE_INSTANCE_KEK (lake#1316).
+    Result<std::string> scim_token_selector(std::string_view token) const {
+        const auto key = instance_kek();
+        if (!key) {
+            return std::unexpected(key.error());
+        }
+        auto selector_key = secrets_crypto::derive_hkdf(*key, "lake/scim-token-selector/v1");
+        if (!selector_key) {
+            return std::unexpected(selector_key.error());
+        }
+        const Result<std::string> selector = secrets_crypto::hmac(*selector_key, token);
+        secrets_crypto::cleanse(*selector_key);
+        return selector;
     }
 
     Result<std::array<unsigned char, 32>> instance_kek() const {

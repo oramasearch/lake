@@ -11,6 +11,7 @@
 
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/saml.hpp"
@@ -309,6 +310,68 @@ TEST(Scim, UserUpdateGroupReplacementAndDeactivationRevokeSessions) {
     ASSERT_EQ(logs.value.at("items").size(), 1U);
     EXPECT_EQ(logs.value.at("items").front().at("resource"), "user");
     EXPECT_EQ(logs.value.at("items").front().at("operation"), "deactivate");
+}
+
+// lake#1316: a SCIM bearer names its provider by the token's selector, so an anonymous request
+// runs at most one Argon2id check whatever the number of providers, and a made-up token none.
+// Before, every enabled provider of every tenant was tried in turn.
+TEST(Scim, ABearerTokenChecksOnlyTheProviderItNames) {
+    SsoSurface surface;
+    std::vector<std::string> provider_ids;
+    for (const std::string tenant : {"first", "second"}) {
+        const ApiResult organization =
+            surface.call("create_organization", {{"display_name", "SCIM " + tenant}});
+        ASSERT_TRUE(organization.ok) << organization.error.message;
+        for (int index = 0; index < 3; ++index) {
+            const std::string name = "scim-" + tenant + "-" + std::to_string(index);
+            const ApiResult provider =
+                surface.call("register_sso_provider",
+                             provider_input(organization.value.at("id"),
+                                            name,
+                                            "oidc",
+                                            "https://" + name + ".stub.example"));
+            ASSERT_TRUE(provider.ok) << provider.error.message;
+            provider_ids.push_back(provider.value.at("id"));
+        }
+    }
+    namespace crypto = lake::control::identity_crypto;
+
+    auto before = crypto::secret_verifications();
+    EXPECT_FALSE(surface.store.authenticate_scim("made-up-token"));
+    EXPECT_EQ(crypto::secret_verifications(), before);
+
+    surface.context.authorized = false;
+    surface.context.operator_credential = false;
+    surface.context.acting_identity.clear();
+    before = crypto::secret_verifications();
+    const ApiResult anonymous =
+        surface.call("scim_list_users", {{"bearer_token", "made-up-token"}});
+    EXPECT_FALSE(anonymous.ok);
+    EXPECT_EQ(anonymous.error.code, "unauthorized");
+    EXPECT_EQ(crypto::secret_verifications(), before);
+
+    before = crypto::secret_verifications();
+    const auto authenticated = surface.store.authenticate_scim("token-scim-second-1");
+    ASSERT_TRUE(authenticated) << authenticated.error().message;
+    EXPECT_EQ(authenticated->id, provider_ids[4]);
+    EXPECT_EQ(crypto::secret_verifications(), before + 1);
+
+    // Registering a provider again replaces its token: the old one names nothing.
+    surface.context.authorized = true;
+    surface.context.operator_credential = true;
+    surface.context.acting_identity = "admin";
+    const auto first = surface.store.get_sso_provider(provider_ids[0]);
+    ASSERT_TRUE(first) << first.error().message;
+    json replaced = provider_input(
+        first->organization_id, "scim-first-0", "oidc", "https://scim-first-0.stub.example");
+    replaced["scim_token"] = "replaced-token";
+    ASSERT_TRUE(surface.call("register_sso_provider", replaced).ok);
+    before = crypto::secret_verifications();
+    EXPECT_FALSE(surface.store.authenticate_scim("token-scim-first-0"));
+    EXPECT_EQ(crypto::secret_verifications(), before);
+    const auto renewed = surface.store.authenticate_scim("replaced-token");
+    ASSERT_TRUE(renewed) << renewed.error().message;
+    EXPECT_EQ(renewed->id, provider_ids[0]);
 }
 
 // lake#870: principal ids are TAAP ids; `admin` belongs to the admin token alone.

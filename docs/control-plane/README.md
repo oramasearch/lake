@@ -69,5 +69,7 @@ session event ends only that browser, with `clerk_session_binding_guard`; and `0
 ([web apps](web-apps.md#restart)), with `app_restarts_guard`.
 session event ends only that browser, with `clerk_session_binding_guard`; and
 `0105_agent_model_prices` (lake#1230): the gpt-6.x and long-context model token rates, with
-`agent_model_prices_guard`.
+`agent_model_prices_guard`; and `0121_scim_token_selectors` (lake#1316): each SSO provider's keyed
+SCIM token selector, so a SCIM request checks one provider's hash, with `scim_token_selectors_guard`
+([SSO](../api/sso.md#scim-bearer-authentication)).
 [Schema](schema.md#authentication-attempts-migration-0098_authentication_attempts) describes shared password/MFA attempt budgets (lake#966).

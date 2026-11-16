@@ -22,6 +22,9 @@ bool verify_secret(std::string_view encoded, std::string_view secret);
 bool verify_secret_against_dummy(std::string_view secret);
 // How many times verify_secret_against_dummy has run in this process, for tests.
 std::uint64_t dummy_secret_verifications();
+// How many Argon2id derivations verify_secret has run in this process, for tests that bound the
+// work an unauthenticated request can cause (lake#1316).
+std::uint64_t secret_verifications();
 // New recovery codes are 128 random bits with a version prefix; legacy codes are refused.
 std::string new_recovery_code();
 std::string recovery_selector(std::string_view code);
