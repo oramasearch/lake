@@ -1835,6 +1835,9 @@ struct AgentSession {
     std::string issued_at;
     std::string expires_at; // "never" for a non-expiring key (lake#234)
     std::string revoked_at; // empty while the key is usable
+    // The repository the session's delegation names (migration 0113, lake#1346). Empty only for a
+    // key minted before it, which no longer verifies.
+    std::string repository_id;
 
     bool never_expires() const {
         return expires_at == "never";
@@ -1855,6 +1858,7 @@ struct NewAgentSession {
     std::int64_t expires_unix = 0;
     std::string issued_at;
     std::string expires_at;
+    std::string repository_id;
 };
 
 // One participant of a root recovery ceremony (migration 0093, lake#934): the TAAP id that holds

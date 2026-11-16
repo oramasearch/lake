@@ -50,6 +50,13 @@ operator vendors the schema and selects the guard. Lake is safe with an operator
 write the new column yet (it clears the hashes as before). See
 [web-apps.md](../docs/control-plane/web-apps.md#token-rotation) and
 [schema.md](../docs/control-plane/schema.md).
+Migration `0113_agent_session_repositories` (lake#1346) adds the nullable
+`agent_sessions.repository_id` (the repository an agent session's `delegation/1` names, as liquid
+v0.3.0 requires; NULL for a key minted before it, which no longer verifies), with the guard
+`agent_session_repositories_guard`. Additive. Numbered after `0112`; `0121` is taken by the open
+lake#1338. Apply before the new binary: the operator vendors the schema and selects the guard. See
+[agents](../docs/api/agents.md#delegation-and-transparency) and
+[schema.md](../docs/control-plane/schema.md).
 Migration `0105_agent_model_prices` (lake#1230) seeds the `model_tokens` rates of the gpt-6.x models
 the gateway now serves and the long-context classes `<model>@long/input` and `<model>@long/output`
 (also for gpt-5.5), OpenAI's standard price plus 30% read 2026-10-26, by `0095`'s rules (once; a new

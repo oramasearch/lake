@@ -8825,8 +8825,8 @@ Result<AgentSession> InMemoryStore::create_agent_session(const NewAgentSession& 
     }
     if (input.id.empty() || input.durable_agent_taap_id.empty() ||
         input.dispatcher_taap_id.empty() || input.session_taap_id.empty() ||
-        input.public_key.empty() || input.scopes.empty() || input.attestation.empty() ||
-        input.transparency_root.empty() || input.issued_at.empty() ||
+        input.repository_id.empty() || input.public_key.empty() || input.scopes.empty() ||
+        input.attestation.empty() || input.transparency_root.empty() || input.issued_at.empty() ||
         (input.expires_at == "never"
              ? input.expires_unix != 0
              : (input.expires_unix <= 0 || input.expires_at <= input.issued_at))) {
@@ -8849,7 +8849,9 @@ Result<AgentSession> InMemoryStore::create_agent_session(const NewAgentSession& 
                         input.transparency_root,
                         input.expires_unix,
                         input.issued_at,
-                        input.expires_at};
+                        input.expires_at,
+                        {},
+                        input.repository_id};
     agent_sessions_.push_back(record);
     return record;
 }

@@ -5451,3 +5451,16 @@ ALTER TABLE apps ADD COLUMN IF NOT EXISTS token_hashes_generation bigint
 CREATE TABLE IF NOT EXISTS app_token_generation_guard (
     applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0112_app_token_generation') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0113_agent_session_repositories (lake#1346, docs/api/agents.md): an agent session's
+-- `delegation/1` names the repository it acts for, as liquid v0.3.0 requires (liquid#515), and
+-- the session row keeps that repository. NULL for a key minted before this migration, which no
+-- longer verifies; a repository's removal leaves its sessions NULL too. Additive.
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS repository_id uuid
+    REFERENCES repositories(id) ON DELETE SET NULL;
+CREATE TABLE IF NOT EXISTS agent_session_repositories_guard (
+    applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0113_agent_session_repositories')
+    ON CONFLICT DO NOTHING;

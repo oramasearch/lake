@@ -707,7 +707,8 @@ stores `expires_at = 'infinity'`, which the existing `agent_sessions_expiry_chec
 reads back as `expires_at: "never"`. Idempotent (`ADD COLUMN IF NOT EXISTS`); guard
 `credentials_guard`. The operator vendors it and selects that guard before a binary that offers
 never-expiring credentials is deployed. Capabilities: [`../api/agents.md`](../api/agents.md) and
-[`../api/identity.md`](../api/identity.md).
+[`../api/identity.md`](../api/identity.md). Since lake#1346 no new agent key is minted without an
+expiry, and a stored `'infinity'` row no longer verifies; never-expiring tokens are unchanged.
 
 ## Agent launches migration
 
@@ -1625,3 +1626,12 @@ NULL until an operator that acknowledges rotation reports). An app token verifie
 two are equal or the operator's is NULL. Guard `app_token_generation_guard`. Additive; the operator
 vendors the schema and selects the guard before the image rolls. See
 [web-apps.md](web-apps.md#token-rotation).
+
+## Agent session repositories (migration `0113_agent_session_repositories`)
+
+lake#1346. `agent_sessions.repository_id uuid REFERENCES repositories(id) ON DELETE SET NULL`: the
+repository an agent session acts for, which its `delegation/1` names by liquid's hex id (liquid
+v0.3.0, liquid#515). `mint_agent_session_key` requires it; a row without one (a key minted before
+this migration) no longer verifies. Guard `agent_session_repositories_guard`. Additive; numbered
+after `0112` (`0121` is taken by the open lake#1338). The operator vendors the schema and selects
+the guard before the image rolls. See [agents](../api/agents.md#delegation-and-transparency).

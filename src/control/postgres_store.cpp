@@ -1971,7 +1971,8 @@ AgentSession agent_session_of(const pqxx::row& row) {
         row[10].as<std::int64_t>(),
         row[11].as<std::string>(),
         row[12].as<std::string>(),
-        row.size() > 13 ? row[13].as<std::string>() : std::string()};
+        row.size() > 13 ? row[13].as<std::string>() : std::string(),
+        row.size() > 14 ? row[14].as<std::string>() : std::string()};
 }
 
 // The agent_sessions columns agent_session_of reads. A never-expiring key is stored with
@@ -1984,7 +1985,8 @@ constexpr const char* agent_session_columns =
     "to_char(issued_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
     "CASE WHEN expires_at = 'infinity' THEN 'never' ELSE "
     "to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') END, "
-    "coalesce(to_char(revoked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '')";
+    "coalesce(to_char(revoked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), "
+    "coalesce(repository_id::text, '')";
 
 constexpr const char* device_columns =
     "devices.id::text, devices.user_id::text, devices.name, "
@@ -12274,9 +12276,9 @@ public:
     Result<AgentSession> create_agent_session(const NewAgentSession& input) override {
         if (input.id.empty() || input.customer_id.empty() || input.durable_agent_taap_id.empty() ||
             input.dispatcher_taap_id.empty() || input.session_taap_id.empty() ||
-            input.public_key.empty() || input.scopes.empty() || input.attestation.empty() ||
-            input.transparency_root.empty() || input.issued_at.empty() ||
-            input.expires_at.empty() ||
+            input.repository_id.empty() || input.public_key.empty() || input.scopes.empty() ||
+            input.attestation.empty() || input.transparency_root.empty() ||
+            input.issued_at.empty() || input.expires_at.empty() ||
             (input.expires_at == "never" ? input.expires_unix != 0 : input.expires_unix <= 0)) {
             return std::unexpected(StoreError{"invalid_input", "agent session record is invalid"});
         }
@@ -12285,10 +12287,11 @@ public:
                 std::string("INSERT INTO agent_sessions "
                             "(id, customer_id, durable_agent_taap_id, dispatcher_taap_id, "
                             "session_taap_id, public_key, scopes, attestation, "
-                            "transparency_index, transparency_root, issued_at, expires_at) VALUES "
+                            "transparency_index, transparency_root, issued_at, expires_at, "
+                            "repository_id) VALUES "
                             "($1::uuid, $2::uuid, $3, $4, $5, $6, "
                             "ARRAY(SELECT jsonb_array_elements_text($7::jsonb)), $8, $9, $10, "
-                            "$11::timestamptz, $12::timestamptz) RETURNING ") +
+                            "$11::timestamptz, $12::timestamptz, $13::uuid) RETURNING ") +
                     agent_session_columns,
                 input.id,
                 input.customer_id,
@@ -12301,7 +12304,8 @@ public:
                 input.transparency_index,
                 input.transparency_root,
                 input.issued_at,
-                input.expires_at == "never" ? std::string("infinity") : input.expires_at);
+                input.expires_at == "never" ? std::string("infinity") : input.expires_at,
+                input.repository_id);
             return agent_session_of(rows[0]);
         });
     }
