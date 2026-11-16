@@ -14512,7 +14512,7 @@ struct ApiServer::Impl {
                                                 const std::string& path) {
         std::string html(web_app_index());
         if (html.empty()) {
-            return serve_web_app_file(route, "/index.html");
+            co_return co_await serve_web_app_file(route, "/index.html");
         }
         ApiContext context = context_for(route);
         nlohmann::json input = nlohmann::json::object();
@@ -14549,14 +14549,16 @@ struct ApiServer::Impl {
             }
         }
         // Computed from the page as sent: its inline scripts are allowed by hash, nothing else.
+        // send_text is a lazy coroutine holding a view of the policy, so this function is one too:
+        // the policy lives in this frame until the answer is sent.
         const std::string policy =
             web_app_content_security_policy(html, clerk ? clerk->frontend_api : "");
-        return send_text(route,
-                         boost::http::status::ok,
-                         std::move(html),
-                         "text/html; charset=utf-8",
-                         "private, no-store",
-                         policy);
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     std::move(html),
+                                     "text/html; charset=utf-8",
+                                     "private, no-store",
+                                     policy);
     }
 
     boost::http::route_task serve_web_app_file(boost::http::route_params& route, std::string path) {
