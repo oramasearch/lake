@@ -407,6 +407,9 @@ struct ApiContext {
     std::string instance_kek;
     // The only key mint_sealed_secret seals to, when set (LAKE_SEALING_PUBLIC_KEY, lake#625).
     std::string sealing_public_key;
+    // Where import_github_repository reads Git checkouts from, one folder per customer
+    // (LAKE_GIT_IMPORT_ROOT, lake#925). Empty: the import is not offered.
+    std::string git_import_root;
     WebhookSender webhook_sender;
     // Speech-to-text for transcribe and create_transcript (docs/api/transcripts.md); empty when
     // this lake has no OpenAI key.

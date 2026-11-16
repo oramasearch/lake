@@ -234,6 +234,9 @@ struct ServerOptions {
     // set by the operator from Lake status.sealing). When set, mint_sealed_secret seals only to it
     // (lake#625, docs/api/secrets.md#projections).
     std::string sealing_public_key;
+    // The staging root import_github_repository reads checkouts from:
+    // <root>/<customer id>/<git_directory> (LAKE_GIT_IMPORT_ROOT, lake#925). Empty: not offered.
+    std::string git_import_root;
     // Speech-to-text (docs/api/transcripts.md, lake#561): OpenAI's key (LAKE_OPENAI_API_KEY) and
     // the transcription model (LAKE_TRANSCRIBE_MODEL, empty: gpt-4o-transcribe). With no key and
     // no injected `transcriber`, transcribe and audio transcripts answer not_supported.

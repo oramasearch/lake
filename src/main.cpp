@@ -349,6 +349,8 @@ int main(int argc, char** argv) {
     // The cluster delivery key the operator publishes (a public key, not a secret): the only one
     // mint_sealed_secret seals a user's secret to (lake#625).
     opts.sealing_public_key = env_or("LAKE_SEALING_PUBLIC_KEY", "");
+    // The staging root for import_github_repository's checkouts (lake#925); unset, not offered.
+    opts.git_import_root = env_or("LAKE_GIT_IMPORT_ROOT", "");
     // Speech-to-text (docs/api/transcripts.md): without a key, transcribe answers not_supported.
     opts.openai_api_key = env_or("LAKE_OPENAI_API_KEY", "");
     opts.model_provider_url = env_or("LAKE_MODEL_PROVIDER_URL", "");

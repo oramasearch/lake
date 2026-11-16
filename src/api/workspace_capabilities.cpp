@@ -3217,13 +3217,56 @@ std::string read_only_statement_problem(std::string_view statement) {
                "with '" +
                first + "'";
     }
-    bool quoted = false;
-    for (const char character : text) {
-        if (character == '\'') {
-            quoted = !quoted;
-        } else if (character == ';' && !quoted) {
-            return "run one statement at a time";
+    // Read the text the way a SQL parser does, and refuse anything two parsers could split
+    // differently (LSR-017, lake#926): a comment (`--`, `/*`), a dollar quote, a backslash inside
+    // a string, or a string or quoted name left open. Only then is a `;` outside them a second
+    // statement, refused. The engine sees exactly the text checked here.
+    enum class State { plain, string, name };
+    State state = State::plain;
+    for (std::size_t index = 0; index < text.size(); ++index) {
+        const char character = text[index];
+        const char next = index + 1 < text.size() ? text[index + 1] : '\0';
+        switch (state) {
+        case State::plain:
+            if (character == '\'') {
+                state = State::string;
+            } else if (character == '"') {
+                state = State::name;
+            } else if ((character == '-' && next == '-') || (character == '/' && next == '*')) {
+                return "comments are not accepted here: send the query alone";
+            } else if (character == '$' &&
+                       (next == '$' || std::isalpha(static_cast<unsigned char>(next)) != 0 ||
+                        next == '_')) {
+                return "dollar-quoted text is not accepted here: use a single-quoted string";
+            } else if (character == ';') {
+                return "run one statement at a time";
+            }
+            break;
+        case State::string:
+            if (character == '\\') {
+                return "a backslash inside a string is not accepted here";
+            }
+            if (character == '\'') {
+                if (next == '\'') {
+                    ++index; // '' is a quote inside the string
+                } else {
+                    state = State::plain;
+                }
+            }
+            break;
+        case State::name:
+            if (character == '"') {
+                if (next == '"') {
+                    ++index;
+                } else {
+                    state = State::plain;
+                }
+            }
+            break;
         }
+    }
+    if (state != State::plain) {
+        return "a string or quoted name is not closed";
     }
     return {};
 }
