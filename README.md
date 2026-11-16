@@ -192,7 +192,7 @@ describes the Network section each workspace has in the console (lake#729), and 
 ## Repository rules
 
 [`CLAUDE.md`](CLAUDE.md) contains contributor instructions. [`AGENTS.md`](AGENTS.md) restates the
-rules used by repository agents.
+rules used by repository agents. [`SECURITY.md`](SECURITY.md) says how to report a vulnerability.
 
 ## Licence
 
