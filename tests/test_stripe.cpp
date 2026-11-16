@@ -1178,7 +1178,9 @@ TEST(StripeBilling, WebhooksMoveTheInvoiceOncePerEvent) {
     EXPECT_EQ(unknown.status, 200);
     EXPECT_EQ(unknown.body["matched"], false);
 
-    // Every notice that moved an invoice, and every refusal, is in the central audit.
+    // Every notice that moved an invoice is in the central audit. The three notices that did not
+    // authenticate are counted, not audited one by one (LSR-196, lake#1002): at most one denied
+    // summary a minute for the whole process, so none here if another test summarized first.
     const auto events = lake::test::audit_events(*rig.store, {.limit = 500});
     ASSERT_TRUE(events) << events.error().message;
     int paid_events = 0;
@@ -1198,7 +1200,7 @@ TEST(StripeBilling, WebhooksMoveTheInvoiceOncePerEvent) {
         }
     }
     EXPECT_EQ(paid_events, 1);
-    EXPECT_EQ(denied, 3);
+    EXPECT_LE(denied, 1);
 }
 
 // One Stripe account, several apps (lake#855): every endpoint receives every event of its types,
