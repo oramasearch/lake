@@ -7,6 +7,7 @@
 #include <string_view>
 #include <vector>
 
+#include "lake/api/forge.hpp"
 #include "lake/api/sync_store.hpp"
 
 namespace lake::control {
@@ -19,10 +20,22 @@ struct ApiContext;
 
 // Capture destinations for authorization under SyncStore's mutation lock. The context must
 // outlive the synchronous commit call; no repository reads are made by the callback.
+//
+// Every write also advances `ref`, so the repository's branch rules apply to it as to a push
+// (LSR-015, lake#924): `protection` is what load_branch_protection read before the write. A write
+// whose rules could not be read is refused rather than made without them.
+using BranchProtectionLoad = std::expected<BranchProtectionRecords, SyncStoreError>;
 [[nodiscard]] RepositoryWriteAuthorizer
 repository_write_authorizer(const control::Repository& repository,
                             const std::vector<RepositoryWriteOperation>& operations,
-                            ApiContext& context);
+                            ApiContext& context,
+                            std::string ref,
+                            BranchProtectionLoad protection);
+
+// load_branch_protection, waited for on this thread. Only for a handler that already runs off the
+// server's own thread (the registry's run_blocking pool).
+BranchProtectionLoad branch_protection_blocking(ApiContext& context,
+                                                const control::Repository& repository);
 
 struct DrivePreview {
     std::string format;

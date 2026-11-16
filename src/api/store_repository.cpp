@@ -284,7 +284,9 @@ std::shared_ptr<control::StoreContents> repository_store_contents(SyncStore* rep
                 return SyncStoreResult<std::string>(std::unexpected(
                     SyncStoreError{repository.error().code, repository.error().message}));
             }
-            auto authorize = repository_write_authorizer(*repository, operations, *caller);
+            auto authorize = repository_write_authorizer(
+                *repository, operations, *caller, branch,
+                branch_protection_blocking(*caller, *repository));
             return repositories->commit_repository_files(customer_id,
                                                          repository_id,
                                                          branch,

@@ -6573,6 +6573,53 @@ TEST(Drive, HistoryAuthorizesTheNodeAtEveryRevisionItReads) {
         << "both sides are the shared folder Bob may read";
 }
 
+// LSR-015 (lake#924): a Drive write advances its branch, so the branch's rules apply to it as to a
+// push. main allows only another person to push: an otherwise authorized writer's upload, restore
+// and conflict resolution are refused and nothing is committed.
+TEST(Drive, WritesFollowTheBranchRules) {
+    Surface surface;
+    RepositoryFixtureStore repositories;
+    surface.ctx.sync_store = &repositories;
+    const auto owner = surface.call(
+        "create_user", {{"taap_id", "taap:1:ed25519:rules-writer"}, {"display_name", "Writer"}});
+    ASSERT_TRUE(owner.ok);
+    const auto customer = surface.call("create_customer",
+                                       {{"customer_type", "individual"},
+                                        {"user_id", owner.value["id"]},
+                                        {"name", "branch-rules"}});
+    ASSERT_TRUE(customer.ok);
+    const auto repository = surface.call("create_repository",
+                                         {{"customer_id", customer.value["id"]},
+                                          {"workspace_id", surface.workspace(customer.value["id"])},
+                                          {"name", "drive"}});
+    ASSERT_TRUE(repository.ok);
+    const auto object = surface.store.find_policy_object("repository", repository.value["id"]);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(surface.store.create_grant(
+        {"taap:1:ed25519:rules-writer", object->id, "write", "test", "admin", "test"}));
+    ASSERT_TRUE(surface
+                    .call("set_branch_protection",
+                          {{"repository_id", repository.value["id"]},
+                           {"ref", "main"},
+                           {"allowed_pushers", json::array({"taap:1:ed25519:someone-else"})}})
+                    .ok);
+    surface.ctx.operator_credential = false;
+    surface.ctx.acting_identity = "taap:1:ed25519:rules-writer";
+    json upload{{"repository_id", repository.value["id"]}, {"ref", "main"}, {"path", "shared"}};
+    upload["files"] = json::array({{{"name", "notes.md"}, {"content", "bmV3"}}});
+    const auto refused = surface.call("upload_drive_files", upload);
+    EXPECT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "unauthorized") << refused.error.message;
+    EXPECT_TRUE(repositories.committed_operations.empty()) << "main is unchanged";
+    const auto restore = surface.call("restore_drive_version",
+                                      {{"repository_id", repository.value["id"]},
+                                       {"ref", "main"},
+                                       {"path", "shared/readme.md"},
+                                       {"change_id", "change-1"}});
+    EXPECT_FALSE(restore.ok);
+    EXPECT_FALSE(repositories.restored);
+}
+
 TEST(Drive, MutationChecksTheLockedTreeAndRestoreChecksMain) {
     Surface surface;
     RepositoryFixtureStore repositories;
