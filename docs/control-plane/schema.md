@@ -62,6 +62,14 @@ schema and select the guard before the binary rolls, or a Lake with billing on r
 models and gpt-5.5. See [billing](../api/billing.md#rates) and
 [the model gateway](../api/model-gateway.md#long-prompts).
 
+`0110_taap_chain_heads` (lake#1024) adds `taap_chain_heads` (`taap_id` primary key, `user_id`
+referencing `users` with cascade, `head_hash` a 64-character lowercase hex SHA-256, `chain_length`
+2 to 64, `updated_at`), index `taap_chain_heads_user_idx`. `sign_in_taap` locks the identifier's row,
+refuses a chain whose document at `chain_length` is not `head_hash`, and moves the head forward when
+the chain is longer; a never-rotated identity has no row. Additive; guard `taap_chain_heads_guard`;
+the operator must vendor this schema and select the guard before the binary rolls. See
+[identity](../api/identity.md#signing-in-with-a-taap-key-the-key-must-be-the-identitys).
+
 `0104_app_restarts` (lake#1228) adds `apps.restart_generation` (bigint, default 0, never
 negative): the generation `restart_app` wrote. The operator writes it on the app's pod template, so a
 restart replaces the pods even when nothing else changed. Additive; guard `app_restarts_guard`. See

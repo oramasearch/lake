@@ -7276,6 +7276,32 @@ TEST_P(WorkspaceRecordStores, MethodologiesAreTheWorkspacesOwnAndOramasStayReadO
     crashed.phase = "Failed";
     crashed.message = "the methodology's code exited with 1";
     ASSERT_TRUE(t.store->put_methodology_run_status(failing_run, crashed));
+    // A member who may only read the account reads it as it stands (LSR-195, lake#1001): nothing
+    // is queued under the reader, and no trial is stopped.
+    const auto account = store->find_policy_object("customer", first.customer_id);
+    ASSERT_TRUE(account) << account.error().message;
+    ASSERT_TRUE(store->create_grant(
+        {second.principal.taap_id,
+         account->id,
+         "read",
+         lake::control::identity_crypto::sha256_hex(second.principal.taap_id + account->id),
+         first.principal.taap_id,
+         lake::control::new_uuid_v4()}));
+    const auto calls_before_read = study_calls.size();
+    const auto read_only =
+        t.call(second, "get_experiment", in(first, 0, {{"experiment_id", "study-1"}}));
+    ASSERT_TRUE(read_only.ok) << read_only.error.code << ": " << read_only.error.message;
+    EXPECT_EQ(study_calls.size(), calls_before_read) << "a read stops no trial";
+    EXPECT_EQ(read_only.value["methodology_runs"].size(), 3U) << "a read queues no run";
+    for (const json& shown : read_only.value["methodology_runs"]) {
+        if (!shown.value("run_id", json(nullptr)).is_string()) {
+            continue;
+        }
+        EXPECT_NE(t.store->get_methodology_run(shown.at("run_id"))->created_by_user_id,
+                  second.principal.user_id)
+            << "no run names the reader";
+    }
+    // The owner's read reconciles it for the person who started it.
     const auto reconciled =
         t.call(first, "get_experiment", in(first, 0, {{"experiment_id", "study-1"}}));
     ASSERT_TRUE(reconciled.ok) << reconciled.error.message;

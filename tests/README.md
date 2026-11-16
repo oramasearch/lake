@@ -180,7 +180,8 @@ authorized engine contract and an opt-in browser fixture. `frontend/tests/experi
 the chart transformations in `frontend/src/pages/experiments/transforms.ts` without a browser, and
 `frontend/tests/experiment-methodologies.test.ts` the Start an Experiment choices for a workspace
 methodology (lake#689); the methodology case in `test_workspace_records.cpp` runs such an
-experiment's trials end to end.
+experiment's trials end to end, including a read by a member who may only read that queues and
+stops nothing (lake#1001).
 Independent response validation also uses these fixtures. See
 [API](../docs/api/experiments.md) and [UI](../docs/ui/experiments.md) contracts.
 
@@ -344,6 +345,11 @@ Agent-session coverage uses an injected clock and a real Ed25519 TAAP signature.
 Postgres cases mint a response-only key, verify its current-profile `delegation/1` attestation,
 find it by dispatcher identity, attribute a signed drip to the durable agent, reject a modified
 body, and reject the key after expiry.
+
+`TaapSignIn.MemoryStoreBindsTheKeyToTheRegisteredIdentity` and
+`TaapSignIn.PostgresStoreBindsTheKeyToTheRegisteredIdentity` (`test_own_identity.cpp`) also keep
+the first key aside, rotate, sign in with the chain, and show the first key alone is then refused
+on both stores (lake#1024).
 
 `IdentityExit.PostgresProvesIdentityPkiAndDynamicSecrets` is the issue #4 acceptance scenario. It
 uses a real pinned-libliquid identity and Postgres rows to prove replay-resistant TAAP sign-in, an

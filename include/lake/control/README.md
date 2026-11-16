@@ -1,5 +1,9 @@
 # Public control types
 
+`identity_crypto::verify_taap_sign_in` answers `VerifiedTaapSignIn::chain_hashes` (each identity
+document's canonical SHA-256, oldest first), which `TaapSignIn` carries to the store so a replaced
+TAAP key stops signing in after its rotation is recorded (lake#1024).
+
 `User::disabled_at` retains offboarding state for administrative reads and the stream workers.
 Person-owned agent creation, claims, renewal and credential resolution require an active account;
 offboarding withdraws its launches/schedules and invalidates its tasks in the same store operation

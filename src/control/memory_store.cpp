@@ -4944,6 +4944,17 @@ Result<IssuedSession> InMemoryStore::sign_in_taap(const TaapSignIn& input) {
         return std::unexpected(StoreError{"invalid_input", "TAAP sign-in fields are required"});
     }
     std::lock_guard lock(mutex_);
+    // A rotated identity signs in only with a chain through its recorded head (lake#1024).
+    const auto head = taap_chain_heads_.find(input.taap_id);
+    if (head != taap_chain_heads_.end()) {
+        const auto& [head_hash, length] = head->second;
+        if (length == 0 || input.chain_hashes.size() < length ||
+            input.chain_hashes[length - 1] != head_hash) {
+            return std::unexpected(StoreError{
+                "unauthorized",
+                "TAAP identity was rotated: sign in with its current key and identity_chain"});
+        }
+    }
     if (!taap_assertions_.insert(input.assertion_id).second) {
         return std::unexpected(StoreError{"unauthorized", "TAAP assertion was already used"});
     }
@@ -4964,6 +4975,10 @@ Result<IssuedSession> InMemoryStore::sign_in_taap(const TaapSignIn& input) {
     }
     if (auto active = active_delegator_locked(user->id); !active)
         return std::unexpected(active.error());
+    if (input.chain_hashes.size() >= 2 &&
+        (head == taap_chain_heads_.end() || input.chain_hashes.size() > head->second.second)) {
+        taap_chain_heads_[input.taap_id] = {input.chain_hashes.back(), input.chain_hashes.size()};
+    }
     Device& device = add_device(devices_, user->id, input.device_name);
     IssuedSession issued =
         add_session(sessions_, user->id, input.pool_id, device.id, "taap", "", {"*"}, "", 86400);

@@ -650,7 +650,9 @@ bool identity_document_is_self_certifying(const liquid::identity_document& docum
 }
 
 std::expected<liquid::actor, std::string>
-bound_taap_key(std::string_view identity_document, std::span<const std::string> identity_chain) {
+bound_taap_key(std::string_view identity_document,
+               std::span<const std::string> identity_chain,
+               std::vector<std::string>* chain_hashes) {
     // The documents, oldest first: the chain when one is given (it must end with the presented
     // document), else the presented document alone.
     std::vector<std::string_view> encoded_documents;
@@ -670,6 +672,8 @@ bound_taap_key(std::string_view identity_document, std::span<const std::string> 
     }
     std::vector<liquid::identity_document> documents;
     documents.reserve(encoded_documents.size());
+    std::vector<std::string> hashes;
+    hashes.reserve(encoded_documents.size());
     for (const std::string_view encoded : encoded_documents) {
         const std::vector<unsigned char> bytes = from_base64url(encoded);
         if (bytes.empty()) {
@@ -684,8 +688,16 @@ bound_taap_key(std::string_view identity_document, std::span<const std::string> 
         if (!canonical || *canonical != canonical_input) {
             return std::unexpected("TAAP identity document does not verify canonically");
         }
+        // Hashed over the canonical bytes, so two encodings of one document are one document.
+        hashes.push_back(sha256_hex(std::string_view(reinterpret_cast<const char*>(bytes.data()),
+                                                     bytes.size())));
         documents.push_back(std::move(*document));
     }
+    const auto keep_hashes = [&] {
+        if (chain_hashes) {
+            *chain_hashes = std::move(hashes);
+        }
+    };
     const liquid::identity_document& root = documents.front();
     const auto verified_root = liquid::verify_document(root);
     if (!verified_root || !*verified_root) {
@@ -699,6 +711,7 @@ bound_taap_key(std::string_view identity_document, std::span<const std::string> 
                 : "TAAP identity document's key is not the key its identifier was derived from");
     }
     if (documents.size() == 1) {
+        keep_hashes();
         return root.subject;
     }
     const auto chain = liquid::verify_chain(documents);
@@ -718,6 +731,7 @@ bound_taap_key(std::string_view identity_document, std::span<const std::string> 
             return std::unexpected("TAAP identity rotation is not signed by the key it replaces");
         }
     }
+    keep_hashes();
     return chain->subject;
 }
 
@@ -777,7 +791,8 @@ verify_taap_sign_in(std::string_view identity_document,
     // lake#917: the key the assertion must be signed with is the one bound to the identifier: an
     // initial document's own key, or the current key of a chain from that document whose every
     // rotation the replaced key signed.
-    const auto key = bound_taap_key(identity_document, identity_chain);
+    std::vector<std::string> chain_hashes;
+    const auto key = bound_taap_key(identity_document, identity_chain, &chain_hashes);
     if (!key) {
         return std::unexpected(key.error());
     }
@@ -807,7 +822,8 @@ verify_taap_sign_in(std::string_view identity_document,
     // The replay key is what the signature authenticates: the identity, the pool, the nonce and
     // the time, never the transport form of the request (LSR-198, lake#1004). One signed assertion
     // is one sign-in, however its signature object or identity document is spelled.
-    return VerifiedTaapSignIn{key->taap_id, sha256_hex(key->taap_id + "\n" + body)};
+    return VerifiedTaapSignIn{
+        key->taap_id, sha256_hex(key->taap_id + "\n" + body), std::move(chain_hashes)};
 }
 
 std::optional<OidcClaims> verify_oidc_id_token(std::string_view token,
@@ -1532,6 +1548,55 @@ Repository repository_of(const pqxx::row& r) {
                       r[8].as<std::string>(),
                       r[9].as<std::string>(),
                       r[10].as<std::string>()};
+}
+
+// lake#1024: a TAAP sign-in's chain must pass through the head recorded for its identifier (a
+// replaced key, or a fork of the chain, is refused), and a longer chain becomes the new head. The
+// row is locked for the rest of the sign-in, so two sign-ins never record two heads.
+Result<void> advance_taap_chain_head(pqxx::work& tx,
+                                     const std::string& taap_id,
+                                     const std::string& user_id,
+                                     const std::vector<std::string>& chain_hashes) {
+    const auto recorded = [&] {
+        return tx.exec_params("SELECT head_hash, chain_length FROM taap_chain_heads "
+                              "WHERE taap_id = $1 FOR UPDATE",
+                              taap_id);
+    };
+    pqxx::result head = recorded();
+    if (head.empty()) {
+        if (chain_hashes.size() < 2) {
+            return {}; // never rotated: the first document's own key signs in
+        }
+        const pqxx::result inserted = tx.exec_params(
+            "INSERT INTO taap_chain_heads (taap_id, user_id, head_hash, chain_length) "
+            "VALUES ($1, $2::uuid, $3, $4) ON CONFLICT (taap_id) DO NOTHING RETURNING 1",
+            taap_id,
+            user_id,
+            chain_hashes.back(),
+            static_cast<int>(chain_hashes.size()));
+        if (!inserted.empty()) {
+            return {};
+        }
+        head = recorded(); // another sign-in recorded it first: check against that one
+        if (head.empty()) {
+            return std::unexpected(StoreError{"store_error", "TAAP chain head is unavailable"});
+        }
+    }
+    const std::string head_hash = head[0][0].as<std::string>();
+    const auto length = static_cast<std::size_t>(head[0][1].as<int>());
+    if (length == 0 || chain_hashes.size() < length || chain_hashes[length - 1] != head_hash) {
+        return std::unexpected(StoreError{
+            "unauthorized",
+            "TAAP identity was rotated: sign in with its current key and identity_chain"});
+    }
+    if (chain_hashes.size() > length) {
+        tx.exec_params("UPDATE taap_chain_heads SET head_hash = $2, chain_length = $3, "
+                       "updated_at = now() WHERE taap_id = $1",
+                       taap_id,
+                       chain_hashes.back(),
+                       static_cast<int>(chain_hashes.size()));
+    }
+    return {};
 }
 
 Result<void> require_live_repository(pqxx::work& tx, const std::string& repository_id) {
@@ -9617,6 +9682,11 @@ public:
                     StoreError{"unauthorized", "TAAP identity is not registered"});
             }
             const std::string user_id = users[0][0].as<std::string>();
+            // A rotated identity signs in only with a chain through its recorded head (lake#1024).
+            if (auto head = advance_taap_chain_head(tx, input.taap_id, user_id, input.chain_hashes);
+                !head) {
+                return std::unexpected(head.error());
+            }
             try {
                 tx.exec_params("INSERT INTO identity_taap_assertions "
                                "(assertion_id, user_id, pool_id) VALUES ($1, $2::uuid, $3)",

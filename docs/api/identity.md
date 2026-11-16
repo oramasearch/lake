@@ -279,6 +279,14 @@ Now the assertion must be signed with the key **bound** to the identifier
   also accepts a successor that declares the previous key compromised and is signed by the new key
   alone; Lake refuses that, because anyone could have made it. The assertion is verified with the
   chain's current key, and its `signing_key_identifier` must name that key.
+- **A replaced key stops signing in** (lake#1024). A sign-in with a chain longer than the one Lake
+  has recorded for that identifier records the chain's head (`taap_chain_heads`, migration
+  `0110_taap_chain_heads`: the SHA-256 of the newest document's canonical CBOR and the chain's
+  length), for a registered identity and for a linked own identity alike. Every later sign-in must
+  send a chain that passes through that head: the first key alone, an older chain, or a fork of the
+  chain is refused with `unauthorized` (*TAAP identity was rotated: sign in with its current key and
+  identity_chain*). Until a rotated chain has signed in once, Lake has no record of the rotation, so
+  sign in with the new key and its chain right after `liquid identity rotate`.
 - **Anything else is refused** with `unauthorized`: a document naming another identifier with a
   different key, a rotated successor sent without its chain, a chain that does not start at a
   bound document, an unbound rotation, or an assertion signed by any other key. No session is
@@ -304,8 +312,9 @@ To verify: `TaapSignIn.MemoryStoreBindsTheKeyToTheRegisteredIdentity` and
 `TaapSignIn.PostgresStoreBindsTheKeyToTheRegisteredIdentity` register a real liquid identity, sign
 in with it, and then show that a forged document with the victim's identifier and the attacker's
 key (which liquid's `verify_document` accepts) is refused and audited, that registering it is
-refused, that the rotated key signs in with its chain and not without it, and that a compromise
-rotation signed only by the new key (which liquid's `verify_chain` accepts) is refused.
+refused, that the rotated key signs in with its chain and not without it, that once it has the
+first key alone is refused (lake#1024), and that a compromise rotation signed only by the new key
+(which liquid's `verify_chain` accepts) is refused.
 
 ## What the exit scenario proves
 
@@ -597,10 +606,11 @@ principal is the account and whose details name `previous` and `next`;
 
 - A person whose liquid identity has already been rotated cannot link it yet: the current document
   alone does not prove its identifier. Accepting the whole chain (`verify_chain`) is the follow-up.
-- Rotating the own key afterwards (`liquid identity rotate`) is not recorded by Lake. `sign_in_taap`
-  accepts the rotated key only with the identity chain from the first document, every rotation
-  signed by the key it replaced ([above](#signing-in-with-a-taap-key-the-key-must-be-the-identitys));
-  the first key also still signs in, because Lake keeps no record that it was replaced.
+- Rotating the own key afterwards (`liquid identity rotate`) is recorded by Lake at the first
+  sign-in with the new key and its identity chain from the first document, every rotation signed by
+  the key it replaced ([above](#signing-in-with-a-taap-key-the-key-must-be-the-identitys)). From
+  then on the replaced key is refused (lake#1024). Before that sign-in, Lake has no record of the
+  rotation and the replaced key still signs in.
 - The link is one-way. An account that uses its own identity cannot return to a managed key.
 - Postgres keeps old row versions until vacuum; the wiped seed was wrapped under the instance key
   throughout.
