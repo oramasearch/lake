@@ -379,13 +379,15 @@ liquid::runtime::task<ZettaControlResult<void>> AgentTaskBus::reap() {
 }
 
 liquid::runtime::task<ZettaControlResult<void>> AgentTaskBus::publish_task(AgentTask task) {
+    // The bus is shared by every tenant, so a dispatch event carries ids only, never the caller's
+    // free text such as the task's kind; an agent reads the task from the store by its id
+    // (lake#1312).
     auto published = settled(co_await bus_->publish(agent_tasks_topic(task.agent),
-                                            {{"task_id", task.id},
-                                             {"customer_id", task.customer_id},
-                                             {"workspace_id", task.workspace_id},
-                                             {"agent", task.agent},
-                                             {"kind", task.kind}},
-                                            task.id));
+                                                    {{"task_id", task.id},
+                                                     {"customer_id", task.customer_id},
+                                                     {"workspace_id", task.workspace_id},
+                                                     {"agent", task.agent}},
+                                                    task.id));
     if (!published) {
         co_return bus_failure<void>(published.error().code, published.error().message);
     }
