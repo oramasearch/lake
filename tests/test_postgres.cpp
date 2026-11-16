@@ -1707,8 +1707,10 @@ TEST(PostgresWebApps, TokenRotationIsAGenerationTheOperatorAcknowledges) {
     EXPECT_EQ(created->token_generation, 0);
     EXPECT_FALSE(created->token_hashes_generation);
 
-    const std::string token = "rotate-source-" + suffix;
-    const json hashes{{"source", lake::control::identity_crypto::sha256_hex(token)}};
+    // An events token: an image app has no source token (a source token needs a runtime app's
+    // repository and revision), and the events purpose verifies for any app's mode.
+    const std::string token = "rotate-events-" + suffix;
+    const json hashes{{"events", lake::control::identity_crypto::sha256_hex(token)}};
     // What the operator writes: the hashes, and from an upgraded operator, their generation.
     const auto operator_writes = [&](const json& values, std::optional<std::int64_t> generation) {
         pqxx::connection connection(uri);
@@ -1750,7 +1752,7 @@ TEST(PostgresWebApps, TokenRotationIsAGenerationTheOperatorAcknowledges) {
 
     // The operator mints the next generation; only its tokens verify.
     const std::string replacement = "rotate-replacement-" + suffix;
-    operator_writes({{"source", lake::control::identity_crypto::sha256_hex(replacement)}}, 2);
+    operator_writes({{"events", lake::control::identity_crypto::sha256_hex(replacement)}}, 2);
     EXPECT_FALSE(store->context_for(token));
     EXPECT_TRUE(store->context_for(replacement));
 

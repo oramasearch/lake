@@ -7282,13 +7282,14 @@ TEST_P(WorkspaceRecordStores, MethodologiesAreTheWorkspacesOwnAndOramasStayReadO
     // is queued under the reader, and no trial is stopped.
     const auto account = store->find_policy_object("customer", first.customer_id);
     ASSERT_TRUE(account) << account.error().message;
-    ASSERT_TRUE(store->create_grant(
+    const auto reader_grant = store->create_grant(
         {second.principal.taap_id,
          account->id,
          "read",
          lake::control::identity_crypto::sha256_hex(second.principal.taap_id + account->id),
          first.principal.taap_id,
-         lake::control::new_uuid_v4()}));
+         lake::control::new_uuid_v4()});
+    ASSERT_TRUE(reader_grant) << reader_grant.error().message;
     const auto calls_before_read = study_calls.size();
     const auto read_only =
         t.call(second, "get_experiment", in(first, 0, {{"experiment_id", "study-1"}}));
@@ -7303,6 +7304,8 @@ TEST_P(WorkspaceRecordStores, MethodologiesAreTheWorkspacesOwnAndOramasStayReadO
                   second.principal.user_id)
             << "no run names the reader";
     }
+    // The reader is a member no more: below, another space sees none of it.
+    ASSERT_TRUE(store->revoke_grant(reader_grant->id, false));
     // The owner's read reconciles it for the person who started it.
     const auto reconciled =
         t.call(first, "get_experiment", in(first, 0, {{"experiment_id", "study-1"}}));
