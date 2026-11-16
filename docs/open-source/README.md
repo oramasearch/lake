@@ -9,7 +9,7 @@ to check it. The tracking issue is lake#1275.
 
 | Gate | What it needs | Covered by | Check |
 |---|---|---|---|
-| G1 Security | No open `security` issue; a private way to report one; a final review of the commit to be published | [`SECURITY.md`](../../SECURITY.md) (this page's change); the open `security` issues | `gh issue list --label security --state open`; the repository's *Private vulnerability reporting* setting is on |
+| G1 Security | No open `security` issue; a private way to report one; a final review of the commit to be published | [`SECURITY.md`](../../SECURITY.md) (lake#1290); the open `security` issues and their pull requests | `gh issue list --label security --state open`; the repository's *Private vulnerability reporting* setting is on |
 | G2 Secrets | A second secret scanner over the tree and the full history, every finding triaged, every credential that ever appeared rotated; test fixtures and smoke tokens confirmed not live | [The secret scan](#the-secret-scan) below: two scanners over the full history, every finding a fixture | A person confirms the triage; the rotation inventory |
 | G3 Internal material | No internal names, hosts, paths, agent instruction files, private-repository references, quoted decisions or internal pricing in the tree | lake#1320, lake#1317, lake#1322 | [`tools/release/public-scan.sh`](#the-scan) comes back empty |
 | G4 Licences | `LICENSE` (MIT), `COPYRIGHT`, an SPDX header in every source file we wrote, a generated `THIRD_PARTY_LICENSES` with nothing incompatible | lake#1321, lake#1334 | Every file in the tree we wrote carries `SPDX-License-Identifier: MIT` |
@@ -20,11 +20,12 @@ commit, pass or fail.
 
 ## Reporting a Vulnerability
 
-[`SECURITY.md`](../../SECURITY.md) is the policy a reporter reads: GitHub private vulnerability
-reporting first, an email address otherwise, the response times, the supported versions and the
-scope. GitHub shows it on the repository's *Security* tab. Private vulnerability reporting is a
-repository setting, switched on by a repository administrator under *Settings → Code security*
-or with:
+[`SECURITY.md`](../../SECURITY.md) (lake#1290) is the policy a reporter reads: email
+security@orama.com, never a public issue; acknowledgement within 2 business days, a plan within 7
+days, a fix or an agreed disclosure date within 90; the latest release only; the repository's code
+in scope. GitHub shows it on the repository's *Security* tab. Private vulnerability reporting is a
+repository setting a repository administrator switches on under *Settings → Code security*, or
+with:
 
 ```sh
 gh api -X PUT repos/<owner>/lake/private-vulnerability-reporting
