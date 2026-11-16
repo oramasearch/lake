@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/liquid_clients.hpp"
 
 #include <charconv>

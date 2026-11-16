@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // What a liquid client (the liquid CLI, liquify) can check before it syncs with this Lake
