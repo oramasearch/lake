@@ -366,6 +366,17 @@ constexpr std::array environment = {
                         false,
                         false,
                         "Where liquid keeps Lake's local signing identity (default $HOME/.liquid)"},
+    EnvironmentVariable{"LIQUID_IDENTITY_KEY_CUSTODY",
+                        false,
+                        false,
+                        "What seals a new liquid identity's wrapping key (default passphrase on "
+                        "Linux; the operator sets passphrase, lake#1352)"},
+    EnvironmentVariable{"LIQUID_IDENTITY_PASSPHRASE_FILE",
+                        false,
+                        false,
+                        "An owner-only file (0400) holding the identity passphrase, mounted from a "
+                        "Secret the operator creates once per Lake; a pod without it and without an "
+                        "identity does not start (lake#1352)"},
     EnvironmentVariable{"SSL_CERT_FILE", false, false, "Trust roots for outbound TLS"},
     EnvironmentVariable{"ZETTA_EGRESS_ALLOW",
                         true,

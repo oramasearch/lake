@@ -270,3 +270,49 @@ repository; without the start-time creation it fails, on `fd4ea84` (before lake#
 The pre-open runs beside those requests, so the test waits for its `repositories_preopened` event
 for both workspaces before it stops the server; a stop that came first drained the pre-open, which
 then logged nothing or 0 (lake#614).
+
+### Custody: the passphrase file
+
+Since liquid v0.3.0 (liquid#402) a new identity's signing key is sealed under a wrapping key that
+is itself held by a **custody**, by default a passphrase on Linux. A pod has no terminal to ask for
+one, so a lake pod seals its identity with a **passphrase file** mounted from a Kubernetes Secret
+(lake#1352). The Orama operator renders, per `Lake`:
+
+- a Secret `lake-<name>-liquid-identity` with one key, `passphrase`: 32 or more random bytes,
+  base64 or hex encoded, generated **once** when the Secret does not exist and never rotated or
+  overwritten by a reconcile (a new passphrase cannot open an identity sealed under the old one);
+- the file where lake's user can read it and liquid accepts it. liquid refuses a passphrase file
+  with any group or other permission bit, or one owned by anyone but the effective user or root.
+  A Secret volume's files are owned by root (group `fsGroup` when the pod sets one, which also adds
+  group read), and lake runs as `10001`, so a Secret volume mounted straight into the lake
+  container is either unreadable (`0400`, root) or refused (group or other bits). The operator
+  therefore mounts the Secret (`defaultMode: 0440` with the pod's `fsGroup`, or `0444`) only into
+  an init container running as `10001` (the lake image serves), which copies it into an
+  `emptyDir` with `medium: Memory` with `install -m 0400 /secret/passphrase
+  /run/lake/liquid-identity/passphrase`, so the copy is owned by `10001` with mode `0400`; the lake
+  container mounts only that `emptyDir`, at `/run/lake/liquid-identity`;
+- `LIQUID_IDENTITY_KEY_CUSTODY=passphrase` and
+  `LIQUID_IDENTITY_PASSPHRASE_FILE=/run/lake/liquid-identity/passphrase` in the lake container's
+  environment.
+
+liquid follows a symbolic link and checks the file it reaches. Keep the Secret off the store volume
+and out of `LIQUID_HOME`: whoever holds both the identity directory and the passphrase can sign as
+the identity.
+
+`ApiServer::start` checks before liquid is asked: when `LIQUID_HOME` holds no identity and the
+custody is `passphrase` (named, or the Linux default), or holds a passphrase-sealed identity, and
+`LIQUID_IDENTITY_PASSPHRASE_FILE` is unset, lake exits at start with `lake cannot create (or open)
+its liquid identity in <dir>: it is sealed under a passphrase and LIQUID_IDENTITY_PASSPHRASE_FILE
+names no passphrase file ...`, naming both variables. A file liquid refuses (wrong owner or mode,
+empty) fails the start with liquid's reason. An identity already in `file` custody (every one created
+before liquid v0.3.0) needs neither variable and keeps loading, so a home that already holds one is
+not broken by the image. `lake manifest` lists both variables (optional) for the operator.
+
+Since each pod's home is new, each pod creates its own identity under the one passphrase; the
+passphrase does not identify the pod, it only seals the key at rest.
+
+`IdentityCustody.*` (`tests/test_identity_custody.cpp`) starts lake with an empty `LIQUID_HOME`:
+with a `0400` passphrase file it gets a `passphrase`-sealed identity and no clear `.wrapping.key`;
+with no file it refuses to start naming both variables and creates nothing; an existing
+`file`-custody identity starts with neither. The suite's `LIQUID_IDENTITY_KEY_CUSTODY=file` default
+(`tests/test_main.cpp`) is overridden only inside these tests.

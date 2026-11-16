@@ -98,6 +98,8 @@ target_sources(lake-tests PRIVATE test_identity_proof.cpp)
 target_sources(lake-tests PRIVATE test_release_version.cpp)
 # `lake manifest`: the schema, Stripe events and environment the operator reads (lake#1119).
 target_sources(lake-tests PRIVATE test_manifest.cpp)
+# A lake pod's liquid identity custody: a passphrase file, or a start that names it (lake#1352).
+target_sources(lake-tests PRIVATE test_identity_custody.cpp)
 # A white-labelled Lake's brand on every page, email and agent surface (lake#1135, lake#1137).
 target_sources(lake-tests PRIVATE test_brand.cpp)
 target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx OpenSSL::Crypto

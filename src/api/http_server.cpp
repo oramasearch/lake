@@ -16355,6 +16355,49 @@ void fix_malloc_mmap_threshold() {
 // home is empty, and its first uses run at once (the pre-open's workers, the first requests). Lake
 // therefore creates or loads it here, once, before anything opens a repository, under a file lock
 // that also orders lake processes sharing one home (lake#534 follow-up).
+//
+// Since liquid v0.3.0 (liquid#402) a new identity's wrapping key is sealed under a custody, by
+// default a passphrase on Linux (the Keychain on macOS). A pod has no terminal to ask for one, so
+// it names an owner-only passphrase file the operator mounts from a Secret
+// (`LIQUID_IDENTITY_PASSPHRASE_FILE`, lake#1352). Without one, the start fails here naming both
+// variables, before liquid is asked. An identity already in `file` custody (every one created
+// before liquid v0.3.0) needs neither and keeps loading.
+static std::optional<std::string>
+refuse_identity_without_custody(const std::filesystem::path& home) {
+    const auto status = liquid::local_identity_custody();
+    if (!status) {
+        return std::nullopt; // liquid reports an unreadable identity itself, below.
+    }
+    std::string custody = status->kind;
+    if (custody == "none") {
+        const char* chosen = std::getenv("LIQUID_IDENTITY_KEY_CUSTODY");
+        if (chosen != nullptr && *chosen != '\0') {
+            custody = chosen;
+        } else {
+#if defined(__APPLE__)
+            custody = "keychain";
+#else
+            custody = "passphrase";
+#endif
+        }
+        if (custody == "passphrase:") {
+            custody = "passphrase";
+        }
+    }
+    const char* file = std::getenv("LIQUID_IDENTITY_PASSPHRASE_FILE");
+    if (custody != "passphrase" || (file != nullptr && *file != '\0')) {
+        return std::nullopt;
+    }
+    return std::string(status->kind == "none" ? "lake cannot create its liquid identity in "
+                                              : "lake cannot open its liquid identity in ") +
+           (home / "identity").string() +
+           ": it is sealed under a passphrase and LIQUID_IDENTITY_PASSPHRASE_FILE names no "
+           "passphrase file. Set LIQUID_IDENTITY_PASSPHRASE_FILE to an owner-only file (mode "
+           "0400 or 0600) holding the passphrase, as the Orama operator mounts it from a Secret, "
+           "or choose another custody with LIQUID_IDENTITY_KEY_CUSTODY "
+           "(docs/serving/configuration.md, lake#1352)";
+}
+
 static std::expected<void, std::string> prepare_local_identity() {
     static std::mutex mutex;
     // The homes whose identity this process has loaded (one, outside tests).
@@ -16370,6 +16413,9 @@ static std::expected<void, std::string> prepare_local_identity() {
     }
     if (ready.contains(home)) {
         return {};
+    }
+    if (auto refused = refuse_identity_without_custody(home)) {
+        return std::unexpected(std::move(*refused));
     }
     std::error_code created;
     std::filesystem::create_directories(home / "identity", created);
