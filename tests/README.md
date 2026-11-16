@@ -518,6 +518,13 @@ refused with its line before any upload call, a taken name refused or reported a
 `AgentRuns.CreateAgentRefusesDefinitionFieldsZettaWouldDrop` cover lake#442 in memory;
 `PostgresAgentLaunches` covers the `0043_agent_launch_workspaces` routing trigger, workspace
 filters and the start-timeout withdrawal. See [agent-launches.md](../docs/api/agent-launches.md).
+`PostgresServices.AServiceIsNeverRoutedToAnotherCustomersWorkspace` (`test_postgres.cpp`) covers
+migration `0111_service_workspace_routing` (lake#1301): the store's insert and raw updates that
+route a service into another customer's workspace, or move a workspace's Zetta service or customer
+across accounts, are refused; same-customer and NULL workspaces, status writes and withdrawals are
+not; the migration re-applies cleanly. `Workspaces.TheMemoryStoreNeverRoutesAServiceToAnotherCustomersWorkspace`
+(`test_workspaces.cpp`) holds the in-memory store to the same rule. See
+[services](../docs/control-plane/services.md#workspace-routing).
 `test_docs_status.cpp` runs `tools/docs/check-status.py` on `docs/design/status.md` against the
 newest snapshot in `docs/deployment/observed/` and the in-tree registry's OpenAPI, and proves the
 script refuses each contradiction it looks for (lake#448). `WebApp.FrontDoorDocQuotesTheHomePage`

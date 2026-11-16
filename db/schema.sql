@@ -5348,3 +5348,90 @@ CREATE INDEX IF NOT EXISTS taap_chain_heads_user_idx ON taap_chain_heads (user_i
 
 CREATE TABLE IF NOT EXISTS taap_chain_heads_guard (applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0110_taap_chain_heads') ON CONFLICT DO NOTHING;
+
+-- 0111_service_workspace_routing (lake#1301, orama-operator#781,
+-- docs/control-plane/services.md#workspace-routing): the operator places a service in the
+-- namespace of the workspace `services.workspace_id` names, and trusts that lake wrote a
+-- consistent row. A service whose workspace belongs to another customer would put one account's
+-- service in another account's workspace. The database now refuses such a row however it is
+-- written: `service_workspace_routing` checks a service on insert and on any update of
+-- `workspace_id` or `customer_id`; `workspace_service_routing` checks a workspace on insert and
+-- on any update of `customer_id` or `zetta_service_id`, so the pair cannot drift from the
+-- workspace's side either. A NULL `workspace_id` (a service from before 0039 that still needs a
+-- selection) and a NULL `zetta_service_id` (a workspace being created) stay allowed. Status
+-- writes and withdrawals touch neither column and are never checked. Existing rows are not
+-- changed: any that already disagree are reported as warnings, and a write that changes their
+-- routing is refused until it names a workspace of the service's customer. Numbered after the
+-- open 0106 (lake#1295), 0107 to 0109 (lake#1296) and 0110 (lake#1300).
+-- ---------------------------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION enforce_service_workspace_routing() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' AND NEW.workspace_id IS NOT DISTINCT FROM OLD.workspace_id
+       AND NEW.customer_id IS NOT DISTINCT FROM OLD.customer_id THEN
+        RETURN NEW;
+    END IF;
+    IF NEW.workspace_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM workspaces WHERE id = NEW.workspace_id AND customer_id = NEW.customer_id
+    ) THEN
+        RAISE EXCEPTION 'services.workspace_id must name a workspace of the service''s customer'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS service_workspace_routing ON services;
+CREATE TRIGGER service_workspace_routing BEFORE INSERT OR UPDATE OF workspace_id, customer_id
+    ON services FOR EACH ROW EXECUTE FUNCTION enforce_service_workspace_routing();
+
+CREATE OR REPLACE FUNCTION enforce_workspace_service_routing() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' AND NEW.customer_id IS NOT DISTINCT FROM OLD.customer_id
+       AND NEW.zetta_service_id IS NOT DISTINCT FROM OLD.zetta_service_id THEN
+        RETURN NEW;
+    END IF;
+    IF NEW.zetta_service_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM services WHERE id = NEW.zetta_service_id AND customer_id = NEW.customer_id
+    ) THEN
+        RAISE EXCEPTION 'workspaces.zetta_service_id must name a service of the workspace''s customer'
+            USING ERRCODE = '23514';
+    END IF;
+    IF TG_OP = 'UPDATE' AND NEW.customer_id IS DISTINCT FROM OLD.customer_id AND EXISTS (
+        SELECT 1 FROM services WHERE workspace_id = NEW.id AND customer_id <> NEW.customer_id
+    ) THEN
+        RAISE EXCEPTION 'a workspace cannot move to another customer while services of its customer name it'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS workspace_service_routing ON workspaces;
+CREATE TRIGGER workspace_service_routing BEFORE INSERT OR UPDATE OF customer_id, zetta_service_id
+    ON workspaces FOR EACH ROW EXECUTE FUNCTION enforce_workspace_service_routing();
+
+DO $service_workspace_routing$
+DECLARE
+    mismatch record;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations
+                    WHERE version = '0111_service_workspace_routing') THEN
+        FOR mismatch IN
+            SELECT s.id AS service_id, s.customer_id AS service_customer,
+                   w.id AS workspace_id, w.customer_id AS workspace_customer
+              FROM services s JOIN workspaces w ON w.id = s.workspace_id
+             WHERE w.customer_id <> s.customer_id
+            UNION
+            SELECT s.id, s.customer_id, w.id, w.customer_id
+              FROM workspaces w JOIN services s ON s.id = w.zetta_service_id
+             WHERE w.customer_id <> s.customer_id
+        LOOP
+            RAISE WARNING 'service routed to another customer''s workspace: service=%, customer=%, workspace=%, workspace customer=%',
+                mismatch.service_id, mismatch.service_customer, mismatch.workspace_id,
+                mismatch.workspace_customer;
+        END LOOP;
+    END IF;
+END
+$service_workspace_routing$;
+
+CREATE TABLE IF NOT EXISTS service_workspace_routing_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0111_service_workspace_routing')
+    ON CONFLICT DO NOTHING;

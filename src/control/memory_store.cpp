@@ -1031,6 +1031,14 @@ Result<ManagedService> InMemoryStore::create_service(const NewManagedService& in
             customers_, [&](const Customer& customer) { return customer.id == in.customer_id; })) {
         return std::unexpected(StoreError{"not_found", "no customer " + in.customer_id});
     }
+    // As the Postgres trigger service_workspace_routing (0111, lake#1301): a service names no
+    // workspace or one of its own customer's, so it is never placed in another account's.
+    if (!in.workspace_id.empty() && std::ranges::none_of(workspaces_, [&](const Workspace& row) {
+            return row.id == in.workspace_id && row.customer_id == in.customer_id;
+        })) {
+        return std::unexpected(StoreError{
+            "invalid_input", "services.workspace_id must name a workspace of the service's customer"});
+    }
     std::size_t live = 0;
     for (const ManagedService& service : services_) {
         if (service.customer_id != in.customer_id || service.desired != "present") {

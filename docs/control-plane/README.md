@@ -77,4 +77,7 @@ contact email was confirmed, with `order_email_confirmation_guard`; `0108_retain
 (lake#988): a deleted workspace's unbilled usage, kept as quantities so its bill still counts it,
 with `retained_usage_guard`; and `0109_principal_ids` (lake#872): the database checks every user's
 and organization's `taap_id` is a TAAP id, with `principal_ids_guard`.
+`agent_model_prices_guard`; and `0111_service_workspace_routing` (lake#1301): the triggers that
+refuse a service routed to another customer's workspace, with `service_workspace_routing_guard`
+([services](services.md#workspace-routing)).
 [Schema](schema.md#authentication-attempts-migration-0098_authentication_attempts) describes shared password/MFA attempt budgets (lake#966).
