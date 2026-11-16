@@ -898,6 +898,13 @@ New delegations require the dispatcher to equal the authenticated acting TAAP id
 durable agent to have an active customer-issued agent certificate (lake#957, no migration).
 Existing agents need an administrator to issue that certificate before minting another session.
 
+## Open-source release
+
+lake is to be published under MIT (lake#1275). The gates, what covers each and the checks are in
+[`docs/open-source/README.md`](docs/open-source/README.md); vulnerabilities are reported as
+[`SECURITY.md`](SECURITY.md) says; `tools/release/public-scan.sh` must exit 0 on the commit to be
+published.
+
 ## Creating users
 
 To give someone a lake account in any environment (Clerk on lake.oramadev.net, lake.live, local,

@@ -190,6 +190,12 @@ defines its permission-checked REST and MCP capabilities; [`docs/ui/network.md`]
 describes the Network section each workspace has in the console (lake#729), and the
 [Network guide](docs/guide/network.md) is what a customer reads.
 
+## Security
+
+Report a vulnerability privately as [`SECURITY.md`](SECURITY.md) describes, never in a public
+issue. What the open-source release still needs is in
+[`docs/open-source/README.md`](docs/open-source/README.md).
+
 ## Repository rules
 
 [`CONTRIBUTING.md`](CONTRIBUTING.md) contains contributor instructions. [`SECURITY.md`](SECURITY.md)
