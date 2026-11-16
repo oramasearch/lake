@@ -2925,7 +2925,7 @@ public:
         if (!state) {
             return std::unexpected(state.error());
         }
-        auto server = liquid::sync_server{*(*state)->subject, *(*state)->objects};
+        auto& server = sync_server_of(**state);
         return from_liquid(liquid::runtime::block_on(server.handle_find_missing(request)));
     }
 
@@ -2945,49 +2945,13 @@ public:
         if (storage_quota_bytes != 0 && *stored_bytes >= storage_quota_bytes) {
             return std::unexpected(quota_error(*stored_bytes, storage_quota_bytes));
         }
-        liquid::sync_server_options options;
-        options.authorize =
-            [authorize = std::move(authorize)](const liquid::sync_item& item,
-                                               std::span<const liquid::sync_ref_update> updates)
-            -> liquid::runtime::task<std::vector<liquid::sync_ref_verdict>> {
-            std::vector<BranchRefUpdate> reference_updates;
-            reference_updates.reserve(updates.size());
-            for (const liquid::sync_ref_update& update : updates) {
-                reference_updates.push_back(BranchRefUpdate{
-                    .name = update.name,
-                    .old_head = update.old_head
-                                    ? std::optional{liquid::to_string(update.old_head->value)}
-                                    : std::nullopt,
-                    .new_head = liquid::to_string(update.new_head.value),
-                    .fast_forward = update.fast_forward,
-                });
-            }
-            const SyncPushItem input{
-                .kind = item.kind == liquid::sync_item_kind::reference ? SyncPushItemKind::Reference
-                                                                       : SyncPushItemKind::Change,
-                .change_id = liquid::to_string(item.reference.value),
-                .author = item.author.taap_id,
-            };
-            auto result = authorize(input, reference_updates);
-            if (!result) {
-                co_return std::unexpected(liquid_error(result.error()));
-            }
-            std::vector<liquid::sync_ref_verdict> verdicts;
-            verdicts.reserve(result->size());
-            for (const SyncRefVerdict& verdict : *result) {
-                verdicts.push_back({
-                    .name = verdict.name,
-                    .verdict = verdict.verdict == SyncRefVerdictKind::Accepted
-                                   ? liquid::sync_ref_verdict_kind::accepted
-                                   : liquid::sync_ref_verdict_kind::refused,
-                    .reason = verdict.reason,
-                });
-            }
-            co_return verdicts;
-        };
-        auto server =
-            liquid::sync_server{*(*state)->subject, *(*state)->objects, std::move(options)};
+        // Set for this push only; the lane serializes the repository's pushes.
+        (*state)->push_authorizer = std::move(authorize);
+        auto& server = sync_server_of(**state);
         auto pushed = from_liquid(liquid::runtime::block_on(server.handle_push(request)));
+        (*state)->push_authorizer = nullptr;
+        // The push moved what it claimed into the store or discarded it.
+        (*state)->staged_bytes = 0;
         if (!pushed) {
             return pushed;
         }
@@ -3004,7 +2968,7 @@ public:
         if (!state) {
             return std::unexpected(state.error());
         }
-        auto server = liquid::sync_server{*(*state)->subject, *(*state)->objects};
+        auto& server = sync_server_of(**state);
         return from_liquid(liquid::runtime::block_on(server.handle_pull(request)));
     }
 
@@ -3024,14 +2988,22 @@ public:
         if (!incoming_bytes) {
             return std::unexpected(incoming_bytes.error());
         }
-        if (exceeds_quota(*stored_bytes, *incoming_bytes, storage_quota_bytes)) {
-            return std::unexpected(quota_error(*stored_bytes, storage_quota_bytes));
+        // Uploads are staged until their push (liquid#403), so the quota counts the bytes staged
+        // since the last push as stored.
+        const std::uint64_t staged = (*state)->staged_bytes;
+        const std::uint64_t pending =
+            *stored_bytes > std::numeric_limits<std::uint64_t>::max() - staged
+                ? std::numeric_limits<std::uint64_t>::max()
+                : *stored_bytes + staged;
+        if (exceeds_quota(pending, *incoming_bytes, storage_quota_bytes)) {
+            return std::unexpected(quota_error(pending, storage_quota_bytes));
         }
-        auto server = liquid::sync_server{*(*state)->subject, *(*state)->objects};
+        auto& server = sync_server_of(**state);
         auto stored = from_liquid(liquid::runtime::block_on(server.handle_chunks(request)));
         if (!stored) {
             return std::unexpected(stored.error());
         }
+        (*state)->staged_bytes = staged + *incoming_bytes;
         if (auto durable = entered_repository.durable.now(); !durable) {
             return std::unexpected(durable.error());
         }
@@ -3055,7 +3027,7 @@ public:
         if (!state) {
             return std::unexpected(state.error());
         }
-        auto server = liquid::sync_server{*(*state)->subject, *(*state)->objects};
+        auto& server = sync_server_of(**state);
         auto output = std::vector<std::byte>(static_cast<std::size_t>(length));
         auto read = liquid::runtime::block_on(server.handle_chunks(*digest, offset, output));
         if (!read) {
@@ -4187,7 +4159,79 @@ private:
         std::filesystem::path path;
         // The workspace whose own store holds it (lake#380); empty for the space's store.
         std::string workspace;
+        // The authorizer of the push this repository is serving, set only while its handle_push
+        // runs; the request holds the repository's lane, so one push runs at a time.
+        SyncPushAuthorizer push_authorizer;
+        // One sync server per open repository (liquid#403): liquid stages chunk uploads in the
+        // server's quarantine and moves them into the store only when a push that reaches them is
+        // authorized, so the uploads and their push must meet the same server. Declared after
+        // `subject`, so it is destroyed first.
+        std::unique_ptr<liquid::sync_server> sync;
+        // The unique bytes uploaded into the quarantine since the last push. The storage quota
+        // counts them as stored, because the push that claims them moves them into the store.
+        std::uint64_t staged_bytes{};
     };
+
+    // The repository's sync server, made on first use. Its authorizer calls the push's own
+    // (`push_authorizer`) and refuses outside a push. The caller holds the repository's lane.
+    liquid::sync_server& sync_server_of(RepositoryState& state) {
+        if (state.sync) {
+            return *state.sync;
+        }
+        liquid::sync_server_options options;
+        options.authorize = [&state](const liquid::sync_item& item,
+                                     std::span<const liquid::sync_ref_update> updates)
+            -> liquid::runtime::task<std::vector<liquid::sync_ref_verdict>> {
+            if (!state.push_authorizer) {
+                co_return std::unexpected(
+                    liquid::error{liquid::errc::unauthorized, "no push is being authorized", ""});
+            }
+            std::vector<BranchRefUpdate> reference_updates;
+            reference_updates.reserve(updates.size());
+            for (const liquid::sync_ref_update& update : updates) {
+                reference_updates.push_back(BranchRefUpdate{
+                    .name = update.name,
+                    .old_head = update.old_head
+                                    ? std::optional{liquid::to_string(update.old_head->value)}
+                                    : std::nullopt,
+                    .new_head = liquid::to_string(update.new_head.value),
+                    .fast_forward = update.fast_forward,
+                });
+            }
+            const SyncPushItem input{
+                .kind = item.kind == liquid::sync_item_kind::reference ? SyncPushItemKind::Reference
+                                                                       : SyncPushItemKind::Change,
+                .change_id = liquid::to_string(item.reference.value),
+                .author = item.author.taap_id,
+            };
+            auto result = state.push_authorizer(input, reference_updates);
+            if (!result) {
+                co_return std::unexpected(liquid_error(result.error()));
+            }
+            std::vector<liquid::sync_ref_verdict> verdicts;
+            verdicts.reserve(result->size());
+            for (const SyncRefVerdict& verdict : *result) {
+                verdicts.push_back({
+                    .name = verdict.name,
+                    .verdict = verdict.verdict == SyncRefVerdictKind::Accepted
+                                   ? liquid::sync_ref_verdict_kind::accepted
+                                   : liquid::sync_ref_verdict_kind::refused,
+                    .reason = verdict.reason,
+                });
+            }
+            co_return verdicts;
+        };
+        // The quarantine stays on lake's volume beside the stores, not in the pod's temporary
+        // directory.
+        if (!root_.empty()) {
+            options.staging_directory = std::filesystem::path(root_) / ".sync-staging";
+            std::error_code ignored;
+            std::filesystem::create_directories(options.staging_directory, ignored);
+        }
+        state.sync = std::make_unique<liquid::sync_server>(
+            *state.subject, *state.objects, std::move(options));
+        return *state.sync;
+    }
 
     // One workspace's liquid store in its workspace Zetta (lake#380), opened on first use.
     struct WorkspaceStore {

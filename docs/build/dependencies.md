@@ -12,10 +12,14 @@ branches. The recorded commits, rather than the configured branch names, determi
 | `modules/beast2` | private `oramasearch/beast2` patch carrier | `orama-main` |
 | `modules/libpqxx` | `jtv/libpqxx` | reviewed recorded commit |
 | `modules/oramacore-cpp` | private `oramasearch/oramacore-cpp` | `main` |
-| `modules/liquid` | private `oramasearch/liquid`, library-only | `main` |
 
-`modules/liquid` owns its transitive submodules. Lake initializes them recursively but does not
-select their revisions independently.
+liquid (private `oramasearch/liquid`, library-only) is not a submodule of lake: lake builds
+against the liquid commit liquid-bridge pins, given at configure time as `LAKE_LIQUID_SOURCE_DIR`
+([local.md](local.md)), so one pin is the single source of truth. Since lake#1346 that is liquid
+v0.3.0 (`66b5bb9`). That release stages sync uploads until the push that claims them is authorized
+(liquid#403), so lake keeps one `sync_server` per open repository
+([sync](../api/sync.md#lake-adapter)), and a test process chooses file custody for liquid's local
+identity ([testing](testing.md)).
 
 The Liquid pin includes first-class conflict values and structural CRDT convergence. Lake consumes
 the `conflict`, `conflict_reference`, and `conflict_resolution` records from that pin directly, so

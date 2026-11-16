@@ -384,6 +384,11 @@ const char* lake::test::postgres_uri() {
 
 int main(int argc, char** argv) {
     std::set_terminate(print_terminate);
+    // Since liquid v0.3.0 a new local identity's wrapping key is sealed in the macOS Keychain, or
+    // under a passphrase elsewhere, unless file custody is chosen (liquid#402). The suite has no
+    // Keychain prompt or passphrase, so it uses file custody, as liquid's own suite does, for this
+    // process and the lake processes it starts. A caller's own choice is kept.
+    ::setenv("LIQUID_IDENTITY_KEY_CUSTODY", "file", 0);
     testing::InitGoogleTest(&argc, argv);
     testing::UnitTest::GetInstance()->listeners().Append(new DatabaseCleanup);
     return RUN_ALL_TESTS();
