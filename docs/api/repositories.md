@@ -40,8 +40,8 @@ with lake#341, and its content moves with lake#380.
 | `repository_refs` | read | `id` | `{items: [{name, change}]}`, from the liquid repository |
 | `repository_tree` | read | `id`, `ref` | `{items: [{path, kind, blob, mode, node_id, size, stored_size}]}` |
 | `repository_file` | read | `id`, `ref`, `path`, `units?` | `{path, blob, contents?, content_base64, binary, size, units?}`: see [File contents](#file-contents) |
-| `list_changes` | read | `id` | `{items: [{id, parents, author, message, occurred_at}]}` |
-| `get_change` | read | `id`, `change_id` | change identity and metadata |
+| `list_changes` | read | `id` | `{items: [{id, parents, author, message, occurred_at}], people}`: see [Signers by name](#signers-by-name) |
+| `get_change` | read | `id`, `change_id` | change identity and metadata, and `people` for its author |
 | `change_diff` | read | `id`, `change_id` | `{items: [{path, old_path, kind, changes, old_mode, new_mode, old_blob, new_blob, line_hunks, old_conflicts, new_conflicts}]}` |
 | `list_conflicts` | read | `id` | `{items: [{id, base, left, right, region, kind, explanation, proposal?, reasons, node?}]}` |
 | `resolve_conflict` | action | `repository_id`, `ref`, `path`, `conflict_id`, `resolution`, `blob?` | `{conflict, value, change}` |
@@ -310,3 +310,39 @@ Lifecycle changes update the applicable migration in `db/schema.sql`, the
 byte-identical operator schema asset, this page, `docs/control-plane/schema.md`, and the repository
 page renderer in one change. Do not shorten the retention window without a migration and a
 documented collection policy.
+
+## Signers by name
+
+**What.** A change's `author` is the TAAP identity that signed it
+(`taap:1:ed25519:TY44R4SE…`). The reads that name signers or principals also answer `people`: each
+such identity mapped to `{kind, name, handle}` of the account it acts for (lake#1326). `kind` is
+`user` or `organization`, `name` the account's display name (possibly empty), and `handle` its
+account's name (`@ada`).
+
+| Read | Identities in `people` |
+|---|---|
+| `list_changes`, `get_change` | each change's `author` |
+| `list_reviews` | each review's `opened_by`, `reviewers` and `approval.by` |
+| `list_review_comments` | each comment's `author` (a TAAP identifier, or liquid's actor object with `taap_id`) |
+| `entity_effective_access` | each entry's `principal_taap_id` |
+
+**How.** `Store::signer_names` resolves an identity the way `Store::account_for_identity` does for
+the `push_change` audit: an account's own identifier is itself, and an own identity linked to an
+account (lake#762) acts for that account. Then it reads the user's or organization's display name and
+its own account's handle. Deleted accounts are left out.
+
+- An identity no account acts for is absent. The web app shows it as **Unknown signer** with a short
+  key, the whole key on hover.
+- `people` never carries an email. A visitor to a public repository reads names and handles, the
+  same as on the repository's owner line.
+- If the lookup fails, `people` is empty and the records are still served with their keys.
+
+**Why.** People recognize each other by name. A list of keys makes review harder.
+
+**How to verify.** `Repositories.PublicRepositoryContentCapabilitiesUseTheRepositoryStore`
+(a visitor reads the author's name and handle, not the email), `Forge.PersistsIssueLifecycleAndMapsReviewCommentAnchors`
+(reviewers by name), `Forge.ARecordsSignersAreItsOpenerReviewersApproverAndAuthor`,
+`Repositories.PeopleNameKnownAccountsOnlyAndTheAccessList` (`tests/test_api.cpp`), and
+`OwnIdentity.*StoreRotatesToTheOwnIdentity` (both keys of an account with a linked own identity read
+as that account, in both stores). The web app's labels: `frontend/tests/signers.test.ts`.
+

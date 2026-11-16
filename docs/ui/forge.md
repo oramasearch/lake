@@ -70,8 +70,9 @@ extension uses the same numbered layout with plain text.
 ## Change review
 
 `/change?repository_id=<id>&id=<change>` (`ChangePage.tsx`) makes the first message line the
-review title and renders the rest as Markdown. It shows compact change, author, parent and blob
-identities; review state and reviewers (`list_reviews`); per-file and total addition and removal
+review title and renders the rest as Markdown. It shows compact change, parent and blob
+identities; the author, each reviewer and each comment's author by name and `@handle`, with the key on
+hover ([signers](#signers-by-name)); review state and reviewers (`list_reviews`); per-file and total addition and removal
 counts; structural conflict values; line-addressable text hunks with their anchored comments
 (`list_review_comments`); and repository checks with output paths and verified attestation profiles
 (`list_artifacts`). Change lookup includes changes kept by named review references as well as the
@@ -240,3 +241,17 @@ protection page as the operator.
 Add the data to a capability's output first ([../api/web-app.md](../api/web-app.md#change)), then
 read it in the page. Shared presentation belongs in `styles/lake.css` and the kit; pages use lake's
 classes, not their own colours.
+
+## Signers by name
+
+The repository page's Recent changes and Effective access, the Change Log, a change's header,
+details, reviewers and comments, the File page's blame and the repository's Effective Access page
+show who signed a change or holds access by name and `@handle` (`SignerName` in `forge.tsx`), from
+the `people` member of the read that named them ([../api/repositories.md](../api/repositories.md#signers-by-name),
+lake#1326). The whole key is in the `title` (the hover) and `data-full-identifier`. An identity no
+account acts for reads **Unknown signer** and a short key (the key without `taap:1:ed25519:`, first 8
+and last 4 characters). A principal that is not a TAAP identity (an App, a build, a share link) reads
+as itself. The viewer's own identity adds "(you)". The Change Log's search and the access search
+match names and handles as well as keys. The labels are pure functions in `signers.ts`
+(`frontend/tests/signers.test.ts`).
+

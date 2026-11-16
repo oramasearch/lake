@@ -184,8 +184,14 @@ ForgeTask<ApiResult> list_records(std::string kind, const json& input, ApiContex
         co_return forge_records_failure(records.error());
     }
     json items = json::array();
+    // Who opened, reviews, approved or commented, by name (lake#1326).
+    const bool names_signers = kind == "review" || kind == "review_comment";
+    std::vector<std::string> signers;
     for (const control::ForgeRecord& record : *records) {
         json output = control::to_json(record);
+        if (names_signers) {
+            forge_record_signers(record.value, signers);
+        }
         if (record.kind == "webhook") {
             output["value"].erase("secret");
         }
@@ -199,7 +205,11 @@ ForgeTask<ApiResult> list_records(std::string kind, const json& input, ApiContex
         }
         items.push_back(std::move(output));
     }
-    co_return ApiResult::success({{"items", std::move(items)}});
+    json out{{"items", std::move(items)}};
+    if (names_signers) {
+        out["people"] = signer_people(context, signers);
+    }
+    co_return ApiResult::success(std::move(out));
 }
 
 // This repository's record `id` of `kind`; `not_found` at `/<field>` when there is none.
@@ -739,12 +749,18 @@ void add_list(Registry& registry,
               std::string kind,
               bool allows_anonymous_public_read = false) {
     std::string description = forge_description(name);
+    json output_schema = records_schema();
+    if (kind == "review" || kind == "review_comment") {
+        // The signers' names (lake#1326).
+        output_schema["properties"]["people"] = signer_people_schema();
+        description += " `people` names each opener, reviewer, approver and author's account.";
+    }
     registry.add(Capability{
         .name = std::move(name),
         .title = std::move(title),
         .description = std::move(description),
         .input_schema = repository_input({{"limit", {{"type", "integer"}}}}, json::array()),
-        .output_schema = records_schema(),
+        .output_schema = std::move(output_schema),
         .kind = CapabilityKind::Read,
         .object = "repository",
         .action = "read",

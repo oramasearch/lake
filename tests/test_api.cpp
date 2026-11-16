@@ -48,6 +48,7 @@
 
 #include "objects/records.hpp"  // from LAKE_LIQUID_SOURCE_DIR/src (see tests/CMakeLists.txt)
 
+#include "api/repository_people.hpp"
 #include "api/workspace_records_api.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/forge.hpp"
@@ -4725,7 +4726,8 @@ TEST(ApiErrors, DatabaseDiagnosticsStayOutOfErrorMessages) {
 
 TEST(Forge, PersistsIssueLifecycleAndMapsReviewCommentAnchors) {
     Surface surface;
-    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    const ApiResult user =
+        surface.call("create_user", {{"display_name", "Ada"}, {"taap_id", "taap:1:ed25519:ada"}});
     ASSERT_TRUE(user.ok) << user.error.message;
     const ApiResult customer = surface.call(
         "create_customer",
@@ -4789,6 +4791,81 @@ TEST(Forge, PersistsIssueLifecycleAndMapsReviewCommentAnchors) {
     EXPECT_EQ(mapped.value["items"][0]["value"]["anchor"]["change"], "change-2");
     EXPECT_EQ(mapped.value["items"][0]["value"]["anchor"]["line"], 10);
     EXPECT_EQ(mapped.value["items"][0]["value"]["anchor"]["disposition"], "shifted");
+
+    // Reviewers and comment authors read by name and handle (lake#1326); an unknown one is absent.
+    const json ada = {{"kind", "user"}, {"name", "Ada"}, {"handle", "ada"}};
+    const ApiResult reviews = surface.call("list_reviews", {{"repository_id", repository_id}});
+    ASSERT_TRUE(reviews.ok) << reviews.error.message;
+    EXPECT_EQ(reviews.value["people"]["taap:1:ed25519:ada"], ada);
+    const ApiResult comments =
+        surface.call("list_review_comments", {{"repository_id", repository_id}});
+    ASSERT_TRUE(comments.ok) << comments.error.message;
+    EXPECT_TRUE(comments.value.contains("people"));
+    // Issues are unchanged.
+    EXPECT_FALSE(
+        surface.call("list_issues", {{"repository_id", repository_id}}).value.contains("people"));
+}
+
+// lake#1326: the identities a forge record names, in either author shape.
+TEST(Forge, ARecordsSignersAreItsOpenerReviewersApproverAndAuthor) {
+    std::vector<std::string> signers;
+    lake::api::forge_record_signers({{"opened_by", "taap:1:ed25519:opener"},
+                                     {"reviewers", json::array({"taap:1:ed25519:r", 7, ""})},
+                                     {"approval", {{"by", "taap:1:ed25519:approver"}}}},
+                                    signers);
+    lake::api::forge_record_signers(
+        {{"author", {{"taap_id", "taap:1:ed25519:actor"}, {"algorithm", "ed25519"}}}}, signers);
+    lake::api::forge_record_signers({{"author", "taap:1:ed25519:plain"}}, signers);
+    lake::api::forge_record_signers(json::array(), signers);
+    EXPECT_EQ(signers,
+              (std::vector<std::string>{"taap:1:ed25519:opener",
+                                        "taap:1:ed25519:r",
+                                        "taap:1:ed25519:approver",
+                                        "taap:1:ed25519:actor",
+                                        "taap:1:ed25519:plain"}));
+}
+
+// lake#1326: an identity no account acts for is absent from `people`, and a repository's access
+// list names its principals.
+TEST(Repositories, PeopleNameKnownAccountsOnlyAndTheAccessList) {
+    Surface s;
+    EXPECT_EQ(lake::api::signer_people(s.ctx, {"taap:1:ed25519:nobody"}), json::object());
+    const ApiResult user = s.call("create_user",
+                                  {{"display_name", "Grace"},
+                                   {"taap_id", "taap:1:ed25519:grace"},
+                                   {"email", "grace@example.test"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer =
+        s.call("create_customer",
+               {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "grace"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    EXPECT_EQ(lake::api::signer_people(s.ctx, {"taap:1:ed25519:grace", "taap:1:ed25519:nobody"}),
+              json({{"taap:1:ed25519:grace",
+                     {{"kind", "user"}, {"name", "Grace"}, {"handle", "grace"}}}}));
+    const ApiResult repository =
+        s.call("create_repository",
+               {{"customer_id", customer.value["id"]},
+                {"workspace_id", lake::test::repository_workspace(s.store, customer.value["id"])},
+                {"name", "access"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const auto object = s.store.find_policy_object("repository", repository.value["id"]);
+    ASSERT_TRUE(object) << object.error().message;
+    ASSERT_TRUE(s.store.create_grant({"taap:1:ed25519:grace",
+                                      object->id,
+                                      "write",
+                                      "people-attestation",
+                                      "admin",
+                                      "people-access"}));
+    const ApiResult access = s.call(
+        "entity_effective_access", {{"object_type", "repository"}, {"id", repository.value["id"]}});
+    ASSERT_TRUE(access.ok) << access.error.message;
+    ASSERT_TRUE(access.value.contains("people"));
+    EXPECT_TRUE(std::ranges::any_of(access.value["items"], [](const json& entry) {
+        return entry.value("principal_taap_id", "") == "taap:1:ed25519:grace";
+    })) << access.value.dump();
+    EXPECT_EQ(access.value["people"]["taap:1:ed25519:grace"],
+              json({{"kind", "user"}, {"name", "Grace"}, {"handle", "grace"}}));
+    EXPECT_EQ(access.value.dump().find("grace@example.test"), std::string::npos);
 }
 
 TEST(Export, ManifestSignerMustBeNamedAfterItsSigningKey) {
@@ -5795,8 +5872,12 @@ TEST(Repositories, PublicRepositoryContentCapabilitiesUseTheRepositoryStore) {
     Surface s;
     RepositoryFixtureStore repository_store;
     s.ctx.sync_store = &repository_store;
-    const ApiResult user = s.call("create_user", {{"display_name", "Ada"}});
-    ASSERT_TRUE(user.ok);
+    // The fixture's changes are signed by this identity (lake#1326).
+    const ApiResult user = s.call("create_user",
+                                  {{"display_name", "Ada"},
+                                   {"taap_id", "taap:1:ed25519:author"},
+                                   {"email", "ada@example.test"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
     const ApiResult customer =
         s.call("create_customer",
                {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
@@ -5844,10 +5925,16 @@ TEST(Repositories, PublicRepositoryContentCapabilitiesUseTheRepositoryStore) {
     EXPECT_EQ(resolved.value["revision"], "main");
     EXPECT_EQ(s.call("resolve_model", {{"namespace", "ada"}, {"name", "missing"}}).error.code,
               "not_found");
-    EXPECT_EQ(s.call("list_changes", {{"id", repository_id}}).value["items"].size(), 1u);
-    EXPECT_EQ(
-        s.call("get_change", {{"id", repository_id}, {"change_id", "change-1"}}).value["message"],
-        "initial");
+    const ApiResult changes = s.call("list_changes", {{"id", repository_id}});
+    EXPECT_EQ(changes.value["items"].size(), 1u);
+    // A visitor reads the author by name and handle, never the email (lake#1326).
+    const json ada = {{"kind", "user"}, {"name", "Ada"}, {"handle", "ada"}};
+    EXPECT_EQ(changes.value["people"], json({{"taap:1:ed25519:author", ada}}));
+    EXPECT_EQ(changes.value.dump().find("ada@example.test"), std::string::npos);
+    const ApiResult change =
+        s.call("get_change", {{"id", repository_id}, {"change_id", "change-1"}});
+    EXPECT_EQ(change.value["message"], "initial");
+    EXPECT_EQ(change.value["people"], json({{"taap:1:ed25519:author", ada}}));
     const ApiResult difference =
         s.call("change_diff", {{"id", repository_id}, {"change_id", "change-1"}});
     ASSERT_TRUE(difference.ok) << difference.error.message;

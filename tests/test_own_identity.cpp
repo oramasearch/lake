@@ -319,6 +319,29 @@ std::string expect_use_own_identity(lake::control::Store& store, const std::stri
     const auto acts_for = store.account_for_identity(own.signer.identity().taap_id);
     EXPECT_TRUE(acts_for);
     EXPECT_EQ(*acts_for, account);
+    // A change signed with either key reads as the account's name and handle (lake#1326); a key
+    // no account acts for is absent, and never an email.
+    {
+        const auto user = store.get_user(person.acting_user_id);
+        EXPECT_TRUE(user);
+        const auto names = store.signer_names(
+            {account, own.signer.identity().taap_id, stranger.signer.identity().taap_id, ""});
+        EXPECT_TRUE(names) << (names ? "" : names.error().message);
+        if (names && user && customer) {
+            EXPECT_EQ(names->size(), 2U);
+            for (const std::string& key : {account, own.signer.identity().taap_id}) {
+                EXPECT_TRUE(names->contains(key)) << key;
+                if (!names->contains(key)) {
+                    continue;
+                }
+                EXPECT_EQ(names->at(key).kind, "user");
+                EXPECT_EQ(names->at(key).display_name, user->display_name);
+                EXPECT_EQ(names->at(key).handle, customer->name);
+                EXPECT_NE(names->at(key).display_name, user->email);
+            }
+            EXPECT_FALSE(names->contains(stranger.signer.identity().taap_id));
+        }
+    }
 
     // Signing in with the own key reaches the same account (sign_in_taap).
     {

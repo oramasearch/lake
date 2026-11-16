@@ -19,6 +19,7 @@
 #include "lake/version.hpp"
 #include "lake_attestation.hpp"
 #include "repository_path_access.hpp"
+#include "repository_people.hpp"
 #include "repository_records_api.hpp"
 
 #include <algorithm>
@@ -1555,6 +1556,12 @@ json grant_schema() {
 json list_schema(json item) {
     return {{"type", "object"},
             {"properties", {{"items", {{"type", "array"}, {"items", std::move(item)}}}}}};
+}
+
+// An output schema with the `people` member that names its signers (lake#1326).
+json with_people(json schema) {
+    schema["properties"]["people"] = signer_people_schema();
+    return schema;
 }
 json session_schema() {
     return {{"type", "object"},
@@ -5534,9 +5541,10 @@ void register_repository_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_changes",
         .title = "List repository changes",
-        .description = "List a repository's change history, newest first, with author and message.",
+        .description = "List a repository's change history, newest first, with author and message. "
+                       "`people` names each author's account (name and handle).",
         .input_schema = id_input(),
-        .output_schema = list_schema(repository_change_schema()),
+        .output_schema = with_people(list_schema(repository_change_schema())),
         .kind = CapabilityKind::Read,
         .object = "repository",
         .action = "read",
@@ -5552,21 +5560,30 @@ void register_repository_capabilities(Registry& registry) {
             if (!ctx.sync_store) {
                 return no_repository_store();
             }
-            return repository_content_list_result(
+            ApiResult result = repository_content_list_result(
                 ctx.sync_store->repository_log(repository->customer_id, repository->id),
                 repository_change_json);
+            if (result.ok) {
+                std::vector<std::string> authors;
+                for (const json& change : result.value["items"]) {
+                    authors.push_back(change.value("author", ""));
+                }
+                // Who wrote each change, by name (lake#1326).
+                result.value["people"] = signer_people(ctx, authors);
+            }
+            return result;
         }});
     registry.add(Capability{
         .name = "get_change",
         .title = "Get repository change",
         .description = "Read one change in a repository's history: its author, message, parents "
-                       "and when it landed.",
+                       "and when it landed. `people` names the author's account.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"id", {{"type", "string"}}}, {"change_id", {{"type", "string"}}}}},
                          {"required", json::array({"id", "change_id"})},
                          {"additionalProperties", false}},
-        .output_schema = repository_change_schema(),
+        .output_schema = with_people(repository_change_schema()),
         .kind = CapabilityKind::Read,
         .object = "repository",
         .action = "read",
@@ -5592,7 +5609,9 @@ void register_repository_capabilities(Registry& registry) {
             if (found == changes->end()) {
                 return ApiResult::failure("not_found", "no change " + change_id);
             }
-            return ApiResult::success(repository_change_json(*found));
+            json change = repository_change_json(*found);
+            change["people"] = signer_people(ctx, {found->author});
+            return ApiResult::success(std::move(change));
         }});
     registry.add(Capability{
         .name = "change_diff",
@@ -6954,7 +6973,8 @@ void register_policy_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "entity_effective_access",
         .title = "Effective entity access",
-        .description = "Effective access for a repository, organization, or team by external id.",
+        .description = "Effective access for a repository, organization, or team by external id. "
+                       "`people` names each principal's account (name and handle).",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"object_type",
@@ -6965,7 +6985,9 @@ void register_policy_capabilities(Registry& registry) {
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"},
                           {"properties",
-                           {{"object", object_schema()}, {"items", {{"type", "array"}}}}}},
+                           {{"object", object_schema()},
+                            {"items", {{"type", "array"}}},
+                            {"people", signer_people_schema()}}}},
         .kind = CapabilityKind::Read,
         .object = "effective access",
         .action = "share",
@@ -6981,11 +7003,14 @@ void register_policy_capabilities(Registry& registry) {
                 return from_store_error(entries.error());
             }
             json items = json::array();
+            std::vector<std::string> principals;
             for (const auto& entry : *entries) {
                 items.push_back(control::to_json(entry));
+                principals.push_back(items.back().value("principal_taap_id", ""));
             }
-            return ApiResult::success(
-                {{"object", control::to_json(*object)}, {"items", std::move(items)}});
+            return ApiResult::success({{"object", control::to_json(*object)},
+                                       {"items", std::move(items)},
+                                       {"people", signer_people(ctx, principals)}});
         }});
 }
 

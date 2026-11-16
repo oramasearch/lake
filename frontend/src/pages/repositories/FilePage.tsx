@@ -15,6 +15,7 @@ import {
   fileLanguage,
   ForgePage,
   Identifier,
+  SignerName,
   itemsOf,
   pending,
   PathBreadcrumbs,
@@ -26,6 +27,7 @@ import {
   type DiffEntry,
   type Items,
   type Repository,
+  type WithPeople,
 } from "./forge";
 
 type RepositoryFile = {
@@ -171,7 +173,7 @@ export default function FilePage() {
 function SourceFile({ id, refName, path }: { id: string; refName: string; path: string }) {
   const repository = useForgeRead<Repository>("get_repository", { id });
   const file = useForgeRead<RepositoryFile>("repository_file", { id, ref: refName, path, units: true });
-  const changes = useForgeRead<Items<Change>>("list_changes", { id });
+  const changes = useForgeRead<Items<Change> & WithPeople>("list_changes", { id });
   const diffs = useChangeDiffs(id, changes.data ? itemsOf(changes.data) : undefined);
   const location = useLocation();
   const navigate = useNavigate();
@@ -269,7 +271,7 @@ function SourceFile({ id, refName, path }: { id: string; refName: string; path: 
                     {who && (
                       <>
                         <Identifier value={who.change} />
-                        <span>{who.author}</span>
+                        <SignerName id={who.author} people={changes.data?.people} />
                         <time dateTime={who.occurred_at}>{dateTime(who.occurred_at)}</time>
                       </>
                     )}
