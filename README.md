@@ -103,12 +103,10 @@ SIGINT/SIGTERM stop it cleanly.
 
 ## Continuous integration
 
-Every pull request and every push to `main` runs lake's **full suite on Linux** in the `ci`
-workflow: Ubuntu 24.04, clang-19, a Postgres 16 service, the real-Zetta tests against a Zetta
-server built at the zetta-bridge pin and cached per pin, and the UI token gates. The run summary
-shows the passed, failed and skipped counts, and the job fails if a real-Zetta test skipped. Merge
-only on a green `ci` check; macOS-only testing let lake#545 ship a change that broke every
-connection on Linux.
+lake has no hosted CI: both GitHub Actions workflows (`ci.yml`, `image.yml`) are commented out,
+line by line, so they run nowhere, forks included. A change is proved by the full local suite
+([`docs/build/local.md`](docs/build/local.md)) and the Linux suite. Uncommenting every line of a
+workflow restores it.
 
 ## Container image
 
