@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The top bar's workspace picker (lake#638): owner groups named as written with a kind label and an
  * initial, the pill's owner only when there are several, the filter past eight workspaces, and the
  * one New workspace link. `npm test`; the build runs it. */

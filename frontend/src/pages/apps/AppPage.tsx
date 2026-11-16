@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Ship → Apps → one app (web_ui.cpp web_ui_app; handlers serve_app_page and the nineteen
  * serve_app_form actions), as a Split: tabs for Overview (deploy history with rollback), Builds,
  * Logs, Events (live, by long poll), Settings (environment and authentication) and Services

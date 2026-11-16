@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 // The model gateway (lake#248, docs/api/model-gateway.md): every model call an agent makes for a
 // workspace goes through lake, which forwards it to the model provider with Orama's own key

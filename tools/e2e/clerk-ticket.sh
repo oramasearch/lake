@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+
 # Clerk test users and one-time sign-in tickets for the browser scripts, through Clerk's Backend API. Clerk's sign-in form consumes a ticket from
 # `?__clerk_ticket=`, so a browser signs in without an email code.
 #

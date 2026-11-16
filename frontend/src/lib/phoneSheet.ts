@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The phone's full-screen sheet, ported from rev-os (lake#561): Ask Orama and every `Modal sheet`
  * use the same mechanics. docs/ui/mobile-web.md explains each rule.
  *

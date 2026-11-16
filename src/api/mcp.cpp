@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/mcp.hpp"
 
 #include "lake/api/brand.hpp"

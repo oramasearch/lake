@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Give credit (lake#1134, docs/ui/balance.md#give-credit): the operator's form that gives an account
  * a credit from Orama through `grant_balance_credit`, by its ID or a person's email. Opened from an
  * account's Billing page and from Customers; the server refuses anyone but the operator or the

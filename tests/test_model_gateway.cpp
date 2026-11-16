@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The model gateway (lake#248, docs/api/model-gateway.md): every model call an agent makes for a
 // workspace goes through lake's `model_completion`, which counts the tokens the provider reports as
 // the workspace's `model_tokens`, refuses calls past the account's monthly limit, and keeps the

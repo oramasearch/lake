@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The apex order sheet (docs/api/orders.md): its configuration, the order form's checks,
 // the status link, the emails and the abuse limit. Pure apart from OrderRateLimiter's clock-driven
 // state.

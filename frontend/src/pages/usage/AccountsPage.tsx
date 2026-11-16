@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Usage → every account (`/usage/accounts`, lake#564): the operator's view across customers, for
  * capacity planning. Each account's usage this month (or the range chosen) from `usage_over_time`
  * over all its workspaces, the totals across accounts, and a link to each account's own Usage

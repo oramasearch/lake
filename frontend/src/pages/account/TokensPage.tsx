@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** API tokens (`/tokens`): create a named, scoped token in a drawer (its secret shown once, in this
  * page's memory only) and revoke existing ones. The token rules (attenuation, never-expiring
  * tokens) are the capability's; the page only builds its input as the form handler did. */

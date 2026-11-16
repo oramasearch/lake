@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Sign in (`/sign-in`). Under Clerk, Clerk's form (ClerkSignIn). Otherwise lake's own: a password
  * (with the TOTP step when the account has MFA, keeping the email and password in memory) and an
  * OAuth provider. Both call `/v1` directly; the password call sets `lake_session` itself. An OAuth

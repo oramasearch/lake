@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Customers (`/customers`): the tenants, each an individual's or an organization's
  * (web_ui_customers, serve_customers_page). The operator gives a credit from Orama here by account
  * ID or a person's email (Give credit, lake#1134), where billing is on. */

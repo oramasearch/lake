@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Change App end to end in a browser (lake#1259, tools/e2e/README.md): an App, then
 // the app page's Change App split screen (lake#1241) and its conversation with the Application Agent
 // (lake#1240): ask a small change, read the agent's proposal, Confirm, follow the redeploy, and check

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The words the workspace's SQL subset reads as syntax, so a dataset named one cannot be queried
  * and lake refuses it ("'order' is a SQL keyword; choose another name"). A copy of `keywords` in
  * `src/api/datasets.cpp`; `tests/sql-keywords.test.ts` fails when the two lists differ (lake#814). */

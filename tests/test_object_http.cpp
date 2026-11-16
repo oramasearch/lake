@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // lake#544: the workspace store's keep-alive client (src/control/object_http.cpp) against a small
 // loopback HTTP/1.1 server that counts its connections.
 

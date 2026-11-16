@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Ship → Deployments (web_ui.cpp web_ui_deployments; serve_deployments_page): every environment
  * across the repositories the viewer can open, read per repository as the server did, with their
  * figures, a search and a phase filter. A repository whose environments cannot be read is

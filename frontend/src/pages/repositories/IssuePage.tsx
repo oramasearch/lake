@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /issue?repository_id=&id= (web_ui_issue): one issue. The conversation (its description and
  * Markdown comments, then a comment box) beside a side column with its state, labels, assignees,
  * details and linked changes. lake has no `get_issue`, so the page finds it in `list_issues` as the

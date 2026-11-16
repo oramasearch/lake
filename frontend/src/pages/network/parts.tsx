@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What the Network pages share (lake#729, docs/ui/network.md): the page frame with the section's
  * tabs, the account and workspace every capability takes, the names that replace ids, and the state
  * of a desired row in words. The rows live in Lake's control plane, so the pages do not wait for the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What every Train, Ship and Ask page shares: the space and workspace it works in, the
  * `workspace_query` / `workspace_act` calls into the workspace Zetta, the page frame with lake's
  * workspace gate, and a Markdown renderer.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The price list (`/billing/plans`, lake#564, lake#635): the operator's editor for the instance's
  * one price list. Lake is priced by usage only: one rate per usage dimension, no plans, no monthly fee,
  * nothing included, and every account is billed at it. The editor shows the list in force this

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** One Ask Orama or Agent Factory conversation, shared by the Ask Orama page, the panel beside every
  * page and the Agent Factory (web_ui.cpp web_ui_ask, web_ui_factory).
  *

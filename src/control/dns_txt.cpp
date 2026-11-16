@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/dns_txt.hpp"
 
 #include <arpa/inet.h>

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Effective Access: who can reach one object, with which actions, and from where. One renderer
  * (web_ui_effective_access) behind two kinds of route: `/access?object_id=` names a policy object
  * (serve_access_page); `/repository/access`, `/organization/access` and `/team/access` take `?id=`

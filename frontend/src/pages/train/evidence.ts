@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A run report's "Most at Risk" evidence in words (lake#581). The engine writes each at-risk row's
  * `evidence` as the run's columns beyond the fixed ones (the population's strongest drivers, the
  * same on every row) plus `reason_codes`, the row's top reasons: `[{reason, effect}]`, where

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // A failed read never looks like an empty list. Fails the build when an empty state can
 // render from `q.data ?? []` without the query's error being checked first:
 //   1. a <DataTable … empty={…}> whose rows trace back to `<query>.data … ?? []` must carry

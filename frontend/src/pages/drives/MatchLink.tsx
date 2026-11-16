@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A `search_drives` match's icon and link (lake#561): Data → Search and a drive's search box. */
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Data → Drives → Storage (`/w/<id>/drives?tab=storage`, lake#656, docs/ui/drives.md#storage): the
  * workspace's storage, moved from Datasets. Figures, the table (type and provider, size with the
  * used space, who mounts it, this month's volume time, status with the operator's message,

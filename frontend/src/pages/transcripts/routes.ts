@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Data → Transcripts (lake#561, docs/ui/transcripts.md): workspace pages, served under
  * `/w/<id>/`. The list is `/transcripts` (`?q=` searches); one transcript is `/transcript?id=<id>`,
  * the address style of lake's other detail pages. */

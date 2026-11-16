@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // The per-request JSON line lake writes to stdout (docs/serving/telemetry.md#request-logs).

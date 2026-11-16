@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+
 """Vendor agent-runtime's skills into lake (agent-runtime#7).
 
 agent-runtime decides what each skill lets a person's agent do (its `skills.py`) and publishes it

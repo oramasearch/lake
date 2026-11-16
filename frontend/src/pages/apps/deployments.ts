@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Whether Ship → Deployments asks a repository for its environments (lake#605). Pure, so
  * `npm test` covers it (tests/deployments.test.ts).
  *

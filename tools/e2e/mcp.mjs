@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Developer → MCP in a browser (docs/api/mcp.md): sign in, open the page from the rail, create a
 // read-only MCP key, copy the Claude Code command through its Copy button, check every client's
 // setup block carries the key, run initialize, tools/list and a refused write with the key, fetch

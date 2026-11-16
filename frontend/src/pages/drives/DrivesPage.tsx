@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Data → Drives (`/w/<id>/drives`, lake#561, docs/ui/drives.md): two tabs. **Drives**: the
  * workspace's drives, each keeping its files in a repository (with history), as workspace files,
  * as shortcuts only, or in one of its buckets or filesystems (a storage drive, lake#656), and the

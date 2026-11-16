@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * What a person reads in the web app: an AI training experiment, as an experiment tracker says it,
  * never a "study" (lake#561). The engine calls an experiment a study, so its

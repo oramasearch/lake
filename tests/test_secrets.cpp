@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Static secrets and named encryption keys (docs/api/secrets.md), kept in the workspace Zetta of
 // their mount (lake#328-#332): version history, delete/undelete/destroy, transit operations, the
 // customer KEK rotation across workspaces, and the conditional writes that keep versions unique.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // docs/design/status.md must agree with what is deployed (lake#448): tools/docs/check-status.py
 // compares the page's Deployed cells with the newest committed OpenAPI observation and the
 // source registry. These tests run it, and prove it refuses each kind of contradiction.

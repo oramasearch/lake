@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/callers.hpp"
 
 #include "lake/control/store.hpp"

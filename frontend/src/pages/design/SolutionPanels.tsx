@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A solution project's panels on the project page (lake's active_solution_content and
  * solution_proposal_content): its stages and Run, the decision policy, the experiment and holdout,
  * the actions and A1 queue, the monitor and the ROI readout; or, before it exists, the Project

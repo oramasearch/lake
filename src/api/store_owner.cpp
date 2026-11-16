@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/store_owner.hpp"
 
 #include <algorithm>

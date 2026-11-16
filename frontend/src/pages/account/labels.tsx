@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Words for the account pages' stored values. */
 import { Badge } from "@/lib/ui";
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Data → Query (web_ui.cpp workspace_content "query"): read-only SQL over the workspace's data.
  * The statement and database stay in the URL, so a result is linkable. */
 import { useState } from "react";

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Data → Datasets (web_ui.cpp workspace_content "data"): the workspace's datasets with figures and
  * a toolbar, and Load data (upload, generate, pull from a connection) in a drawer. Datasets only:
  * connections have their own page (Data → Connections, lake#651) and storage is a tab of Data →

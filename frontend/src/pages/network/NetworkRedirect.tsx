@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** `/network` opens the section's overview, in the same workspace. */
 import { Navigate, useLocation } from "react-router-dom";
 import { OVERVIEW_PATH } from "./network";

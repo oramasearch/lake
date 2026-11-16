@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Screenshots of the streams that start an agent (lake#677, docs/api/agent-launches.md#stream-triggers)
 // at 1440 and 390 wide: an agent's Design page with its streams under Where It Is Used, its Edit
 // drawer, and New agent on a frontier model. Run against `npx vite --port 5174`; every /v1 call is

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Operator sign-in (`/login`). A real form POST to `/session`: the server compares the credential,
  * sets the HttpOnly operator cookie and redirects. No capability issues that cookie, and the
  * credential never passes through the page's script. */

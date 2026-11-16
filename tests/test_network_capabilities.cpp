@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // lake#728: secure-networking desired state is one permission-checked capability registry rendered
 // as REST, OpenAPI and MCP. Live tunnel sessions and activity explicitly await their workspace
 // record provider; their reads authorize before returning an explicit pending marker.

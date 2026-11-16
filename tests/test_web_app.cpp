@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The web app's serving rules (docs/ui/web-app.md): which requests are answered with index.html,
 // and how the embedded files are cached.
 #include "lake/api/web_app.hpp"

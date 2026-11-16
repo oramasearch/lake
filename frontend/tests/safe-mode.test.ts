@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A database's safe mode (lake#906, docs/ui/safe-mode.md): the levels and their words, the
  * warning read from an error, the confirmation added to the repeated call, and the database the
  * query editor's status bar shows. `npm test`; the build runs it. */

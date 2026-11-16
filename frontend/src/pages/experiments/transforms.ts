@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The experiment pages' data transforms, ported from `assets/experiments/experiments.js`
  * unchanged in behaviour: EMA smoothing, metric alignment by step or time, parameter
  * differences, the live cursor, and metric labels. */

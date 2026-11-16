@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Usage over time (lake#564): the dashboard's windows, units, changes, readings of several accounts
  * added up, the stacked chart, the CSV, limits in a person's units, the links other pages make, and
  * Home's workspace selection that Usage shares. `npm test`; the build runs it. */

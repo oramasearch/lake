@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // End-to-end browser walkthrough of lake's console (tools/e2e/README.md): Clerk
 // sign-in with a one-time ticket, landing on `/` (Quickstart), then Design, Train and Ship as a
 // person does them, with a screenshot per step, a log.json, and pass/fail checks (exit 1 on any

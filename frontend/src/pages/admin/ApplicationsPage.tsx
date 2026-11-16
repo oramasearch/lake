@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Applications (`/applications`): the identity applications of every customer the viewer can
  * see, as cards, and the drawer to register one in a workspace (web_ui_applications,
  * serve_applications_page, serve_application_register). */

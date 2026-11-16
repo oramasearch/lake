@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/agent_task_records.hpp"
 
 #include <algorithm>

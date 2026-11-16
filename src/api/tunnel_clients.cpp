@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The tunnel client downloads (lake#745, docs/api/tunnel-clients.md): what the clients directory
 // holds, and the signed links that hand one out.
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What the issue pages share (lake#598): whether the viewer may write the repository's issues
  * (`my_permissions`, `write` on the repository: what `create_issue`, `update_issue` and
  * `create_issue_comment` check), the people an issue can be assigned to (`issue_assignees`),

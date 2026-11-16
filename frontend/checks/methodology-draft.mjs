@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // New Methodology's Ask Orama (lake#688) in the real app, at 1440 and 390 px: Design → Methodologies,
 // New methodology, a name and a description, Ask Orama; the drawer while Ask Orama writes, then the
 // draft it wrote (checked by Lake), then a draft Lake refused (its template, with the failing

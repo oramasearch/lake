@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The keywords the web app avoids when it fills in a dataset name are the ones lake refuses
  * (lake#814): `SQL_KEYWORDS` is a copy of `keywords` in `src/api/datasets.cpp`, and this fails when
  * the two differ. `npm test`; the build runs it. */

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The quickstart process (lake#1128, docs/api/quickstart.md): a new person drops a dataset and Lake
 // takes them to search and model answers on their own website. Four capabilities compose the ones
 // that already exist, so permissions, the balance gate, audit and usage metering apply unchanged:

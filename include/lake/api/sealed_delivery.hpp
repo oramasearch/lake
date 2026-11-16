@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // Delivery of a user's workspace secret to a Kubernetes Secret (lake#625): a secret's source of

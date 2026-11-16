@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The instance brand (lake#1135, docs/serving/brand.md): what this Lake calls itself. Lake reads
  * it from the operator's LAKE_BRAND_* settings at start and answers it in `viewer.brand`, which
  * index.html carries embedded, so the console needs no build per brand and paints the brand

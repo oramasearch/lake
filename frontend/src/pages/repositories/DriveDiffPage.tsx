@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /drive/history/diff?repository_id=&ref=&path=&left=&right= (web_ui_drive_version_diff): two
  * preserved text versions of a Drive file, line by line. Neither is changed. */
 import { useSearchParams } from "react-router-dom";

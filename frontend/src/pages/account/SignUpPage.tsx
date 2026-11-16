@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Create an account (`/sign-up`). Under Clerk, Clerk's sign-up with the invitation sentence;
  * otherwise lake's own password sign-up, which gives the account a managed key, provisions the
  * person's own space and sets `lake_session` (`sign_up_password`). No identity document is asked

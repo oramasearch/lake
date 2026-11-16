@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT */
+
 /* The catalogue icons (lake#639, components/CatalogueIcon.tsx, docs/ui/catalogue-icons.md): ink
    lines in the text colour, one accent (blue for a methodology, amber for a solution), a flat tint of
    that accent, and a soft periwinkle tile at card and page sizes. Every colour is a lake token, so

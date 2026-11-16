@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "agent_task_records_api.hpp"
 
 #include <utility>

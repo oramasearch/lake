@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Design → Methodology (lake#655): one methodology, Orama's or the workspace's own.
  *
  * Orama's is read-only and marked "By Orama": what it needs, makes and is measured by, the

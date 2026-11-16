@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "network_internal.hpp"
 
 #include <arpa/inet.h>

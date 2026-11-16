@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Dictation (lake#561, ported from rev-os): dictated text in the box, a recording's length in
  * words, and when lake says it has no speech-to-text. `npm test`; the build runs it. */
 import { test } from "node:test";

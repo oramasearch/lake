@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // The last-resort answer for a route handler that throws (lake#440).

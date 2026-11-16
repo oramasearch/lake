@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+
 """Checks of publish-release-image.py (lake#994) with Git, GitHub and the registry replaced.
 
 run: python3 -I -m unittest discover -s tools/release -p 'test_*.py'

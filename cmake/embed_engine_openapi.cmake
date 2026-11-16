@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 # Embeds the vendored workspace engine input schemas (src/api/engine_openapi.json, lake#650) into
 # the binary as one raw string, read by register_engine_capabilities.
 if(NOT DEFINED INPUT_FILE OR NOT DEFINED OUTPUT_FILE)

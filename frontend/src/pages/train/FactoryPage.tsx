@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Design → Agents → Agent Factory, one of the two ways an agent is designed (lake#653; web_ui.cpp web_ui_factory, docs/api/agent-factory.md): a
  * conversation with the Agent Creator Agent beside its proposal, and Approve and create. Nothing is created
  * until the person approves; Approve sends the SHA-256 of the proposal they saw, which the server

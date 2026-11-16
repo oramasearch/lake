@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Screenshots of the delete and revoke confirmations (lake#645, docs/ui/deletion.md) at 1440 and 390
 // wide: an organization that still owns a workspace (blocked, with the workspace linked), one that
 // owns none (typed handle), a dataset, a secret mount and an Ask Orama conversation with the agent

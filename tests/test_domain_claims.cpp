@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Custom-domain claims (lake#949, migration 0106_domain_claims,
 // docs/api/platform.md#custom-domains). The store half runs over the in-memory store and, with
 // LAKE_TEST_DB_URI, over PostgreSQL: one claim per host across accounts, the same environment

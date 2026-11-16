@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /repositories (web_ui_repositories): the repositories the viewer can read, newest first, and
  * "New repository" in a drawer. Figures on top (repositories, private and public, the workspaces
  * they live in), then search and filters by workspace and visibility. Visitors see the public

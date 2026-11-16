@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // A store Lake keeps in the workspace Zetta (provider `zetta`, lake#664): sealed records for the
 // tree and sealed objects for the bytes. See store_kept.hpp.
 

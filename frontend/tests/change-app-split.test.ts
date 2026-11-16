@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The app page's Change App split screen (lake#1241): it opens from the page's top and closes back
  * to it, the divider resizes within bounds, and the App's frame reloads once a confirmed change is
  * deployed and Ready. `npm test`; the build runs it. */

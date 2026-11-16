@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Screenshots of Data → MCP Connections (lake#652, docs/ui/mcp-connections.md) at 1440 and 390 wide:
 // the list, New connection (a remote server, and a package Lake runs here), a connection's page, its
 // "Try it" drawer, and a stdio connection's page with its App (lake#659). Run against

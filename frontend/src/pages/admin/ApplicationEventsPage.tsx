@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Application event log (`/application/events?id=`): one application's lifecycle events and the
  * drawer to create a webhook, whose secret is shown once (web_ui_application_events,
  * serve_application_events_page, serve_application_webhook_create). */

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // What a lake image needs from whoever runs it (lake#1119, orama-operator#936), printed by

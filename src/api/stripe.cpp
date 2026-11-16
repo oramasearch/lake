@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Stripe, lake's payment provider (lake#620, docs/api/billing.md#stripe): lake's own
 // client for Stripe's REST API and the check of its webhook signatures. No Stripe SDK ("We write
 // our own"); the HTTP exchange is injected (StripeHttp), the server's outbound client in lake.

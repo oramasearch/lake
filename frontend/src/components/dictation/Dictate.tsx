@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The microphone, ported from rev-os's `components/dictation/Dictate.tsx` (lake#561). Ask Orama's
  * message box and the Transcripts page use it.
  *

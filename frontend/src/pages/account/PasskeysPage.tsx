@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Passkeys (`/passkeys`): register an attestation-less passkey for this account. Registered
  * passkeys appear as devices on Sessions. */
 import { useState } from "react";

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Load data → Upload names the dataset after the chosen file (lake#814). `npm test`; the build runs
  * it. */
 import { test } from "node:test";

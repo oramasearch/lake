@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The return-path check every sign-in page uses (LSR-184, lake#990). No imports, so it is tested
  * directly. */
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Screenshots of a standalone model (lake#654, docs/ui/train.md#a-standalone-model) at 1440 and 390
 // wide: Train → Models with New model, the New Model choice, Train one and Bring one, a trained
 // standalone model's page (what it trains on, Retrain, New version, Move into a project, Delete), a

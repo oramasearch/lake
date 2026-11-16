@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /file?repository_id=&ref=&path= (web_ui_repository_file): one file with line anchors, blame,
  * C and C++ highlighting and syntax-unit shading. `#L5` selects a line, `#L5-L9` a range;
  * shift-click on a line number extends the selection from the line clicked before. Raw and

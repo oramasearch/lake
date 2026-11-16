@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Data → Dataset (web_ui.cpp workspace_content "dataset"): one dataset's figures, its columns
  * with their types, its first rows and its partitions beside its facts and actions. */
 import { useState } from "react";

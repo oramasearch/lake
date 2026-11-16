@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** One invoice (`/billing/invoices/:invoiceId`, lake#564): its lines as issued, its state and how to
  * pay it: **Pay with Stripe** opens Stripe's hosted invoice page while it is due (lake#620), with
  * Stripe's own state of it. The account is the current workspace's, or `?customer_id=` for the

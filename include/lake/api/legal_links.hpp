@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 // The terms of service and privacy policy that Lake's sign-up and sign-in pages link to
 // (docs/serving/configuration.md). Instance configuration: LAKE_TERMS_URL and LAKE_PRIVACY_URL,

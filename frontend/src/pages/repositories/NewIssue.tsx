@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** New issue (create_issue), in a drawer (lake#598): a title, a Markdown body with a preview, labels
  * and assignees among the repository's people. On success the page opens the new issue. */
 import { useState } from "react";

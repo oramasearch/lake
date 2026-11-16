@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * The Clerk sign-in page's decisions, kept pure so `npm test` can pin them (lake#1115, lake#1116).
  * The page itself is `pages/account/ClerkSignIn.tsx`; the server side is `POST

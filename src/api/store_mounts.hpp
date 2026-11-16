@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // The `stores` a service or an app mounts (lake#666, docs/control-plane/storage.md#mounts): the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // `lake manifest` and the lists it publishes (lake#1119, orama-operator#936): the Stripe webhook
 // events are exactly the ones the handler dispatches on, the environment is exactly what main.cpp
 // reads, and the schema is the db/schema.sql compiled into the binary.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Data → MCP Connections (`/w/<id>/mcp-connections`, lake#652, docs/ui/mcp-connections.md): the
  * remote MCP servers this workspace is a client of, each with its status, its tools and its calls
  * this month. New connection asks for the URL and how to authenticate, then Lake discovers the

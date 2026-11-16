@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Organization settings (`/organization?id=&tab=`): overview, teams, members, invitations,
  * access, SSO, applications, usage and audit, each a tab in the query (web_ui_organization,
  * serve_organization_page and the team, invitation and SSO form handlers). */

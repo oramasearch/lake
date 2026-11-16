@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 // A person's own liquid identity in tests: its signer, the document `liquid identity show
 // --document` prints, and the proof that they hold its key which password sign-up and a first OAuth

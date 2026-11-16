@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Lake as an MCP client (lake#652, docs/api/mcp-connections.md#the-client): the pure
 // protocol pieces, then the client against a local test MCP server over the server's own outbound
 // transport, honest and hostile.

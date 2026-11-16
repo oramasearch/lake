@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import jsonschema"
   RESULT_VARIABLE LAKE_JSONSCHEMA_RESULT)

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Billing (lake#564): the shapes the billing capabilities answer and the pure rules the
  * pages share — amounts in a currency from millionths, a rate in a person's units, a line as usage ×
  * rate = cost, the months a bill covers, the price list editor's rows, an invoice's state as a

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // What the browser scripts share (tools/e2e/README.md): Playwright, a log with
 // pass/fail checks, Clerk sign-in with a one-time ticket (lake lands a signed-in person on `/`),
 // lake's /v1 capabilities called with the browser's own session, the first top-up through Stripe's

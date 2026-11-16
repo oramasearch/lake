@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Sessions and devices (`/sessions`): every session and token of the account, and every device,
  * each revocable. The session this browser is using leads the page; revoking it signs this browser
  * out. Signing out ends only this browser, never a key (lake#1163); **Sign out everywhere**

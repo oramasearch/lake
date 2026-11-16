@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "audit_test_support.hpp"
 #include "identity_proof_test_support.hpp"
 #include "personal_customer_test_support.hpp"

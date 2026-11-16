@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Train → Experiments → Compare Runs (web_ui_experiments.cpp, compare mode): two to eight runs'
  * curves on shared charts, their parameter differences and artifacts, refreshed live — the runs
  * compared on top, then one clean chart per metric with its table. */

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Screenshots of the Usage page's figures (lake#663, docs/ui/usage.md) at 1440 and 390
 // wide: Storage is what Lake holds outside the engine, billed; Engine Storage is what the engine
 // holds on its own volume, marked "Detail, billed as the engine's volume"; volumes are billed. Run

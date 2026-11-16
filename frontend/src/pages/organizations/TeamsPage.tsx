@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Teams (`/teams?organization_id=`): an organization's teams (web_ui_teams, serve_teams_page). */
 import { useState } from "react";
 import { Link, Navigate } from "react-router-dom";

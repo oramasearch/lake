@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/clerk_webhooks.hpp"
 
 #include <chrono>

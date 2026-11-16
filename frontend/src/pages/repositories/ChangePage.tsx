@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /change?repository_id=&id= (web_ui_change): a change under review. The header names it, its
  * author, its review state and the diff layout; figures (files, lines, checks); the description and
  * the files changed beside its details, reviews and checks; then every file's diff in a unified or

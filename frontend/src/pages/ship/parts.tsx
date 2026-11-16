@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Pieces the Ship pages share: an inline copy button beside an identifier or address, and the
  * origin outside callers use. */
 import { useState } from "react";

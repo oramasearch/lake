@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The terms of service and privacy policy that sign-up and sign-in link to.
  * The instance configures them (LAKE_TERMS_URL, LAKE_PRIVACY_URL, defaulting to Orama's published
  * pages) and `viewer.legal` reports them; an empty URL means the instance shows no link. The

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // Stripe, lake's payment provider (lake#620, docs/api/billing.md#stripe). Lake's own

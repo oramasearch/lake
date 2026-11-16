@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /drive/share?repository_id=&ref=&path=&workspace_id= (web_ui_drive_share): who can reach a
  * Drive folder now (with its figures), the four ways to deliver it (each form in a dialog), and the
  * folder's links. A folder's links are held

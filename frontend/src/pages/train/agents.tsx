@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What Design → Agents, Design → Agent, Train → Agents, Train → Agent and the Agent Factory share
  * (lake#653): the agent definition form, with the runtime's skills, and the workspace reads
  * through Lake's named engine capabilities (`list_agents`, `get_agent`, …, lake#650). The pure

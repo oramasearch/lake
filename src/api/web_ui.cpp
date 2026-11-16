@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/web_ui.hpp"
 
 #include <algorithm>

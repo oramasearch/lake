@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Screenshots of which services and apps mount a store, and its used space (lake#666,
 // docs/ui/drives.md#storage) at 1440 and 390 wide: Data → Drives → Storage with Mounted By and used
 // space, the delete dialog of a mounted volume, Ship → Services with a service's storage and its

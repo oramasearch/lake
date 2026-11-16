@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** One click opens (#230): a second press soon after is the same intent, never its opposite.
  * `npm test`; the build runs it. */
 import { test } from "node:test";

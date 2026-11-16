@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // lake#534: connections apart from request workers. An idle or still-arriving connection holds no
 // worker, idle keep-alive connections and slow headers are closed after their timeouts, the
 // connection cap answers 503, refusals close their connection, and streaming still works.

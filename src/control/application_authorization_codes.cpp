@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/application_authorization_codes.hpp"
 
 #include "lake/control/application_webhook_records.hpp"

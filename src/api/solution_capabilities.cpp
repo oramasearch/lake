@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // A workspace's own AI solutions beside Orama's catalogue (docs/api/solutions.md, lake#597): six
 // capabilities over sealed `lake_solutions` records in the workspace Zetta and the engine's
 // read-only catalogue (S-1, …). list_solutions and get_solution answer both kinds, each marked

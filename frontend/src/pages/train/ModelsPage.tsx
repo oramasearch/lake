@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Train → Models (lake#599): every model of the workspace, as a model with its versions: the
  * latest held-out score, the runs and experiments that trained it, the features it learned from,
  * and whether a version is serving. A row opens the model's training page; serving is Ship →

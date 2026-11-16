@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Lake's records in workspace Zettas (docs/architecture/workspace-records.md, lake#370), with Ask
 // Orama conversations as the first collection and Design → Opportunities as the first mutable one
 // (lake#376): sealing, structural isolation between workspaces and spaces, conditional writes,

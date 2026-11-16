@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Data → Transcripts (`/w/<id>/transcripts?q=`, lake#561, docs/ui/transcripts.md): the workspace's
  * transcripts, newest first, searchable by their text; each opens its own page. New transcript
  * records, uploads or takes pasted text. Phone-first: one column of cards, the search box full

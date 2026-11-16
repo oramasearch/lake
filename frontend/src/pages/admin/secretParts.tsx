@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What the Secrets pages share (docs/ui/secrets.md): the value editor a new secret and a new
  * version use, the masked value a deliberate Reveal shows, and the drawer that writes a version.
  * A value lives only in component state: never in the URL, a log, the query cache or storage, and

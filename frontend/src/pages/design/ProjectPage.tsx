@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Design → Project (lake's workspace_content, project branch): one project's state, its solution
  * when it is one, its five latest runs, the Project Agent's background build or foundation
  * proposal, its pipelines, the ways to start one, and its deletion. Main column: tabs (Overview,

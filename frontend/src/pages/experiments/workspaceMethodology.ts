@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Experiments over a workspace methodology's parameters (lake#689): what the Start an Experiment
  * drawer offers for one, and what a trial's Lake run says. The engine publishes, for every
  * methodology an experiment can search, `studies: true` and its `study_search_space`; a workspace

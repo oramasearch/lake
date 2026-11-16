@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /drive/conflict?repository_id=&ref=&path= (web_ui_drive_conflict): the preserved versions of a
  * conflicted Drive file: the explanation, what differs between them and the choice of which value
  * to keep, beside the region, both versions and the preserved values. A resolution returns to the

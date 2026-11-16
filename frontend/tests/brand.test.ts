@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * A white-labelled Lake (lake#1135): the console names itself from `viewer.brand`, never from a
  * literal, and Lake's own brand reads exactly as before. `npm test`.

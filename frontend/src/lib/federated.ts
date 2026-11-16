@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Federated search as plain logic (lake#633): what a hit is, the places in order, how each place's
  * answers from several workspaces become one, how hits rank, the excerpt around a match, the rows
  * of the top bar's search and the address of "See all results". Data → Search and the top bar both

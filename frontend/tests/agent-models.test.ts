@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The workspace's agent model picker (lake#1230, docs/ui/workspace-selection.md#settings): the default,
  * the labels, the prices per million tokens and what is sent. `npm test`; the build runs it. */
 import { test } from "node:test";

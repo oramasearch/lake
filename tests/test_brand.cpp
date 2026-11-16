@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The instance brand (lake#1135, lake#1137, docs/serving/brand.md): Lake's own brand changes
 // nothing, a custom brand reaches every page lake renders, every email and every agent surface
 // with no Lake, Orama or lake.live left, and an invalid brand is refused.

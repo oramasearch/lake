@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The passkey ceremonies, ported as they were from the server pages' inline script
  * (web_ui_passkeys, web_ui_passkey_sign_in): the same `/v1` calls, the same two conversions of the
  * options lake sends, the same fields back. Only the transport changed: `act` instead of a bare

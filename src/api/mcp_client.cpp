@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Lake as an MCP client (lake#652, docs/api/mcp-connections.md#the-client). Pure
 // protocol over an injected McpHttp: no HTTP library is named here.
 

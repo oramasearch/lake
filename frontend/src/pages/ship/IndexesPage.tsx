@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Ship → Search Indexes (web_ui.cpp workspace_content "indexes", web_ui_new_index): the
  * workspace's search indexes and a form, in a drawer, to make one over a dataset. The dataset
  * choices, which the server page deferred to /ship/indexes/datasets, are one ordinary read of the

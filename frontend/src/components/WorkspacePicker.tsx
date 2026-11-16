@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The workspace picker in the top bar (lake#638): one pill naming the current workspace, its owner
  * beside it only when the viewer has more than one, which opens the viewer's workspaces grouped by
  * owner (their account, then each organization). Past eight workspaces the menu opens with a filter

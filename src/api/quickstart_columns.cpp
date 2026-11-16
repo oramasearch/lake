@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // How the quickstart reads a dataset's columns and prepares them for its first model (lake#1181,
 // docs/api/quickstart.md#columns). Pure rules; quickstart_capabilities.cpp calls the engine.
 

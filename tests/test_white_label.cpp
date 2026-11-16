@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // A white-labelled Lake (lake#1136, docs/api/clerk.md): the host aliases and
 // control host the operator gives it, the redirect of pages on an alias to the customer's host, and
 // sign-in through the customer's own identity provider only.

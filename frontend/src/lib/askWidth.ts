@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The Ask Orama panel's width: resizable like rev-os's assistant pane. Default 560px, between
  * 320px and 70% of the window, remembered in this browser. The shell reads it to push the page
  * aside while the page keeps room to read. */

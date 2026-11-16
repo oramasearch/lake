@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /protection?repository_id= (web_ui_branch_protection): the branch protection rules and the
  * updates they refused, from the repository's workspace audit (or the central log when the
  * repository has no workspace). Rules are cards; refusals are a table. Anyone who can read the

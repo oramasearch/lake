@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Federated search (lake#633): the top bar's search and Data → Search share these rules. How a
  * place's answers from several workspaces become one, how hits rank, the excerpt around a match,
  * the top bar's rows and selection, and the "See all results" address. `npm test`. */

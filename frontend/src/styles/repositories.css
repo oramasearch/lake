@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT */
+
 /* Data → Repositories and Drive: the one pattern the kit does not draw, an item menu (forge.tsx
    `Menu`, drawn in a portal on <body>). Its items are full-width rows, not 32px bordered buttons.
    Lake tokens only. */

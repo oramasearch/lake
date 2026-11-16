@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A run report's at-risk evidence in words, never raw JSON (lake#581). `npm test`; the build runs
  * it. */
 import { test } from "node:test";

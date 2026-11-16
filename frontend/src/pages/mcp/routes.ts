@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Data → MCP Connections (lake#652, docs/ui/mcp-connections.md): workspace pages, served under
  * `/w/<id>/`. The list is `/mcp-connections`; one connection is `/mcp-connection?id=<id>`, the
  * address style of lake's other detail pages. The OAuth sign-in returns to

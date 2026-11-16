@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Change an App in a conversation with the Application Agent (lake#1240,
  * docs/ui/apps.md#changing-an-app-in-a-conversation). The thread is `get_app_conversation` (each
  * person's own, kept in the workspace); a message is `change_app`; the agent answers, asks back or

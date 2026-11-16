@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * The Design pages' rules (src/pages/design/logic.ts): what lake's renderers and form handlers
  * computed on the server, checked against the server's own behaviour.

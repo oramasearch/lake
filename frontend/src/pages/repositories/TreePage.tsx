@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /repository/tree?id=&ref= (web_ui_repository_tree): every path of a ref with the newest change
  * that touched it, filtered by path in the page, beside the ref's figures. A directory "opens" by an
  * anchor jump: the tree is recursive. */

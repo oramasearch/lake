@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A database's safe mode in the web app (lake#906, docs/ui/safe-mode.md): the control that shows
  * and changes the level (a lock and the level; its menu lists Off, Warn Writes and Warn All with a
  * check on the current one), and the dialog a `safe_mode_warning` opens, which shows the exact

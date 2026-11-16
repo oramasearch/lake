@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Browser keys (lake#1152, docs/api/browser-keys.md): the key a website's own page holds to search
 // one published index, and ask one published model, of one workspace.
 //

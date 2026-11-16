@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Transparency Monitor (`/transparency?identity=&start=`): public. Verifies the current
  * checkpoint and scans its tiles for attestations naming one TAAP identity, 100 a page from entry
  * `start` (web_ui_transparency, serve_transparency_page). */

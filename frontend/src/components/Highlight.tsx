@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** `text` with the first case-insensitive occurrence of `q` marked, as the Docs reader and Search
  * show a match. */
 import { splitAround } from "@/pages/developer/docs";

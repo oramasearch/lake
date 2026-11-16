@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A secret's value as the Secrets pages edit it (docs/ui/secrets.md). `npm test`; the build runs it. */
 import { test } from "node:test";
 import assert from "node:assert/strict";

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Managed keys and using your own identity (lake#762,
 // docs/api/identity.md#your-own-identity).
 #include "audit_test_support.hpp"

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Secrets (`/secrets?mount_id=` and `/secrets?mount_id=&name=`), docs/ui/secrets.md.
  *
  * - With only `mount_id`, the mount's page: its secrets from `list_secrets` (paths and metadata,

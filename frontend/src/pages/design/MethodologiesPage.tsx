@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Design → Methodologies (lake#655): Orama's methodologies, read-only and marked "By Orama", and
  * the workspace's own, written in Python and kept in a workspace repository, marked "Yours". A
  * toolbar filters by who a methodology is from, by family and by a search; New Methodology opens a

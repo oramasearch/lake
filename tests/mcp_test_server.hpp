@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // A local MCP server for Lake's MCP client tests (lake#652, docs/api/mcp-connections.md): plain

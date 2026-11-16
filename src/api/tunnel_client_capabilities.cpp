@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // tunnel_client_downloads (lake#745, docs/api/tunnel-clients.md): the tunnel client a developer
 // installs for Developer Access, as a signed link per platform that a plain `curl` follows.
 

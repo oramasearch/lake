@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "audit_test_support.hpp"
 #include "lake/api/audit_routing.hpp"
 #include "lake/api/billing.hpp"

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Where an MCP server's sign-in sends the browser back (`/mcp-connections/oauth/callback?code&state`,
  * lake#652, docs/ui/mcp-connections.md). The state names the account and workspace Lake started the
  * sign-in in; the page finishes it there with `complete_mcp_connection_sign_in` (Lake exchanges the

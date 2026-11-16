@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Effects return nothing or a cleanup function. React calls whatever an effect returns as
 // its cleanup the next time the effect runs; an arrow with an expression body returns that
 // expression's value — and newer browsers return a Promise from a smooth `scrollIntoView`, so

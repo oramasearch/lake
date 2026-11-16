@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /share/:token?ref=&path= (web_ui_drive_link): a folder opened through a bearer link, with no
  * sign-in, as a small file manager. Every read rechecks the link's scope, role, expiry and
  * revocation. Files download from lake's `/share/:token/download` route. */

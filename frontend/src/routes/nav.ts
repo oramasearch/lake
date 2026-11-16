@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The rail's rules that need no page code (lake#600): which rail item a path makes current, and the
  * Home group. Pure, so `npm test` runs them (tests/home.test.ts); `routes.tsx` joins them with the
  * page registry. */

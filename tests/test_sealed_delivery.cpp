@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // A user's workspace secret delivered to a Kubernetes Secret (lake#625): the sealed-secret
 // envelope version 1 byte for byte against the orama-operator's reference fixture, and
 // mint_sealed_secret, the operator's only way to a value (docs/api/secrets.md#projections).

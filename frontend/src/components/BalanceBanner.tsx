@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The prepaid balance's banner (lake#1114, docs/ui/balance.md): on every page while the current
  * account's balance is low, negative or blocked, with the balance, how much to add and Add funds,
  * which opens the one Add funds page. Reads `viewer.balance`; nothing where the lake does not bill,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/white_label.hpp"
 
 #include <algorithm>

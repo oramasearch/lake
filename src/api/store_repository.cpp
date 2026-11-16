@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // A `lake` store over a liquid repository (lake#664). See store_repository.hpp.
 
 #include "store_repository.hpp"

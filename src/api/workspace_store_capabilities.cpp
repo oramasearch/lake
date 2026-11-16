@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // move_workspace_store (lake#380, docs/api/workspace-store.md): the operator
 // moves one workspace's repositories from its space's liquid store on lake's volume into the
 // workspace's own store in its workspace Zetta, one workspace at a time. `plan` lists what moves,

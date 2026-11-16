@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // Lake as an MCP client (lake#652, docs/api/mcp-connections.md): the protocol a

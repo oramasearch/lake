@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The Orama operator reads and writes lake's control tables directly (docs/control-plane/). Twice
 // a column the operator selects was missing from lake's schema: agent_launches.workspace_id
 // (lake#442) and stores.workspace_id (lake#465). Each time every operator poll failed and nothing

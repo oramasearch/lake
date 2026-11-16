@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Train → Agent (lake#653): one agent's training page, and where it runs. A trainable agent (its
  * behaviour comes from a model, a pipeline or a training schedule) opens on Training: its
  * performance over time (held-out scores, task success rate, latency, cost), its trained

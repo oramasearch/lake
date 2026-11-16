@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Network → Private Networks (`/w/<id>/network/private-networks`, lake#729, docs/ui/network.md): the
  * peer connections joining another network (a cluster, another Lake's workspace, a cloud network) to
  * this workspace, what each side offers the other, and whether it is up (`list_network_peers`).

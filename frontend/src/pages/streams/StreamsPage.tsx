@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Train → Streams (web_ui_streams.cpp, list mode; serve_streams_page): the workspace Zetta's and
  * the Lake bus's topics with their figures, paged and filtered by name prefix, and New topic in a
  * drawer for those who may write. */

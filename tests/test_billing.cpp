@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Billing (lake#564, docs/api/billing.md): the price list (usage only, lake#635: one
 // rate per dimension, no plans, no fee, nothing included), the bill worked out from usage read
 // through usage_over_time, invoices with their frozen lines and payment state, the manual provider,

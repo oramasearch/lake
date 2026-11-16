@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Usage over time (lake#564, docs/api/metering.md#usage-over-time): the bounded recorder that
 // writes each workspace's `lake_usage` and `lake_storage` series, the owner loop's sample,
 // usage_over_time across workspaces, usage limits and record_model_usage.

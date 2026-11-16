@@ -197,6 +197,9 @@ describes the Network section each workspace has in the console (lake#729), and 
 [`CONTRIBUTING.md`](CONTRIBUTING.md) contains contributor instructions. [`SECURITY.md`](SECURITY.md)
 says how to report a vulnerability.
 
-## Licence
+## License
 
 No licence is declared in this repository yet.
+MIT, see [LICENSE](LICENSE). Third-party components and their licenses are in
+[THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES). To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md)
+(contributions come in under the [Contributor License Agreement](CLA.md)).

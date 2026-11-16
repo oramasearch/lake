@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Drives (docs/api/drives.md, lake#561): a workspace's drives, each a sealed `lake_drives` record
 // in its workspace Zetta that keeps its files in a repository, as workspace files, or as shortcuts
 // only (virtual), or that browses one of the workspace's bucket or filesystem stores in place

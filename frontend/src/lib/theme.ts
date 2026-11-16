@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The theme switch: `lake-theme` in localStorage and `data-theme` on <html>, as the server pages
  * kept it; with nothing stored the CSS follows the system preference. */
 import { useState } from "react";

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A registered page whose port is in progress. */
 import { Page, Empty } from "@/lib/ui";
 

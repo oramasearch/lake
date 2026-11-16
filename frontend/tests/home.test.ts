@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The home and Ask Orama's page: Quickstart is a signed-in person's home (lake#1128) and Ask Orama
  * has its own page, `/ask` (it was the home from lake#600); the rail's Home group and which of its
  * items is current, old home links with a conversation, `/w/<id>/ask` and Command Center links, what

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Add funds (`/billing/add-funds?customer_id=`, lake#1114, docs/ui/balance.md): the one page every
  * balance email, the banner and every 402 answer link to. It shows the account's balance and how much
  * to add, and starts a Stripe Checkout (`start_top_up`); Stripe sends the person back here with

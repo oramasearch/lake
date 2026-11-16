@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * The product's name is Lake, with a capital L, and the app is the Lake Console
  * (lake#642). Technical names keep their form: hostnames (`lake.example.com`, `lake.example.net`), the MCP

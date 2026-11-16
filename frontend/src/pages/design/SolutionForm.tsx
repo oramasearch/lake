@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The fields of one of your own solutions (lake#597), shared by New Solution and Edit Solution:
  * the catalogue's shape as far as a person writes it. A refusal names its field: lake's `path`
  * (such as /measurement/metric) puts the message under the field it points at. */

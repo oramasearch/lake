@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /releases?repository_id= (web_ui_releases): published releases, newest first, each a card with
  * its tag, change, notes and attested artifacts, under the figures they add up to. */
 import { useSearchParams } from "react-router-dom";

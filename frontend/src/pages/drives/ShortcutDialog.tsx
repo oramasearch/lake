@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** New shortcut (create_drive_shortcut): a name and what it opens. Repositories, transcripts and
  * drive items are chosen from what the workspace has; a dataset, project, agent or model is named;
  * a web address is typed. */

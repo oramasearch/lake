@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What the application's pages share: the application read first (its name and workspace), the
  * header with the application's name, and the route tabs between its overview, users,
  * organizations and webhook events. */

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // How the quickstart reads a dataset's columns and prepares them for its first model (lake#1181,

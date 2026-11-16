@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** One MCP connection (`/w/<id>/mcp-connection?id=<id>`, lake#652, docs/ui/mcp-connections.md): its
  * server and status, its tools (allow each, say whether it changes something, try it, auto-approve
  * a change for one agent), the switch that exposes its allowed tools through Lake's own MCP (with

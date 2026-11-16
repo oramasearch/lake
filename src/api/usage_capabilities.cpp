@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Usage over time (lake#564, docs/api/metering.md#usage-over-time): usage_over_time, usage_limits,
 // set_usage_limit, record_model_usage, model_completion (the model gateway, lake#248), and the
 // owner loop's usage sample. Every workspace's usage is read from its own workspace Zetta; lake's

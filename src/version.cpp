@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/version.hpp"
 
 #ifndef LAKE_BUILD_REVISION

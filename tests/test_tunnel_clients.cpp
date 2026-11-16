@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The tunnel client downloads (lake#745, docs/api/tunnel-clients.md): the clients directory,
 // tunnel_client_downloads' signed short-lived links, and GET /tunnel-clients/<platform>.
 #include <openssl/hmac.h>

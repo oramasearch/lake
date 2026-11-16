@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A secret's value as the pages edit it (docs/ui/secrets.md): `put_secret` takes a JSON object,
  * written either as key/value rows or as raw JSON. Pure, so `npm test` checks it. Nothing here
  * stores, logs or puts a value in a URL. */

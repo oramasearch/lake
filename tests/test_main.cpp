@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/store.hpp"
 #include "postgres_fixture.hpp"
 

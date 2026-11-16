@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Train → Experiments → one experiment (the engine's study; formerly web_ui_experiments.cpp and
  * experiments.js drawing it, its leaderboard and refresh), as a Split: optimization history, parallel coordinates, parameter
  * importance and the sortable trial leaderboard with Promote and Stop trial on the left; the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Billing (lake#564, lake#635): amounts from millionths, rates in a person's units, a line as usage ×
  * rate = cost, the months a bill covers, invoice states, what is owed, the price list editor's rows,
  * the rail that shows Billing only where the lake bills, and the billing contact (lake#857). `npm

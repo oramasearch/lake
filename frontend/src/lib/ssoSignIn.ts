@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** SSO-only sign-in (lake#1136, docs/api/sso.md): a white-labelled Lake whose only way in is the
  * customer's own identity provider (LAKE_SIGN_IN_SSO_PROVIDER). The `viewer` read names it; the
  * sign-in and sign-up pages offer it alone. */

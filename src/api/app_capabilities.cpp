@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/apps.hpp"
 #include "lake/api/authentication_work.hpp"
 #include "lake/api/clerk.hpp"

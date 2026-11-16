@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Deleting what a workspace holds (lake#645, docs/api/deletion.md): its datasets, trained models,
 // runs and search indexes, which live in the workspace's engine, and a person's Ask Orama
 // conversations, which are lake's records in the workspace Zetta. Each is a named capability with

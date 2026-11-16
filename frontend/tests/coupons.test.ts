@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Coupon codes (lake#1156): a `?code=` link's code is kept through sign-up (Clerk's round trip, a
  * `?next=` redirect that drops the query, an email link in another tab), taken out of the address,
  * redeemed once on the first signed-in page, and forgotten after a day or once Lake has answered;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Any address no page answers. The server had no HTML 404 (it answered JSON); this is the error
  * state page in lake's words. */
 import { useLocation } from "react-router-dom";

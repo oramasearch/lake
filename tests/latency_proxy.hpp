@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // A TCP proxy on loopback that delays every byte by half a round trip in each direction, so a

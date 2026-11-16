@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Design → Projects (lake's workspace_content, projects branch): the workspace's projects with their
  * figures, a way to the Opportunities, and New Project in a drawer. Each row's intent, pipelines
  * and status come from the project's own `get_project`, read alongside the list (the same read the

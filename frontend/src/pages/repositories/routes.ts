@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import type { Audience, Screen } from "@/routes/types";
 import { lazyPage } from "@/lib/lazyPage";
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The quickstart process's page rules (lake#1128, docs/ui/quickstart.md): what a dropped file is
  * sent as, the first model's columns, polling, publishing a trained model, the website key and the
  * balance. `npm test`; the build runs it. */

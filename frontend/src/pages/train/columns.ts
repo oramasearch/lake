@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The order of a table's columns (lake#812), their types (zetta#1021), and the first rows by
  * `LIMIT`. A row arrives as a JSON object, and an object's keys are not the table's order: the
  * server writes them sorted, so a table built from them reads alphabetically. `workspace_sql`

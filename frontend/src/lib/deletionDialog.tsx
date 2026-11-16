@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The one confirmation every delete and revoke uses (lake#645, docs/ui/deletion.md). It asks the
  * capability with `dry_run: true` first (a read over POST, which changes and refreshes nothing),
  * lists what would go from that answer, and keeps the action disabled until the person types the

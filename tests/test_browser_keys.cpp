@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Browser keys (lake#1152, docs/api/browser-keys.md): the key a website's own page holds. Each test
 // runs over the in-memory store and, with LAKE_TEST_DB_URI, over PostgreSQL (migration
 // 0102_browser_keys): what a key may call (its index, its model, its workspace, its account, search

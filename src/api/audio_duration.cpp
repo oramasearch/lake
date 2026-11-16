@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The length of a recording, read from its container (lake#658, docs/api/transcripts.md#how-long-
 // a-recording-is): speech-to-text is billed by the minute, and gpt-4o-transcribe reports tokens,
 // not seconds, so lake measures the audio it sends. Pure functions over the bytes; every read is

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The home and Ask Orama's page, as pure rules so `npm test` runs them (tests/home.test.ts): what
  * `/` shows each viewer (Quickstart for a signed-in person since lake#1128; Ask Orama was the home
  * from lake#600), where an old home link with a conversation, an `/ask` link or an old Command

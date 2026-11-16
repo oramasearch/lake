@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // The prepaid account balance (lake#1114, docs/api/billing.md#balance):

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // lake — the HTTP adapter. Beast2 (HTTP/1) on Capy + Corosio, the same stack
 // Zetta serves with (zetta/src/core/api/http_server.cpp). This is the ONE
 // translation unit that knows about beast2 / boost::http. It

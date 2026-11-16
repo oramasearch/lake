@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Transcripts (lake#561): the words a page shows, default titles, and what Ask Orama is told about
  * one. `npm test`; the build runs it. */
 import { test } from "node:test";

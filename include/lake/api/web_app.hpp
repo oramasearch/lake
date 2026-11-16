@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // The web app: the single-page application built from frontend/ (React, Vite) and embedded into

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Home (`/`): Quickstart for a signed-in person (lake#1128; Ask Orama, the home from lake#600, is at
  * `/ask`); for a visitor and the operator, what lake is for and their next step. An old Command
  * Center link (`/?ws=`) opens the Dashboard, and an old Ask Orama home link (`/?conversation=`) opens

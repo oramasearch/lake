@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Data → Connections (`/w/<id>/connections`, lake#651, docs/ui/connections.md): the databases the
  * workspace reads. Figures (connections, kinds, tables reachable), the list with each connection's
  * kind, host, the service it uses, status and created date, Add connection in a drawer, Connect One

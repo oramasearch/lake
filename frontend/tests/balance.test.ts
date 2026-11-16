@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The prepaid balance (lake#1114): the banner every page shows while the balance is low, negative or
  * blocked, the Add funds link, the top-up amounts, the history of credits and charges, and what the
  * page says after Stripe. `npm test`; the build runs it. */

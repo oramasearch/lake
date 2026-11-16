@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Personal settings (`/settings?tab=`): Profile, Identity, Sessions and devices, Passkeys, Tokens
  * and Notifications, each a tab of cards. Identity is which key the account signs with (lake#762). An unknown tab shows Notifications, as the server page did.
  * Profile ends with Delete account (lake#810, docs/ui/settings.md#deleting-your-account). */

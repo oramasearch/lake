@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // Feature planning for a dataset in a workspace (lake#1153, docs/api/feature-planning.md).

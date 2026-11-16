@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+
 """Check docs/design/status.md against an observed OpenAPI document (lake#448).
 
 Every row of the page's *Area status* table names the capabilities it speaks for in its

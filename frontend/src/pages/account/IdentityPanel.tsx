@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Account → Identity (`/settings?tab=identity`, lake#762): which key the account signs with, and
  * "Use my own identity", which replaces the managed key with the person's own liquid identity in
  * two steps: paste `liquid identity show --document`, then paste what `liquid sign artifact

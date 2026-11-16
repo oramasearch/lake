@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What `search_drives` answers and where each match takes the person (lake#561,
  * docs/api/drives.md#search): Data → Search's Drives place and a drive's own search box both use
  * it. Pure, so `tests/drives.test.ts` runs it under Node. */

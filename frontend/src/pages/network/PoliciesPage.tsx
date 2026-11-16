@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Network → Policies (`/w/<id>/network/policies`, lake#729, docs/ui/network.md): the rules in
  * effect now (`network_rules`), first as sentences ("Reporting may reach orders on TCP 5432."), then
  * each one with whether the cluster has applied it. Read-only: the rules are changed on the pages

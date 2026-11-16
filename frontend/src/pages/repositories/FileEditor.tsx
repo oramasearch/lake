@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Edit a repository file and commit it (lake#1239, docs/ui/drive.md#editing-a-file). The file
  * is read from `repository_file`'s `content_base64`, edited in a monospace textarea (the console
  * ships no code editor component), and committed with `commit_repository_files` as the person, its

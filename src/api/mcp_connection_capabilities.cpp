@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // A workspace's MCP connections (lake#652, docs/api/mcp-connections.md): Lake as the
 // client of remote MCP servers. Each connection is a sealed `lake_mcp_connections` record in its
 // workspace Zetta; its credential is a workspace secret Lake reads server-side and never answers.
