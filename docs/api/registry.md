@@ -241,6 +241,14 @@ re-hashes it against the current app row and allows manifest and blob `GET`/`HEA
 exact `<space>/<app name>` repository. Other apps, cache repositories, upload starts, blob writes,
 and manifest publication receive OCI `403 DENIED`. Rotation or app deletion revokes it.
 
+A methodology run's credential (`lmr.…`) is accepted only as HTTP Basic user `methodology-run`, and
+a served methodology model's (`lmd.…`) only as user `methodology-deployment`, the names the Orama
+operator writes into their pull Secrets. Each pulls, read only, the image of its own build, and only
+when that build is its own workspace's (lake#952, [methodologies.md](methodologies.md)). Until
+v0.9.0 Lake's Basic parser dropped both user names, so neither could pull.
+`RegistryStore.AMethodologyRunPullsOnlyABuildOfItsOwnWorkspace` proves the run's pull and the
+refusal of another workspace's build.
+
 ## Protocol routes
 
 | Protocol | Routes |
