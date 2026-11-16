@@ -25,7 +25,8 @@ The runner sets `LIQUID_IDENTITY_KEY_CUSTODY=file` unless the caller already set
 Since liquid v0.3.0 (liquid#402) a new local identity's wrapping key is sealed in the macOS Keychain,
 or under a passphrase elsewhere; the suite has neither a Keychain prompt nor a passphrase, so every
 `LIQUID_HOME` a test creates, and every lake process it starts, would otherwise fail to create its
-identity. liquid's own suite makes the same choice.
+identity. liquid's own suite makes the same choice. `IdentityCustody.*` override it inside each
+test to prove a pod's passphrase-file custody (lake#1352).
 
 ### Databases the runner owns
 
