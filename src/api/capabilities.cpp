@@ -15,6 +15,7 @@
 #include "lake/api/sealed_delivery.hpp"
 #include "lake/version.hpp"
 #include "lake_attestation.hpp"
+#include "repository_path_access.hpp"
 #include "repository_records_api.hpp"
 
 #include <algorithm>
@@ -28,6 +29,7 @@
 #include <map>
 #include <optional>
 #include <ranges>
+#include <set>
 #include <string>
 #include <string_view>
 
@@ -527,6 +529,105 @@ ApiResult repository_content_list_result(SyncStoreResult<std::vector<T>> rows, T
     return ApiResult::success({{"items", std::move(items)}});
 }
 
+ApiResult api_error_result(const ApiError& error) {
+    return ApiResult::failure(error.code, error.message, error.path);
+}
+
+// The paths of a repository at `ref` the caller may not read (LSR-108, lake#975), decided as Drive
+// decides them: a path below a path object that does not inherit needs a grant there. Empty
+// without asking for the tree when no such object exists. A tree that cannot be read refuses
+// every path (fail closed).
+struct RepositoryPathFilter {
+    RepositoryPathAccess access;
+    // Trees read so far, by ref.
+    std::map<std::string, std::vector<RepositoryTreeEntry>> trees;
+
+    std::expected<std::set<std::string>, ApiError>
+    unreadable(ApiContext& ctx,
+               const control::Repository& repository,
+               const std::string& ref,
+               const std::vector<std::string>& paths) {
+        if (access.unrestricted()) {
+            return std::set<std::string>{};
+        }
+        auto tree = trees.find(ref);
+        if (tree == trees.end()) {
+            if (!ctx.sync_store) {
+                return std::unexpected(
+                    ApiError{"store_unavailable", "no repository store is configured", {}});
+            }
+            auto read = ctx.sync_store->repository_tree(repository.customer_id, repository.id, ref);
+            if (!read) {
+                return std::set<std::string>(paths.begin(), paths.end());
+            }
+            tree = trees.emplace(ref, std::move(*read)).first;
+        }
+        return access.unreadable(ctx, tree->second, paths);
+    }
+
+    // Whether `path` is readable at the revisions `refs` name: one of them holds it, and none
+    // that holds it refuses it.
+    std::expected<bool, ApiError> readable_at(ApiContext& ctx,
+                                              const control::Repository& repository,
+                                              const std::vector<std::string>& refs,
+                                              const std::string& path) {
+        if (access.unrestricted()) {
+            return true;
+        }
+        bool held = false;
+        for (const std::string& ref : refs) {
+            if (ref.empty()) {
+                continue;
+            }
+            const auto refused = unreadable(ctx, repository, ref, {path});
+            if (!refused) {
+                return std::unexpected(refused.error());
+            }
+            const auto tree = trees.find(ref);
+            if (tree == trees.end() ||
+                std::ranges::find(tree->second, path, &RepositoryTreeEntry::path) ==
+                    tree->second.end()) {
+                continue;
+            }
+            if (refused->contains(path)) {
+                return false;
+            }
+            held = true;
+        }
+        return held;
+    }
+};
+
+std::expected<RepositoryPathFilter, ApiError>
+repository_path_filter(ApiContext& ctx, const control::Repository& repository, const json& in) {
+    auto access =
+        RepositoryPathAccess::load(ctx, repository, repository_input_value(in, "ref", "revision"));
+    if (!access) {
+        return std::unexpected(access.error());
+    }
+    return RepositoryPathFilter{std::move(*access), {}};
+}
+
+// A read of the whole repository (pull, read_chunk) carries every path, so it needs read on every
+// path object of the repository that does not inherit (lake#975).
+std::optional<ApiResult> whole_repository_refusal(ApiContext& ctx,
+                                                  const control::Repository& repository) {
+    const auto access = RepositoryPathAccess::load(ctx, repository);
+    if (!access) {
+        return api_error_result(access.error());
+    }
+    const auto every = access->reads_every_cut(ctx);
+    if (!every) {
+        return api_error_result(every.error());
+    }
+    if (!*every) {
+        return ApiResult::failure("unauthorized",
+                                  "this repository has restricted folders you cannot read, so it "
+                                  "cannot be read whole; read its files one at a time instead");
+    }
+    return std::nullopt;
+}
+
 // The rows the caller may read: public ones for an anonymous caller, otherwise those its policy
 // allows, in order.
 std::expected<std::vector<control::Repository>, ApiResult>
@@ -724,6 +825,61 @@ ApiResult search_result(search::Result<search::QueryResult> result) {
                                {"items", std::move(values)}});
 }
 
+// Search authorizes each hit's repository; a hit inside a path object that does not inherit is
+// also checked there, at the change it was found in, as Drive decides that path (lake#975). A hit
+// whose path that change's tree does not hold, or whose repository cannot be read, is dropped
+// (fail closed).
+ApiResult without_restricted_hits(ApiContext& context, search::QueryResult& result) {
+    if (result.items.empty() || context.operator_credential ||
+        context.acting_identity == control::operator_principal) {
+        return ApiResult::success(nullptr);
+    }
+    std::map<std::string, std::optional<RepositoryPathFilter>> filters;
+    std::map<std::string, control::Repository> repositories;
+    // The paths of each repository at each change, decided in one batch.
+    std::map<std::pair<std::string, std::string>, std::vector<std::string>> asked;
+    for (const search::Hit& hit : result.items) {
+        auto filter = filters.find(hit.repository);
+        if (filter == filters.end()) {
+            std::optional<RepositoryPathFilter> loaded;
+            if (const auto repository = context.store->get_repository(hit.repository)) {
+                if (auto access = RepositoryPathAccess::load(context, *repository)) {
+                    loaded = RepositoryPathFilter{std::move(*access), {}};
+                    repositories.emplace(hit.repository, *repository);
+                }
+            }
+            filter = filters.emplace(hit.repository, std::move(loaded)).first;
+        }
+        if (filter->second && !filter->second->access.unrestricted()) {
+            asked[{hit.repository, hit.change}].push_back(hit.path);
+        }
+    }
+    std::map<std::pair<std::string, std::string>, std::set<std::string>> refused;
+    for (const auto& [key, paths] : asked) {
+        const auto& [repository, change] = key;
+        auto decided =
+            filters.at(repository)->unreadable(context, repositories.at(repository), change, paths);
+        if (!decided) {
+            return api_error_result(decided.error());
+        }
+        refused.emplace(key, std::move(*decided));
+    }
+    std::erase_if(result.items, [&](const search::Hit& hit) {
+        const auto& filter = filters.at(hit.repository);
+        if (!filter) {
+            return true;
+        }
+        if (filter->access.unrestricted()) {
+            return false;
+        }
+        if (hit.change.empty() || hit.path.empty()) {
+            return true;
+        }
+        return refused.at({hit.repository, hit.change}).contains(hit.path);
+    });
+    return ApiResult::success(nullptr);
+}
+
 // The key of a TOTP secret, stored as hexadecimal, written as RFC 4648 base32 without padding:
 // what the Key Uri Format's `secret` parameter is and what authenticator apps decode (lake#773).
 // The stored value is unchanged, so earlier enrollments keep verifying.
@@ -767,6 +923,82 @@ std::expected<std::string, ApiError> global_object(const json&, ApiContext&) {
     return std::string{};
 }
 
+// Why a path object for `node_id` may not sit under `parent_id` (lake#1030). Admin on a folder's
+// object let its holder create objects under it, and the external id was checked only for the
+// repository it names, so a folder administrator could make one for a sibling folder (or any
+// other node of the repository) and govern it with their own grants. The node must be a file or
+// folder of the repository's tree at `ref` (default `main`), and the parent must be the object of
+// the nearest folder above it that has one in this repository, or the repository's own object
+// when none does: exactly where the drive capabilities link it (`link_folder_chain`). So a path
+// object is made only by an administrator of the folder it lies in, and a branch rule's
+// `<repository_id>:<ref>` id, which names no node, never is (set_branch_protection makes those).
+ApiResult path_node_refusal(const json& in,
+                            ApiContext& ctx,
+                            const control::PolicyObject& repository_object,
+                            const std::string& node_id) {
+    const auto repository = ctx.store->get_repository(repository_object.external_id);
+    if (!repository) {
+        return ApiResult::failure(
+            repository.error().code, repository.error().message, "/parent_id");
+    }
+    if (!repository->deleted_at.empty()) {
+        return ApiResult::failure("conflict", "repository is tombstoned", "/parent_id");
+    }
+    if (!ctx.sync_store) {
+        return ApiResult::failure("store_unavailable",
+                                  "no repository store is configured to place a path object");
+    }
+    const std::string ref = in.value("ref", std::string("main"));
+    const auto tree = ctx.sync_store->repository_tree(repository->customer_id, repository->id, ref);
+    if (!tree) {
+        return ApiResult::failure(tree.error().code, tree.error().message, "/ref");
+    }
+    const auto node = std::ranges::find(*tree, node_id, &RepositoryTreeEntry::node_id);
+    if (node_id.empty() || node == tree->end()) {
+        return ApiResult::failure("invalid_input",
+                                  "no file or folder of the repository at " + ref +
+                                      " has node id " + node_id,
+                                  "/external_id");
+    }
+    std::string expected = repository_object.id;
+    for (std::string path = node->path; !path.empty();) {
+        const std::size_t slash = path.find_last_of('/');
+        path = slash == std::string::npos ? std::string{} : path.substr(0, slash);
+        if (path.empty()) {
+            break;
+        }
+        const auto folder = std::ranges::find(*tree, path, &RepositoryTreeEntry::path);
+        if (folder == tree->end() || folder->node_id.empty()) {
+            continue;
+        }
+        const auto object =
+            ctx.store->find_policy_object("path", repository->id + ":" + folder->node_id);
+        if (!object) {
+            if (object.error().code == "not_found") {
+                continue;
+            }
+            return ApiResult::failure(object.error().code, object.error().message);
+        }
+        // Only an object under the repository's own counts (lake#913).
+        const auto within = control::object_within(*ctx.store, object->id, repository_object.id);
+        if (!within) {
+            return ApiResult::failure(within.error().code, within.error().message);
+        }
+        if (*within) {
+            expected = object->id;
+            break;
+        }
+    }
+    if (in.at("parent_id").get<std::string>() != expected) {
+        return ApiResult::failure("invalid_input",
+                                  "a path object sits under the object of the nearest folder above "
+                                  "it that has one (" +
+                                      expected + "), and only that folder's administrator makes it",
+                                  "/parent_id");
+    }
+    return ApiResult::success(json::object());
+}
+
 // Why `create_object` refuses this object, or success when it may be made (lake#913). Every
 // consumer finds an object by its type and external id, which is unique across all accounts, so
 // an object a caller names with another account's identifiers would govern that account's
@@ -803,7 +1035,10 @@ ApiResult caller_object_refusal(const json& in, ApiContext& ctx) {
                                       "<node id>, in the repository it sits in",
                                   "/external_id");
     }
-    return ApiResult::success(json::object());
+    if (ctx.operator_credential) {
+        return ApiResult::success(json::object()); // repair, as for the other types
+    }
+    return path_node_refusal(in, ctx, *repository, external_id.substr(prefix.size()));
 }
 
 std::expected<std::string, ApiError> self_object(const json&, ApiContext& context) {
@@ -934,17 +1169,6 @@ std::string scim_email(const json& resource) {
         if (email.is_object() && email.contains("value") && email["value"].is_string()) {
             return email["value"].get<std::string>();
         }
-    }
-    return {};
-}
-
-std::string scim_taap_id(const json& resource) {
-    if (resource.contains("taapId") && resource["taapId"].is_string()) {
-        return resource["taapId"].get<std::string>();
-    }
-    const std::string extension(scim_taap_schema);
-    if (resource.contains(extension) && resource[extension].is_object()) {
-        return resource[extension].value("taapId", "");
     }
     return {};
 }
@@ -1087,22 +1311,30 @@ std::expected<json, std::string> apply_scim_patch(json resource, const json& req
     return resource;
 }
 
-std::expected<control::NewScimUser, ApiResult> new_scim_user(const std::string& provider_id,
-                                                             json resource) {
+// A SCIM client never names the identity of the account a create makes (lake#872): Lake mints a
+// managed key for it, and a `taapId` the resource carries is dropped, never stored or answered.
+std::expected<control::NewScimUser, ApiResult>
+new_scim_user(ApiContext& context, const std::string& provider_id, json resource) {
     const std::string external_id = resource.value("externalId", resource.value("userName", ""));
-    const std::string taap_id = scim_taap_id(resource);
-    if (external_id.empty() || taap_id.empty()) {
-        return std::unexpected(ApiResult::failure(
-            "invalid_input", "SCIM user requires externalId or userName and a TAAP identity"));
+    if (external_id.empty()) {
+        return std::unexpected(
+            ApiResult::failure("invalid_input", "SCIM user requires externalId or userName"));
     }
+    resource.erase("taapId");
+    resource.erase(std::string(scim_taap_schema));
     resource["externalId"] = external_id;
-    return control::NewScimUser{provider_id,
-                                external_id,
-                                scim_email(resource),
-                                resource.value("displayName", ""),
-                                taap_id,
-                                resource.value("active", true),
-                                std::move(resource)};
+    control::NewScimUser user{provider_id,
+                              external_id,
+                              scim_email(resource),
+                              resource.value("displayName", ""),
+                              "",
+                              resource.value("active", true),
+                              std::move(resource)};
+    if (!audit::give_managed_key(user, *context.store, context.instance_kek)) {
+        return std::unexpected(
+            ApiResult::failure("store_unavailable", "Lake cannot create a managed key"));
+    }
+    return user;
 }
 
 std::expected<control::NewScimGroup, ApiResult>
@@ -2973,7 +3205,7 @@ void register_identity_capabilities(Registry& registry) {
                             .title = "Create organization",
                             .description =
                                 "Create an organization (identity, owns nothing). taap_id "
-                                "is optional and unique.",
+                                "is optional, unique and the operator's to give.",
                             .input_schema = {{"type", "object"},
                                              {"properties",
                                               {{"taap_id", {{"type", "string"}}},
@@ -2988,6 +3220,16 @@ void register_identity_capabilities(Registry& registry) {
                             .handler = [](const json& in, ApiContext& ctx) {
                                 if (!ctx.store)
                                     return no_store();
+                                // Only the operator names an organization's identity (lake#872):
+                                // an account administrator could otherwise give it an identity a
+                                // grant already names and show its own name there.
+                                if (!in.value("taap_id", "").empty() && !ctx.operator_credential &&
+                                    ctx.acting_identity != control::operator_principal) {
+                                    return ApiResult::failure(
+                                        "forbidden",
+                                        "only the operator names an organization's identity",
+                                        "/taap_id");
+                                }
                                 return one_result(ctx.store->create_organization(
                                     control::NewOrganization{in.value("taap_id", ""),
                                                              in.value("display_name", ""),
@@ -4289,16 +4531,18 @@ void register_sso_capabilities(Registry& registry) {
                     "unauthorized",
                     "sign_in_sso is operator-only; sign in through the provider (OIDC or SAML)");
             }
-            co_return session_answer(co_await issued_result(
-                context.store->sign_in_sso({input.value("provider_id", ""),
-                                            input.value("issuer", ""),
-                                            input.value("subject", ""),
-                                            input.value("email", ""),
-                                            input.value("display_name", ""),
-                                            input.value("taap_id", ""),
-                                            input.value("device_name", "browser"),
-                                            input.value("claims", json::object())}),
-                context));
+            // A new account takes a managed key Lake mints; `taap_id` is ignored (lake#872).
+            control::SsoIdentity identity{input.value("provider_id", ""),
+                                          input.value("issuer", ""),
+                                          input.value("subject", ""),
+                                          input.value("email", ""),
+                                          input.value("display_name", ""),
+                                          "",
+                                          input.value("device_name", "browser"),
+                                          input.value("claims", json::object())};
+            audit::give_managed_key(identity, *context.store, context.instance_kek);
+            co_return session_answer(
+                co_await issued_result(context.store->sign_in_sso(identity), context));
         }});
     registry.add(Capability{
         .name = "start_sso_saml",
@@ -4381,6 +4625,10 @@ void register_sso_capabilities(Registry& registry) {
             if (!accepted) {
                 co_return ApiResult::failure(accepted.error().code, accepted.error().message);
             }
+            // The identity of a just-in-time account is a managed key Lake mints, never the
+            // `taap_id` this unauthenticated caller or its start_sso_saml named (lake#872).
+            accepted->identity.taap_id.clear();
+            audit::give_managed_key(accepted->identity, *context.store, context.instance_kek);
             co_return session_answer(
                 co_await issued_result(context.store->sign_in_sso(accepted->identity), context));
         }});
@@ -4398,8 +4646,7 @@ void register_sso_capabilities(Registry& registry) {
                            {"taap_id", {{"type", "string"}}},
                            {"active", {{"type", "boolean"}}},
                            {"attributes", {{"type", "object"}}}}},
-                         {"required",
-                          json::array({"provider_id", "external_id", "taap_id", "active"})},
+                         {"required", json::array({"provider_id", "external_id", "active"})},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
@@ -4407,15 +4654,21 @@ void register_sso_capabilities(Registry& registry) {
         .action = "admin",
         .resolve_object = sso_provider_object,
         .handler = [](const json& input, ApiContext& context) {
-            return context.store ? one_result(context.store->upsert_scim_user(
-                                       {input.value("provider_id", ""),
-                                        input.value("external_id", ""),
-                                        input.value("email", ""),
-                                        input.value("display_name", ""),
-                                        input.value("taap_id", ""),
-                                        input.value("active", true),
-                                        input.value("attributes", json::object())}))
-                                 : no_store();
+            if (!context.store) {
+                return no_store();
+            }
+            // `taap_id` is ignored: a new account takes a managed key Lake mints (lake#872).
+            control::NewScimUser user{input.value("provider_id", ""),
+                                      input.value("external_id", ""),
+                                      input.value("email", ""),
+                                      input.value("display_name", ""),
+                                      "",
+                                      input.value("active", true),
+                                      input.value("attributes", json::object())};
+            if (!audit::give_managed_key(user, *context.store, context.instance_kek)) {
+                return ApiResult::failure("store_unavailable", "Lake cannot create a managed key");
+            }
+            return one_result(context.store->upsert_scim_user(user));
         }});
     registry.add(Capability{
         .name = "scim_upsert_user",
@@ -4438,7 +4691,7 @@ void register_sso_capabilities(Registry& registry) {
             if (!provider) {
                 return provider.error();
             }
-            auto user = new_scim_user(provider->id, input.at("resource"));
+            auto user = new_scim_user(context, provider->id, input.at("resource"));
             if (!user) {
                 return user.error();
             }
@@ -4545,7 +4798,7 @@ void register_sso_capabilities(Registry& registry) {
                 return ApiResult::failure("invalid_input", patched.error());
             }
             (*patched)["externalId"] = existing->external_id;
-            auto user = new_scim_user(provider->id, std::move(*patched));
+            auto user = new_scim_user(context, provider->id, std::move(*patched));
             if (!user) {
                 return user.error();
             }
@@ -5145,10 +5398,26 @@ void register_repository_capabilities(Registry& registry) {
             if (!ctx.sync_store) {
                 return no_repository_store();
             }
-            return repository_content_list_result(
+            auto tree =
                 ctx.sync_store->repository_tree(repository->customer_id,
                                                 repository->id,
-                                                repository_input_value(in, "ref", "revision")),
+                                                repository_input_value(in, "ref", "revision"));
+            if (!tree) {
+                return from_sync_store_error(tree.error());
+            }
+            // Entries below a path object that does not inherit are left out unless the caller
+            // holds a grant there, as Drive decides them (lake#975).
+            const auto access = RepositoryPathAccess::load(
+                ctx, *repository, repository_input_value(in, "ref", "revision"));
+            if (!access) {
+                return api_error_result(access.error());
+            }
+            auto readable = access->readable_entries(ctx, std::move(*tree));
+            if (!readable) {
+                return api_error_result(readable.error());
+            }
+            return repository_content_list_result(
+                SyncStoreResult<std::vector<RepositoryTreeEntry>>(std::move(*readable)),
                 repository_tree_entry_json);
         }});
     registry.add(Capability{
@@ -5203,6 +5472,23 @@ void register_repository_capabilities(Registry& registry) {
             }
             if (!ctx.sync_store) {
                 return no_repository_store();
+            }
+            // A file below a path object that does not inherit needs a grant there, as its Drive
+            // download does (lake#975). Its node is read from the tree at the same ref; a path
+            // the tree does not hold is refused, since no cut can be ruled out.
+            auto filter = repository_path_filter(ctx, *repository, in);
+            if (!filter) {
+                return api_error_result(filter.error());
+            }
+            const std::string requested_path = in.at("path").get<std::string>();
+            const auto refused = filter->unreadable(
+                ctx, *repository, repository_input_value(in, "ref", "revision"), {requested_path});
+            if (!refused) {
+                return api_error_result(refused.error());
+            }
+            if (refused->contains(requested_path)) {
+                return ApiResult::failure(
+                    "unauthorized", "principal is not allowed to read this path", "/path");
             }
             const auto file =
                 ctx.sync_store->repository_file(repository->customer_id,
@@ -5310,10 +5596,70 @@ void register_repository_capabilities(Registry& registry) {
             if (!ctx.sync_store) {
                 return no_repository_store();
             }
-            return repository_content_list_result(
-                ctx.sync_store->repository_diff(
-                    repository->customer_id, repository->id, in.at("change_id").get<std::string>()),
-                repository_diff_entry_json);
+            const std::string change_id = in.at("change_id").get<std::string>();
+            auto entries =
+                ctx.sync_store->repository_diff(repository->customer_id, repository->id, change_id);
+            if (!entries) {
+                return from_sync_store_error(entries.error());
+            }
+            auto filter = repository_path_filter(ctx, *repository, in);
+            if (!filter) {
+                return api_error_result(filter.error());
+            }
+            if (!filter->access.unrestricted() && !entries->empty()) {
+                // A diff entry names a path at the change and, for a move or a delete, one at its
+                // first parent. Each is decided at the revision it names, and an entry is kept
+                // only when every path it names is readable at a revision that holds it
+                // (lake#975).
+                std::string parent;
+                const auto log =
+                    ctx.sync_store->repository_log(repository->customer_id, repository->id);
+                if (!log) {
+                    return from_sync_store_error(log.error());
+                }
+                if (const auto change = std::ranges::find(*log, change_id, &RepositoryChange::id);
+                    change != log->end() && !change->parents.empty()) {
+                    parent = change->parents.front();
+                }
+                std::vector<std::string> paths;
+                for (const RepositoryDiffEntry& entry : *entries) {
+                    for (const std::string* path : {&entry.path, &entry.old_path}) {
+                        if (!path->empty()) {
+                            paths.push_back(*path);
+                        }
+                    }
+                }
+                const auto at_change = filter->unreadable(ctx, *repository, change_id, paths);
+                if (!at_change) {
+                    return api_error_result(at_change.error());
+                }
+                std::set<std::string> at_parent(paths.begin(), paths.end());
+                if (!parent.empty()) {
+                    auto decided = filter->unreadable(ctx, *repository, parent, paths);
+                    if (!decided) {
+                        return api_error_result(decided.error());
+                    }
+                    at_parent = std::move(*decided);
+                }
+                const auto held = [&](const std::string& ref, const std::string& path) {
+                    const auto tree = filter->trees.find(ref);
+                    return tree != filter->trees.end() &&
+                           std::ranges::find(tree->second, path, &RepositoryTreeEntry::path) !=
+                               tree->second.end();
+                };
+                // Readable when some revision holds the path and none that holds it refuses it.
+                const auto readable = [&](const std::string& path) {
+                    const bool in_change = held(change_id, path);
+                    const bool in_parent = !parent.empty() && held(parent, path);
+                    return (in_change || in_parent) && (!in_change || !at_change->contains(path)) &&
+                           (!in_parent || !at_parent.contains(path));
+                };
+                std::erase_if(*entries, [&](const RepositoryDiffEntry& entry) {
+                    return (!entry.path.empty() && !readable(entry.path)) ||
+                           (!entry.old_path.empty() && !readable(entry.old_path));
+                });
+            }
+            return repository_content_list_result(std::move(entries), repository_diff_entry_json);
         }});
     registry.add(Capability{
         .name = "list_conflicts",
@@ -5336,9 +5682,35 @@ void register_repository_capabilities(Registry& registry) {
             if (!ctx.sync_store) {
                 return no_repository_store();
             }
-            return repository_content_list_result(
-                ctx.sync_store->repository_conflicts(repository->customer_id, repository->id),
-                repository_conflict_json);
+            auto conflicts =
+                ctx.sync_store->repository_conflicts(repository->customer_id, repository->id);
+            if (!conflicts) {
+                return from_sync_store_error(conflicts.error());
+            }
+            auto filter = repository_path_filter(ctx, *repository, in);
+            if (!filter) {
+                return api_error_result(filter.error());
+            }
+            if (!filter->access.unrestricted()) {
+                // A conflict carries both sides' bytes of one path; it is listed only when that
+                // path is readable at the sides that hold it (lake#975).
+                std::vector<RepositoryConflict> kept;
+                for (RepositoryConflict& conflict : *conflicts) {
+                    const auto readable =
+                        filter->readable_at(ctx,
+                                            *repository,
+                                            {conflict.left, conflict.right, conflict.base},
+                                            conflict.region.path);
+                    if (!readable) {
+                        return api_error_result(readable.error());
+                    }
+                    if (*readable) {
+                        kept.push_back(std::move(conflict));
+                    }
+                }
+                *conflicts = std::move(kept);
+            }
+            return repository_content_list_result(std::move(conflicts), repository_conflict_json);
         }});
     registry.add(Capability{.name = "list_artifacts",
                             .title = "List repository artifacts",
@@ -5607,6 +5979,11 @@ void register_repository_capabilities(Registry& registry) {
                        if (!repository) {
                            return repository.error();
                        }
+                       // A pull carries every path, so a restricted folder the caller
+                       // cannot read refuses it (lake#975).
+                       if (auto refused = whole_repository_refusal(context, *repository)) {
+                           return *refused;
+                       }
                        auto response = context.sync_store->pull(
                            repository->customer_id, repository->id, context.sync_request);
                        if (!response) {
@@ -5689,6 +6066,12 @@ void register_repository_capabilities(Registry& registry) {
             auto repository = live_sync_repository(input, context);
             if (!repository) {
                 return repository.error();
+            }
+            // A chunk is named by its digest alone, never by a path, so it cannot be decided per
+            // path: a repository with a restricted folder the caller cannot read refuses it
+            // (lake#975).
+            if (auto refused = whole_repository_refusal(context, *repository)) {
+                return *refused;
             }
             auto response = context.sync_store->read_chunk(repository->customer_id,
                                                            repository->id,
@@ -6356,14 +6739,17 @@ void register_policy_capabilities(Registry& registry) {
         .title = "Create object",
         .description = "Add a path object under a repository or one of its folders, to protect "
                        "a folder or a file with its own grants. Its external_id is "
-                       "<repository_id>:<node id>, naming the repository it sits in; Lake creates "
+                       "<repository_id>:<node id>, naming a file or folder of the repository's "
+                       "tree at ref (default main), and its parent is the object of the nearest "
+                       "folder above that node that has one, or the repository's; Lake creates "
                        "every other kind of object itself.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"object_type", {{"type", "string"}}},
                            {"external_id", {{"type", "string"}}},
                            {"parent_id", {{"type", "string"}}},
-                           {"inherit", {{"type", "boolean"}}}}},
+                           {"inherit", {{"type", "boolean"}}},
+                           {"ref", {{"type", "string"}}}}},
                          {"required", json::array({"object_type", "external_id", "parent_id"})},
                          {"additionalProperties", false}},
         .output_schema = object_schema(),
@@ -6594,9 +6980,13 @@ std::expected<search::Query, ApiError> search_scope(const json& input, ApiContex
                         input.value("change", ""),
                         input.value("history", false),
                         input.value("workspace_id", "")};
+    // An agent credential searches only its own account and workspace (lake#985).
+    query.confined = context.authorization_cache.confinement.active;
+    query.confined_customer = context.authorization_cache.confinement.customer_id;
+    query.confined_workspace = context.authorization_cache.confinement.workspace_id;
     const bool operator_principal =
         context.operator_credential || context.acting_identity == "admin";
-    control::AuthorizationCache cache;
+    control::AuthorizationCache cache = control::fresh_cache_like(context.authorization_cache);
     const auto space_readable = [&](const std::string& customer_id) {
         const auto object = context.store->find_policy_object("customer", customer_id);
         if (!object) {
@@ -6739,6 +7129,11 @@ void register_search_capability(Registry& registry) {
                 }
                 auto result =
                     context.search->query(*scope, context.acting_identity, *context.store);
+                if (result) {
+                    if (auto filtered = without_restricted_hits(context, *result); !filtered.ok) {
+                        return filtered;
+                    }
+                }
                 if (result) {
                     context.audit_object =
                         input.value("repository", "").empty()

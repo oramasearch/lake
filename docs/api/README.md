@@ -423,7 +423,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `list_memberships`, `get_membership`, `create_membership`, `set_member_role`, `remove_member` | read/action | scope (omit for your own), membership id, principal, role; lake signs the evidence (lake#602) | membership(s) or removal confirmation; owner changes require an organization owner or operator (LSR-099) | [organizations.md](organizations.md) |
 | `list_invitations`, `create_invitation`, `accept_invitation` | read/action | scope (omit for your own), invitee, role, expiry or accepting principal | invitation or membership | [organizations.md](organizations.md) |
 | `create_organization_space`, `convert_personal_space`, `join_organization` | action | organization name and handle, your personal account, or an invitation addressed to you | organization account or membership | [organizations.md](organizations.md) |
-| `list_objects`, `get_object`, `create_object` | read/action | graph identifiers, type, parent, `inherit` | object(s) | [policy.md](policy.md) |
+| `list_objects`, `get_object`, `create_object` | read/action | graph identifiers, type, parent, `inherit`, `ref` | object(s) | [policy.md](policy.md) |
 | `list_grants`, `create_grant` | read/action | object, principal, role; lake signs the evidence (lake#602) | grant(s); a created one with `attestation` | [policy.md](policy.md) |
 | `effective_access` | read | `object_id` | `{items: [effective access]}` | [policy.md](policy.md) |
 | `entity_effective_access` | read | `object_type` (`repository`, `organization`, or `team`), `id` | `{object, items: [effective access]}` | [policy.md](policy.md) |

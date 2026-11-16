@@ -204,7 +204,9 @@ record replaced whole on every save; `set_invoice_provider_status` records wheth
 email was sent (`send_failed`), moving a due invoice only from the status its caller read. `CloudOrder`, `NewCloudOrder`, `CloudOrderTransition`, `CloudOrderPayment`, `CloudOrderEvent`
 and `CloudOrderEmailOutcome`, with `create_cloud_order`, `get_cloud_order`,
 `transition_cloud_order`, `apply_cloud_order_payment`, `claim_cloud_order_emails`,
-`record_cloud_order_email`, `unaudited_cloud_order_events` and `mark_cloud_order_events_audited`,
+`record_cloud_order_email`, `confirm_cloud_order_email`, `count_cloud_order_recipients`
+(lake#1000: the contact email's confirmation and the per-recipient limits; `CloudOrderRecipientCounts`,
+`cloud_order_contact_confirmed`), `unaudited_cloud_order_events` and `mark_cloud_order_events_audited`,
 are the apex order sheet's orders (migration `0089_cloud_orders`, lake#831,
 [orders](../../../docs/api/orders.md)), implemented in both stores and the instrumented wrapper.
 `application_credential_records.hpp` holds the application's credentials in its workspace (lake#352,

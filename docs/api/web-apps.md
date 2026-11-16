@@ -246,6 +246,16 @@ Secret is only the projection the operator writes at deploy (lake#625,
   caller may read it (`get_secret_mount`), that it belongs to the app's workspace (else
   `invalid_input`), and that the secret is live and has the field (`read_secret`, else `not_found`).
   Those two reads are audited in the mount's workspace like any other.
+- **A confirmed Application Agent turn holds no secret read** (lake#891). When the person confirms a
+  proposal, `agent_turn` checks every secret reference in the proposal's `app.env` with the
+  person's own `get_secret_mount` and `read_secret`, as above; a reference they cannot satisfy
+  refuses the confirmation (path `/context/confirmed_proposal/app/env/<KEY>/secret`). The turn's
+  `create_app` then accepts exactly the references its confirmed proposal carries under the same
+  key, read from the turn's request record that lake wrote after verifying the proposal against
+  `proposal_sha256`, and checks only, server-side, that each mount still exists and belongs to the
+  app's workspace. Any other reference the turn sends is checked with the turn's own credential,
+  which has no secret read, and refused. A secret deleted between confirmation and `create_app`
+  shows when the operator projects it.
 - A Kubernetes Secret name (`db-url`, `db-credentials/password`) is refused with `invalid_input`;
   apps written before lake#625 kept theirs in `secret_env_refs`, and none existed on dev.
 - The audit event of `set_app_env` names the key and the reference, never a value.
@@ -261,7 +271,8 @@ orama-operator `docs/lake/apps.md#lake-secret-references-lake625`.
 `context.confirmed_proposal`. `agent_turn` verifies that proposal itself (lake#561): the call names
 the turn that proposed it as `proposal_task_id` and the digest the person reviewed as
 `proposal_sha256` (`get_agent_task` returns it), and lake compares both with the proposal stored in
-that turn's answer. A public app (`auth` `none` or `public`) also needs `context.confirm_public:
+that turn's answer. It also checks the proposal's secret references as the person
+([above](#secret-environment), lake#891), so the turn never needs a secret read. A public app (`auth` `none` or `public`) also needs `context.confirm_public:
 true`. The full input and refusals are in [apps.md](apps.md#applicationagent-and-ship-apps). Ask Orama can delegate app requests through `agent_turn`; it never receives
 the App write capabilities itself. See [agent-launches.md](agent-launches.md) and
 [the page contract](../ui/apps.md).

@@ -149,6 +149,22 @@ Result<void> verify_managed_signature(std::string_view public_key,
 // store's fixed development key when it is empty.
 std::string effective_instance_kek(control::Store& store, std::string_view instance_kek);
 
+// Gives a new-account input (control::SsoIdentity, control::NewScimUser) a freshly minted managed
+// key in its custodial_* fields, so the account a just-in-time SSO sign-in or a SCIM create makes
+// takes an identity Lake chose, never one its caller named (lake#872). When the instance holds no
+// key the fields stay empty and the store refuses to create the account. False then.
+template <class Input>
+bool give_managed_key(Input& input, control::Store& store, std::string_view instance_kek) {
+    const auto minted = mint_custodial_identity(effective_instance_kek(store, instance_kek));
+    if (!minted) {
+        return false;
+    }
+    input.custodial_taap_id = minted->taap_id;
+    input.custodial_public_key = minted->public_key;
+    input.custodial_wrapped_seed = minted->wrapped_seed;
+    return true;
+}
+
 // Creates a dual-signed TAAP rotation document and makes the new identity
 // current.
 Result<Identity> rotate_identity(control::Store& store, const IdentityOptions& options);

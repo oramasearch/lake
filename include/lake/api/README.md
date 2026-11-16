@@ -27,7 +27,7 @@ capability reuses `ApiContext.pki`. See [tunnel credentials](../../../docs/api/t
 (lake#561, [web-app.md](../../../docs/ui/web-app.md)): an identity application's hosted sign-in
 pages, the stylesheet and fonts they link, the Docs guides `list_docs` and `get_doc` read, a handler
 failure's page, and the pure helpers capabilities share (`web_ui_escape`, `web_ui_space_label`,
-`web_ui_source_units`). `web_app.hpp` declares the embedded app and which requests it answers.
+`web_ui_source_units`). `web_app.hpp` declares the embedded app, which requests it answers and its Content-Security-Policy (lake#991).
 
 `Capability::post_alias` gives read capabilities a JSON POST route as well as GET, preserving
 read policy and identical OpenAPI/MCP schemas. See `docs/api/streams.md` and `docs/ui/streams.md`

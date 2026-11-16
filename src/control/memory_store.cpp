@@ -321,11 +321,24 @@ Result<void> InMemoryStore::ping() {
     return {};
 }
 
+bool InMemoryStore::principal_id_taken_locked(const std::string& taap_id) const {
+    return !taap_id.empty() &&
+           (std::ranges::any_of(users_,
+                                [&](const User& user) { return user.taap_id == taap_id; }) ||
+            std::ranges::any_of(organizations_, [&](const Organization& organization) {
+                return organization.taap_id == taap_id;
+            }));
+}
+
 Result<User> InMemoryStore::create_user(const NewUser& in) {
     if (auto checked = check_principal_id(in.taap_id, "taap_id"); !checked) {
         return std::unexpected(checked.error());
     }
     std::lock_guard lock(mutex_);
+    // lake#872: one principal id, one person or organization (PostgresStore::principal_id_taken).
+    if (principal_id_taken_locked(in.taap_id)) {
+        return std::unexpected(StoreError{"conflict", "that identity belongs to another account"});
+    }
     for (const auto& u : users_) {
         if (!in.taap_id.empty() && u.taap_id == in.taap_id)
             return std::unexpected(StoreError{"conflict", "taap_id already exists"});
@@ -2832,6 +2845,86 @@ Result<void> InMemoryStore::add_app_transfer(const AppTransfer& row) {
     return {};
 }
 
+namespace {
+bool retained_point_valid(const RetainedUsagePoint& point) {
+    return !point.workspace_id.empty() && !point.dimension.empty() &&
+           point.dimension.size() <= 64 && (point.source == "rollup" || point.source == "late") &&
+           point.value >= 0 && nlohmann::json(point.labels).dump().size() <= 1024;
+}
+} // namespace
+
+Result<void> InMemoryStore::retain_workspace_usage(const RetainedUsageSet& set,
+                                                   const std::vector<RetainedUsagePoint>& points) {
+    if (set.workspace_id.empty() || set.customer_id.empty() || set.to_ms <= set.from_ms) {
+        return std::unexpected(StoreError{"invalid_input", "not a retained usage window"});
+    }
+    for (const RetainedUsagePoint& point : points) {
+        if (!retained_point_valid(point) || point.source != "rollup" ||
+            point.workspace_id != set.workspace_id) {
+            return std::unexpected(StoreError{"invalid_input", "not a retained usage point"});
+        }
+    }
+    std::lock_guard lock(mutex_);
+    const auto workspace = std::ranges::find(workspaces_, set.workspace_id, &Workspace::id);
+    if (workspace == workspaces_.end() || workspace->customer_id != set.customer_id) {
+        return std::unexpected(StoreError{"not_found", "no such workspace in this account"});
+    }
+    std::erase_if(retained_usage_, [&](const RetainedUsagePoint& point) {
+        return point.workspace_id == set.workspace_id && point.source == "rollup";
+    });
+    retained_usage_.insert(retained_usage_.end(), points.begin(), points.end());
+    RetainedUsageSet stored = set;
+    stored.retained_at = now_iso8601();
+    retained_usage_sets_[set.workspace_id] = stored;
+    return {};
+}
+
+Result<void> InMemoryStore::add_retained_usage(const RetainedUsagePoint& point) {
+    if (!retained_point_valid(point) || point.source != "late" || point.gauge) {
+        return std::unexpected(StoreError{"invalid_input", "not a late counter value"});
+    }
+    std::lock_guard lock(mutex_);
+    if (!retained_usage_sets_.contains(point.workspace_id)) {
+        return std::unexpected(StoreError{"not_found", "the workspace has no retained usage"});
+    }
+    for (RetainedUsagePoint& stored : retained_usage_) {
+        if (stored.workspace_id == point.workspace_id && stored.source == "late" &&
+            stored.dimension == point.dimension && stored.labels == point.labels &&
+            stored.at_ms == point.at_ms) {
+            stored.value += point.value;
+            return {};
+        }
+    }
+    retained_usage_.push_back(point);
+    return {};
+}
+
+Result<std::vector<RetainedUsagePoint>> InMemoryStore::retained_usage(
+    const std::string& customer_id, std::int64_t from_ms, std::int64_t to_ms) {
+    std::lock_guard lock(mutex_);
+    std::vector<RetainedUsagePoint> rows;
+    for (const RetainedUsagePoint& point : retained_usage_) {
+        const auto set = retained_usage_sets_.find(point.workspace_id);
+        if (set != retained_usage_sets_.end() && set->second.customer_id == customer_id &&
+            point.at_ms >= from_ms && point.at_ms < to_ms) {
+            rows.push_back(point);
+        }
+    }
+    return rows;
+}
+
+Result<std::vector<RetainedUsageSet>>
+InMemoryStore::retained_usage_sets(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<RetainedUsageSet> rows;
+    for (const auto& [id, set] : retained_usage_sets_) {
+        if (set.customer_id == customer_id) {
+            rows.push_back(set);
+        }
+    }
+    return rows;
+}
+
 Result<void> InMemoryStore::put_workload_resources(const WorkloadResources& row) {
     static const std::set<std::string> kinds{
         "workspace", "service", "store", "app", "build", "agent_launch", "agent_cron_run",
@@ -3921,6 +4014,7 @@ Result<CloudOrder> InMemoryStore::create_cloud_order(const NewCloudOrder& in) {
     order.organization_id = in.organization_id;
     order.email_error = utf8_prefix(in.email_error, 1024);
     cloud_orders_.push_back(order);
+    cloud_order_created_[order.id] = std::chrono::system_clock::now();
     cloud_order_event_locked(order.id,
                              "",
                              order.state,
@@ -4094,12 +4188,18 @@ Result<std::vector<CloudOrder>> InMemoryStore::claim_cloud_order_emails(int limi
     const auto now = std::chrono::system_clock::now();
     std::vector<CloudOrder*> due;
     for (CloudOrder& order : cloud_orders_) {
+        // lake#1000: an unconfirmed order form has one email due, the confirmation, and only
+        // until it is sent; nothing else goes to its address or to support.
+        const bool confirmed = cloud_order_contact_confirmed(order);
         const bool support =
+            confirmed &&
             (order.state == "submitted" || order.state == "paid" || order.state == "failed") &&
             order.support_emailed_state != order.state;
-        const bool customer = (order.state == "submitted" || order.state == "paid" ||
-                               order.state == "ready" || order.state == "failed") &&
-                              order.customer_emailed_state != order.state;
+        const bool customer =
+            confirmed ? (order.state == "submitted" || order.state == "paid" ||
+                         order.state == "ready" || order.state == "failed") &&
+                            order.customer_emailed_state != order.state
+                      : order.state == "submitted" && order.customer_emailed_state.empty();
         const auto retry = cloud_order_email_due_.find(order.id);
         if ((support || customer) &&
             (retry == cloud_order_email_due_.end() || retry->second <= now)) {
@@ -4118,6 +4218,62 @@ Result<std::vector<CloudOrder>> InMemoryStore::claim_cloud_order_emails(int limi
         claimed.push_back(*order);
     }
     return claimed;
+}
+
+Result<CloudOrder> InMemoryStore::confirm_cloud_order_email(const std::string& id,
+                                                            int max_age_seconds) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(cloud_orders_, id, &CloudOrder::id);
+    if (found == cloud_orders_.end()) {
+        return std::unexpected(StoreError{"not_found", "no order " + id});
+    }
+    if (!found->contact_email_confirmed_at.empty()) {
+        return *found;
+    }
+    const auto created = cloud_order_created_.find(id);
+    if (created != cloud_order_created_.end() &&
+        std::chrono::system_clock::now() - created->second >
+            std::chrono::seconds(std::max(max_age_seconds, 0))) {
+        return std::unexpected(StoreError{"expired", "the confirmation link has expired"});
+    }
+    found->contact_email_confirmed_at = now_iso8601();
+    found->updated_at = found->contact_email_confirmed_at;
+    cloud_order_event_locked(id, found->state, found->state, "lake", "contact email confirmed");
+    return *found;
+}
+
+Result<CloudOrderRecipientCounts>
+InMemoryStore::count_cloud_order_recipients(const std::string& email) {
+    const auto lower = [](std::string_view text) {
+        std::string out(text);
+        for (char& c : out) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return out;
+    };
+    const std::string address = lower(email);
+    const std::size_t at = address.rfind('@');
+    const std::string domain = at == std::string::npos ? std::string() : address.substr(at + 1);
+    std::lock_guard lock(mutex_);
+    const auto now = std::chrono::system_clock::now();
+    CloudOrderRecipientCounts counts;
+    for (const CloudOrder& order : cloud_orders_) {
+        const auto created = cloud_order_created_.find(order.id);
+        if (created == cloud_order_created_.end()) {
+            continue;
+        }
+        const std::string other = lower(order.contact_email);
+        const std::size_t other_at = other.rfind('@');
+        if (other == address && now - created->second <= std::chrono::hours(24)) {
+            ++counts.email_last_day;
+        }
+        if (!domain.empty() && other_at != std::string::npos &&
+            other.substr(other_at + 1) == domain &&
+            now - created->second <= std::chrono::hours(1)) {
+            ++counts.domain_last_hour;
+        }
+    }
+    return counts;
 }
 
 Result<void> InMemoryStore::record_cloud_order_email(const CloudOrderEmailOutcome& outcome) {
@@ -4201,9 +4357,8 @@ Result<Organization> InMemoryStore::create_organization(const NewOrganization& i
         return std::unexpected(checked.error());
     }
     std::lock_guard lock(mutex_);
-    for (const auto& o : organizations_) {
-        if (!in.taap_id.empty() && o.taap_id == in.taap_id)
-            return std::unexpected(StoreError{"conflict", "taap_id already exists"});
+    if (principal_id_taken_locked(in.taap_id)) {
+        return std::unexpected(StoreError{"conflict", "that identity belongs to another account"});
     }
     const std::string now = now_iso8601();
     organizations_.push_back(Organization{new_uuid_v4(), in.taap_id, in.display_name, now, now});
@@ -5267,6 +5422,26 @@ Result<IssuedSession> InMemoryStore::sign_in_oauth(const OAuthIdentity& input) {
     return issued;
 }
 
+std::string InMemoryStore::take_verified_email_locked(const std::string& email,
+                                                      const std::string& keep_user_id) {
+    if (email.empty()) {
+        return "";
+    }
+    for (auto& user : users_) {
+        if (user.id != keep_user_id && !user.email.empty() && lower(user.email) == lower(email)) {
+            user.email.clear();
+            user.updated_at = now_iso8601();
+            const std::string holder = user.id;
+            std::erase_if(passwords_, [&](const PasswordCredential& password) {
+                return password.user_id == holder && password.pool_id == "lake" &&
+                       lower(password.email) == lower(email);
+            });
+            return holder;
+        }
+    }
+    return "";
+}
+
 Result<ClerkUserProvisioned> InMemoryStore::clerk_user_locked(const ClerkIdentity& input) {
     if (input.subject.empty()) {
         return std::unexpected(StoreError{"invalid_input", "a Clerk subject is required"});
@@ -5278,23 +5453,15 @@ Result<ClerkUserProvisioned> InMemoryStore::clerk_user_locked(const ClerkIdentit
             result.user_id = credential.user_id;
         }
     }
-    if (result.user_id.empty() && !input.email.empty()) {
-        for (const auto& user : users_) {
-            if (lower(user.email) == lower(input.email)) {
-                result.user_id = user.id;
-            }
-        }
-        if (!result.user_id.empty()) {
-            oauth_credentials_.push_back(OAuthCredential{result.user_id, "lake", subject});
-            result.linked = true;
-        }
-    }
+    // A new subject is never linked to an existing account by email (lake#920, LSR-011); the
+    // verified address moves to the new account (PostgresStore::clerk_user_tx).
     if (result.user_id.empty()) {
         if (input.custodial_taap_id.empty() || input.custodial_public_key.empty() ||
             input.custodial_wrapped_seed.empty()) {
             return std::unexpected(
                 StoreError{"invalid_input", "a custodial identity is required to create a user"});
         }
+        result.email_taken_from = take_verified_email_locked(input.email, "");
         const std::string now = now_iso8601();
         users_.push_back(User{
             new_uuid_v4(), input.custodial_taap_id, input.email, input.display_name, now, now});
@@ -5499,11 +5666,7 @@ Result<std::string> InMemoryStore::update_clerk_user(const ClerkIdentity& input)
     if (input.subject.empty() || user_id.empty()) {
         return std::unexpected(StoreError{"not_found", "no Lake account is linked to this user"});
     }
-    if (!input.email.empty() && std::ranges::any_of(users_, [&](const User& user) {
-            return user.id != user_id && lower(user.email) == lower(input.email);
-        })) {
-        return std::unexpected(StoreError{"conflict", "another account has this email"});
-    }
+    take_verified_email_locked(input.email, user_id);
     for (auto& user : users_) {
         if (user.id == user_id) {
             if (!input.email.empty()) {
@@ -6618,6 +6781,12 @@ Result<IssuedSession> InMemoryStore::sign_in_sso(const SsoIdentity& input) {
     if (auto checked = check_principal_id(input.taap_id, "taap_id"); !checked) {
         return std::unexpected(checked.error());
     }
+    // lake#872: a new account takes the managed key Lake minted, never a caller's choice.
+    const std::string identity =
+        input.custodial_taap_id.empty() ? input.taap_id : input.custodial_taap_id;
+    if (auto checked = check_principal_id(identity, "taap_id"); !checked) {
+        return std::unexpected(checked.error());
+    }
     if (input.provider_id.empty() || input.issuer.empty() || input.subject.empty() ||
         !input.claims.is_object()) {
         return std::unexpected(StoreError{"invalid_input", "SSO assertion is incomplete"});
@@ -6654,13 +6823,23 @@ Result<IssuedSession> InMemoryStore::sign_in_sso(const SsoIdentity& input) {
         }
         user_id = scim->user_id;
     } else {
-        if (!provider->jit_provisioning || input.taap_id.empty()) {
+        if (!provider->jit_provisioning || identity.empty()) {
             return std::unexpected(StoreError{"unauthorized", "SSO user is not provisioned"});
         }
+        if (principal_id_taken_locked(identity)) {
+            return std::unexpected(
+                StoreError{"conflict", "that identity belongs to another account"});
+        }
         const std::string now = now_iso8601();
-        users_.push_back(
-            User{new_uuid_v4(), input.taap_id, input.email, input.display_name, now, now});
+        users_.push_back(User{new_uuid_v4(), identity, input.email, input.display_name, now, now});
         user_id = users_.back().id;
+        if (!input.custodial_public_key.empty() && !input.custodial_wrapped_seed.empty()) {
+            ClerkIdentity managed;
+            managed.custodial_taap_id = identity;
+            managed.custodial_public_key = input.custodial_public_key;
+            managed.custodial_wrapped_seed = input.custodial_wrapped_seed;
+            custodial_identities_[user_id] = std::move(managed);
+        }
         scim_users_.push_back(
             ScimUser{input.provider_id, input.subject, user_id, true, input.claims, now, now});
     }
@@ -6766,7 +6945,13 @@ Result<ScimUser> InMemoryStore::upsert_scim_user(const NewScimUser& input) {
     if (auto checked = check_principal_id(input.taap_id, "taap_id"); !checked) {
         return std::unexpected(checked.error());
     }
-    if (input.provider_id.empty() || input.external_id.empty() || input.taap_id.empty()) {
+    // lake#872: a new account takes the managed key Lake minted, never the SCIM client's choice.
+    const std::string identity =
+        input.custodial_taap_id.empty() ? input.taap_id : input.custodial_taap_id;
+    if (auto checked = check_principal_id(identity, "taap_id"); !checked) {
+        return std::unexpected(checked.error());
+    }
+    if (input.provider_id.empty() || input.external_id.empty() || identity.empty()) {
         return std::unexpected(
             StoreError{"invalid_input", "provider, external id, and TAAP identity are required"});
     }
@@ -6806,7 +6991,17 @@ Result<ScimUser> InMemoryStore::upsert_scim_user(const NewScimUser& input) {
                                                      now});
         return *record;
     }
-    users_.push_back(User{new_uuid_v4(), input.taap_id, input.email, input.display_name, now, now});
+    if (principal_id_taken_locked(identity)) {
+        return std::unexpected(StoreError{"conflict", "that identity belongs to another account"});
+    }
+    users_.push_back(User{new_uuid_v4(), identity, input.email, input.display_name, now, now});
+    if (!input.custodial_public_key.empty() && !input.custodial_wrapped_seed.empty()) {
+        ClerkIdentity managed;
+        managed.custodial_taap_id = identity;
+        managed.custodial_public_key = input.custodial_public_key;
+        managed.custodial_wrapped_seed = input.custodial_wrapped_seed;
+        custodial_identities_[users_.back().id] = std::move(managed);
+    }
     ScimUser created{input.provider_id,
                      input.external_id,
                      users_.back().id,

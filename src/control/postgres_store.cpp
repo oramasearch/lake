@@ -2026,11 +2026,53 @@ public:
         return {};
     }
 
+    // A principal id belongs to one person or organization (lake#872): a new account or
+    // organization may not take an identity any user, in any pool, or organization already has,
+    // or it would inherit that principal's grants and name.
+    static bool principal_id_taken(pqxx::work& tx, const std::string& taap_id) {
+        return !taap_id.empty() &&
+               !tx.exec_params("SELECT 1 FROM users WHERE taap_id = $1 UNION ALL "
+                               "SELECT 1 FROM organizations WHERE taap_id = $1 LIMIT 1",
+                               taap_id)
+                    .empty();
+    }
+    static StoreError principal_id_conflict() {
+        return StoreError{"conflict", "that identity belongs to another account"};
+    }
+    // The identity a new SSO or SCIM account takes: the managed key Lake minted for it, or, with
+    // none (a direct store caller), the given id. Recorded as a managed key when minted.
+    static Result<std::string> new_account_identity(const std::string& custodial_taap_id,
+                                                    const std::string& taap_id) {
+        const std::string chosen = custodial_taap_id.empty() ? taap_id : custodial_taap_id;
+        if (auto checked = check_principal_id(chosen, "taap_id"); !checked) {
+            return std::unexpected(checked.error());
+        }
+        return chosen;
+    }
+    void record_custodial_identity(pqxx::work& tx,
+                                   const std::string& user_id,
+                                   const std::string& taap_id,
+                                   const std::string& public_key,
+                                   const std::string& wrapped_seed) {
+        if (public_key.empty() || wrapped_seed.empty()) {
+            return;
+        }
+        tx.exec_params("INSERT INTO custodial_identities (user_id, taap_id, public_key, "
+                       "wrapped_seed) VALUES ($1::uuid, $2, $3, $4)",
+                       user_id,
+                       taap_id,
+                       public_key,
+                       wrapped_seed);
+    }
+
     Result<User> create_user(const NewUser& in) override {
         if (auto checked = check_principal_id(in.taap_id, "taap_id"); !checked) {
             return std::unexpected(checked.error());
         }
         return with_tx<User>([&](pqxx::work& tx) -> Result<User> {
+            if (principal_id_taken(tx, in.taap_id)) {
+                return std::unexpected(principal_id_conflict());
+            }
             const pqxx::result rows = tx.exec_params(
                 std::string("INSERT INTO users (taap_id, email, display_name) VALUES "
                             "($1, $2, $3) RETURNING ") +
@@ -2107,6 +2149,9 @@ public:
                         "invalid_input", "customer_id does not reference a policy object"});
                 }
                 parent_id = parents[0][0].as<std::string>();
+            }
+            if (principal_id_taken(tx, in.taap_id)) {
+                return std::unexpected(principal_id_conflict());
             }
             const pqxx::result rows =
                 tx.exec_params(std::string("INSERT INTO organizations (taap_id, display_name) "
@@ -7498,6 +7543,150 @@ public:
         return {};
     }
 
+    // Migration 0108 (lake#988): a deleted workspace's unbilled usage, content-free.
+    static std::map<std::string, std::string> retained_labels(const std::string& text) {
+        std::map<std::string, std::string> labels;
+        const nlohmann::json parsed = nlohmann::json::parse(text, nullptr, false);
+        if (parsed.is_object()) {
+            for (const auto& [name, value] : parsed.items()) {
+                if (value.is_string()) {
+                    labels[name] = value.get<std::string>();
+                }
+            }
+        }
+        return labels;
+    }
+
+    Result<void> retain_workspace_usage(const RetainedUsageSet& set,
+                                        const std::vector<RetainedUsagePoint>& points) override {
+        for (const RetainedUsagePoint& point : points) {
+            if (point.source != "rollup" || point.workspace_id != set.workspace_id) {
+                return std::unexpected(StoreError{"invalid_input", "not a rollup point"});
+            }
+        }
+        auto written = with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            const pqxx::result found =
+                tx.exec_params("SELECT 1 FROM workspaces WHERE id = $1::uuid AND customer_id = "
+                               "$2::uuid FOR UPDATE",
+                               set.workspace_id,
+                               set.customer_id);
+            if (found.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no such workspace in this account"});
+            }
+            tx.exec_params(
+                "INSERT INTO retained_usage_sets (workspace_id, customer_id, from_at, to_at) "
+                "VALUES ($1::uuid, $2::uuid, to_timestamp($3::double precision / 1000), "
+                "to_timestamp($4::double precision / 1000)) ON CONFLICT (workspace_id) DO UPDATE "
+                "SET from_at = EXCLUDED.from_at, to_at = EXCLUDED.to_at, retained_at = now()",
+                set.workspace_id,
+                set.customer_id,
+                set.from_ms,
+                set.to_ms);
+            tx.exec_params(
+                "DELETE FROM retained_usage WHERE workspace_id = $1::uuid AND source = 'rollup'",
+                set.workspace_id);
+            for (const RetainedUsagePoint& point : points) {
+                tx.exec_params(
+                    "INSERT INTO retained_usage (workspace_id, customer_id, source, dimension, "
+                    "labels, at, value, gauge) VALUES ($1::uuid, $2::uuid, 'rollup', $3, $4, "
+                    "to_timestamp($5::double precision / 1000), $6, $7) ON CONFLICT (workspace_id, "
+                    "source, dimension, labels, at) DO UPDATE SET value = EXCLUDED.value",
+                    set.workspace_id,
+                    set.customer_id,
+                    point.dimension,
+                    nlohmann::json(point.labels).dump(),
+                    point.at_ms,
+                    point.value,
+                    point.gauge);
+            }
+            return true;
+        });
+        if (!written) {
+            return std::unexpected(written.error());
+        }
+        return {};
+    }
+
+    Result<void> add_retained_usage(const RetainedUsagePoint& point) override {
+        if (point.source != "late" || point.gauge) {
+            return std::unexpected(StoreError{"invalid_input", "not a late counter value"});
+        }
+        auto written = with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            const pqxx::result added = tx.exec_params(
+                "INSERT INTO retained_usage (workspace_id, customer_id, source, dimension, labels, "
+                "at, value, gauge) SELECT s.workspace_id, s.customer_id, 'late', $2, $3, "
+                "to_timestamp($4::double precision / 1000), $5, false FROM retained_usage_sets s "
+                "WHERE s.workspace_id = $1::uuid ON CONFLICT (workspace_id, source, dimension, "
+                "labels, at) DO UPDATE SET value = retained_usage.value + EXCLUDED.value",
+                point.workspace_id,
+                point.dimension,
+                nlohmann::json(point.labels).dump(),
+                point.at_ms,
+                point.value);
+            if (added.affected_rows() == 0) {
+                return std::unexpected(
+                    StoreError{"not_found", "the workspace has no retained usage"});
+            }
+            return true;
+        });
+        if (!written) {
+            return std::unexpected(written.error());
+        }
+        return {};
+    }
+
+    Result<std::vector<RetainedUsagePoint>> retained_usage(const std::string& customer_id,
+                                                           std::int64_t from_ms,
+                                                           std::int64_t to_ms) override {
+        return with_tx<std::vector<RetainedUsagePoint>>(
+            [&](pqxx::work& tx) -> Result<std::vector<RetainedUsagePoint>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT workspace_id::text, source, dimension, labels, "
+                    "(extract(epoch FROM at) * 1000)::bigint, value, gauge FROM retained_usage "
+                    "WHERE customer_id = $1::uuid AND at >= to_timestamp($2::double precision / "
+                    "1000) AND at < to_timestamp($3::double precision / 1000) ORDER BY "
+                    "workspace_id, at",
+                    customer_id,
+                    from_ms,
+                    to_ms);
+                std::vector<RetainedUsagePoint> out;
+                for (const auto& row : rows) {
+                    out.push_back({.workspace_id = row[0].as<std::string>(),
+                                   .source = row[1].as<std::string>(),
+                                   .dimension = row[2].as<std::string>(),
+                                   .labels = retained_labels(row[3].as<std::string>()),
+                                   .at_ms = row[4].as<std::int64_t>(),
+                                   .value = row[5].as<double>(),
+                                   .gauge = row[6].as<bool>()});
+                }
+                return out;
+            });
+    }
+
+    Result<std::vector<RetainedUsageSet>>
+    retained_usage_sets(const std::string& customer_id) override {
+        return with_tx<std::vector<RetainedUsageSet>>(
+            [&](pqxx::work& tx) -> Result<std::vector<RetainedUsageSet>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT workspace_id::text, customer_id::text, (extract(epoch FROM from_at) * "
+                    "1000)::bigint, (extract(epoch FROM to_at) * 1000)::bigint, " +
+                        utc_column("retained_at") +
+                        " FROM retained_usage_sets WHERE customer_id = $1::uuid ORDER BY "
+                        "workspace_id",
+                    customer_id);
+                std::vector<RetainedUsageSet> out;
+                for (const auto& row : rows) {
+                    out.push_back({row[0].as<std::string>(),
+                                   row[1].as<std::string>(),
+                                   row[2].as<std::int64_t>(),
+                                   row[3].as<std::int64_t>(),
+                                   row[4].as<std::string>()});
+                }
+                return out;
+            });
+    }
+
     static std::string invoice_columns() {
         return "id::text, number, customer_id::text, period, plan_id, plan_name, currency, "
                "total_micros, state, provider, provider_reference, instructions, note, " +
@@ -8669,7 +8858,9 @@ public:
         "coalesce(customer_emailed_state, ''), email_attempts, email_error, "
         "coalesce(to_char(email_retry_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "''), subscription_status, paid_through, entitlement_access_until, "
-        "subscription_event_created, entitlement_grace_seconds, entitlement_retry_invoice_id";
+        "subscription_event_created, entitlement_grace_seconds, entitlement_retry_invoice_id, "
+        "coalesce(to_char(contact_email_confirmed_at AT TIME ZONE 'UTC', "
+        "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '')";
 
     static CloudOrder cloud_order_row(const pqxx::row& row) {
         CloudOrder order;
@@ -8710,6 +8901,7 @@ public:
         order.entitlement.event_created = row[column++].as<std::int64_t>();
         order.entitlement.grace_seconds = row[column++].as<int>();
         order.entitlement.retry_invoice_id = text();
+        order.contact_email_confirmed_at = text();
         return order;
     }
 
@@ -9016,10 +9208,15 @@ public:
                 const pqxx::result rows = tx.exec_params(
                     std::string("UPDATE cloud_orders SET email_retry_at = now() + make_interval("
                                 "secs => $2) WHERE id IN (SELECT id FROM cloud_orders WHERE "
-                                "((state IN ('submitted', 'paid', 'failed') AND "
+                                // lake#1000: mail other than the confirmation goes only once the
+                                // address is confirmed (cloud_order_contact_confirmed).
+                                "((((path = 'checkout' OR contact_email_confirmed_at IS NOT NULL) "
+                                "AND ((state IN ('submitted', 'paid', 'failed') AND "
                                 "support_emailed_state IS DISTINCT FROM state) OR (state IN "
                                 "('submitted', 'paid', 'ready', 'failed') AND "
-                                "customer_emailed_state IS DISTINCT FROM state)) AND "
+                                "customer_emailed_state IS DISTINCT FROM state))) OR (path = "
+                                "'order_form' AND contact_email_confirmed_at IS NULL AND state = "
+                                "'submitted' AND coalesce(customer_emailed_state, '') = '')) AND "
                                 "(email_retry_at IS NULL OR email_retry_at <= now()) ORDER BY "
                                 "updated_at LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING ") +
                         cloud_order_columns,
@@ -9059,6 +9256,51 @@ public:
             }
             return {};
         });
+    }
+
+    Result<CloudOrder> confirm_cloud_order_email(const std::string& id,
+                                                 int max_age_seconds) override {
+        if (!uuid_text(id)) {
+            return std::unexpected(StoreError{"not_found", "no order " + id});
+        }
+        return with_tx<CloudOrder>([&](pqxx::work& tx) -> Result<CloudOrder> {
+            auto before = cloud_order_in(tx, id, true);
+            if (!before || !before->contact_email_confirmed_at.empty()) {
+                return before;
+            }
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE cloud_orders SET contact_email_confirmed_at = now() WHERE id = $1::uuid "
+                "AND contact_email_confirmed_at IS NULL AND created_at > now() - "
+                "make_interval(secs => $2) RETURNING id",
+                id,
+                std::max(max_age_seconds, 0));
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"expired", "the confirmation link has expired"});
+            }
+            cloud_order_event(
+                tx, id, before->state, before->state, "lake", "contact email confirmed");
+            return cloud_order_in(tx, id);
+        });
+    }
+
+    Result<CloudOrderRecipientCounts>
+    count_cloud_order_recipients(const std::string& email) override {
+        return with_tx<CloudOrderRecipientCounts>(
+            [&](pqxx::work& tx) -> Result<CloudOrderRecipientCounts> {
+                // The expressions are the indexes' (0107): the address without case, and the part
+                // after its last @.
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT (SELECT count(*) FROM cloud_orders WHERE lower(contact_email) = "
+                    "lower($1) AND created_at > now() - interval '24 hours'), (SELECT count(*) "
+                    "FROM cloud_orders WHERE substring(lower(contact_email) FROM '@([^@]*)$') = "
+                    "substring(lower($1) FROM '@([^@]*)$') AND created_at > now() - interval '1 "
+                    "hour')",
+                    email);
+                CloudOrderRecipientCounts counts;
+                counts.email_last_day = rows[0][0].as<int>();
+                counts.domain_last_hour = rows[0][1].as<int>();
+                return counts;
+            });
     }
 
     Result<std::vector<CloudOrderEvent>> unaudited_cloud_order_events(int limit) override {
@@ -9767,6 +10009,35 @@ public:
             return issued;
         });
     }
+    // A Clerk-verified address belongs to the Clerk subject presenting it (lake#920). Any other
+    // Lake-pool account holding it loses it and the password named by it; its other
+    // credentials, sessions and grants stay its own and never reach the Clerk person. Answers
+    // the id of the account it was taken from, or empty.
+    std::string
+    take_verified_email(pqxx::work& tx, const std::string& email, const std::string& keep_user_id) {
+        if (email.empty()) {
+            return "";
+        }
+        const pqxx::result holders =
+            tx.exec_params("SELECT id::text FROM users WHERE pool_id = 'lake' "
+                           "AND lower(email) = lower($1) AND ($2 = '' OR id <> $2::uuid) "
+                           "FOR UPDATE",
+                           email,
+                           keep_user_id);
+        if (holders.empty()) {
+            return "";
+        }
+        const std::string holder = holders[0][0].as<std::string>();
+        tx.exec_params("UPDATE users SET email = NULL WHERE id = $1::uuid", holder);
+        // A password signs in by its address, so one named by the taken address goes with it:
+        // neither the password nor email recovery to that address reaches the old account.
+        tx.exec_params("UPDATE credentials SET revoked_at = coalesce(revoked_at, now()) "
+                       "WHERE user_id = $1::uuid AND pool_id = 'lake' AND kind = 'password' "
+                       "AND subject = lower($2)",
+                       holder,
+                       email);
+        return holder;
+    }
     Result<ClerkUserProvisioned> clerk_user_tx(pqxx::work& tx, const ClerkIdentity& in) {
         if (in.subject.empty()) {
             return std::unexpected(StoreError{"invalid_input", "a Clerk subject is required"});
@@ -9785,40 +10056,35 @@ public:
         if (!rows.empty()) {
             result.user_id = rows[0][0].as<std::string>();
         } else {
-            // Clerk verified this address, so an existing lake account with it is the same
-            // person: link it rather than create a second account.
-            if (!in.email.empty()) {
-                rows = tx.exec_params("SELECT id::text FROM users WHERE pool_id = 'lake' "
-                                      "AND lower(email) = lower($1)",
-                                      in.email);
+            // A new Clerk subject always gets a new account (lake#920, LSR-011). It is never
+            // linked to an existing account by email: that account's address was proven by no
+            // one (password sign-up, SSO or SCIM provisioning, an operator) or belongs to another
+            // Clerk subject, and linking would hand its holder's password, sessions, keys and
+            // grants the verified person's account. Clerk verified this address, so it moves to
+            // the new account and the old holder keeps everything else.
+            if (in.custodial_taap_id.empty() || in.custodial_public_key.empty() ||
+                in.custodial_wrapped_seed.empty()) {
+                return std::unexpected(StoreError{
+                    "invalid_input", "a custodial identity is required to create a user"});
             }
-            if (!rows.empty()) {
-                result.user_id = rows[0][0].as<std::string>();
-                result.linked = true;
-            } else {
-                if (in.custodial_taap_id.empty() || in.custodial_public_key.empty() ||
-                    in.custodial_wrapped_seed.empty()) {
-                    return std::unexpected(StoreError{
-                        "invalid_input", "a custodial identity is required to create a user"});
-                }
-                rows = tx.exec_params("INSERT INTO users (taap_id, email, display_name, "
-                                      "pool_id) VALUES ($1, $2, $3, 'lake') RETURNING id::text",
-                                      in.custodial_taap_id,
-                                      nullable(in.email),
-                                      in.display_name);
-                result.user_id = rows[0][0].as<std::string>();
-                result.created = true;
-                tx.exec_params("INSERT INTO custodial_identities (user_id, taap_id, "
-                               "public_key, wrapped_seed) VALUES ($1::uuid, $2, $3, $4)",
-                               result.user_id,
-                               in.custodial_taap_id,
-                               in.custodial_public_key,
-                               in.custodial_wrapped_seed);
-                const auto customer =
-                    provision_personal_customer(tx, result.user_id, in.custodial_taap_id, subject);
-                if (!customer) {
-                    return std::unexpected(customer.error());
-                }
+            result.email_taken_from = take_verified_email(tx, in.email, "");
+            rows = tx.exec_params("INSERT INTO users (taap_id, email, display_name, "
+                                  "pool_id) VALUES ($1, $2, $3, 'lake') RETURNING id::text",
+                                  in.custodial_taap_id,
+                                  nullable(in.email),
+                                  in.display_name);
+            result.user_id = rows[0][0].as<std::string>();
+            result.created = true;
+            tx.exec_params("INSERT INTO custodial_identities (user_id, taap_id, "
+                           "public_key, wrapped_seed) VALUES ($1::uuid, $2, $3, $4)",
+                           result.user_id,
+                           in.custodial_taap_id,
+                           in.custodial_public_key,
+                           in.custodial_wrapped_seed);
+            const auto customer =
+                provision_personal_customer(tx, result.user_id, in.custodial_taap_id, subject);
+            if (!customer) {
+                return std::unexpected(customer.error());
             }
             tx.exec_params("INSERT INTO credentials (user_id, pool_id, kind, subject) "
                            "VALUES ($1::uuid, 'lake', 'oauth', $2)",
@@ -10008,14 +10274,9 @@ public:
                 return std::unexpected(
                     StoreError{"not_found", "no Lake account is linked to this user"});
             }
-            if (!in.email.empty() &&
-                !tx.exec_params("SELECT 1 FROM users WHERE lower(email) = lower($1) "
-                                "AND id <> $2::uuid",
-                                in.email,
-                                *user_id)
-                     .empty()) {
-                return std::unexpected(StoreError{"conflict", "another account has this email"});
-            }
+            // Clerk verified the new address, so it moves here from any other Lake-pool account
+            // that holds it, as at provisioning (lake#920).
+            take_verified_email(tx, in.email, *user_id);
             tx.exec_params("UPDATE users SET email = COALESCE(NULLIF($2, ''), email), "
                            "display_name = $3 WHERE id = $1::uuid",
                            *user_id,
@@ -11165,6 +11426,10 @@ public:
         if (auto checked = check_principal_id(input.taap_id, "taap_id"); !checked) {
             return std::unexpected(checked.error());
         }
+        const auto identity = new_account_identity(input.custodial_taap_id, input.taap_id);
+        if (!identity) {
+            return std::unexpected(identity.error());
+        }
         if (input.provider_id.empty() || input.issuer.empty() || input.subject.empty() ||
             !input.claims.is_object()) {
             return std::unexpected(StoreError{"invalid_input", "SSO assertion is incomplete"});
@@ -11208,17 +11473,25 @@ public:
                 }
                 user_id = mapped[0][0].as<std::string>();
             } else {
-                if (!provider.jit_provisioning || input.taap_id.empty()) {
+                if (!provider.jit_provisioning || identity->empty()) {
                     return std::unexpected(
                         StoreError{"unauthorized", "SSO user is not provisioned"});
+                }
+                if (principal_id_taken(tx, *identity)) {
+                    return std::unexpected(principal_id_conflict());
                 }
                 const pqxx::result created =
                     tx.exec_params("INSERT INTO users (taap_id, email, display_name) VALUES ($1, "
                                    "$2, $3) RETURNING id::text",
-                                   input.taap_id,
+                                   *identity,
                                    nullable(input.email),
                                    input.display_name);
                 user_id = created[0][0].as<std::string>();
+                record_custodial_identity(tx,
+                                          user_id,
+                                          *identity,
+                                          input.custodial_public_key,
+                                          input.custodial_wrapped_seed);
                 tx.exec_params(
                     "INSERT INTO scim_users (provider_id, external_id, user_id, attributes) "
                     "VALUES ($1::uuid, $2, $3::uuid, $4::jsonb)",
@@ -11286,7 +11559,11 @@ public:
         if (auto checked = check_principal_id(input.taap_id, "taap_id"); !checked) {
             return std::unexpected(checked.error());
         }
-        if (input.provider_id.empty() || input.external_id.empty() || input.taap_id.empty()) {
+        const auto identity = new_account_identity(input.custodial_taap_id, input.taap_id);
+        if (!identity) {
+            return std::unexpected(identity.error());
+        }
+        if (input.provider_id.empty() || input.external_id.empty() || identity->empty()) {
             return std::unexpected(StoreError{
                 "invalid_input", "provider, external id, and TAAP identity are required"});
         }
@@ -11305,13 +11582,21 @@ public:
             std::string user_id;
             std::string operation = "create";
             if (existing.empty()) {
+                if (principal_id_taken(tx, *identity)) {
+                    return std::unexpected(principal_id_conflict());
+                }
                 const pqxx::result created =
                     tx.exec_params("INSERT INTO users (taap_id, email, display_name) VALUES ($1, "
                                    "$2, $3) RETURNING id::text",
-                                   input.taap_id,
+                                   *identity,
                                    nullable(input.email),
                                    input.display_name);
                 user_id = created[0][0].as<std::string>();
+                record_custodial_identity(tx,
+                                          user_id,
+                                          *identity,
+                                          input.custodial_public_key,
+                                          input.custodial_wrapped_seed);
                 tx.exec_params("INSERT INTO scim_users (provider_id, external_id, user_id, active, "
                                "attributes) "
                                "VALUES ($1::uuid, $2, $3::uuid, $4, $5::jsonb)",

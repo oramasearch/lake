@@ -307,11 +307,13 @@ Outcome receive(ApiContext& context,
         }
         details["user_id"] = provisioned->user_id;
         details["created"] = provisioned->created;
-        details["linked"] = provisioned->linked;
-        return done(provisioned->taap_id,
-                    {{"user_id", provisioned->user_id},
-                     {"created", provisioned->created},
-                     {"linked", provisioned->linked}});
+        nlohmann::json body{{"user_id", provisioned->user_id}, {"created", provisioned->created}};
+        if (!provisioned->email_taken_from.empty()) {
+            // The verified address moved here from another account (lake#920).
+            details["email_taken_from"] = provisioned->email_taken_from;
+            body["email_taken_from"] = provisioned->email_taken_from;
+        }
+        return done(provisioned->taap_id, std::move(body));
     }
     if (type == "user.updated") {
         const auto updated = context.store->update_clerk_user(

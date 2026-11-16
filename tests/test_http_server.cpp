@@ -55,6 +55,7 @@
 #include "lake/api/clerk_webhooks.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/server.hpp"
+#include "lake/api/web_app.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_runs.hpp"
@@ -525,10 +526,19 @@ TEST(WebAppHttp, BrowsersGetTheAppAndCustomDomainsTheirHostedSignIn) {
         ASSERT_TRUE(page.starts_with("HTTP/1.1 200")) << path << "\n" << page.substr(0, 300);
         EXPECT_EQ(response_header(page, "content-type"), "text/html; charset=utf-8") << path;
         // Framed only by lake, and images only from lake (lake#943): Markdown an agent wrote can
-        // make the browser contact no other server.
+        // make the browser contact no other server. Scripts only from lake and the page's own
+        // inline scripts by hash, requests only to lake (lake#991).
         EXPECT_EQ(response_header(page, "content-security-policy"),
-                  "frame-ancestors 'self'; img-src 'self' data:")
+                  lake::api::web_app_content_security_policy(lake::api::web_app_index(), ""))
             << path;
+        const std::string policy = response_header(page, "content-security-policy");
+        EXPECT_NE(policy.find("script-src 'self'"), std::string::npos) << policy;
+        EXPECT_NE(policy.find("connect-src 'self';"), std::string::npos) << policy;
+        EXPECT_NE(policy.find("img-src 'self' data:;"), std::string::npos) << policy;
+        EXPECT_NE(policy.find("frame-ancestors 'self'"), std::string::npos) << policy;
+        EXPECT_NE(policy.find("object-src 'none'"), std::string::npos) << policy;
+        EXPECT_EQ(policy.find("'unsafe-eval'"), std::string::npos) << policy;
+        EXPECT_EQ(response_header(page, "x-content-type-options"), "nosniff") << path;
         // The page carries this request's viewer, so it is personal and never stored by a cache.
         EXPECT_EQ(response_header(page, "cache-control"), "private, no-store") << path;
         EXPECT_NE(page.find("<div id=\"root\">"), std::string::npos) << path;
@@ -540,6 +550,8 @@ TEST(WebAppHttp, BrowsersGetTheAppAndCustomDomainsTheirHostedSignIn) {
             << path << ": no lake_workspace cookie remembers a page any more";
         const std::string other = get(connection, path, false);
         EXPECT_TRUE(other.starts_with("HTTP/1.1 404")) << path << "\n" << other.substr(0, 300);
+        // Every answer, a JSON 404 included, is never sniffed into another type (lake#991).
+        EXPECT_EQ(response_header(other, "x-content-type-options"), "nosniff") << path;
     }
     // The retired forms are gone: nothing is created through them.
     const std::string form =
@@ -5254,12 +5266,17 @@ TEST(HttpServer, ClerkExchangeRefusesAForgedTokenAndSignOutEndsClerkToo) {
                            "application/json");
     ASSERT_TRUE(sign_in.starts_with("HTTP/1.1 403")) << sign_in.substr(0, 400);
     EXPECT_TRUE(response_header(sign_in, "set-cookie").empty());
-    // Clerk's sign-in shows its images from Clerk's image host, and from nowhere else (lake#943).
+    // Clerk's sign-in shows its images from Clerk's image host, and from nowhere else (lake#943);
+    // clerk-js loads and talks only to the instance's own Frontend API host (lake#991).
     const std::string page = connection.request(
         "GET", "/sign-in", {}, {}, "HTTP/1.1", {}, "text/plain", {{"Accept", "text/html"}});
     ASSERT_TRUE(page.starts_with("HTTP/1.1 200")) << page.substr(0, 300);
-    EXPECT_EQ(response_header(page, "content-security-policy"),
-              "frame-ancestors 'self'; img-src 'self' data: https://img.clerk.com");
+    const std::string policy = response_header(page, "content-security-policy");
+    EXPECT_NE(policy.find("img-src 'self' data: https://img.clerk.com;"), std::string::npos)
+        << policy;
+    EXPECT_NE(policy.find("connect-src 'self' https://"), std::string::npos) << policy;
+    EXPECT_NE(policy.find("script-src 'self'"), std::string::npos) << policy;
+    EXPECT_NE(policy.find("https://challenges.cloudflare.com"), std::string::npos) << policy;
 
     const std::string refused =
         connection.request("POST", "/identity/clerk-session", "token=not.a.jwt&device_name=b");

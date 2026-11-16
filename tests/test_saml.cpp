@@ -751,6 +751,11 @@ TEST(SamlSignIn, TheAcsSignsInOnceAndRefusesReplayTamperingAndUnsolicitedRespons
     const std::string secret = cookie.substr(13, cookie.find(';') - 13);
     const auto principal = lake.store->context_for(secret);
     ASSERT_TRUE(principal) << principal.error().message;
+    // lake#872: the just-in-time account takes a managed key Lake minted, not the TAAP id the
+    // unauthenticated start named.
+    EXPECT_NE(principal->taap_id, "taap:1:ed25519:saml-person");
+    EXPECT_TRUE(principal->taap_id.starts_with("taap:1:ed25519:")) << principal->taap_id;
+    EXPECT_EQ(lake.store->account_identity(principal->user_id)->key, "managed");
 
     // The same response again: its request is used and its assertion recorded.
     const std::string replayed = lake.post(response);
@@ -819,8 +824,8 @@ TEST(SamlSignIn, MetadataAndStartRoutesAndTheCapabilityPath) {
     ASSERT_FALSE(request.empty());
 
     // sign_in_saml takes the same response through the registry: an unknown request is refused,
-    // an outstanding one signs in. The start route recorded no TAAP identity, so the capability's
-    // taap_id provisions the person just in time.
+    // an outstanding one signs in, provisioning the person just in time with a managed key; the
+    // taap_id it is given is ignored (lake#872).
     const auto refused = http(lake.port,
                               "POST",
                               "/v1/sign_in_saml",
@@ -838,8 +843,9 @@ TEST(SamlSignIn, MetadataAndStartRoutesAndTheCapabilityPath) {
                                    .dump(),
                                "application/json");
     ASSERT_NE(accepted.find(" 200 "), std::string::npos) << accepted;
-    EXPECT_TRUE(
-        lake.store->context_for(json::parse(body_of(accepted))["value"]["secret"]).has_value());
+    const auto person = lake.store->context_for(json::parse(body_of(accepted))["value"]["secret"]);
+    ASSERT_TRUE(person.has_value());
+    EXPECT_NE(person->taap_id, "taap:1:ed25519:saml-capability");
 }
 
 TEST(SamlSignIn, TheStoreAcceptsEachRequestAndAssertionOnce) {

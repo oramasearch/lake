@@ -99,7 +99,7 @@ Lake capability and Zetta-shaped proxy calls, including clients that use the unp
 
 Ask Orama's turns have kind `api`, except New Methodology's draft (lake#688): kind
 `methodology_draft`, with the person's description as the message and `context: {name?,
-target_kind?}`. Its credential is Ask Orama's usual one (every read, no action); the answer's
+target_kind?}`. Its credential is Ask Orama's usual one (the library-agent reads, no action); the answer's
 `result` is the draft's files, which `draft_methodology {task_id}` checks before anything is offered
 ([methodologies.md](methodologies.md#drafts)).
 
@@ -120,6 +120,70 @@ polls accept up to 60 seconds (`wait_ms`), but the authorized upstream currently
 at 30 seconds; Lake clamps accordingly and allows a 40-second transport timeout. Runtime idle
 backoff is required until [Zetta's longer poll](https://github.com/oramasearch/zetta/issues/1174)
 lands. The at-most-one-receive-per-minute deployment acceptance is not claimed by this PR.
+
+## A task credential is confined to its workspace
+
+LSR-118 ([lake#985](https://github.com/oramasearch/lake/issues/985)). A task, launch or schedule
+credential acts as the person who started the agent, and that person may belong to other accounts
+or other workspaces of the same account. The credential reaches none of them, whatever its input
+names:
+
+- **Every policy decision of the call is confined.** `prepare_call` (`src/api/registry.cpp`) sets
+  `AuthorizationConfinement` on the call's authorization cache: the task's (launch's, schedule's)
+  account and workspace. `control::authorize` and `authorize_batch` then allow an object only when
+  its whole parent chain, followed past any inheritance cut, reaches that account's `customer`
+  object, and every repository on the chain belongs to that workspace. A repository that cannot be
+  shown to belong to it, or a row that cannot be read, is outside. Checks that start a fresh cache
+  (`control::fresh_cache_like`) keep the confinement, and so does `search`'s check of each hit
+  (`search::Query::confined`), so a search finds nothing in another account or workspace. The person's own identity object
+  (`principal/<taap id>`) is not an account's object and is decided as before; the task's scopes
+  decide whether such a capability may be called at all.
+- **An input naming another account or workspace is refused** before any handler reads it: a
+  `customer_id` or `workspace_id` other than the task's, any other id in `workspace_ids`, or a
+  repository (`repository_id`, `repository`, or `id` on a repository capability) of another account
+  or workspace. The answer is `unauthorized`, *this agent credential acts only in its own
+  workspace*.
+- **A library agent that reads for a person carries a generated read list, not every read.**
+  Ask Orama's turn key carries `agent_turn`, `workspace_openapi`, `workspace_query` and each
+  capability `library_agent_may_read` accepts (`src/api/workspace_capabilities.cpp`): reads only,
+  never one whose object is a secret, secret mount, principal, sign-in, application, certificate,
+  session or agent-bus object, and never a named read of secrets, keys, sessions, devices, grants,
+  invitations, SSO, SCIM or recovery state (`read_secret`, `list_secrets`, `secret_metadata`,
+  `list_sessions`, `list_sso_providers`, ...). Agent-ask-orama's own exclusion list stays as a
+  second check.
+
+Tests: `Policy.AConfinedDecisionAllowsOnlyObjectsInsideItsAccountAndWorkspace`,
+`Policy.LibraryAgentReadsLeaveOutSecretsAndCredentials` and
+`Streams.TaskCredentialReadsOnlyItsOwnWorkspacesResources`.
+
+## What a library agent holds, and the trust placed in it
+
+lake#871. A library agent (Ask Orama, its specialists, the Application Agent and the rest of the
+Agent Library) is one shared process per agent that serves every tenant, with one bus credential.
+Claiming a task fills the task body's `{{credential}}` with a task credential that acts as the
+person who started the turn. What bounds that credential today:
+
+- **It lives only while its task runs.** Every call with it renews the claim
+  (`renew_agent_task_lease` in `prepare_call`), which requires the task to be `Running` under the
+  same credential digest; a retry clears the digest, and a finished, failed or reclaimed task's
+  credential is refused. A compromised process holds the credentials of the tasks it is serving at
+  that moment, never earlier ones.
+- **It acts only in its task's account and workspace**
+  ([above](#a-task-credential-is-confined-to-its-workspace), lake#985), with the task's scopes.
+- **The bus credential names only its own agent's running tasks.** `claim_agent_task`,
+  `publish_agent_event` and `record_model_usage` refuse a task of another agent, and
+  `record_model_usage` also refuses one that is not `Running` (`conflict`, `/task_id`), so the bus
+  credential cannot report usage into any workspace whose task it is not serving.
+
+What it does not bound: while a turn runs, the shared process holds that turn's credential in
+clear, beside the credentials of the other tenants' turns it is serving at the same moment. Lake
+therefore trusts every library-agent image it dispatches to (`LAKE_AGENT_ENDPOINTS`) as it trusts
+its own code: they are Orama's private images, pinned by the operator, and never customer code.
+Whether the boundary moves (a library-agent process per workspace, or credentials that never reach
+the process in clear) is open on lake#871.
+
+Tests: `AgentLeases.ATaskCredentialEndsWithItsTaskAndAnotherAgentCannotNameIt` and
+`RecordModelUsage.ABusCredentialReportsOnlyItsOwnRunningTask`.
 
 ## Delegated turns
 

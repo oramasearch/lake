@@ -27,7 +27,7 @@ tick.
 | any other request whose `Host` is `LAKE_APEX_HOST`, apart from the stylesheet, fonts and probes | the region picker, before every other route, inside the order sheet (lake#831); `POST` with `region` sets the `lake_region` preference cookie and redirects to the region's host with the same path and query ([`../api/regions.md`](../api/regions.md#the-apex-picker), lake#757) |
 | any request whose `Host` is one of `LAKE_HOST_ALIASES` | after the region picker: a browser page (what the web app would answer) is redirected (302, `no-store`) to the same path and query on `LAKE_PUBLIC_HOST`; anything else has its `Host` rewritten to `LAKE_PUBLIC_HOST` and is served as there, so the alias is never taken for an application's custom domain ([`../deployment/white-label-sign-in.md`](../deployment/white-label-sign-in.md), lake#1136) |
 | on `LAKE_APEX_HOST`: `GET /order/<offer>`, `GET /order/price-list`, `POST /order`, `GET /orders/<id>?token=…` | the order sheet's forms, the published price list, an order (recorded, then Stripe Checkout or the confirmation; 32 KiB, rate limited, honeypot), and an order's status by its signed link ([`../api/orders.md`](../api/orders.md#routes), lake#831) |
-| a browser's `GET` or `HEAD` of any other path (`Accept: text/html`) | the web app's `index.html` (`no-cache`, `Content-Security-Policy: frame-ancestors 'self'; img-src 'self' data:`, [images](#images)): `/`, `/repositories`, `/w/<workspace_id>/design/projects` and every other page are the app's ([`../ui/web-app.md`](../ui/web-app.md)); the same path asked for by anything else is the 404 |
+| a browser's `GET` or `HEAD` of any other path (`Accept: text/html`) | the web app's `index.html` (`no-cache`, the [web app's script policy](#the-web-apps-script-policy), [images](#images)): `/`, `/repositories`, `/w/<workspace_id>/design/projects` and every other page are the app's ([`../ui/web-app.md`](../ui/web-app.md)); the same path asked for by anything else is the 404 |
 | `GET /ui/<file>` | the app's content-hashed files (`public, max-age=31536000, immutable`) |
 | `GET /style-<hash>.css`, `GET /fonts/<IBM Plex face>-<hash>.woff2` | content-hashed design-system assets (`public, max-age=31536000, immutable`) linked by the hosted application pages |
 | `GET /style.css`, `GET /fonts/<IBM Plex face>.woff2` | compatibility aliases for direct and older links (`no-cache`) |
@@ -412,11 +412,13 @@ path;
 
 ## Images
 
-Every HTML page lake answers (the web app, the hosted application pages, the region picker) carries
-`Content-Security-Policy: frame-ancestors 'self'; img-src 'self' data:` (`send_text`). Only lake
-frames its pages, and the browser loads images only from lake's own origin and `data:` URLs (the
-Drive image previews). With Clerk on, the web app's pages add `https://img.clerk.com`, the host
-Clerk's sign-in form shows its logos and provider icons from.
+Every HTML page lake answers (the hosted application pages, the region picker, the order sheet)
+carries `Content-Security-Policy: frame-ancestors 'self'; img-src 'self' data:` (`send_text`), and
+the web app's pages carry the stricter [script policy](#the-web-apps-script-policy) below, which
+has the same frame and image rules. Only lake frames its pages, and the browser loads images only
+from lake's own origin and `data:` URLs (the Drive image previews). With Clerk on, the web app's
+pages add `https://img.clerk.com`, the host Clerk's sign-in form shows its logos and provider icons
+from.
 
 Why (lake#943, LSR-082): an agent's reply is Markdown, and an agent may have read untrusted content
 (a document, a dataset row, an MCP tool's result) that tells it to name an image at an address
@@ -434,6 +436,58 @@ Change it here and in the tests together. An image host is added only for a page
 never for every page; a host that fetches arbitrary addresses for its callers (an image proxy)
 reopens the leak, so any such host is a known weakness to record here. `img.clerk.com` is Clerk's
 image service and is allowed only where Clerk's sign-in is mounted.
+
+## The web app's script policy
+
+Every page of the web app (`index.html`, whatever path it answers) carries a policy that limits
+what a script injected into it could do (lake#991, LSR-185), from
+`web_app_content_security_policy` (`include/lake/api/web_app.hpp`), computed from the page as sent:
+
+```
+default-src 'self'; script-src 'self' 'sha256-<each inline script>'; style-src 'self' 'unsafe-inline';
+img-src 'self' data:; font-src 'self'; connect-src 'self'; media-src 'self' blob:;
+worker-src 'self' blob:; frame-src 'self' https:; frame-ancestors 'self'; base-uri 'none';
+object-src 'none'; form-action 'self'
+```
+
+- **Scripts** come only from lake's own files (`/ui/`) and the inline scripts the page itself
+  carries, each allowed by its SHA-256: today the theme script of `frontend/index.html`. The
+  `lake-viewer` block lake writes into the first paint is `type="application/json"`, data a browser
+  never runs, so it is not listed. No `'unsafe-inline'` and no `'unsafe-eval'` for scripts: a
+  `<script>` or an `onerror=` an injection adds does not run.
+- **Requests** (`fetch`, `XMLHttpRequest`, `EventSource`) reach lake alone: the app calls only
+  `/v1` ([web app](../ui/web-app.md)). An injected script cannot send what it reads elsewhere.
+- **Styles** allow inline: the white-label brand's colours are an inline `<style>`
+  ([brand](brand.md)) and Clerk's components inject theirs. Styles run no code.
+- **Media and workers** allow `blob:` for a recording's preview (transcripts) and Clerk's worker.
+- **Frames** may show an `https` page: the App preview beside Change App is the App's own host.
+- **No plugins, no `<base>`**, and forms post only to lake (`/session`, `/logout`,
+  `/identity/clerk-session`, `/exports/download`).
+
+With Clerk on, `script-src` and `connect-src` add the instance's Frontend API host
+(`https://<frontend_api>`, where clerk-js loads from and talks to), `script-src` adds
+`https://challenges.cloudflare.com` (the challenge Clerk's bot protection loads), and `img-src`
+adds `https://img.clerk.com`.
+
+A new inline script in `frontend/index.html` needs nothing else: its hash is computed when the page
+is served. A script loaded from another origin, or a request to one, needs its origin added here
+first, with the reason.
+
+**`X-Content-Type-Options: nosniff`** is on every answer lake gives (lake#991): the first router
+middleware sets it after clearing the pooled response, and `send_text` and `send_bytes` set it
+again, so a JSON error, a repository file's bytes (`/file/raw`), a registry manifest or a stream
+is read only as the type lake names. The download routes keep their `Content-Disposition` and
+sandboxing policies (the route table above).
+
+HSTS is the edge's: lake serves HTTP behind the ingress and Cloudflare, which terminate TLS, so
+lake sets no `Strict-Transport-Security` itself.
+
+**Verify.** `WebApp.ContentSecurityPolicyAllowsOnlyTheInlineScriptsThePageCarries`,
+`WebApp.ContentSecurityPolicyUnderClerkNamesOnlyItsFrontendApi` and
+`WebApp.TheBuiltIndexRunsUnderItsPolicy` (`tests/test_web_app.cpp`); the page and 404 checks in
+`tests/test_http_server.cpp`. By hand: `curl -si -H 'Accept: text/html' http://127.0.0.1:4900/ |
+grep -i -e content-security -e nosniff`, then open the console in a browser and check its
+developer console names no refused script or request.
 
 ## Cross-site requests
 

@@ -5243,3 +5243,89 @@ CREATE INDEX IF NOT EXISTS domain_claims_environment_idx
     ON domain_claims (repository_id, environment);
 CREATE TABLE IF NOT EXISTS domain_claims_guard (applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0106_domain_claims') ON CONFLICT DO NOTHING;
+
+-- 0107_order_email_confirmation (lake#1000, LSR-194, docs/api/orders.md#email): an order form's
+-- contact email is anyone's to type, so until the person who sent it follows the confirmation link
+-- the order mails that address only the confirmation and tells support nothing.
+-- `contact_email_confirmed_at` is when they did; NULL until then. A checkout order needs none: its
+-- mail is about a payment Stripe took from the person at that address. Orders that were mailed
+-- before this migration count as confirmed (once, while unrecorded), so their later mail still
+-- goes. The two indexes serve the per-recipient limits: orders naming one address (without case)
+-- in a day, and one domain (after the last @) in an hour. Additive. Numbered after the open 0106
+-- (lake#949).
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE cloud_orders ADD COLUMN IF NOT EXISTS contact_email_confirmed_at timestamptz;
+DO $order_email_confirmation$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations
+                    WHERE version = '0107_order_email_confirmation') THEN
+        UPDATE cloud_orders SET contact_email_confirmed_at = created_at
+         WHERE contact_email_confirmed_at IS NULL AND path = 'order_form'
+           AND (customer_emailed_state IS NOT NULL OR support_emailed_state IS NOT NULL);
+    END IF;
+END
+$order_email_confirmation$;
+CREATE INDEX IF NOT EXISTS cloud_orders_contact_email_idx
+    ON cloud_orders (lower(contact_email), created_at);
+CREATE INDEX IF NOT EXISTS cloud_orders_contact_domain_idx
+    ON cloud_orders ((substring(lower(contact_email) FROM '@([^@]*)$')), created_at);
+CREATE TABLE IF NOT EXISTS order_email_confirmation_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0107_order_email_confirmation')
+    ON CONFLICT DO NOTHING;
+-- ---------------------------------------------------------------------------------------------
+-- 0108_retained_usage (lake#988, LSR-121, docs/api/billing.md#a-deleted-workspaces-usage): a
+-- deleted workspace's usage that no issued invoice has billed. delete_workspace reads it from the
+-- workspace Zetta before the cascade (billing on) and writes it here in one transaction, so the
+-- month's bill and the model-token limit still count it after the Zetta is gone. Billing records
+-- are multitenancy (decision 56): content-free quantities by dimension, the labels billing reads
+-- (`kind`, `class`, `model`) and a bucket start, never a row's content. `rollup`: what
+-- delete_workspace read, one point a day, replaced by a repeated delete; `late`: counter values
+-- the usage recorder still held, one point an hour, added. Numbered after the open 0106
+-- (lake#1295) and 0107. Additive.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS retained_usage_sets (
+    workspace_id uuid        PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+    customer_id  uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    from_at      timestamptz NOT NULL,
+    to_at        timestamptz NOT NULL,
+    retained_at  timestamptz NOT NULL DEFAULT now(),
+    CHECK (to_at > from_at)
+);
+CREATE INDEX IF NOT EXISTS retained_usage_sets_customer_idx ON retained_usage_sets (customer_id);
+CREATE TABLE IF NOT EXISTS retained_usage (
+    workspace_id uuid             NOT NULL
+        REFERENCES retained_usage_sets(workspace_id) ON DELETE CASCADE,
+    customer_id  uuid             NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    source       text             NOT NULL CHECK (source IN ('rollup', 'late')),
+    dimension    text             NOT NULL CHECK (length(dimension) BETWEEN 1 AND 64),
+    labels       text             NOT NULL DEFAULT '{}' CHECK (length(labels) <= 1024),
+    at           timestamptz      NOT NULL,
+    value        double precision NOT NULL CHECK (value >= 0),
+    gauge        boolean          NOT NULL DEFAULT false,
+    PRIMARY KEY (workspace_id, source, dimension, labels, at),
+    CHECK (source = 'rollup' OR NOT gauge)
+);
+CREATE INDEX IF NOT EXISTS retained_usage_customer_at_idx ON retained_usage (customer_id, at);
+CREATE TABLE IF NOT EXISTS retained_usage_guard (applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0108_retained_usage') ON CONFLICT DO NOTHING;
+-- ---------------------------------------------------------------------------------------------
+-- 0109_principal_ids (lake#872, docs/api/policy.md#principal-ids-lake870-lake872): every identity
+-- a person or organization carries is a TAAP id, `taap:` and printable ASCII, at most 512
+-- characters, the rule `valid_principal_id` (src/control/policy.cpp) applies on every creation
+-- path. Policy is keyed by that string, and `admin` (the operator) or an identity lake sets in code
+-- (`agent-service:`, `share-link:`, `sso-provider/`) stored on a row would inherit what it may do.
+-- The database now refuses such a row however it is written. NOT VALID: rows written before
+-- lake#870 are not scanned, and `accepted_principal` already refuses their sessions; a write to
+-- such a row is refused until it is corrected. Numbered after 0106 (lake#949), 0107 and 0108
+-- (open security pull requests).
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_taap_id_format;
+ALTER TABLE users ADD CONSTRAINT users_taap_id_format
+    CHECK (taap_id IS NULL OR (taap_id ~ '^taap:[!-~]+$' AND length(taap_id) <= 512)) NOT VALID;
+ALTER TABLE organizations DROP CONSTRAINT IF EXISTS organizations_taap_id_format;
+ALTER TABLE organizations ADD CONSTRAINT organizations_taap_id_format
+    CHECK (taap_id IS NULL OR (taap_id ~ '^taap:[!-~]+$' AND length(taap_id) <= 512)) NOT VALID;
+CREATE TABLE IF NOT EXISTS principal_ids_guard (applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0109_principal_ids') ON CONFLICT DO NOTHING;

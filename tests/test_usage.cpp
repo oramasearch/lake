@@ -634,6 +634,52 @@ TEST(RecordModelUsage, CountsAnAgentRunsTokensInItsWorkspace) {
     EXPECT_EQ(rig.call("record_model_usage", tokens, person).error.code, "unauthorized");
 }
 
+// lake#871: a library agent's bus credential reports usage only for a task of its own agent that
+// it is serving now. Another agent's task, a task nobody claimed and a finished one are refused,
+// whichever workspace they are in.
+TEST(RecordModelUsage, ABusCredentialReportsOnlyItsOwnRunningTask) {
+    UsageRig rig;
+    const auto own = rig.store->create_agent_task({.customer_id = rig.customer,
+                                                   .agent = "agent-ask-orama",
+                                                   .kind = "api",
+                                                   .workspace_id = rig.lab,
+                                                   .scopes = {"agent_turn"}});
+    ASSERT_TRUE(own) << own.error().message;
+    const auto others = rig.store->create_agent_task({.customer_id = rig.customer,
+                                                      .agent = "agent-project",
+                                                      .kind = "api",
+                                                      .workspace_id = rig.home,
+                                                      .scopes = {"workspace_query"}});
+    ASSERT_TRUE(others) << others.error().message;
+    ASSERT_TRUE(rig.store->claim_agent_task(others->id, "agent-project", "project-claim"));
+
+    auto bus = rig.context();
+    bus.acting_identity = "agent-service:agent-ask-orama";
+    bus.operator_credential = false;
+    bus.credential_kind = "agent_service";
+    bus.agent_service = "agent-ask-orama";
+    const auto tokens = [](const std::string& task_id) {
+        return json{{"model_name", "gpt-5"},
+                    {"input_tokens", 10},
+                    {"output_tokens", 5},
+                    {"task_id", task_id}};
+    };
+    const auto another_agents = rig.call("record_model_usage", tokens(others->id), bus);
+    EXPECT_EQ(another_agents.error.code, "conflict");
+    EXPECT_EQ(another_agents.error.path, "/task_id");
+    EXPECT_EQ(rig.call("record_model_usage", tokens(own->id), bus).error.code, "conflict")
+        << "a task nobody claimed is not being served";
+
+    ASSERT_TRUE(rig.store->claim_agent_task(own->id, "agent-ask-orama", "ask-claim"));
+    const auto running = rig.call("record_model_usage", tokens(own->id), bus);
+    ASSERT_TRUE(running.ok) << running.error.message;
+    EXPECT_EQ(running.value["workspace_id"], rig.lab);
+
+    ASSERT_TRUE(rig.store->record_agent_task_event(own->id, "agent-ask-orama", "Succeeded"));
+    EXPECT_EQ(rig.call("record_model_usage", tokens(own->id), bus).error.code, "conflict")
+        << "a finished task's usage is no longer reported through the bus credential";
+}
+
 TEST(UsageSample, ReadsEachWorkspacesStoredBytesAndRunningServices) {
     UsageRig rig;
     rig.workspaces.zetta->answers["list_datasets"] = {

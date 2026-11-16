@@ -18,6 +18,7 @@
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 #include "lake_attestation.hpp"
+#include "repository_path_access.hpp"
 #include "repository_records_api.hpp"
 
 namespace lake::api {
@@ -208,6 +209,21 @@ liquid::runtime::task<ApiResult> export_repository(const json& input, ApiContext
     const auto repository = context.store->get_repository(input.at("repository_id"));
     if (!repository) {
         co_return store_error(repository.error());
+    }
+    // An export carries every path, so a restricted folder the caller cannot read refuses it, as
+    // a pull does (lake#975).
+    const auto paths = RepositoryPathAccess::load(context, *repository);
+    if (!paths) {
+        co_return ApiResult::failure(paths.error().code, paths.error().message, paths.error().path);
+    }
+    const auto every = paths->reads_every_cut(context);
+    if (!every) {
+        co_return ApiResult::failure(every.error().code, every.error().message, every.error().path);
+    }
+    if (!*every) {
+        co_return ApiResult::failure("unauthorized",
+                                     "this repository has restricted folders you cannot read, so "
+                                     "it cannot be exported whole");
     }
     // The forge records come from the repository's workspace (lake#341).
     auto forge = RepositoryForge::open(context, *repository);

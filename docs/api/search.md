@@ -255,6 +255,11 @@ content. Non-text/binary format extraction belongs to the format registry work i
 The query path resolves each candidate repository to its policy object, batches the object ids
 through `control::authorize_batch(principal, objects, "read", cache)`, and emits only allowed
 hits. This is the shared attestation-backed policy engine; `admin` is its operator principal.
+**Restricted folders (lake#975).** A hit inside a path object that does not inherit is also
+decided there, at the change it was found in, as Drive decides that path; a hit the caller may not
+read there, or whose path that change's tree does not hold, is left out. The `limit` applies
+before that filter, so a page can hold fewer hits. See
+[policy.md](policy.md#restricted-folders-hold-for-every-repository-read-lake975).
 **Where search reads repositories (lake#380).** Search reads a repository only through lake's
 repository store, which lends it from the store that serves it (the account's store, or a switched
 workspace's own store) under that store's lane and on its one open instance

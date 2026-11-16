@@ -134,7 +134,8 @@ constexpr std::string_view default_sheet = R"json({
     {"text": "SOC 2 compliant: ask for the report", "url": "mailto:support@orama.com?subject=SOC%202%20report"},
     {"text": "Source available, with access to the source code", "url": "mailto:support@orama.com?subject=Source%20access"}
   ],
-  "limits": {"orders_per_client_per_hour": 5, "orders_per_hour": 60}
+  "limits": {"orders_per_client_per_hour": 5, "orders_per_hour": 60,
+             "orders_per_email_per_day": 3, "orders_per_domain_per_hour": 20}
 })json";
 
 constexpr std::array offer_ids{std::string_view{"private_warehouse"},
@@ -517,8 +518,23 @@ std::expected<OrderSheet, std::string> order_sheet_from_environment(std::string_
     if (!per_hour) {
         return std::unexpected(per_hour.error());
     }
+    auto per_email = whole_at(
+        limits, "orders_per_email_per_day", at + ".limits.orders_per_email_per_day", 1, 1'000);
+    if (!per_email) {
+        return std::unexpected(per_email.error());
+    }
+    auto per_domain = whole_at(limits,
+                               "orders_per_domain_per_hour",
+                               at + ".limits.orders_per_domain_per_hour",
+                               1,
+                               100'000);
+    if (!per_domain) {
+        return std::unexpected(per_domain.error());
+    }
     sheet.orders_per_client_per_hour = static_cast<int>(*per_client);
     sheet.orders_per_hour = static_cast<int>(*per_hour);
+    sheet.orders_per_email_per_day = static_cast<int>(*per_email);
+    sheet.orders_per_domain_per_hour = static_cast<int>(*per_domain);
     return sheet;
 }
 
@@ -697,9 +713,34 @@ bool order_status_token_matches(std::string_view key,
     return signed_link_matches(key, "lake-order-status\n" + std::string(order_id), token);
 }
 
+std::string order_confirmation_token(std::string_view key, std::string_view order_id) {
+    return signed_link_signature(key, "lake-order-confirm\n" + std::string(order_id));
+}
+
+bool order_confirmation_token_matches(std::string_view key,
+                                      std::string_view order_id,
+                                      std::string_view token) {
+    return signed_link_matches(key, "lake-order-confirm\n" + std::string(order_id), token);
+}
+
+std::string order_email_state(const control::CloudOrder& order, std::string_view recipient) {
+    if (recipient == "customer" && !control::cloud_order_contact_confirmed(order)) {
+        return "confirm";
+    }
+    return order.state;
+}
+
 std::vector<std::string> order_email_recipients_due(const control::CloudOrder& order) {
     std::vector<std::string> due;
     const std::string& state = order.state;
+    if (!control::cloud_order_contact_confirmed(order)) {
+        // lake#1000: the address has not been shown to be the sender's. It gets one email, the
+        // confirmation, and support hears of the order only once it is confirmed.
+        if (state == "submitted" && order.customer_emailed_state.empty()) {
+            due.emplace_back("customer");
+        }
+        return due;
+    }
     if ((state == "submitted" || state == "paid" || state == "failed") &&
         order.support_emailed_state != state) {
         due.emplace_back("support");
@@ -748,6 +789,9 @@ Email order_email_in_lake_words(const OrderSheet& sheet,
     std::string fields = ordered;
     fields += "Name: " + order.contact_name + "\n";
     fields += "Email: " + order.contact_email + "\n";
+    if (!order.contact_email_confirmed_at.empty()) {
+        fields += "Email confirmed: " + order.contact_email_confirmed_at + "\n";
+    }
     fields +=
         "Company: " + (order.company.empty() ? std::string("(none given)") : order.company) + "\n";
     fields += "State: " + order.state + "\n";
@@ -792,6 +836,18 @@ Email order_email_in_lake_words(const OrderSheet& sheet,
     }
     email.to = {order.contact_email};
     email.reply_to = customer_support;
+    if (!control::cloud_order_contact_confirmed(order)) {
+        // lake#1000: whoever typed this address may not own it, so this email says only that an
+        // order form named it, and how to confirm it or ignore it. No offer, price or field.
+        email.subject = "Confirm your email for Lake order " + order.id;
+        email.text = "Someone sent an order form on the Lake order sheet with this email address. "
+                     "If it was you, confirm it here and we will pass your order to our team:\n\n" +
+                     std::string(status_url) +
+                     "\n\nThe link works for 7 days. If it was not you, ignore this email: nothing "
+                     "more is sent to this address about it.\n\nOrder: " +
+                     order.id + "\n";
+        return email;
+    }
     std::string lead;
     if (order.state == "submitted") {
         email.subject = "We received your Lake order (" + order.id + ")";

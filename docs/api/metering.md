@@ -379,7 +379,9 @@ period, added up across the workspaces; a reading's periods without data are `nu
 bills the dimension (false for the detail dimensions `instances`, `build_compute` and
 `run_compute`).
 `workspaces[]` says which workspaces were read and why one was not; a workspace that could not be
-read never counts as zero. It needs `read` on the customer and is audited centrally as
+read never counts as zero. Without `workspace_ids`, the account's deleted workspaces are added from
+the usage kept when each was deleted, each listed with `deleted: true` (lake#988,
+[billing.md](billing.md#a-deleted-workspaces-usage)); its points are at day resolution. It needs `read` on the customer and is audited centrally as
 `metering.usage_over_time.read`. The existing `metering_usage` is unchanged.
 
 ### Limits
@@ -398,7 +400,9 @@ per UTC calendar month and warns without refusing anything. Lake is priced by us
 (lake#635, [billing.md](billing.md#usage-only-lake635)); enforcing a limit is an extension point.
 
 `usage_limits {customer_id}` answers each limit with what is used (storage: the repository bytes
-the quota is enforced against; any other: this month's total across the account's workspaces),
+the quota is enforced against; any other: this month's total across the account's workspaces,
+deleted ones included through their retained usage,
+[billing.md](billing.md#a-deleted-workspaces-usage)),
 `percent`, `state` (`ok`, `warning` from `warn_percent`, default 80, `over` from 100%, or
 `not_measured`), `enforced` and `period` (`now` or `month`), and a `warnings` sentence for each one
 warning or over. It needs `read` on the customer and is audited as `metering.limits.read`.
@@ -408,7 +412,8 @@ warning or over. It needs `read` on the customer and is audited as `metering.lim
 `record_model_usage {model_name, input_tokens, output_tokens, task_id?}` is how an agent reports the
 tokens one of its turns or runs spent. Only an agent's own credential may call it: a task (`lat.`),
 launch (`lal.`) or schedule (`las.`) credential, or a library agent's bus credential naming its
-`task_id`. Lake adds both counts together to the usage of the workspace the task, launch or schedule
+`task_id`, which must be a task of that agent that is `Running` now (lake#871; another agent's,
+an unclaimed or a finished task answers `conflict` at `/task_id`). Lake adds both counts together to the usage of the workspace the task, launch or schedule
 runs in, labelled with the agent's name, the run's id (`launch_id`) and `model_name`, and audits it
 in that workspace. Anyone else is refused `unauthorized`. When billing is on, both exact
 `<model>/input` and `<model>/output` prices must be positive before a report is accepted; otherwise

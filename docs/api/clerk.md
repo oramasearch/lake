@@ -95,8 +95,21 @@ The credential is `credentials(kind = 'oauth', pool_id = 'lake', subject = 'cler
 | Situation | Result |
 |---|---|
 | The Clerk subject is already linked | Signs in that user |
-| Not linked, and a lake-pool user has the same email | Links the subject to that user. Clerk verified the address, so it is the same person |
-| Neither | Creates the user with a **managed key** (a TAAP identity Lake holds), provisions their personal customer with an `admin` grant (as password sign-up does, decision 40), and links the subject |
+| Not linked | Creates the user with a **managed key** (a TAAP identity Lake holds), provisions their personal customer with an `admin` grant (as password sign-up does, decision 40), and links the subject |
+
+**A new subject is never linked to an existing account by email** (lake#920, LSR-011). An
+account that already holds the address got it from someone who proved nothing to anyone: a
+password sign-up, an organization's SSO or SCIM provisioning, an operator's `create_user`, or a
+different Clerk subject whose address has since moved. Linking would let that holder keep their
+password, sessions, API keys, own key and the grants they set up, inside the account the verified
+person then fills. So the new subject always gets a new account, and Clerk's verified address
+moves to it: the old account's `email` becomes empty and its password, whose login name is that
+address, is revoked, so neither a password sign-in nor email recovery to that address reaches it.
+Nothing else of the old account changes, and nothing of it reaches the new one. `user.created`
+answers `email_taken_from` (the old account's id) when this happened, and the delivery's audit
+event records it. The same holds when `user.updated` gives an account a verified address another
+account holds. An operator who knows two accounts are one person moves the data between them;
+Lake does not decide it from an email.
 
 Policy is keyed on TAAP identities, and a Clerk user arrives without one. So on first sign-in lake
 mints one: `audit::mint_custodial_identity` generates an Ed25519 seed, derives
@@ -136,9 +149,11 @@ account is disabled.
 - **`user.created`** does what a first sign-in does, without a session: the account with a
   **managed key** (decision 65), its personal customer with an `admin` grant (decision 40), and the
   Clerk subject linked (`Store::provision_clerk_user`, the same code `sign_in_clerk` runs). An
-  account that already has the subject is found again; one with the same **verified** primary email
-  is linked. An unverified primary email is never used: the account is created without an email,
-  and a later `user.updated` sets it once Clerk has verified it.
+  account that already has the subject is found again. Any other account is never linked: a new
+  subject gets a new account, and its **verified** primary email moves to it from an account that
+  held it (`email_taken_from`, [above](#who-a-clerk-sign-in-becomes)). An unverified primary email
+  is never used: the account is created without an email, and a later `user.updated` sets it once
+  Clerk has verified it.
 - **`user.updated`** applies `banned`, `locked` or `deprovisioned` as account suspension,
   revoking every Lake
   session, API/static token and device for the linked account, including token descendants.
@@ -152,12 +167,15 @@ account is disabled.
   revoked credentials stay revoked. Any suspended Clerk subject linked to the account keeps it
   suspended; a deletion stays permanent. State is kept before provisioning,
   and the security update commits before a profile conflict can refuse an email change. An
-  identical current delivery can retry unfinished provisioning/profile work. Linking a suspended
-  subject to an existing account revokes that account's credentials before any later unban.
+  identical current delivery can retry unfinished provisioning/profile work. A suspended subject
+  provisioned with an existing account's address gets its own suspended account and leaves the
+  other alone. Accounts linked to several subjects before lake#920 keep the rule that any
+  suspended subject suspends the account.
   `deprovisioned` is optional for older payloads; a present value must be boolean.
   It also sets the verified primary email and the display name (first and last name, else
-  the username) of the account linked to the subject. It never links or relinks an account. An
-  email another account has is refused.
+  the username) of the account linked to the subject. It never links or relinks an account. A
+  verified email another account holds moves to this one, with the old holder's password named
+  by it revoked (lake#920).
 - **`user.deleted`** disables the linked account (`users.disabled_at`) and revokes every session,
   token and device of it in one transaction. It also withdraws its agent launches and schedules,
   removes task credentials and leases, and prevents queued tasks from being claimed (lake#951,
@@ -233,7 +251,8 @@ webhooks after the migration cutoff.
 **Verify:** `ctest --test-dir build -R 'ClerkWebhook'` (with `LAKE_TEST_DB_URI` set). It covers
 Svix's documented signature vector, a wrong secret, a tampered body, a changed id, old and future
 timestamps and a replayed `svix-id`; on both stores, `user.created` giving the same account as a
-first sign-in (and a later sign-in reaching it), linking by verified email only, `user.updated`,
+first sign-in (and a later sign-in reaching it), a new subject never linked by email but taking
+its verified address (`ClerkWebhooks.AUserCreatedWithAnExistingEmailGetsItsOwnAccountAndTheAddress`), `user.updated`,
 and `user.deleted` disabling the account with its session no longer working; and the route's `404`
 without the secret, `401` to a forged delivery and `200` creating the account.
 
@@ -273,8 +292,9 @@ The Clerk instance needs:
   through Clerk. The API enforces it (lake#1098): in the `lake` pool `sign_up_password`,
   `sign_in_password`, `verify_mfa` and `recover_with_code` answer `403 forbidden` under Clerk, by
   the same rule `viewer` reports (`lake_pool_password_sign_in`). A password account could otherwise
-  be registered under someone's email before their first Clerk sign-in links to it (LSR-011,
-  lake#920). The per-environment table is in
+  be registered under someone's email before their first Clerk sign-in. Since lake#920 (LSR-011)
+  a first Clerk sign-in never links to such an account anyway: it gets a new account and takes the
+  address ([who a Clerk sign-in becomes](#who-a-clerk-sign-in-becomes)). The per-environment table is in
   [`../deployment/users.md`](../deployment/users.md#what-the-pages-say-about-sign-up).
 
 ### The instance lake.oramadev.net uses
@@ -297,7 +317,8 @@ curl -s https://<host>/sign-in | grep data-clerk-publishable-key
 
 `Clerk.*` covers the key parsing, template-token verification (wrong audience, issuer, signer,
 expiry and tampering are refused), managed-key minting, and the sign-in contract on both stores
-(create, repeat, link by email, refuse without an identity). `HttpServer.Clerk*` covers the pages,
+(create, repeat, a second subject or an operator-made account with the same email never adopted,
+refuse without an identity). `HttpServer.Clerk*` covers the pages,
 a refused token, logout, and the exchange being absent without Clerk.
 `Clerk.ATemplateTokenWithANullNameOrEmailVerifies`, `Clerk.ARefusedTokenSaysWhyAndSummarizesWithoutPersonalClaims`
 and `HttpServer.ClerkExchangeAcceptsANamelessPersonAndLogsWhyATokenWasRefused` pin lake#1115: the
@@ -308,9 +329,10 @@ needs a real Clerk instance: sign in at `/sign-in` with an invited address and c
 `/repositories` with a `lake_session` cookie.
 
 `Stores/ClerkRevocation.*` runs signed session events, bans, locks, Directory Sync deprovisioning, ordered unban/unlock,
-pre-exchange delivery, old-template replay, token descendants, provisioning retries and suspended
-account linking, a suspended account's email recovery queueing no mail, and a delayed ban after
-another subject's newer profile on memory and PostgreSQL stores.
+pre-exchange delivery, old-template replay, token descendants, provisioning retries, a suspended
+subject with an existing address getting its own account, subjects with one address never sharing
+an account, a password account for the address never adopted and its password and email
+recovery ending with the address (lake#920), on memory and PostgreSQL stores.
 `Stores/ClerkRevocation.SessionEventsEndOnlyBrowserSessions` pins lake#1163: each of the three
 session events ends the browser bound to its Clerk session (and unbound browsers) while another
 browser, keys made in the ended browser itself, API keys and their descendants, MCP keys and their

@@ -70,8 +70,11 @@ suspension and a persistent account-wide revocation watermark, with `clerk_revoc
 `0103_clerk_session_binding` (lake#1163): each Clerk browser session's Clerk session id, so a
 session event ends only that browser, with `clerk_session_binding_guard`; and `0104_app_restarts`
 (lake#1228): the generation an app's last restart wrote, which the operator puts on the pod template
-([web apps](web-apps.md#restart)), with `app_restarts_guard`.
-session event ends only that browser, with `clerk_session_binding_guard`; and
+([web apps](web-apps.md#restart)), with `app_restarts_guard`; and
 `0105_agent_model_prices` (lake#1230): the gpt-6.x and long-context model token rates, with
-`agent_model_prices_guard`.
+`agent_model_prices_guard`; `0107_order_email_confirmation` (lake#1000): when an order form's
+contact email was confirmed, with `order_email_confirmation_guard`; `0108_retained_usage`
+(lake#988): a deleted workspace's unbilled usage, kept as quantities so its bill still counts it,
+with `retained_usage_guard`; and `0109_principal_ids` (lake#872): the database checks every user's
+and organization's `taap_id` is a TAAP id, with `principal_ids_guard`.
 [Schema](schema.md#authentication-attempts-migration-0098_authentication_attempts) describes shared password/MFA attempt budgets (lake#966).

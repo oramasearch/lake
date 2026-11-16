@@ -450,7 +450,118 @@ std::vector<std::string> agent_launch_scopes_for(const nlohmann::json& agent) {
             }
         }
     }
-    return agent_launch_scopes_for(skills);
+    std::vector<std::string> scopes = agent_launch_scopes_for(skills);
+    for (std::string& area : dataset_work_area_scopes(agent)) {
+        scopes.push_back(std::move(area));
+    }
+    return scopes;
+}
+
+std::optional<std::string> canonical_dataset(std::string_view id) {
+    std::size_t split = id.find('/');
+    if (split == std::string_view::npos) {
+        split = id.find('.');
+    }
+    std::string database = split == std::string_view::npos ? std::string("datasets")
+                                                           : std::string(id.substr(0, split));
+    std::string name =
+        split == std::string_view::npos ? std::string(id) : std::string(id.substr(split + 1));
+    const auto plain = [](std::string_view part) {
+        return !part.empty() && std::ranges::all_of(part, [](unsigned char c) {
+            return std::isalnum(c) != 0 || c == '_' || c == '-';
+        });
+    };
+    if (!plain(database) || !plain(name)) {
+        return std::nullopt;
+    }
+    return database + "/" + name;
+}
+
+std::vector<std::string> dataset_work_area_scopes(const nlohmann::json& agent) {
+    const auto area = agent.find("work_area");
+    if (area == agent.end() || !area->is_object() ||
+        area->value("kind", std::string()) != "dataset") {
+        return {};
+    }
+    std::vector<std::string> scopes;
+    const nlohmann::json detail = area->value("detail", nlohmann::json());
+    bool malformed = !detail.is_string();
+    std::string_view rest = detail.is_string() ? detail.get_ref<const std::string&>() : "";
+    while (!malformed && !rest.empty()) {
+        const std::size_t comma = rest.find(',');
+        std::string_view item = rest.substr(0, comma);
+        rest = comma == std::string_view::npos ? std::string_view() : rest.substr(comma + 1);
+        while (!item.empty() && std::isspace(static_cast<unsigned char>(item.front())) != 0) {
+            item.remove_prefix(1);
+        }
+        while (!item.empty() && std::isspace(static_cast<unsigned char>(item.back())) != 0) {
+            item.remove_suffix(1);
+        }
+        if (item.empty()) {
+            continue;
+        }
+        const auto canonical = canonical_dataset(item);
+        if (!canonical) {
+            malformed = true;
+            break;
+        }
+        const std::string scope = std::string(dataset_work_area_scope) + *canonical;
+        if (std::ranges::find(scopes, scope) == scopes.end()) {
+            scopes.push_back(scope);
+        }
+    }
+    if (malformed || scopes.empty()) {
+        // A dataset work area that names nothing usable confines the run to nothing.
+        scopes = {std::string(dataset_work_area_scope)};
+    }
+    // A confined run still reads its own definition: the repository and pinned revision its
+    // record names, and nothing else of that repository's history.
+    const auto definition = agent.find("definition");
+    if (definition != agent.end() && definition->is_object() &&
+        definition->value("source", std::string()) == "lake") {
+        const nlohmann::json repository = definition->value("repository_id", nlohmann::json());
+        const nlohmann::json revision = definition->value("revision", nlohmann::json());
+        if (repository.is_string() && revision.is_string() &&
+            !repository.get_ref<const std::string&>().empty() &&
+            !revision.get_ref<const std::string&>().empty()) {
+            scopes.push_back(std::string(agent_definition_scope) + repository.get<std::string>() +
+                             "@" + revision.get<std::string>());
+        }
+    }
+    return scopes;
+}
+
+std::optional<std::pair<std::string, std::string>>
+agent_definition_source(const std::vector<std::string>& scopes) {
+    for (const std::string& scope : scopes) {
+        if (!scope.starts_with(agent_definition_scope)) {
+            continue;
+        }
+        const std::string rest = scope.substr(agent_definition_scope.size());
+        const std::size_t at = rest.rfind('@');
+        if (at == std::string::npos || at == 0 || at + 1 == rest.size()) {
+            return std::nullopt;
+        }
+        return std::pair{rest.substr(0, at), rest.substr(at + 1)};
+    }
+    return std::nullopt;
+}
+
+std::optional<std::vector<std::string>> dataset_work_area(const std::vector<std::string>& scopes) {
+    std::optional<std::vector<std::string>> area;
+    for (const std::string& scope : scopes) {
+        if (!scope.starts_with(dataset_work_area_scope)) {
+            continue;
+        }
+        if (!area) {
+            area.emplace();
+        }
+        const std::string dataset = scope.substr(dataset_work_area_scope.size());
+        if (!dataset.empty()) {
+            area->push_back(dataset);
+        }
+    }
+    return area;
 }
 
 } // namespace lake::control

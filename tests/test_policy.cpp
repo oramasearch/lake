@@ -93,6 +93,101 @@ TEST(Policy, InheritsDownTheGraphAndStopsAtACut) {
     EXPECT_EQ(local->source_object_id, graph.cut);
 }
 
+// LSR-118 (lake#985): a decision made for an agent's credential is confined to its account and
+// workspace, whatever the person it acts for may reach elsewhere.
+TEST(Policy, AConfinedDecisionAllowsOnlyObjectsInsideItsAccountAndWorkspace) {
+    PolicyGraph graph;
+    const std::string reader = "taap:1:ed25519:reader";
+    graph.grant(reader, graph.customer, "read");
+    graph.grant(reader, graph.cut, "read");
+    const auto other_customer = graph.store.create_policy_object(
+        NewPolicyObject{"customer", "customer-2", {}, "admin", "r8", true});
+    ASSERT_TRUE(other_customer);
+    graph.grant(reader, other_customer->id, "read");
+
+    AuthorizationCache unconfined;
+    auto elsewhere =
+        lake::control::authorize(graph.store, reader, other_customer->id, "read", unconfined);
+    ASSERT_TRUE(elsewhere);
+    EXPECT_TRUE(elsewhere->allowed) << "the person may read the other account";
+
+    AuthorizationCache confined;
+    confined.confinement = {.active = true, .customer_id = "customer-1"};
+    auto own = lake::control::authorize(graph.store, reader, graph.team, "read", confined);
+    ASSERT_TRUE(own);
+    EXPECT_TRUE(own->allowed);
+    // Below an inheritance cut, the chain is still followed to the account.
+    auto below = lake::control::authorize(graph.store, reader, graph.below_cut, "read", confined);
+    ASSERT_TRUE(below);
+    EXPECT_TRUE(below->allowed);
+    auto other =
+        lake::control::authorize(graph.store, reader, other_customer->id, "read", confined);
+    ASSERT_TRUE(other);
+    EXPECT_FALSE(other->allowed) << "an agent credential never reaches another account";
+    auto batch = lake::control::authorize_batch(
+        graph.store, reader, {graph.team, other_customer->id}, "read", confined);
+    ASSERT_TRUE(batch);
+    EXPECT_TRUE(batch->at(graph.team).allowed);
+    EXPECT_FALSE(batch->at(other_customer->id).allowed);
+    // A fresh cache for a re-check keeps the confinement.
+    AuthorizationCache fresh = lake::control::fresh_cache_like(confined);
+    auto rechecked =
+        lake::control::authorize(graph.store, reader, other_customer->id, "read", fresh);
+    ASSERT_TRUE(rechecked);
+    EXPECT_FALSE(rechecked->allowed);
+
+    // Bound to a workspace, a repository that cannot be shown to belong to it is outside.
+    AuthorizationCache in_workspace;
+    in_workspace.confinement = {
+        .active = true, .customer_id = "customer-1", .workspace_id = "workspace-1"};
+    auto unproven =
+        lake::control::authorize(graph.store, reader, graph.repository, "read", in_workspace);
+    ASSERT_TRUE(unproven);
+    EXPECT_FALSE(unproven->allowed);
+    auto account = lake::control::authorize(graph.store, reader, graph.team, "read", in_workspace);
+    ASSERT_TRUE(account);
+    EXPECT_TRUE(account->allowed) << "objects above any repository are the account's";
+
+    // A credential whose row could not be read is confined to nothing.
+    AuthorizationCache nothing;
+    nothing.confinement = {.active = true};
+    auto none = lake::control::authorize(graph.store, reader, graph.team, "read", nothing);
+    ASSERT_TRUE(none);
+    EXPECT_FALSE(none->allowed);
+}
+
+// LSR-118 (lake#985): the reads a library agent's task may carry leave out secrets, credentials
+// and identity material, and keep the workspace's data.
+TEST(Policy, LibraryAgentReadsLeaveOutSecretsAndCredentials) {
+    Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    std::set<std::string> allowed;
+    for (const auto& capability : registry.list()) {
+        if (lake::api::library_agent_may_read(*capability)) {
+            allowed.insert(capability->name);
+            EXPECT_TRUE(capability->kind == lake::api::CapabilityKind::Read ||
+                        capability->action == "read")
+                << capability->name << " is not a read";
+        }
+    }
+    for (const char* withheld : {"read_secret",
+                                 "list_secrets",
+                                 "secret_metadata",
+                                 "list_secret_mounts",
+                                 "list_sessions",
+                                 "list_devices",
+                                 "list_sso_providers",
+                                 "scim_list_users",
+                                 "create_token"}) {
+        EXPECT_FALSE(allowed.contains(withheld)) << withheld;
+    }
+    for (const char* kept : {"get_repository", "repository_file", "repository_tree"}) {
+        if (registry.find(kept)) {
+            EXPECT_TRUE(allowed.contains(kept)) << kept;
+        }
+    }
+}
+
 // lake#929: a moved drive folder's object takes its new parent's grants and loses its old one's;
 // only a path object moves, and never under itself.
 TEST(Policy, APathObjectMovesUnderAnotherParent) {

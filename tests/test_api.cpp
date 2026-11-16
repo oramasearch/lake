@@ -6573,6 +6573,82 @@ TEST(Drive, HistoryAuthorizesTheNodeAtEveryRevisionItReads) {
         << "both sides are the shared folder Bob may read";
 }
 
+// LSR-108 (lake#975): a path object that does not inherit cuts its folder off from the
+// repository's grants for every read of repository content, as it does for Drive. A repository
+// reader without a grant on the cut neither reads the folder's files nor sees them in the tree,
+// and cannot read the repository whole; a grant there gives both back.
+TEST(Drive, RepositoryReadsHonourRestrictedFolders) {
+    Surface surface;
+    RepositoryFixtureStore repositories;
+    surface.ctx.sync_store = &repositories;
+    const auto owner = surface.call(
+        "create_user", {{"taap_id", "taap:1:ed25519:cut-owner"}, {"display_name", "Owner"}});
+    ASSERT_TRUE(owner.ok);
+    const auto customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", owner.value["id"]}, {"name", "cut-reads"}});
+    ASSERT_TRUE(customer.ok);
+    const auto repository = surface.call("create_repository",
+                                         {{"customer_id", customer.value["id"]},
+                                          {"workspace_id", surface.workspace(customer.value["id"])},
+                                          {"name", "drive"}});
+    ASSERT_TRUE(repository.ok);
+    const std::string repository_id = repository.value["id"];
+    const auto object = surface.store.find_policy_object("repository", repository_id);
+    ASSERT_TRUE(object);
+    // The fixture's `shared` folder is restricted: its object does not inherit.
+    const auto restricted =
+        surface.store.create_policy_object({"path",
+                                            repository_id + ":22222222222222222222222222222222",
+                                            object->id,
+                                            "admin",
+                                            "test",
+                                            false});
+    ASSERT_TRUE(restricted);
+    const std::string reader = "taap:1:ed25519:cut-reader";
+    ASSERT_TRUE(surface.store.create_grant({reader, object->id, "read", "test", "admin", "test"}));
+    surface.ctx.operator_credential = false;
+    surface.ctx.acting_identity = reader;
+
+    const json restricted_file{
+        {"id", repository_id}, {"ref", "main"}, {"path", "shared/readme.md"}};
+    EXPECT_EQ(surface.call("repository_file", restricted_file).error.code, "unauthorized");
+    EXPECT_TRUE(surface
+                    .call("repository_file",
+                          {{"id", repository_id}, {"ref", "main"}, {"path", "readme.md"}})
+                    .ok);
+    // A path the tree does not hold cannot be ruled out of the cut.
+    EXPECT_EQ(surface
+                  .call("repository_file",
+                        {{"id", repository_id}, {"ref", "main"}, {"path", "./shared/readme.md"}})
+                  .error.code,
+              "unauthorized");
+    const auto paths_of = [&] {
+        std::set<std::string> paths;
+        const auto tree = surface.call("repository_tree", {{"id", repository_id}, {"ref", "main"}});
+        EXPECT_TRUE(tree.ok) << tree.error.message;
+        for (const auto& item : tree.value["items"]) {
+            paths.insert(item["path"].get<std::string>());
+        }
+        return paths;
+    };
+    auto listed = paths_of();
+    EXPECT_TRUE(listed.contains("readme.md"));
+    EXPECT_FALSE(listed.contains("shared"));
+    EXPECT_FALSE(listed.contains("shared/readme.md"));
+    EXPECT_EQ(surface.call("export_repository", {{"repository_id", repository_id}}).error.code,
+              "unauthorized");
+
+    // A grant on the restricted folder gives it back.
+    ASSERT_TRUE(
+        surface.store.create_grant({reader, restricted->id, "read", "test", "admin", "test"}));
+    surface.ctx.authorization_cache = {};
+    EXPECT_TRUE(surface.call("repository_file", restricted_file).ok);
+    listed = paths_of();
+    EXPECT_TRUE(listed.contains("shared"));
+    EXPECT_TRUE(listed.contains("shared/readme.md"));
+}
+
 // LSR-015 (lake#924): a Drive write advances its branch, so the branch's rules apply to it as to a
 // push. main allows only another person to push: an otherwise authorized writer's upload, restore
 // and conflict resolution are refused and nothing is committed.
@@ -6618,6 +6694,72 @@ TEST(Drive, WritesFollowTheBranchRules) {
                                        {"change_id", "change-1"}});
     EXPECT_FALSE(restore.ok);
     EXPECT_FALSE(repositories.restored);
+}
+
+// lake#1030: a folder's administrator creates path objects only for what lies in that folder.
+// The node an object names must be in the repository's tree, and its parent must be the object of
+// the nearest folder above the node that has one: a sibling, a file above the folder, a node
+// deeper than its own folder object, a branch rule or an unknown node is refused.
+TEST(Drive, CreateObjectPlacesAPathObjectByTheTree) {
+    Surface surface;
+    RepositoryFixtureStore repositories;
+    surface.ctx.sync_store = &repositories;
+    const auto owner = surface.call(
+        "create_user", {{"taap_id", "taap:1:ed25519:tree-owner"}, {"display_name", "Owner"}});
+    ASSERT_TRUE(owner.ok);
+    const auto customer = surface.call("create_customer",
+                                       {{"customer_type", "individual"},
+                                        {"user_id", owner.value["id"]},
+                                        {"name", "tree-objects"}});
+    ASSERT_TRUE(customer.ok);
+    const auto repository = surface.call("create_repository",
+                                         {{"customer_id", customer.value["id"]},
+                                          {"workspace_id", surface.workspace(customer.value["id"])},
+                                          {"name", "drive"}});
+    ASSERT_TRUE(repository.ok);
+    const std::string repository_id = repository.value["id"];
+    const auto object = surface.store.find_policy_object("repository", repository_id);
+    ASSERT_TRUE(object);
+    // The fixture's tree: readme.md (1111…), shared/ (2222…), shared/readme.md (3333…).
+    const std::string top_file = repository_id + ":11111111111111111111111111111111";
+    const std::string folder_node = repository_id + ":22222222222222222222222222222222";
+    const std::string inner_file = repository_id + ":33333333333333333333333333333333";
+    const auto folder = surface.store.create_policy_object(
+        {"path", folder_node, object->id, "admin", "test", true});
+    ASSERT_TRUE(folder);
+    const std::string folder_admin = "taap:1:ed25519:folder-admin";
+    ASSERT_TRUE(
+        surface.store.create_grant({folder_admin, folder->id, "admin", "test", "admin", "test"}));
+    const std::string repository_admin = "taap:1:ed25519:repository-admin";
+    ASSERT_TRUE(surface.store.create_grant(
+        {repository_admin, object->id, "admin", "test", "admin", "test"}));
+    surface.ctx.operator_credential = false;
+    const auto create =
+        [&](const std::string& who, const std::string& id, const std::string& parent) {
+            surface.ctx.acting_identity = who;
+            surface.ctx.authorization_cache = {};
+            return surface.call("create_object",
+                                {{"object_type", "path"},
+                                 {"external_id", id},
+                                 {"parent_id", parent},
+                                 {"inherit", false}});
+        };
+    // The folder administrator cannot claim a file beside the folder under it.
+    EXPECT_EQ(create(folder_admin, top_file, folder->id).error.code, "invalid_input");
+    // Nor a node that is not in the tree, nor a branch rule's id.
+    EXPECT_EQ(create(folder_admin, repository_id + ":not-a-node", folder->id).error.code,
+              "invalid_input");
+    EXPECT_EQ(create(repository_admin, repository_id + ":refs/heads/main", object->id).error.code,
+              "invalid_input");
+    // The repository's administrator places the file inside the folder only under the folder.
+    EXPECT_EQ(create(repository_admin, inner_file, object->id).error.code, "invalid_input");
+    EXPECT_EQ(surface.store.find_policy_object("path", top_file).error().code, "not_found");
+    // What lies in the folder is the folder administrator's to protect.
+    const auto inner = create(folder_admin, inner_file, folder->id);
+    EXPECT_TRUE(inner.ok) << inner.error.message;
+    // The repository's administrator protects the file at the top, under the repository.
+    const auto top = create(repository_admin, top_file, object->id);
+    EXPECT_TRUE(top.ok) << top.error.message;
 }
 
 TEST(Drive, MutationChecksTheLockedTreeAndRestoreChecksMain) {

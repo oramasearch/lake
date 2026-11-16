@@ -348,11 +348,47 @@ std::expected<std::pair<json, json>, ApiResult> normalized_app_env(const json& e
     return std::pair{std::move(plain), std::move(secret_refs)};
 }
 
+// The secret references of the calling Application Agent turn's confirmed proposal (lake#891):
+// `{KEY: "lake-secret://…"}` from `context.confirmed_proposal.app.env` of the turn's request, a
+// record lake wrote in its workspace (lake#374) after agent_turn verified the proposal against the
+// one the person reviewed (`proposal_sha256`) and checked these references with the person's own
+// credential (check_proposed_app_secret_references). Empty for any other caller, and when the
+// turn's request cannot be read.
+liquid::runtime::task<json> confirmed_secret_references(const ApiContext& context) {
+    constexpr std::string_view prefix = "task:";
+    if (context.credential_kind != "agent_task" || context.store == nullptr ||
+        !context.credential_session_id.starts_with(prefix)) {
+        co_return json::object();
+    }
+    auto task = context.store->get_agent_task(context.credential_session_id.substr(prefix.size()));
+    if (!task || task->agent != "agent-application" ||
+        !control::settled(co_await load_agent_task_content(context, *task))) {
+        co_return json::object();
+    }
+    const json proposal = task->body.value("context", json::object()).is_object()
+                              ? task->body.at("context").value("confirmed_proposal", json())
+                              : json();
+    if (!proposal.is_object() || !proposal.value("app", json()).is_object()) {
+        co_return json::object();
+    }
+    const auto env = normalized_app_env(proposal.at("app").value("env", json::object()));
+    co_return env ? env->second : json::object();
+}
+
 // Each secret reference must name a mount of the app's workspace that the caller may read, and a
 // live secret with that field. Checked with the caller's own credential (get_secret_mount and
 // read_secret, each audited in the mount's workspace); the value read is never kept or answered.
-liquid::runtime::task<std::optional<ApiResult>> check_secret_references(
-    const json& secret_refs, const std::string& workspace_id, ApiContext& context) {
+//
+// A confirmed Application Agent turn holds no secret read (lake#891). A reference its confirmed
+// proposal carries under the same key (`confirmed`, from confirmed_secret_references) was checked
+// with the person's credential when they confirmed it, so here lake checks only, server-side, that
+// the mount still exists and belongs to the app's workspace. Any other reference the turn sends is
+// checked with its own credential, and refused.
+liquid::runtime::task<std::optional<ApiResult>>
+check_secret_references(const json& secret_refs,
+                        const std::string& workspace_id,
+                        ApiContext& context,
+                        const json& confirmed = json::object()) {
     if (secret_refs.empty()) {
         co_return std::nullopt;
     }
@@ -364,6 +400,24 @@ liquid::runtime::task<std::optional<ApiResult>> check_secret_references(
         const std::string path = "/env/" + key + "/secret";
         if (!reference) {
             co_return ApiResult::failure("invalid_input", "not a Lake secret reference", path);
+        }
+        if (confirmed.is_object() && confirmed.contains(key) && confirmed.at(key) == stored) {
+            if (context.store == nullptr) {
+                co_return ApiResult::failure("store_unavailable",
+                                             "no store to check secret references");
+            }
+            const auto route = context.store->get_secret_mount_route(reference->mount_id);
+            if (!route) {
+                co_return ApiResult::failure(
+                    "not_found", "no secret mount " + reference->mount_id, path);
+            }
+            if (route->workspace_id != workspace_id) {
+                co_return ApiResult::failure(
+                    "invalid_input",
+                    "the secret mount belongs to another workspace than the app",
+                    path);
+            }
+            continue;
         }
         ApiContext inner = context;
         inner.audit_details = json::object();
@@ -670,6 +724,19 @@ json deployment_properties() {
 
 } // namespace
 
+liquid::runtime::task<std::optional<ApiResult>> check_proposed_app_secret_references(
+    const json& app, const std::string& workspace_id, ApiContext& context) {
+    const auto env = normalized_app_env(app.value("env", json::object()));
+    if (!env) {
+        co_return env.error();
+    }
+    auto checked = co_await check_secret_references(env->second, workspace_id, context);
+    if (!checked) {
+        co_return ApiResult::failure("store_error", checked.error().message);
+    }
+    co_return std::move(*checked);
+}
+
 void register_web_app_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_apps",
@@ -830,8 +897,14 @@ void register_web_app_capabilities(Registry& registry) {
             if (!env) {
                 co_return env.error();
             }
+            // A confirmed Application Agent turn's references were checked as the person when
+            // they confirmed its proposal (lake#891).
+            json confirmed = json::object();
+            if (!env->second.empty() && context.credential_kind == "agent_task") {
+                confirmed = co_await confirmed_secret_references(context);
+            }
             auto checked = co_await check_secret_references(
-                env->second, input.at("workspace_id").get<std::string>(), context);
+                env->second, input.at("workspace_id").get<std::string>(), context, confirmed);
             if (!checked) {
                 co_return ApiResult::failure("store_error", checked.error().message);
             }

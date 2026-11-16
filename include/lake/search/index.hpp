@@ -62,6 +62,12 @@ struct Query {
     // empty, whose indexes on lake's volume it reads); nothing: every space (the operator). A
     // workspace outside them is never lent, opened or rebuilt for this query.
     std::optional<std::set<std::string>> spaces;
+    // An agent credential's confinement (lake#985): while `confined`, each hit's repository is
+    // authorized only inside the account `confined_customer` and, when set, the workspace
+    // `confined_workspace`, as control::AuthorizationConfinement decides.
+    bool confined = false;
+    std::string confined_customer;
+    std::string confined_workspace;
 };
 
 struct Hit {

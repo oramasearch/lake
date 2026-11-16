@@ -85,6 +85,10 @@ struct OrderSheet {
     // Abuse limits on the anonymous form: orders a client address may send an hour, and in all.
     int orders_per_client_per_hour = 5;
     int orders_per_hour = 60;
+    // Per-recipient limits (lake#1000): orders that may name one contact email in 24 hours, and
+    // one email domain in an hour, whoever sends them. Each order form mails its address once.
+    int orders_per_email_per_day = 3;
+    int orders_per_domain_per_hour = 20;
 
     const OrderOffer* find_offer(std::string_view id) const;
     const OrderProvider* find_provider(std::string_view id) const;
@@ -144,10 +148,25 @@ bool order_status_token_matches(std::string_view key,
 
 // Who is due an email about the order's current state (docs/api/orders.md#email): support for
 // submitted, paid and failed; the customer for submitted, paid, ready and failed; each only when
-// not yet told about this state.
+// not yet told about this state. An order form whose contact email is not confirmed (lake#1000)
+// is due one email only, the customer's confirmation, until it is sent.
 std::vector<std::string> order_email_recipients_due(const control::CloudOrder& order);
+// The state an email to `recipient` tells, recorded once it is delivered: the order's state, or
+// `confirm` for the confirmation an unconfirmed order form's address gets (lake#1000).
+std::string order_email_state(const control::CloudOrder& order, std::string_view recipient);
+
+// The token in an order form's confirmation link (lake#1000): HMAC-SHA-256 under `key` over the
+// order id, distinct from the status token, base64url. The link works for
+// `order_confirmation_max_age_seconds` after the order was sent.
+inline constexpr int order_confirmation_max_age_seconds = 7 * 86400;
+std::string order_confirmation_token(std::string_view key, std::string_view order_id);
+bool order_confirmation_token_matches(std::string_view key,
+                                      std::string_view order_id,
+                                      std::string_view token);
 // The email `recipient` (support or customer) gets about the order's current state: every field
-// and the order id, and the status link for the customer. Plain text.
+// and the order id, and the status link for the customer. Plain text. To an unconfirmed order
+// form's address it is the confirmation (lake#1000): Lake's words, the order id and `status_url`,
+// which is then the confirmation link, and nothing else of the order.
 Email order_email(const OrderSheet& sheet,
                   const Regions& regions,
                   const ResendSettings& settings,

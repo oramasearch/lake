@@ -403,6 +403,14 @@ public:
     mcp_exported_dispatch(const std::string& workspace_id) override;
     Result<std::vector<AppTransfer>> app_transfer(const std::string& since_hour) override;
     Result<void> add_app_transfer(const AppTransfer& row) override;
+    Result<void> retain_workspace_usage(const RetainedUsageSet& set,
+                                        const std::vector<RetainedUsagePoint>& points) override;
+    Result<void> add_retained_usage(const RetainedUsagePoint& point) override;
+    Result<std::vector<RetainedUsagePoint>> retained_usage(const std::string& customer_id,
+                                                           std::int64_t from_ms,
+                                                           std::int64_t to_ms) override;
+    Result<std::vector<RetainedUsageSet>>
+    retained_usage_sets(const std::string& customer_id) override;
     Result<BillingPlan> put_billing_plan(const BillingPlan& plan) override;
     Result<Invoice> create_invoice(const Invoice& invoice) override;
     Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) override;
@@ -466,6 +474,10 @@ public:
     apply_cloud_order_subscription(const CloudOrderSubscriptionEvent& event) override;
     Result<std::vector<CloudOrder>> claim_cloud_order_emails(int limit, int lease_seconds) override;
     Result<void> record_cloud_order_email(const CloudOrderEmailOutcome& outcome) override;
+    Result<CloudOrder> confirm_cloud_order_email(const std::string& id,
+                                                 int max_age_seconds) override;
+    Result<CloudOrderRecipientCounts>
+    count_cloud_order_recipients(const std::string& email) override;
     Result<std::vector<CloudOrderEvent>> unaudited_cloud_order_events(int limit) override;
     Result<void> mark_cloud_order_events_audited(const std::vector<std::int64_t>& ids) override;
     Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
@@ -580,6 +592,12 @@ public:
                                       const std::string& subject) override;
     // provision_clerk_user under the lock.
     Result<ClerkUserProvisioned> clerk_user_locked(const ClerkIdentity&);
+    // Clears a Clerk-verified address from any other account holding it (lake#920); answers
+    // that account's id, or empty.
+    std::string take_verified_email_locked(const std::string& email,
+                                           const std::string& keep_user_id);
+    // Whether a user (any pool) or organization already has this principal id (lake#872).
+    bool principal_id_taken_locked(const std::string& taap_id) const;
     Result<AccountIdentity> account_identity(const std::string& user_id) override;
     Result<ManagedKey> managed_key(const std::string& user_id) override;
     Result<void> create_identity_link_challenge(const IdentityLinkChallenge&) override;
@@ -750,6 +768,8 @@ private:
     // By (workspace, connection).
     std::map<std::pair<std::string, std::string>, McpConnectionDispatch> mcp_connection_dispatch_;
     std::map<std::pair<std::string, std::string>, AppTransfer> app_transfer_; // (hour, app)
+    std::map<std::string, RetainedUsageSet> retained_usage_sets_;             // by workspace
+    std::vector<RetainedUsagePoint> retained_usage_;
     std::vector<Invoice> invoices_;
     std::map<std::pair<std::string, std::string>, std::string> billing_provider_customers_;
     std::set<std::pair<std::string, std::string>> payment_events_;
@@ -769,6 +789,8 @@ private:
     std::vector<CloudOrder> cloud_orders_;
     std::vector<CloudOrderEvent> cloud_order_events_;
     std::map<std::string, std::chrono::system_clock::time_point> cloud_order_email_due_;
+    // When each order was created, for its confirmation expiry and the recipient limits.
+    std::map<std::string, std::chrono::system_clock::time_point> cloud_order_created_;
     void cloud_order_event_locked(const std::string& id,
                                   const std::string& from,
                                   const std::string& to,

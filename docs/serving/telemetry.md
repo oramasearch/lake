@@ -35,7 +35,7 @@ The exported metric families are:
   `lake_balance_accounts`: the prepaid balance's refresh by the store root's owner
   ([billing](../api/billing.md#charges), lake#1114)
 - `lake_cloud_orders_total{offer,path}`, `lake_cloud_orders_refused_total{reason}` (`honeypot`,
-  `rate`, `size`) and `lake_cloud_order_emails_total{recipient,outcome}` (`sent`, `failed`): the
+  `rate`, `size`, `recipient`, `domain`) and `lake_cloud_order_emails_total{recipient,outcome}` (`sent`, `failed`): the
   apex order sheet's orders and their email ([orders](../api/orders.md#metrics), lake#831). The
   log lines `cloud_order_email_waiting`, `cloud_order_email_disabled`, `cloud_order_email_failed`,
   `cloud_order_checkout_failed` and `cloud_order_not_recorded` carry the order id and the reason,

@@ -342,14 +342,20 @@ TEST(PrincipalIds, NoCreationPathAcceptsTheOperatorIdentity) {
     const ApiResult registered = surface.call("register_sso_provider", provider);
     ASSERT_TRUE(registered.ok) << registered.error.message;
 
+    // lake#872: a SCIM client never chooses the identity: the `taap_id` it sends is ignored and
+    // the account takes a managed key Lake minted.
     const ApiResult scim = surface.call("upsert_scim_user",
                                         {{"provider_id", registered.value.at("id")},
                                          {"external_id", "scim-admin"},
                                          {"display_name", "Operator"},
                                          {"taap_id", "admin"},
                                          {"active", true}});
-    EXPECT_FALSE(scim.ok);
-    EXPECT_EQ(scim.error.code, "invalid_input");
+    ASSERT_TRUE(scim.ok) << scim.error.message;
+    const auto provisioned = surface.store.get_user(scim.value.at("user_id"));
+    ASSERT_TRUE(provisioned);
+    EXPECT_NE(provisioned->taap_id, "admin");
+    EXPECT_TRUE(lake::control::valid_principal_id(provisioned->taap_id));
+    EXPECT_EQ(surface.store.account_identity(provisioned->id)->key, "managed");
 
     const auto jit = surface.store.sign_in_sso({registered.value.at("id"),
                                                 "https://oidc.attacker.example",
@@ -361,6 +367,58 @@ TEST(PrincipalIds, NoCreationPathAcceptsTheOperatorIdentity) {
                                                 json::object()});
     ASSERT_FALSE(jit);
     EXPECT_EQ(jit.error().code, "invalid_input");
+}
+
+// lake#872: one principal id names one person or organization. A new user, organization, SCIM
+// user or just-in-time SSO user cannot take an identity another user or organization holds, or it
+// would inherit that principal's grants and name.
+TEST(PrincipalIds, NoCreationPathTakesAnIdentityAnotherPrincipalHolds) {
+    SsoSurface surface;
+    const std::string held = "taap:1:ed25519:held-by-an-organization";
+    const auto organization = surface.store.create_organization({held, "Holder", ""});
+    ASSERT_TRUE(organization) << organization.error().message;
+    const auto user = surface.store.create_user({held, "", "Same identity"});
+    ASSERT_FALSE(user);
+    EXPECT_EQ(user.error().code, "conflict");
+    const auto person = surface.store.create_user({"taap:1:ed25519:a-person", "", "Person"});
+    ASSERT_TRUE(person) << person.error().message;
+    const auto twin = surface.store.create_organization({"taap:1:ed25519:a-person", "Twin", ""});
+    ASSERT_FALSE(twin);
+    EXPECT_EQ(twin.error().code, "conflict");
+
+    json provider =
+        provider_input(organization->id, "collide", "oidc", "https://oidc.collide.example");
+    provider["jit_provisioning"] = true;
+    const ApiResult registered = surface.call("register_sso_provider", provider);
+    ASSERT_TRUE(registered.ok) << registered.error.message;
+    const std::string provider_id = registered.value.at("id");
+    lake::control::NewScimUser scim{
+        provider_id, "scim-twin", "", "Twin", held, true, json::object()};
+    const auto scim_user = surface.store.upsert_scim_user(scim);
+    ASSERT_FALSE(scim_user);
+    EXPECT_EQ(scim_user.error().code, "conflict");
+    lake::control::SsoIdentity jit{provider_id,
+                                   "https://oidc.collide.example",
+                                   "jit-twin",
+                                   "",
+                                   "Twin",
+                                   "",
+                                   "browser",
+                                   json::object()};
+    jit.custodial_taap_id = held;
+    const auto signed_in = surface.store.sign_in_sso(jit);
+    ASSERT_FALSE(signed_in);
+    EXPECT_EQ(signed_in.error().code, "conflict");
+
+    // Only the operator names an organization's identity; an account administrator cannot.
+    surface.context.operator_credential = false;
+    surface.context.acting_identity = "taap:1:ed25519:an-account-admin";
+    const ApiResult named = surface.call(
+        "create_organization",
+        {{"display_name", "Named"}, {"taap_id", "taap:1:ed25519:someone-a-grant-names"}});
+    EXPECT_FALSE(named.ok);
+    EXPECT_TRUE(named.error.code == "forbidden" || named.error.code == "unauthorized")
+        << named.error.code;
 }
 
 // lake#872: a grant or membership someone writes names a TAAP identity: never `admin`, never lake's

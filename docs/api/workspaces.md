@@ -269,6 +269,13 @@ list it, with `counts` (`repositories`, `live_repositories`, `tombstoned_reposit
   `<space>/<name>` and `<space>/cache/<name>` for each of its apps and each image its builds target
   (state `tagged`), unless an app or build of another live workspace of the account uses the name.
 
+**Its usage is kept first** where billing is on
+([lake#988](https://github.com/oramasearch/lake/issues/988),
+[billing.md](billing.md#a-deleted-workspaces-usage)): before the transaction, lake reads the usage
+no issued invoice has billed yet from the workspace Zetta and writes it, as quantities only, to
+`retained_usage`. If that read or write fails, `delete_workspace` answers `store_unavailable` and
+nothing is deleted.
+
 **One PostgreSQL transaction** tombstones the repositories, deletes the apps, cancels the builds,
 deletes the workspace's image routes, sets the workspace's desired state to `deleted` with its
 services `absent`, and records the

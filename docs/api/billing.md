@@ -49,6 +49,58 @@ go in postgres... usage records go in zetta workspace."*
   reaches PostgreSQL. Decision 55 dropped the central usage history; nothing here restores it.
 - Every billing capability is policy-checked and audited in the **central** log (decision 52,
   [audit.md](audit.md#which-log)): billing is account configuration, not a workspace's data.
+- **A deleted workspace's unbilled usage** is the one other exception: it is kept centrally, as
+  quantities only, from the moment the workspace is deleted ([below](#a-deleted-workspaces-usage)).
+
+## A deleted workspace's usage
+
+[LSR-121](https://github.com/oramasearch/lake/issues/988): deleting a workspace removes its Zetta,
+and with it the usage a bill reads. Before, `usage_over_time` read only live workspaces, so an
+account that deleted a workspace before its month was invoiced was never billed for what it had
+used, and its model tokens stopped counting against its monthly limit.
+
+**What lake keeps** (migration `0108_retained_usage`, guard `retained_usage_guard`, billing on
+only): before the cascade, `delete_workspace` flushes the usage recorder, reads every usage dimension
+of the workspace through `usage_over_time`'s reader, a point a day, from the first day no issued
+invoice covers (the month after the account's latest invoice that is not void; else the month the
+workspace was created; at most 400 days back, the series' retention) through today, and writes it
+in one transaction as `retained_usage` rows (`source = 'rollup'`) with one `retained_usage_sets` row
+naming the window. Each row holds a dimension, the labels billing and the breakdowns read (`kind`,
+`class`, `model`; never an object id), a bucket start and a quantity: content-free, multitenancy
+like the invoice lines (decision 56).
+
+**Fail closed.** If the workspace's usage cannot be read in full (any reader answers `measured:
+false`), or the rows cannot be written, `delete_workspace` answers `store_unavailable` and deletes
+nothing; retry once the workspace Zetta answers. The synchronous handler, which skips the read,
+refuses a live workspace's deletion with `conflict` where billing is on, so no path deletes a
+workspace without retaining its usage first. With billing off (`LAKE_BILLING`, an enterprise
+install) nothing is retained and deletion is unchanged.
+
+**What reads it.** Whenever no workspace is chosen, `usage_over_time` adds each deleted workspace's
+retained rows as if read from its Zetta, so `bill_preview`, `issue_invoice`, the balance's refresh,
+`usage_limits` and the model gateway's monthly `model_tokens` limit all count it. The deleted
+workspace is listed in the reading's `workspaces` with `deleted: true`; when its rows cannot be
+read it is `measured: false`, and the bill waits, as for any unread workspace. A workspace deleted
+within the window that has no rows (deleted before migration 0108, or while billing was off) is
+named in `not_measured`.
+
+**Values still in flight.** A counter value the usage recorder held when the workspace was deleted
+is added to its rows (`source = 'late'`, one row an hour) at the next flush instead of being
+dropped. A repeated `delete_workspace` of a live workspace (a retry after a refusal) writes the
+rollup again and replaces the first; `late` rows are kept. A deleted workspace's deletion that the
+owner loop resumes needs no read: its usage was retained before its cascade committed.
+
+**Verify.** `Billing.ADeletedWorkspacesUsageStaysOnTheUnissuedBill` (`tests/test_billing.cpp`) deletes a
+workspace that has used calls and checks this month's preview is unchanged, a later recorder value
+is added, a repeated delete changes nothing, and a deletion whose usage cannot be read is refused;
+`RetainedUsage.ARollupIsReplacedAndLateValuesAddUp` covers the store. On a Lake:
+
+```sh
+psql "$LAKE_CONTROL_DB_URI" -c "SELECT workspace_id, from_at, to_at, retained_at FROM retained_usage_sets"
+```
+
+**Operator.** The operator must vendor the schema and select `retained_usage_guard` before the image
+rolls; without the tables a Lake with billing on refuses every workspace deletion.
 
 ## The enterprise switch
 

@@ -406,7 +406,9 @@ struct ClerkUserState {
 struct ClerkUserProvisioned {
     std::string user_id, taap_id;
     bool created = false; // a new account, with a managed key and a personal customer
-    bool linked = false;  // the subject was linked to an account found by its verified email
+    // A new subject is never linked to an existing account by email (lake#920, LSR-011): the
+    // id of the Lake-pool account its verified address was taken from, or empty.
+    std::string email_taken_from;
 };
 // Which key an account signs with (lake#762, docs/api/identity.md#your-own-identity). `managed`:
 // lake minted and holds the key. `own`: the person's own liquid identity, either registered at
@@ -741,6 +743,23 @@ struct CloudOrder {
     int email_attempts = 0;
     std::string email_error, email_retry_at;
     CloudOrderEntitlement entitlement;
+    // When the person who sent an order form proved they read its contact email by following the
+    // confirmation link (lake#1000, migration 0107); empty until then. Until it is set, the only
+    // email the order sends is the confirmation itself (docs/api/orders.md#email).
+    std::string contact_email_confirmed_at;
+};
+// Whether mail about the order may go to its contact email and reach support: a checkout order's
+// mail is only about a payment Stripe took from the person at that address (paid, ready, failed),
+// and an order form's address must be confirmed first (lake#1000).
+inline bool cloud_order_contact_confirmed(const CloudOrder& order) {
+    return order.path == "checkout" || !order.contact_email_confirmed_at.empty();
+}
+// How many orders name an address and its domain lately (lake#1000): the per-recipient limits on
+// the anonymous order form. `email_last_day` compares the whole address without case over the last
+// 24 hours; `domain_last_hour` the part after the last `@` over the last hour.
+struct CloudOrderRecipientCounts {
+    int email_last_day = 0;
+    int domain_last_hour = 0;
 };
 // A new order: `path` checkout starts it in `pending_payment`, order_form in `submitted`.
 struct NewCloudOrder {
@@ -838,6 +857,27 @@ struct AppTransfer {
     std::uint64_t in_bytes = 0;
     std::uint64_t out_bytes = 0;
     std::string observed_at;
+};
+// The usage a deleted workspace consumed and no issued invoice has billed yet, kept centrally
+// before the workspace's records go (migration 0108_retained_usage, lake#988,
+// docs/api/billing.md#a-deleted-workspaces-usage). Content-free: a dimension, the labels billing
+// reads (`kind`, `class`, `model`), a bucket start and a quantity. `source` is `rollup` (what
+// delete_workspace read from the workspace Zetta, one point a day) or `late` (counter values the
+// usage recorder still held when the workspace was deleted, one point an hour, added).
+struct RetainedUsagePoint {
+    std::string workspace_id;
+    std::string source = "rollup";
+    std::string dimension;
+    std::map<std::string, std::string> labels;
+    std::int64_t at_ms = 0;
+    double value = 0;
+    bool gauge = false;
+};
+// One workspace's rollup: the window it covers, [from_ms, to_ms).
+struct RetainedUsageSet {
+    std::string workspace_id, customer_id;
+    std::int64_t from_ms = 0, to_ms = 0;
+    std::string retained_at;
 };
 struct Workspace {
     std::string id, customer_id, name, environment;
@@ -1637,9 +1677,12 @@ struct SsoIdentity {
     std::string subject;
     std::string email;
     std::string display_name;
-    std::string taap_id;
+    std::string taap_id; // the operator's sign_in_sso only; ignored when a managed key is given
     std::string device_name;
     nlohmann::json claims;
+    // The managed key Lake minted for the account a just-in-time sign-in creates (lake#872). Lake
+    // never takes a new account's identity from the browser or the identity provider.
+    std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
 };
 struct ScimUser {
     std::string provider_id;
@@ -1655,9 +1698,12 @@ struct NewScimUser {
     std::string external_id;
     std::string email;
     std::string display_name;
-    std::string taap_id;
+    std::string taap_id; // ignored when a managed key is given (lake#872)
     bool active = true;
     nlohmann::json attributes;
+    // The managed key Lake minted for the account a create makes (lake#872); a SCIM client never
+    // chooses a new account's identity.
+    std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
 };
 struct ScimGroup {
     std::string provider_id;
@@ -2388,6 +2434,19 @@ public:
     // local demos.
     virtual Result<std::vector<AppTransfer>> app_transfer(const std::string& since_hour) = 0;
     virtual Result<void> add_app_transfer(const AppTransfer& row) = 0;
+    // A deleted workspace's unbilled usage (migration 0108, lake#988). retain_workspace_usage
+    // replaces the workspace's `rollup` points and its set in one transaction, so a repeated
+    // delete_workspace writes the same rollup again; `late` points are kept. add_retained_usage
+    // adds one `late` counter value to a workspace that has a set (not_found without one).
+    // retained_usage answers every point of the account's workspaces in [from_ms, to_ms), both
+    // sources; retained_usage_sets every set of the account.
+    virtual Result<void> retain_workspace_usage(const RetainedUsageSet& set,
+                                                const std::vector<RetainedUsagePoint>& points) = 0;
+    virtual Result<void> add_retained_usage(const RetainedUsagePoint& point) = 0;
+    virtual Result<std::vector<RetainedUsagePoint>>
+    retained_usage(const std::string& customer_id, std::int64_t from_ms, std::int64_t to_ms) = 0;
+    virtual Result<std::vector<RetainedUsageSet>>
+    retained_usage_sets(const std::string& customer_id) = 0;
     virtual Result<BillingPlan> put_billing_plan(const BillingPlan& plan) = 0;
     virtual Result<Invoice> create_invoice(const Invoice& invoice) = 0;
     virtual Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) = 0;
@@ -2500,6 +2559,14 @@ public:
     virtual Result<std::vector<CloudOrder>> claim_cloud_order_emails(int limit,
                                                                      int lease_seconds) = 0;
     virtual Result<void> record_cloud_order_email(const CloudOrderEmailOutcome& outcome) = 0;
+    // Records that the order's contact email is confirmed (lake#1000), once: a second call answers
+    // the order unchanged. `expired` when the order was created more than `max_age_seconds` ago and
+    // is not confirmed yet; `not_found` for no such order. The first confirmation is one event
+    // (submitted to submitted, actor lake) in the order's history.
+    virtual Result<CloudOrder> confirm_cloud_order_email(const std::string& id,
+                                                         int max_age_seconds) = 0;
+    virtual Result<CloudOrderRecipientCounts>
+    count_cloud_order_recipients(const std::string& email) = 0;
     // Events not yet in the central audit log, oldest first, and marking them recorded.
     virtual Result<std::vector<CloudOrderEvent>> unaudited_cloud_order_events(int limit) = 0;
     virtual Result<void> mark_cloud_order_events_audited(const std::vector<std::int64_t>& ids) = 0;
@@ -2657,9 +2724,10 @@ public:
                                                             const std::string& origin) = 0;
     virtual Result<IssuedSession> sign_in_passkey(const PasskeyAssertion&) = 0;
     virtual Result<IssuedSession> sign_in_oauth(const OAuthIdentity&) = 0;
-    // Signs in the lake-pool user linked to this Clerk subject. With no link, it links the lake
-    // user with the same email; with neither, it creates the user with the custodial identity
-    // and provisions their personal customer, as password sign-up does.
+    // Signs in the lake-pool user linked to this Clerk subject. With no link, it creates the user
+    // with the custodial identity and provisions their personal customer, as password sign-up
+    // does. It never links an existing account found by email (lake#920): the verified address
+    // moves from any account holding it to the new one.
     virtual Result<IssuedSession> sign_in_clerk(const ClerkIdentity&) = 0;
     // Clerk webhooks (lake#765, docs/api/clerk.md#webhooks).
     // user.created: what a first sign_in_clerk does to the account, without a session. Repeating
@@ -2680,7 +2748,8 @@ public:
                                                const std::string& session_id,
                                                std::int64_t revoked_at) = 0;
     // user.updated: the email (when non-empty) and display name of the account linked to the
-    // subject; not_found when none is linked, conflict when another account has the email.
+    // subject; not_found when none is linked. A verified email another Lake-pool account holds
+    // moves to this one (lake#920).
     virtual Result<std::string> update_clerk_user(const ClerkIdentity&) = 0;
     // user.deleted: disables the account linked to the subject and revokes every session, token
     // and device of it. Withdraws its launches/schedules and invalidates tasks and leases in

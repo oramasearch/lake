@@ -412,15 +412,19 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
     const auto repository_object =
         store->find_policy_object("repository", repository.value.at("id"));
     ASSERT_TRUE(repository_object) << repository_object.error().message;
-    const ApiResult path = call("create_object",
-                                {{"object_type", "path"},
-                                 // Named for the repository it sits in (lake#913).
-                                 {"external_id",
-                                  repository.value.at("id").get<std::string>() + ":node-" + suffix},
-                                 {"parent_id", repository_object->id},
-                                 {"inherit", true}});
-    ASSERT_TRUE(path.ok) << path.error.message;
-    ASSERT_TRUE(call("get_object", {{"id", path.value.at("id")}}).ok);
+    // create_object places a path object from the repository's tree (lake#1030), which this
+    // test has no repository store for; the object is made in the store, as lake makes them.
+    const auto path_object = store->create_policy_object(
+        {"path",
+         // Named for the repository it sits in (lake#913).
+         repository.value.at("id").get<std::string>() + ":node-" + suffix,
+         repository_object->id,
+         "admin",
+         lake::control::new_uuid_v4(),
+         true});
+    ASSERT_TRUE(path_object) << path_object.error().message;
+    const json path{{"id", path_object->id}};
+    ASSERT_TRUE(call("get_object", {{"id", path.at("id")}}).ok);
     ASSERT_TRUE(call("list_objects", {{"parent_id", repository_object->id}}).ok);
 
     const ApiResult grant = call("create_grant",
@@ -429,7 +433,7 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
                                   {"role", "read"}});
     ASSERT_TRUE(grant.ok) << grant.error.message;
     ASSERT_TRUE(call("list_grants", {{"object_id", repository_object->id}}).ok);
-    const ApiResult access = call("effective_access", {{"object_id", path.value.at("id")}});
+    const ApiResult access = call("effective_access", {{"object_id", path.at("id")}});
     ASSERT_TRUE(access.ok) << access.error.message;
     EXPECT_FALSE(access.value.at("items").empty());
 }
