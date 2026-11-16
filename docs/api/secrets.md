@@ -185,8 +185,15 @@ flow: [../deployment/secrets.md](../deployment/secrets.md).
 
 | Capability | Authorization | Input | Result |
 |---|---|---|---|
-| `mint_sealed_secret` | the operator credential only (the Lake's admin bearer); anyone else `unauthorized` before the handler | `recipient` `{cluster, namespace, name, kid, public_key}`, `source` (the `LakeSealedSecret` source unchanged), `attestation?` | `data`: one sealed record per field of the secret; `version` for a `lake` source; `lease` `{id, expires_at}` for a `dynamic` one |
+| `mint_sealed_secret` | the operator credential only (the Lake's admin bearer); anyone else `unauthorized` before the handler | `workspace_id` (the workspace of the app, service or store the Secret is for), `recipient` `{cluster, namespace, name, kid, public_key}`, `source` (the `LakeSealedSecret` source unchanged), `attestation?` | `data`: one sealed record per field of the secret; `version` for a `lake` source; `lease` `{id, expires_at}` for a `dynamic` one |
 
+- **The mount belongs to `workspace_id`, at every delivery.** Before reading anything, lake looks up the
+  mount named by the source and answers `not_found` unless it is in `workspace_id` (lake#950, lake#971).
+  The check is no longer only at the write that named the mount (`check_secret_references`,
+  `create_store`), so a row that names another workspace's mount, however it got there, is never
+  delivered. `workspace_id` is required.
+- **Only to this lake's delivery key.** With no `LAKE_SEALING_PUBLIC_KEY`, every mint answers
+  `unavailable`; lake never seals to a key the caller chose.
 - **`lake` source** `{type: "lake", lake: {mount, name, version?}}`: lake reads the version (the
   current one when `version` is absent) with `read_secret` as the operator. Each field of the secret's
   JSON object becomes one Kubernetes Secret key of the same name (a string as itself, any other JSON

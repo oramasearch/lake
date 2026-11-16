@@ -36,7 +36,9 @@ from the instance's Clerk configuration, orama-operator#541; without it `POST
    written to PostgreSQL (decision 51 keeps the operator on PostgreSQL; the reference is content-free
    desired state).
 4. The operator turns the reference into a `LakeSealedSecret` with a `lake` source and asks lake's
-   `mint_sealed_secret` for it with its own credential (the Lake's admin bearer). Lake reads the
+   `mint_sealed_secret` for it with its own credential (the Lake's admin bearer), naming the
+   workspace of the app, service or store it serves; lake refuses a mount of any other workspace
+   (lake#950, lake#971). Lake reads the
    secret from the workspace Zetta and answers each field **sealed to the cluster's delivery key**
    (X25519, XChaCha20-Poly1305, bound to the target namespace and Secret name;
    [../api/secrets.md](../api/secrets.md#projections)). Only the operator, holding that key's private

@@ -182,6 +182,7 @@ protected:
     json mint_input(json source) const {
         return {{"attestation",
                  {{"type", "kubernetes"}, {"token", "projected"}, {"audiences", {"lake"}}}},
+                {"workspace_id", workspace_id},
                 {"recipient", recipient()},
                 {"source", std::move(source)}};
     }
@@ -380,6 +381,38 @@ TEST_F(MintSealedSecret, AnAppNamesALakeSecretItsWorkspaceHolds) {
     EXPECT_EQ(refused.error.code, "invalid_input");
     EXPECT_EQ(refused.error.path, "/secret");
     EXPECT_EQ(set({{"secret", secret}, {"value", "plain"}}).error.code, "invalid_input");
+}
+
+// Every delivery checks the mount belongs to the workspace the projection is for, not only the
+// write that named it (lake#950, lake#971), and nothing is sealed without this lake's key.
+TEST_F(MintSealedSecret, AMountOfAnotherWorkspaceIsNeverDelivered) {
+    ASSERT_TRUE(
+        call("put_secret",
+             {{"mount_id", mount_id}, {"name", "database"}, {"value", {{"password", "pw-1"}}}})
+            .ok);
+    const json source{{"type", "lake"}, {"lake", {{"mount", mount_id}, {"name", "database"}}}};
+    ASSERT_TRUE(call("mint_sealed_secret", mint_input(source)).ok);
+
+    const std::string elsewhere = workspaces.create(customer_id, "elsewhere");
+    json foreign = mint_input(source);
+    foreign["workspace_id"] = elsewhere;
+    const ApiResult refused = call("mint_sealed_secret", foreign);
+    EXPECT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "not_found");
+    const json dynamic{{"type", "dynamic"},
+                       {"dynamic", {{"engine", mount_id}, {"role", "reader"}, {"ttl", "1h"}}}};
+    json foreign_dynamic = mint_input(dynamic);
+    foreign_dynamic["workspace_id"] = elsewhere;
+    EXPECT_EQ(call("mint_sealed_secret", foreign_dynamic).error.code, "not_found");
+
+    json unnamed = mint_input(source);
+    unnamed.erase("workspace_id");
+    EXPECT_FALSE(call("mint_sealed_secret", unnamed).ok);
+
+    context.sealing_public_key.clear();
+    const ApiResult keyless = call("mint_sealed_secret", mint_input(source));
+    EXPECT_FALSE(keyless.ok);
+    EXPECT_EQ(keyless.error.code, "unavailable");
 }
 
 } // namespace
