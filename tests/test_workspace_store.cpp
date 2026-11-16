@@ -530,7 +530,10 @@ TEST(WorkspaceStoreOwner, ALostLeaseRefusesWritesAndTheSuccessorKeepsEveryAcknow
     static_cast<void>(liquid::runtime::block_on(stale->close()));
 
     std::shared_ptr<ZettaStoreOwner> successor_owner;
-    auto successor = liquid::runtime::block_on(liquid::store::open(root, owned(rig, successor_owner)));
+    auto successor_options = owned(rig, successor_owner);
+    const auto successor_backend =
+        std::static_pointer_cast<ZettaObjectBackend>(successor_options.backend);
+    auto successor = liquid::runtime::block_on(liquid::store::open(root, successor_options));
     ASSERT_TRUE(successor) << successor.error().message;
     for (const auto& [id, contents] : acknowledged) {
         auto read_back = liquid::runtime::block_on(successor->get(id));
@@ -538,12 +541,20 @@ TEST(WorkspaceStoreOwner, ALostLeaseRefusesWritesAndTheSuccessorKeepsEveryAcknow
         EXPECT_EQ(*read_back, contents);
     }
 
-    // A write the remote refuses as fenced revokes the grant at once, before any renewal.
+    // A write the remote refuses as fenced is refused before any renewal. With liquid v0.3.0 this
+    // small put sends nothing: the backend holds it until the operation's sync (lake#527), which
+    // lake runs before it answers (make_durable), so the refusal arrives there. A refusal of a
+    // write liquid sent revokes the grant; one at the sync marks the backend failed. Either makes
+    // the store unusable, so lake closes it and opens it again.
     rig.zetta->take_over(rig.endpoint, "third");
-    const auto fenced = liquid::runtime::block_on(successor->put(random_bytes(9000, 61)));
+    auto fenced = liquid::runtime::block_on(successor->put(random_bytes(9000, 61)));
+    if (fenced) {
+        auto synced = liquid::runtime::block_on(successor_backend->make_durable());
+        fenced = synced ? fenced : std::unexpected(synced.error());
+    }
     ASSERT_FALSE(fenced);
     EXPECT_EQ(fenced.error().code, liquid::errc::locked);
-    EXPECT_TRUE(successor_owner->lost());
+    EXPECT_TRUE(successor_owner->lost() || successor_backend->failed());
     static_cast<void>(liquid::runtime::block_on(successor->close()));
 }
 
