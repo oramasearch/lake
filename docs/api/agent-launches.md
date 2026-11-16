@@ -270,6 +270,15 @@ leave them for retry. Authority ends immediately, even while the workspace is un
 with `ctest --test-dir build --timeout 600 -R
 'DisablingAUserRevokesAgentDelegation|DisabledUsersCannotDriveAgentOrMcpStreams'` on both stores.
 
+**Deleting a workspace stops what acts for it (lake#1311).** `delete_workspace` withdraws the
+workspace's launches and schedules (desired `absent`, generation bumped, a launch's `stop_reason`
+*Stopped: the workspace was deleted.*, each id notified on `lake_services`) and its agent tasks
+(desired `absent`, credential and lease cleared, an unfinished task `Failed` with the same notice) in
+the cascade's own transaction ([workspaces.md](workspaces.md#deletion)). A `lal.`, `las.` or `lat.`
+credential leaked from that workspace stops authenticating at the commit; the same person's runs in
+their other workspaces keep going. Verify with `ctest --test-dir build -R
+DeletingAWorkspaceStopsItsAgentCredentials` (`Stores/AgentLeases`, memory and Postgres).
+
 **An agent can be started by a workspace stream, not only a schedule (lake#677).** A Python agent's
 stream triggers name topics of its workspace Zetta (`list_streams`, Train → Streams); each message
 published to one after the trigger is set starts one `job` launch of the agent, with the message as

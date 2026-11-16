@@ -744,6 +744,8 @@ Result<WorkspaceDeletion> InMemoryStore::delete_workspace_cascade(
     }
     // Its services and apps are deleted, so they mount nothing (lake#666).
     drop_workspace_store_mounts_locked(row->id);
+    // Nothing acts for a deleted workspace any more (lake#1311).
+    withdraw_workspace_agents_locked(row->id);
     workspace_deletions_.push_back(deletion);
     return deletion;
 }
@@ -5798,6 +5800,41 @@ void InMemoryStore::revoke_agent_delegations_locked(const std::string& user_id) 
             if (task.phase.empty() || task.phase == "Running") {
                 task.phase = "Failed";
                 task.message = "Stopped: the account that requested this task is disabled.";
+                task.finished_at = now;
+            }
+        }
+    }
+}
+
+// lake#1311: as revoke_agent_delegations_locked does for a disabled account, a deleted
+// workspace's launches, schedules and tasks are withdrawn and their credentials stop.
+void InMemoryStore::withdraw_workspace_agents_locked(const std::string& workspace_id) {
+    const auto now = now_iso8601();
+    const std::string notice = "Stopped: the workspace was deleted.";
+    for (auto& launch : agent_launches_) {
+        if (launch.workspace_id == workspace_id && launch.desired == "present") {
+            launch.desired = "absent";
+            launch.stop_reason = notice;
+            launch.updated_at = now;
+            ++launch.generation;
+        }
+    }
+    for (auto& schedule : agent_cron_schedules_) {
+        if (schedule.workspace_id == workspace_id && schedule.desired == "present") {
+            schedule.desired = "absent";
+            schedule.updated_at = now;
+            ++schedule.generation;
+        }
+    }
+    for (auto& task : agent_tasks_) {
+        if (task.workspace_id == workspace_id && task.desired == "present") {
+            task.desired = "absent";
+            task.credential_sha256.clear();
+            task.lease_until.clear();
+            task.retry_notice_pending = false;
+            if (task.phase.empty() || task.phase == "Running") {
+                task.phase = "Failed";
+                task.message = notice;
                 task.finished_at = now;
             }
         }

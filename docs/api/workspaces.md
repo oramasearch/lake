@@ -267,7 +267,14 @@ list it, with `counts` (`repositories`, `live_repositories`, `tombstoned_reposit
   (lake#383, state `routed`), whose manifests and
   tags go with its Zetta; and what the instance registry still holds from before that split,
   `<space>/<name>` and `<space>/cache/<name>` for each of its apps and each image its builds target
-  (state `tagged`), unless an app or build of another live workspace of the account uses the name.
+  (state `tagged`), unless an app or build of another live workspace of the account uses the name;
+- everything acting for it (lake#1311): its agent launches and schedules (desired `absent`,
+  generation bumped, a launch's `stop_reason` "Stopped: the workspace was deleted.", each named on
+  `lake_services` for the operator) and its agent tasks (desired `absent`, the credential digest and
+  lease cleared, an unfinished task `Failed` with the same notice). Their `lal.`, `las.` and `lat.`
+  credentials stop authenticating at the commit, as they do when the person who started them is
+  disabled ([agent-launches.md](agent-launches.md)). These are not listed in `deletion` or
+  `counts`.
 
 **Its usage is kept first** where billing is on
 ([lake#988](https://github.com/oramasearch/lake/issues/988),
@@ -278,7 +285,7 @@ nothing is deleted.
 
 **One PostgreSQL transaction** tombstones the repositories, deletes the apps, cancels the builds,
 deletes the workspace's image routes, sets the workspace's desired state to `deleted` with its
-services `absent`, and records the
+services `absent`, withdraws its agent launches, schedules and tasks, and records the
 deletion with everything it destroyed in `workspace_deletions` (migration
 `0065_workspace_deletions`). The operator reads only the desired state, as before.
 
