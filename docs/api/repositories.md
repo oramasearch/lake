@@ -35,7 +35,7 @@ with lake#341, and its content moves with lake#380.
 | `create_repository` | action | `customer_id`, `workspace_id`, `name`, `description?`, `visibility?` | `400 invalid_input` at `/workspace_id` (missing, unknown or deleted workspace), at `/customer_id` (another account's workspace, or an unknown customer), bad name, bad visibility; `409 conflict` (name taken within the customer); with a description, `workspace_not_ready` while the workspace cannot be written, and nothing is created |
 | `rename_repository` | action | `id`, `name` | `404 not_found`, `409 conflict` (tombstoned or name taken) |
 | `transfer_repository` | action | `id`, `customer_id` | always `409 conflict` at `/customer_id`: a repository stays in its account and workspace; export it and import it into the other account's workspace. `404 not_found` |
-| `set_repository_visibility` | action | `id`, `visibility` | `400 invalid_input`, `404 not_found`, `409 conflict` (tombstoned) |
+| `set_repository_visibility` | action, `admin` on the repository | `id`, `visibility` | `400 invalid_input`, `401 unauthorized` (a caller without `admin`, a writer included), `404 not_found`, `409 conflict` (tombstoned) |
 | `delete_repository` | action | `id` | `404 not_found`, `409 conflict` (already tombstoned) |
 | `repository_refs` | read | `id` | `{items: [{name, change}]}`, from the liquid repository |
 | `repository_tree` | read | `id`, `ref` | `{items: [{path, kind, blob, mode, node_id, size, stored_size}]}` |
@@ -137,6 +137,14 @@ An anonymous caller may call `list_repositories` and the repository read capabil
 repository marked `public`. The repository list omits every other visibility level. A direct read
 of a private or organization repository returns `unauthorized`; the HTML routes turn that result
 into a sign-in redirect. A signed-in caller continues through the repository policy object.
+
+Changing who may read is an administrator's decision (lake#1310): `set_repository_visibility`
+needs `admin` on the repository, held through a grant on it or inherited from its account (an
+owner or administrator of the account), or the operator credential. A `write` grant is not enough:
+a writer can push and file issues but is answered `unauthorized`, and the visibility stays as it
+was. This matches `set_branch_protection` and `replicate_repository`, which also need `admin`.
+`Repositories.OnlyAnAdministratorChangesVisibility` proves a writer is refused and the repository
+stays private, and that an administrator of the repository still makes it public.
 
 ## Lifecycle
 

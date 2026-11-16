@@ -8437,6 +8437,61 @@ TEST(Repositories, LifecycleUsesPolicyAndAuditRegistry) {
         "unauthorized");
 }
 
+// lake#1310: publishing a repository is an administrator's decision. A writer can push but is
+// refused when it tries to change who may read, and the repository stays private.
+TEST(Repositories, OnlyAnAdministratorChangesVisibility) {
+    Surface surface;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult created =
+        surface.call("create_repository",
+                     {{"customer_id", customer.value["id"]},
+                      {"workspace_id", surface.workspace(customer.value["id"])},
+                      {"name", "private-work"}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string repository_id = created.value["id"];
+    ASSERT_EQ(created.value["visibility"], "private");
+
+    const auto object = surface.store.find_policy_object("repository", repository_id);
+    ASSERT_TRUE(object);
+    const std::string writer = "taap:1:ed25519:writer";
+    const std::string administrator = "taap:1:ed25519:repository-admin";
+    ASSERT_TRUE(surface.store.create_grant(
+        {writer, object->id, "write", "attestation-writer", "admin", "request-writer"}));
+    ASSERT_TRUE(surface.store.create_grant({administrator,
+                                            object->id,
+                                            "admin",
+                                            "attestation-repository-admin",
+                                            "admin",
+                                            "request-repository-admin"}));
+    surface.ctx.operator_credential = false;
+
+    surface.ctx.acting_identity = writer;
+    // The write grant is real: the writer may rename the repository.
+    ASSERT_TRUE(
+        surface.call("rename_repository", {{"id", repository_id}, {"name", "still-private"}}).ok);
+    const ApiResult refused = surface.call("set_repository_visibility",
+                                           {{"id", repository_id}, {"visibility", "public"}});
+    EXPECT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "unauthorized");
+    const auto unchanged = surface.store.get_repository(repository_id);
+    ASSERT_TRUE(unchanged);
+    EXPECT_EQ(unchanged->visibility, "private");
+
+    surface.ctx.acting_identity = administrator;
+    const ApiResult published = surface.call("set_repository_visibility",
+                                             {{"id", repository_id}, {"visibility", "public"}});
+    ASSERT_TRUE(published.ok) << published.error.message;
+    EXPECT_EQ(published.value["visibility"], "public");
+    const auto changed = surface.store.get_repository(repository_id);
+    ASSERT_TRUE(changed);
+    EXPECT_EQ(changed->visibility, "public");
+}
+
 TEST(ModelSync, MultiGigabyteRevisionsDeduplicateAndResumePull) {
     TemporarySyncRoot temporary;
     auto control = std::make_shared<lake::control::InMemoryStore>();

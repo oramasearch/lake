@@ -143,6 +143,10 @@ There is no visibility control on the page; it is a capability.
   `{"id": "<repository id>", "visibility": "public"}`.
 - MCP: `set_repository_visibility`.
 
+Changing visibility needs `admin` on the repository: an administrator of the repository or of
+the account that owns it. Someone with only `write` is refused with `unauthorized`, and the
+repository keeps its visibility (lake#1310).
+
 Making a repository public lets anyone read its files, changes, issues, reviews and releases
 without signing in. Webhooks, branch protection evidence and the Drive view still need a signed-in
 reader.
@@ -203,7 +207,8 @@ Grants themselves are covered in [Grants and Effective Access](/docs/access).
 | Read a public repository | nothing; signed out works |
 | Read a private or organization repository | `read` on it (a grant, an organization role or ownership) |
 | Create a repository | `write` on the account that owns the workspace |
-| Push, rename, change visibility, delete | `write` on the repository |
+| Push, rename, delete | `write` on the repository |
+| Change visibility | `admin` on the repository or its account |
 | See effective access | `share` on the repository |
 
 A signed-out visitor who opens a private repository's address is sent to sign in, and is never told
