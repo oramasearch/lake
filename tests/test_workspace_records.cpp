@@ -887,9 +887,9 @@ TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {
     };
 
     // Without a key, speech-to-text is refused and nothing is written.
-    const std::string speech = test_wav(1.0);
-    const std::string silence = test_wav(2.0);
-    const std::string audio = "data:audio/webm;codecs=opus;base64," + test_base64_encode(speech);
+    const std::string speech = lake::test_wav(1.0);
+    const std::string silence = lake::test_wav(2.0);
+    const std::string audio = "data:audio/webm;codecs=opus;base64," + lake::test_base64_encode(speech);
     const auto unconfigured =
         t.call(first, "transcribe", in(first, 0, {{"name", "memo"}, {"audio_base64", audio}}));
     EXPECT_EQ(unconfigured.error.code, "not_supported");
@@ -928,7 +928,7 @@ TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {
     EXPECT_EQ(heard[0].mime, "audio/webm");
     EXPECT_EQ(heard[0].language, "en");
     const auto failing = t.call(
-        first, "transcribe", in(first, 0, {{"name", "x.wav"}, {"audio_base64", test_base64_encode(silence)}}));
+        first, "transcribe", in(first, 0, {{"name", "x.wav"}, {"audio_base64", lake::test_base64_encode(silence)}}));
     EXPECT_EQ(failing.error.code, "engine_error");
     // A text file is refused before it reaches the speech service (lake#594).
     const std::size_t sent_before = heard.size();

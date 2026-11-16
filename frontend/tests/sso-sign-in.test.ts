@@ -15,7 +15,7 @@ const signIn = readFileSync(new URL("../src/pages/account/SignInPage.tsx", impor
 const signUp = readFileSync(new URL("../src/pages/account/SignUpPage.tsx", import.meta.url), "utf8");
 const page = readFileSync(new URL("../src/pages/account/SsoSignIn.tsx", import.meta.url), "utf8");
 // The page's code, without its opening comment (which explains what it leaves out).
-const code = page.replace(/^\/\*\*[\s\S]*?\*\//, "");
+const code = page.replace(/^(?:\/\/ SPDX-License-Identifier:[^\n]*\n\s*)?\/\*\*[\s\S]*?\*\//, "");
 
 test("SAML starts at Lake's sign-on URL and keeps only a same-origin return", () => {
     const saml = {provider_id: "sso_123", protocol: "saml", name: "Acme"};

@@ -400,9 +400,19 @@ liquid::runtime::task<BranchProtectionLoad> methodology_protection(ApiContext& c
                                                                    const control::Repository& repository) {
     auto loaded = co_await load_branch_protection(context, repository);
     if (!loaded) {
-        co_return std::unexpected(SyncStoreError{"unavailable", loaded.error().message});
+        co_return BranchProtectionLoad(
+            std::unexpected(SyncStoreError{"unavailable", loaded.error().message}));
     }
     co_return std::move(*loaded);
+}
+
+// The rules methodology_protection read, or `unavailable` when the read itself failed, so a write
+// whose rules could not be read is refused rather than made without them.
+template <typename Awaited> BranchProtectionLoad protection_or_unavailable(Awaited awaited) {
+    if (!awaited) {
+        return std::unexpected(SyncStoreError{"unavailable", awaited.error().message});
+    }
+    return std::move(*awaited);
 }
 
 // `protection`: the repository's branch rules, read by the caller before the write (lake#924).
@@ -1161,12 +1171,13 @@ liquid::runtime::task<ApiResult> create_methodology(const json& input, ApiContex
             co_return created.error();
         }
         repository = *created;
-        auto committed = commit_files(context,
-                                      repository,
-                                      folder,
-                                      changes,
-                                      "Create the methodology " + probe.manifest->name,
-                                      co_await methodology_protection(context, repository));
+        auto committed = commit_files(
+            context,
+            repository,
+            folder,
+            changes,
+            "Create the methodology " + probe.manifest->name,
+            protection_or_unavailable(co_await methodology_protection(context, repository)));
         if (!committed) {
             co_return committed.error();
         }
@@ -1348,12 +1359,13 @@ liquid::runtime::task<ApiResult> update_methodology(const json& input, ApiContex
             {std::string(control::methodology_manifest_file), manifest.dump(2) + "\n"});
     }
     if (!changes.empty()) {
-        auto committed = commit_files(context,
-                                      *repository,
-                                      folder,
-                                      changes,
-                                      input.value("message", std::string("Edit the methodology")),
-                                      co_await methodology_protection(context, *repository));
+        auto committed = commit_files(
+            context,
+            *repository,
+            folder,
+            changes,
+            input.value("message", std::string("Edit the methodology")),
+            protection_or_unavailable(co_await methodology_protection(context, *repository)));
         if (!committed) {
             co_return committed.error();
         }
@@ -1508,13 +1520,13 @@ liquid::runtime::task<ApiResult> duplicate_methodology(const json& input, ApiCon
     if (!repository) {
         co_return repository.error();
     }
-    auto committed =
-        commit_files(context,
-                     *repository,
-                     "",
-                     changes,
-                     "Duplicate " + id + " as " + name,
-                     co_await methodology_protection(context, *repository));
+    auto committed = commit_files(
+        context,
+        *repository,
+        "",
+        changes,
+        "Duplicate " + id + " as " + name,
+        protection_or_unavailable(co_await methodology_protection(context, *repository)));
     if (!committed) {
         co_return committed.error();
     }
