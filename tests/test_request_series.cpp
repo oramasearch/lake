@@ -85,6 +85,20 @@ TEST(RequestLog, NamesTheRouteAndCapturedIdsNeverTheRawPath) {
     EXPECT_FALSE(lake::api::request_log_capability_route("/repository"));
 }
 
+// Requests are counted and logged by the method's standard name, any other method as `other`
+// (lake#1315).
+TEST(RequestLog, NamesStandardMethodsAndEveryOtherMethodOther) {
+    for (const std::string_view method :
+         {"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH"}) {
+        EXPECT_EQ(lake::api::request_method_label(method), method);
+    }
+    for (const std::string_view method : {"get", "XMADEUP", "PROPFIND", "", "GET "}) {
+        EXPECT_EQ(lake::api::request_method_label(method), std::string_view("other")) << method;
+    }
+    const std::string long_method(8192, 'X');
+    EXPECT_EQ(lake::api::request_method_label(long_method), std::string_view("other"));
+}
+
 TEST(RequestRecorder, AggregatesPerWorkspaceAndFlushesOnlyOnFlush) {
     auto store = std::make_shared<lake::control::InMemoryStore>();
     lake::test::RecordWorkspaces workspaces(store);

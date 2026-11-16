@@ -29,6 +29,7 @@
 
 #include "lake/api/web_ui.hpp"
 #include "lake/control/store.hpp"
+#include "request_log.hpp"
 
 namespace lake::api {
 
@@ -57,7 +58,7 @@ inline RouteFailure route_failure(const boost::http::route_params& route,
                                   std::string message) {
     RouteFailure failure;
     failure.route = std::string(pattern);
-    failure.method = std::string(route.req.method_text());
+    failure.method = std::string(request_method_label(route.req.method_text()));
     failure.path = std::string(route.url.path());
     failure.request_id = route.req.count("x-request-id") == 0
                              ? control::new_uuid_v4()

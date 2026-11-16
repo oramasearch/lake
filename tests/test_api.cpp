@@ -3282,6 +3282,46 @@ TEST(TelemetryHttp, MetricsRequireExistingAuthAndUsePrometheusContentType) {
     server.stop();
 }
 
+// A method HTTP does not define is counted as `other` (lake#1315): a client that sends a new
+// made-up method on every request must not add a new metric series each time.
+TEST(TelemetryHttp, UnknownMethodsAreCountedAsOtherNotByTheirText) {
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "test-node";
+    options.admin_token = "test-token";
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    // A target that is not a URL is refused before any route (`bad_url`), which counts and logs
+    // the request with its method.
+    const std::vector<std::string> made_up = {"XMADEUP1", "XMADEUP2", "XMADEUP3", "get"};
+    for (const std::string& method : made_up) {
+        const std::string answered = http_request(server.port(), method, "/%zz", "", "text/plain");
+        EXPECT_NE(answered.find(" 400 "), std::string::npos) << method << "\n" << answered;
+    }
+
+    const std::string served = http_get(server.port(), "/metrics", "Bearer test-token");
+    ASSERT_NE(served.find(" 200 "), std::string::npos) << served;
+    for (const std::string& method : made_up) {
+        const std::string label = "method=\"" + method + "\"";
+        EXPECT_EQ(served.find(label), std::string::npos) << served;
+    }
+    std::size_t other_series = 0;
+    std::size_t at = 0;
+    const std::string other_counter = "lake_http_requests_total{method=\"other\"";
+    while ((at = served.find(other_counter, at)) != std::string::npos) {
+        ++other_series;
+        at += other_counter.size();
+    }
+    ASSERT_EQ(other_series, 1U) << served;
+    const std::size_t line_start = served.find(other_counter);
+    const std::size_t line_end = served.find('\n', line_start);
+    const std::string line = served.substr(line_start, line_end - line_start);
+    EXPECT_EQ(line, other_counter + ",route=\"bad_url\",status=\"400\"} 4");
+    server.stop();
+}
+
 // The browser session is the API's: password sign-up through /v1 sets the HttpOnly lake_session
 // cookie, which then reads sessions and enrolls MFA. The former server pages are the web app's, so
 // a request that is not a browser's gets the 404 (lake#561).

@@ -29,6 +29,10 @@ The exported metric families are:
   request refused before any route (`workers_busy`, `store_root_wait`, `bad_url`, `bad_request`,
   `header_too_large`)
   is also logged and counted in `lake_http_requests_total` with that reason as its route
+
+The `method` label is the request method's standard name (`GET`, `HEAD`, `POST`, `PUT`,
+`DELETE`, `CONNECT`, `OPTIONS`, `TRACE`, `PATCH`), and any other method, a request refused before
+its method was read included, is `other` ([below](#the-method-label)).
 - `lake_balance_refreshes_total`, `lake_balance_refresh_errors_total`, `lake_balance_held_total`
   (a usage read failed and the balance was held), `lake_balance_emails_total{outcome}` (`sent`,
   `failed`), `lake_balance_auto_top_ups_total{outcome}` (`started`, `failed`) and the gauge
@@ -109,7 +113,7 @@ Every completed request writes one JSON object to stdout:
 | Field | Value |
 |---|---|
 | `ts` | RFC 3339 UTC |
-| `method` | the HTTP method |
+| `method` | the HTTP method's standard name, or `other` ([below](#the-method-label)) |
 | `route` | the registered route pattern (`/v1/repositories/:repository_id/sync/pull`, `/:package`, `/v2/:space/:repository/manifests/:reference`), or `unmatched` |
 | `status`, `duration_ms`, `node` | as before |
 | `request_id` | the request's id: the caller's `X-Request-Id` when it is a short token (letters, digits, `-_.:`, at most 128), else the one lake chose; left out otherwise |
@@ -122,6 +126,22 @@ image or file name. A captured value that is not a UUID (`:package`, an OCI `:re
 `:digest`, `:filename`, an ACME `:token`) is left out, and the query string never was logged. A
 request log line therefore carries no customer content. The `handler_exception` line
 ([http.md](http.md#handler-exceptions)) dropped its `path` the same way.
+
+### The method label
+
+A client may send any token as the method. A request refused before any route (`bad_url`,
+`store_root_wait`, `workers_busy`) is counted and logged with it, and a routed request's method is
+recorded too. Each label value Prometheus is given is a new series the process keeps
+until it exits, and every `/metrics` scrape renders all of them, so a client sending a new made-up
+method on every request, without signing in, would grow Lake's memory and its scrape output
+without bound (lake#1315). One helper, `request_method_label` (`src/api/request_log.hpp`), names
+the method for `lake_http_requests_total`, `lake_http_request_duration_seconds`, the request log
+line and the `handler_exception` line: one of the nine methods HTTP defines, compared
+case-sensitively as RFC 9110 does (`get` is not `GET`), or `other`. The client's text is never a
+label or a log field. `TelemetryHttp.UnknownMethodsAreCountedAsOtherNotByTheirText` sends made-up
+methods to a target that is not a URL and finds one `other` series (`route="bad_url"`) and none
+named after them;
+`RequestLog.NamesStandardMethodsAndEveryOtherMethodOther` covers the helper.
 
 Startup is also one JSON object and records `admin_token_set` and `replication_token_set` as `yes`
 or `no`, never either token, and `replication_peers`, the origins replication may pull from. Authorization and cookie values are never logged.
