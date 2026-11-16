@@ -255,7 +255,7 @@ Task browse(ApiContext& context, const json& input) {
     const std::string selected_agent = input.value("agent", "");
     if (input.at("zetta") == "workspace" && requested == "agent-events" && !selected_task.empty()) {
         const auto task = context.store->get_agent_task(selected_task);
-        // Someone else's turn is private to them (LSR-119, lake#986): the same answer as none.
+        // Someone else's turn is private to them (lake#986): the same answer as none.
         if (!task || task->customer_id != input.at("customer_id").get<std::string>() ||
             task->workspace_id != input.at("workspace_id").get<std::string>() ||
             (!context.operator_credential && task->requested_by_user_id != context.acting_user_id)) {
@@ -315,7 +315,7 @@ Task browse(ApiContext& context, const json& input) {
             value["topic"] = requested;
             if (requested == "agent-events") {
                 // A workspace member reads the events of their own turns only: a turn's answer is
-                // the requester's (LSR-119, lake#986). The operator reads every one.
+                // the requester's (lake#986). The operator reads every one.
                 std::map<std::string, bool> mine;
                 const auto own = [&](const std::string& task_id) {
                     if (context.operator_credential) {

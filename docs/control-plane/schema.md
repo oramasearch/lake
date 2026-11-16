@@ -40,7 +40,7 @@ scanned; a write to such a row is refused until it is corrected. Guard `principa
 operator must vendor this schema and select the guard. See
 [principal ids](../api/policy.md#principal-ids-lake870-lake872).
 
-`0108_retained_usage` (lake#988, LSR-121) adds `retained_usage_sets` (one row per deleted
+`0108_retained_usage` (lake#988) adds `retained_usage_sets` (one row per deleted
 workspace: its account and the window `[from_at, to_at)` read) and `retained_usage` (that
 workspace's quantities: `source` `rollup` or `late`, `dimension`, `labels` as a JSON object of at
 most `kind`, `class` and `model`, `at`, `value`, `gauge`; primary key `(workspace_id, source,
@@ -50,7 +50,7 @@ when it cannot; `usage_over_time` adds the rows for deleted workspaces. Additive
 `retained_usage_guard`; the operator must vendor the schema and select the guard before the binary
 rolls. See [billing](../api/billing.md#a-deleted-workspaces-usage).
 
-`0107_order_email_confirmation` (lake#1000, LSR-194): `cloud_orders.contact_email_confirmed_at`,
+`0107_order_email_confirmation` (lake#1000): `cloud_orders.contact_email_confirmed_at`,
 NULL until the person who sent an order form follows its confirmation link; until then the order
 mails its contact email only the confirmation and tells support nothing (a checkout order needs
 none). Order forms mailed before the migration count as confirmed, once. Two indexes serve the
@@ -1574,7 +1574,7 @@ selected, rolls before a lake image that serves coupons, after the one for `0100
 `0106_domain_claims` (lake#949, [`../api/platform.md#custom-domains`](../api/platform.md#custom-domains))
 adds `domain_claims`, one row per custom-domain host an environment has claimed. Multitenancy (which
 environment of which account holds a name), so in the control plane beside workspace routing,
-never in a workspace Zetta (Steve, 2026-11-14).
+never in a workspace Zetta.
 
 - `host`, the primary key: lowercase (the table checks it), 1 to 253 characters. One claim per host
   across every account of this Lake;

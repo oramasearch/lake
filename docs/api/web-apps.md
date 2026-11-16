@@ -126,7 +126,7 @@ nginx.ingress.kubernetes.io/auth-response-headers: X-Orama-User,X-Orama-Space
 
 `GET /apps/authorize` hands the app its session only for a **browser session** (the session cookie
 on the Lake host). A request carrying `Authorization: Bearer`, with or without a cookie, is `403`
-(LSR-208, lake#1058), so no script or tool carries a Lake credential through to a tenant's app host.
+(lake#1058), so no script or tool carries a Lake credential through to a tenant's app host.
 The e2e probes (`tools/e2e/agents.py`) reach an app without any Lake credential: a public app
 answers 2xx, and a private one redirects an anonymous visitor to `/apps/authorize`.
 
@@ -167,7 +167,7 @@ atomically spends that code, returns the identity headers, and sets:
 __Host-lake_app_session=<token>; Path=/; Secure; HttpOnly; SameSite=Lax
 ```
 
-The cookie is always `Secure`, so it always carries the `__Host-` prefix (LSR-115): a sibling
+The cookie is always `Secure`, so it always carries the `__Host-` prefix: a sibling
 host can neither set nor shadow it, and only that name is read.
 
 There is deliberately no `Domain` attribute, so customer app code receives only its own app

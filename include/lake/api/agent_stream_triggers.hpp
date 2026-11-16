@@ -17,7 +17,7 @@ namespace lake::api {
 
 // A stream Lake and its agents write themselves (agent tasks and events, app, build, run-metric and
 // study events, inboxes). No tenant writes one, names one as an MCP connection's topic, or makes one a
-// trigger (LSR-190, lake#996). `name` may carry the "topic:" prefix.
+// trigger (lake#996). `name` may carry the "topic:" prefix.
 [[nodiscard]] bool system_stream_name(std::string_view name);
 
 

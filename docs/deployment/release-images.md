@@ -1,14 +1,14 @@
 # Release images: a release tag is written once, from an approved source
 
-> **Human action: Steve, open.** Turn on tag immutability for `v*` tags of `oramasearch/lake` in
+> **Human action: open.** Turn on tag immutability for `v*` tags of `oramasearch/lake` in
 > Docker Hub (below). Until it is on, `tools/release/publish-release-image.py` is the only guard
-> against a release tag being overwritten. Retiring `.github/workflows/image.yml` is also Steve's
-> call: it is a CI file (lake#994).
+> against a release tag being overwritten. The hosted `.github/workflows/image.yml` is commented out
+> (lake#994).
 
-lake#994 (LSR-188): a release tag such as `oramasearch/lake:v0.8.1` could be written again, and
-nothing tied the bytes under it to an approved source. Decided under Steve's 2026-11-14 delegation:
+lake#994: a release tag such as `oramasearch/lake:v0.8.1` could be written again, and
+nothing tied the bytes under it to an approved source. The fix:
 the path that actually publishes images (the cluster BuildKit build and the registry retag) is
-hardened; `image.yml` is left to Steve.
+hardened; `image.yml` is commented out.
 
 ## The path
 
@@ -42,7 +42,7 @@ digest; for lake, use this script instead, which also checks the source.
 
 ## Human step: tag immutability in Docker Hub
 
-**Who:** Steve (a Docker Hub organization owner). **Status:** open.
+**Who:** a Docker Hub organization owner. **Status:** open.
 
 - **Symptom:** without it, anyone holding the push credential can write `vX.Y.Z` again by hand.
 - **Read-only check:** in Docker Hub, `oramasearch/lake` → *Settings* → *Tag immutability*: it is

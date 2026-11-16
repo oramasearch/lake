@@ -31,7 +31,7 @@ and `workspace_id` and the engine's own fields at the top level, and runs
   named read, and one that names `workspace_act` every named action (`granted_by_scope`). An agent
   turn still acts only through the actions its credential names, by the engine's name or Lake's;
   an agent launch's or schedule's credential through those and the five direct actions a run calls
-  (`check_pipeline`, `start_run`, `generate_dataset`, `decide`, `record_outcome`; LSR-009,
+  (`check_pipeline`, `start_run`, `generate_dataset`, `decide`, `record_outcome`;
   lake#918, [agent-launches.md](agent-launches.md#launches)).
   An app's Zetta token, which may call `workspace_query`, may call the named reads.
 - **Audit:** the event is the capability's name in the workspace's audit, with

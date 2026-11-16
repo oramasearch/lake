@@ -47,7 +47,7 @@ every page and API call is resolved by `context_for` as before.
    one (a page loaded before lake#1163) signs in unbound; any session event of the account ends an
    unbound browser session. No Clerk configuration changes: the default session token exists on
    every instance.
-   **The template token's `azp` must be one of this Lake's origins** (LSR-012, lake#921): its
+   **The template token's `azp` must be one of this Lake's origins** (lake#921): its
    `LAKE_EXTERNAL_ORIGIN`, `https://<LAKE_PUBLIC_HOST>`, an alias, a region's host, the apex, or the
    origin the request reached. Another product that shares the Clerk instance (Cloud v1's dashboard
    did) can mint an `aud: lake` template token in its own pages, and Clerk sets `azp` to that page's
@@ -70,7 +70,7 @@ every page and API call is resolved by `context_for` as before.
    `clerk` and method `clerk`, success or denied, then redirects with the `lake_session` cookie
    (`HttpOnly`, `SameSite=Lax`, `Secure` over HTTPS) to the posted `next` field when it is a
    same-origin path (one leading `/`, never `//` or `/\`, and no control character or backslash
-   anywhere, in the browser and on the server, LSR-184) or a Ship app return
+   anywhere, in the browser and on the server) or a Ship app return
    (`/apps/authorize?app=…&rd=…`), else to the `lake_sign_in_return` app return, else to
    the home (`/`; lake#600, `account_landing` in `http_server.cpp`; it was `/repositories`), which is
    Quickstart since lake#1128

@@ -319,8 +319,8 @@ std::expected<std::string, ApiError> drive_upload_object(const json& input, ApiC
     return location->object.id;
 }
 
-// Whether the caller may `action` the node at `path` as it was at `revision` (LSR-014,
-// lake#923). A history operation reads revisions other than the `ref` its object was resolved
+// Whether the caller may `action` the node at `path` as it was at `revision` (lake#923).
+// A history operation reads revisions other than the `ref` its object was resolved
 // from, and the node a path names can differ between them (a folder renamed away and another
 // made under its name), so each revision it reads is authorized on its own.
 std::optional<ApiResult> authorize_drive_revision(const json& input,

@@ -64,7 +64,7 @@ struct McpStreamPass {
     bool stopped_early = false;
     std::vector<std::string> problems;
 };
-// Bounds on what one outside server can cost a pass (lake#980, LSR-113).
+// Bounds on what one outside server can cost a pass (lake#980).
 struct McpStreamLimits {
     // A pass starts no further connection once this much time has gone; the next pass resumes at
     // the workspace where it stopped, so every workspace is reached in turn.

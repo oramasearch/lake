@@ -441,7 +441,7 @@ image service and is allowed only where Clerk's sign-in is mounted.
 ## The web app's script policy
 
 Every page of the web app (`index.html`, whatever path it answers) carries a policy that limits
-what a script injected into it could do (lake#991, LSR-185), from
+what a script injected into it could do (lake#991), from
 `web_app_content_security_policy` (`include/lake/api/web_app.hpp`), computed from the page as sent:
 
 ```
@@ -515,7 +515,7 @@ browser session."}}` when:
   its `Content-Type` is not `application/json` (parameters such as `charset` are allowed). The
   binary repository sync routes under `/v1/repositories/` are not JSON and are not checked for it.
 
-**Routes that issue a session are checked with or without one** (LSR-110, lake#977). A cross-site
+**Routes that issue a session are checked with or without one** (lake#977). A cross-site
 `POST` carries no `SameSite=Lax` cookie, so the rule above alone would never see a request that
 *creates* a session: a page elsewhere could post the attacker's own credential and sign the
 visitor's browser in as the attacker (login CSRF). `POST /session`, `POST /identity/clerk-session`,
@@ -563,7 +563,7 @@ browser must post to from another origin is a bearer route, never an exemption h
 Two routes take a link instead of a credential, for clients that cannot hold a session: the Hub's
 basic-LFS upload `href` (`PUT /api/lfs/<repository>/<oid>`, [models](../api/models.md)) and a
 tunnel client download (`GET /tunnel-clients/<platform>`, lake#745). Both sign their fields with
-HMAC-SHA-256 under a key derived from `LAKE_INSTANCE_KEK` for this purpose alone (HMAC-SHA-256 of `lake signed link v1`; the instance key itself never signs a link, LSR-266), base64url without padding, carry `expires` (Unix seconds,
+HMAC-SHA-256 under a key derived from `LAKE_INSTANCE_KEK` for this purpose alone (HMAC-SHA-256 of `lake signed link v1`; the instance key itself never signs a link), base64url without padding, carry `expires` (Unix seconds,
 15 minutes ahead) and `signature` in the query, and are checked in constant time
 (`signed_link_signature` and `signed_link_matches`, `src/api/tunnel_clients.cpp`). No new key and no
 new primitive: a new kind of link names itself on its payload's first line, as the tunnel client's

@@ -15,7 +15,7 @@
 
 namespace lake::api {
 
-// The access a repository's own path objects give its paths (LSR-108, lake#975). A path object
+// The access a repository's own path objects give its paths (lake#975). A path object
 // that does not inherit cuts its folder or file off from the repository's grants, and Drive has
 // always decided a path by the nearest object that counts (drive_capabilities.cpp,
 // `drive_location_at`). Every other read of repository content (repository_file,

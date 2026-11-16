@@ -266,7 +266,7 @@ TEST(ClerkWebhooks, PostgresStoreCreatesUpdatesAndDisablesAccounts) {
     EXPECT_EQ(deliveries[0][0].as<int>(), 5) << "each applied delivery, once";
 }
 
-// lake#920 (LSR-011): a new Clerk subject is never linked to an existing account by email. It
+// lake#920: a new Clerk subject is never linked to an existing account by email. It
 // gets its own account, and its verified address moves there from the account that held it.
 TEST(ClerkWebhooks, AUserCreatedWithAnExistingEmailGetsItsOwnAccountAndTheAddress) {
     lake::control::InMemoryStore store;
@@ -605,7 +605,7 @@ TEST_P(ClerkRevocation, SignOutKeepsKeysAndBansStillEndEverything) {
 TEST_P(ClerkRevocation, OrderedBansAndLocksOnlyRestoreNewSignIns) {
     expect_upstream_suspension(*store);
 }
-// lake#920 (LSR-011): an account made by password sign-up for an address its maker never proved
+// lake#920: an account made by password sign-up for an address its maker never proved
 // is not adopted by the Clerk person who owns the address. The password, its session and the
 // account stay apart from the Clerk person's account, which they never reach.
 TEST_P(ClerkRevocation, APasswordAccountForTheSameEmailIsNeverAdopted) {
@@ -661,7 +661,7 @@ TEST_P(ClerkRevocation, ATakenAddressStartsNoRecoveryOfTheOldAccount) {
     EXPECT_TRUE(none->empty());
     EXPECT_FALSE(store->sign_in_password({"lake", identity.email, input.password, "", "test"}));
 }
-// lake#920 (LSR-011): two Clerk subjects with the same address never share an account. The
+// lake#920: two Clerk subjects with the same address never share an account. The
 // newer takes the address into its own account; suspending or revoking one never touches the
 // other, and no subject reaches the other's account.
 TEST_P(ClerkRevocation, SubjectsWithTheSameEmailNeverShareAnAccount) {

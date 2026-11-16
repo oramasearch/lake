@@ -52,7 +52,7 @@ inline const std::vector<std::string> agent_launch_scopes{"workspace_query",
 // The engine actions a run's code calls directly, by Lake's names (agent-runtime#11, *Direct
 // actions*): check_pipeline and start_run (skill train), generate_dataset (generate-data), decide
 // and record_outcome (call-api); the engine's own policy governs them. A launch's or schedule's
-// `workspace_act` runs these and the actions its scopes name, nothing else (LSR-009, lake#918):
+// `workspace_act` runs these and the actions its scopes name, nothing else (lake#918):
 // every other change is a proposal a person confirms.
 inline const std::vector<std::string> agent_run_direct_actions{
     "check_pipeline", "start_run", "generate_dataset", "decide", "record_outcome"};
@@ -77,8 +77,8 @@ std::vector<std::string> agent_launch_scopes_for(const std::vector<std::string>&
 // work_area_recorded_scope.
 std::vector<std::string> agent_launch_scopes_for(const nlohmann::json& agent);
 
-// A dataset work area on a launch's, schedule's or service's credential (LSR-181 companion,
-// lake#1055). An agent whose `work_area` is `{kind: "dataset", detail: "<id>[, <id>...]"}` gets
+// A dataset work area on a launch's, schedule's or service's credential (lake#1055).
+// An agent whose `work_area` is `{kind: "dataset", detail: "<id>[, <id>...]"}` gets
 // one scope `dataset:<database>/<name>` per dataset, stored with the row's scopes when it is made
 // and never changed. `<database>/<name>` and `<database>.<name>` are the same dataset; a bare
 // `<name>` is `datasets/<name>`, Lake's default database, never a table of that name elsewhere.

@@ -123,7 +123,7 @@ std::shared_ptr<McpHttp> make_mcp_http(bool allow_private_addresses);
 // link-local (the cloud metadata address included), carrier-grade NAT, unspecified, multicast or
 // reserved. An IPv4-mapped, well-known NAT64 or 6to4 IPv6 address is judged by its IPv4 address;
 // otherwise only global unicast (2000::/3) is public, minus Teredo, benchmarking, ORCHID and
-// documentation ranges (LSR-265). `bytes` is 4 or 16 bytes in network order.
+// documentation ranges. `bytes` is 4 or 16 bytes in network order.
 bool mcp_public_address(const std::vector<std::uint8_t>& bytes);
 
 struct McpUrl {

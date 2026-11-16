@@ -16,7 +16,7 @@ is written to a network row or returned by these capabilities.
 The instance must have its existing PKI/instance-KEK configuration; missing signing capability or
 unreadable protected CA keys fail closed.
 
-### How many grants (lake#983, LSR-116)
+### How many grants (lake#983)
 
 Every active grant (not revoked, not expired) is projected into the cluster's one relay grants
 document, which the relay refuses past 1 MiB or 10,000 entries, so one tenant must not be able to

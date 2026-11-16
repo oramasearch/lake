@@ -104,7 +104,7 @@ The apex is anonymous, so the form cannot flood support:
   address, whatever headers it sent. Lake never reads `CF-Connecting-IP` or the first
   `X-Forwarded-For` hop: a sender that reaches the ingress without passing Cloudflare could write
   either and land in a fresh bucket with each request (lake#838). Hosted code (a workspace's app,
-  service or Zetta) may reach lake's main port directly, past the ingress (LSR-200, lake#1006): with
+  service or Zetta) may reach lake's main port directly, past the ingress (lake#1006): with
   the proxy listener on, the main port believes no peer, so such a caller is counted on its own pod
   address whatever it sends, and cannot spend the in-all budget by naming new addresses
   (`OrdersApex.ForwardingHeadersFromAnUntrustedPeerNeverMakeAFreshBucket`). The operator renders
@@ -261,7 +261,7 @@ words, sent from `LAKE_BRAND_EMAIL_FROM` with the brand's support address as Rep
 ([`../serving/brand.md`](../serving/brand.md#where-it-is-read), lake#1135). Lake's own brand sends
 exactly the email below.
 
-**An order form's address is confirmed first** (lake#1000, LSR-194, migration
+**An order form's address is confirmed first** (lake#1000, migration
 `0107_order_email_confirmation`). Anyone can type any address into the anonymous form, so until the
 person who sent it shows they read that address, lake sends it exactly one email, the
 confirmation, and tells support nothing:

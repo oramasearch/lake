@@ -378,7 +378,7 @@ std::shared_ptr<lake::api::PaymentProviders> stripe_providers(FakeStripe& stripe
                                            "https://stripe.test"));
 }
 
-// LSR-196 (lake#1002): notices that do not authenticate are anyone's requests. However many arrive,
+// lake#1002: notices that do not authenticate are anyone's requests. However many arrive,
 // they add at most one denied audit event a minute, never one each.
 TEST(StripeNotices, UnauthenticatedNoticesDoNotEachAppendAnAuditEvent) {
     FakeStripe stripe;
@@ -1179,7 +1179,7 @@ TEST(StripeBilling, WebhooksMoveTheInvoiceOncePerEvent) {
     EXPECT_EQ(unknown.body["matched"], false);
 
     // Every notice that moved an invoice is in the central audit. The three notices that did not
-    // authenticate are counted, not audited one by one (LSR-196, lake#1002): at most one denied
+    // authenticate are counted, not audited one by one (lake#1002): at most one denied
     // summary a minute for the whole process, so none here if another test summarized first.
     const auto events = lake::test::audit_events(*rig.store, {.limit = 500});
     ASSERT_TRUE(events) << events.error().message;

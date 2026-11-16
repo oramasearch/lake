@@ -699,7 +699,7 @@ image_build(ApiContext& context,
         }
     }
     if (!may_build) {
-        // A read reconciling an experiment (LSR-195, lake#1001) uses the image already built; it
+        // A read reconciling an experiment (lake#1001) uses the image already built; it
         // never starts a build.
         co_return std::expected<control::Build, ApiResult>(std::unexpected(refused(
             "conflict", "the methodology's image is not built; the trial waits for it")));
@@ -2224,7 +2224,7 @@ std::expected<control::MethodologyRun, ApiResult> own_run(ApiContext& context,
 std::string quoted_table(const std::string& dataset) {
     // The engine's SQL subset takes database.table names as they are; refuse anything else. Each
     // component starts with a letter, digit or '_' and never holds "--", which starts a comment in
-    // the engine's SQL and would hide the LIMIT and OFFSET that follow (LSR-191, lake#997).
+    // the engine's SQL and would hide the LIMIT and OFFSET that follow (lake#997).
     const bool plain = std::ranges::all_of(dataset, [](unsigned char c) {
         return std::isalnum(c) != 0 || c == '_' || c == '.' || c == '-';
     });
@@ -2327,7 +2327,7 @@ liquid::runtime::task<ApiResult> methodology_run_input(const json& input, ApiCon
                 co_return failed(page.error());
             }
             rows = page->value("rows", json::array());
-            // A second cap on what came back, whatever the statement did (LSR-191).
+            // A second cap on what came back, whatever the statement did.
             if (rows.is_array() && rows.size() > static_cast<std::size_t>(wanted)) {
                 rows.erase(rows.begin() + wanted, rows.end());
             }
@@ -3110,7 +3110,7 @@ liquid::runtime::task<json> current_experiment(ApiContext& context,
     const std::string experiment_id = experiment.value("id", std::string());
     json runner = experiment.value("runner", json::array());
     std::map<std::string, json> claims;
-    // Reconciling for the starter (LSR-195, lake#1001): the runs are queued for whoever started the
+    // Reconciling for the starter (lake#1001): the runs are queued for whoever started the
     // experiment, never for the caller, only from an image already built, and a trial whose source
     // cannot be prepared waits instead of being stopped. With no starter known yet, nothing is done.
     std::optional<std::pair<std::string, std::string>> by;

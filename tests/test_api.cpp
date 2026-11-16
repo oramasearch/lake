@@ -1401,7 +1401,7 @@ TEST(RegistryProtocols, OciClientPushesAndPullsTwoLayersByteIdentical) {
         return digest;
     };
 
-    // LSR-192 (lake#998): an upload started in one repository cannot be continued in another.
+    // lake#998: an upload started in one repository cannot be continued in another.
     {
         const std::string started = http_request(server.port(),
                                                  "POST",
@@ -6848,7 +6848,7 @@ TEST(Drive, SharingCannotGrantActionsTheCallerDoesNotHold) {
     EXPECT_TRUE(share({{"principal_taap_id", "taap:1:ed25519:outsider"}, {"role", "write"}}).ok);
 }
 
-// LSR-014 (lake#923): a diff or restore reads revisions other than the ref its object came from,
+// lake#923: a diff or restore reads revisions other than the ref its object came from,
 // and the node a path names can differ between them. A restricted folder renamed away, a shared
 // one made under its old name: the old revision is the restricted folder's, and stays unreadable.
 TEST(Drive, HistoryAuthorizesTheNodeAtEveryRevisionItReads) {
@@ -6914,7 +6914,7 @@ TEST(Drive, HistoryAuthorizesTheNodeAtEveryRevisionItReads) {
         << "both sides are the shared folder Bob may read";
 }
 
-// LSR-108 (lake#975): a path object that does not inherit cuts its folder off from the
+// lake#975: a path object that does not inherit cuts its folder off from the
 // repository's grants for every read of repository content, as it does for Drive. A repository
 // reader without a grant on the cut neither reads the folder's files nor sees them in the tree,
 // and cannot read the repository whole; a grant there gives both back.
@@ -6990,7 +6990,7 @@ TEST(Drive, RepositoryReadsHonourRestrictedFolders) {
     EXPECT_TRUE(listed.contains("shared/readme.md"));
 }
 
-// LSR-015 (lake#924): a Drive write advances its branch, so the branch's rules apply to it as to a
+// lake#924: a Drive write advances its branch, so the branch's rules apply to it as to a
 // push. main allows only another person to push: an otherwise authorized writer's upload, restore
 // and conflict resolution are refused and nothing is committed.
 TEST(Drive, WritesFollowTheBranchRules) {

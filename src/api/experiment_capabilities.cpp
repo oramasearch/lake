@@ -387,7 +387,7 @@ Task dispatch(ApiContext& context, const json& input, const std::string& name,
     const std::string customer_id = input.at("customer_id");
     const std::string workspace_id = input.at("workspace_id");
     if (result.ok && (name == "start_experiment" || name == "get_experiment")) {
-        // Reading never acts for the reader (LSR-195, lake#1001): one who may only read sees the
+        // Reading never acts for the reader (lake#1001): one who may only read sees the
         // experiment as it stands; one who may change it reconciles it for its starter.
         ExperimentReconcile reconcile = ExperimentReconcile::as_caller;
         if (name == "get_experiment") {

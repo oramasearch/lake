@@ -294,7 +294,7 @@ TEST(McpClient, OnlyPublicAddressesAreReachable) {
     EXPECT_TRUE(lake::api::mcp_public_address(mapped));
     bytes nat64{0x00, 0x64, 0xFF, 0x9B, 0, 0, 0, 0, 0, 0, 0, 0, 169, 254, 169, 254};
     EXPECT_FALSE(lake::api::mcp_public_address(nat64)) << "the metadata address through NAT64";
-    // LSR-265 (lake#1008): every transition and site-local form that hides a private address.
+    // lake#1008: every transition and site-local form that hides a private address.
     bytes compatible(16, 0);
     compatible[12] = 10;
     EXPECT_FALSE(lake::api::mcp_public_address(compatible)) << "IPv4-compatible ::10.0.0.0";

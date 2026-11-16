@@ -18,7 +18,7 @@ namespace lake::api {
 
 // A link a plain HTTP client follows without a session: HMAC-SHA-256 over the link's fields,
 // base64url without padding, under a key derived from LAKE_INSTANCE_KEK for this purpose alone
-// (HMAC-SHA-256 of "lake signed link v1"), never the instance key itself (LSR-266). The Hub's basic-LFS upload hrefs were signed this
+// (HMAC-SHA-256 of "lake signed link v1"), never the instance key itself. The Hub's basic-LFS upload hrefs were signed this
 // way first; the tunnel client links reuse it (docs/serving/http.md#signed-links). Empty when the
 // key is empty or the HMAC fails.
 std::string signed_link_signature(std::string_view key, std::string_view payload);

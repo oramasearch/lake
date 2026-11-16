@@ -11,14 +11,14 @@ control and whether it is `verified`. Only a verified claim's domain row reaches
 the operator acts only on a domain whose claim is verified. Additive; guard `domain_claims_guard`.
 See [platform](../docs/api/platform.md#custom-domains) and
 [schema.md](../docs/control-plane/schema.md#domain-claims-migration-0106_domain_claims).
-Migration `0107_order_email_confirmation` (lake#1000, LSR-194) adds the nullable
+Migration `0107_order_email_confirmation` (lake#1000) adds the nullable
 `cloud_orders.contact_email_confirmed_at` (when the person who sent an order form followed its
 confirmation link), marks order forms mailed before it as confirmed (once), and adds the indexes
 `cloud_orders_contact_email_idx` and `cloud_orders_contact_domain_idx` for the per-recipient limits;
 guard `order_email_confirmation_guard`. Additive; numbered after the open `0106` (lake#949). Apply
 before the new binary, which reads the column. See [orders](../docs/api/orders.md#email) and
 [schema.md](../docs/control-plane/schema.md).
-Migration `0108_retained_usage` (lake#988, LSR-121) adds `retained_usage_sets` and `retained_usage`:
+Migration `0108_retained_usage` (lake#988) adds `retained_usage_sets` and `retained_usage`:
 the usage a deleted workspace consumed that no issued invoice billed, as content-free quantities by
 dimension, `kind`/`class`/`model` and day (`rollup`, written by `delete_workspace` before the cascade)
 or hour (`late`, what the usage recorder still held), and the guard `retained_usage_guard`. Additive;

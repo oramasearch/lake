@@ -418,7 +418,7 @@ struct ClerkUserState {
 struct ClerkUserProvisioned {
     std::string user_id, taap_id;
     bool created = false; // a new account, with a managed key and a personal customer
-    // A new subject is never linked to an existing account by email (lake#920, LSR-011): the
+    // A new subject is never linked to an existing account by email (lake#920): the
     // id of the Lake-pool account its verified address was taken from, or empty.
     std::string email_taken_from;
 };
@@ -911,7 +911,7 @@ struct Workspace {
 };
 struct NewWorkspace {
     std::string customer_id, name, environment, created_by_taap_id;
-    // lake#987 (LSR-120): the most live (not deleted) workspaces the customer may have
+    // lake#987: the most live (not deleted) workspaces the customer may have
     // (LAKE_WORKSPACES_PER_CUSTOMER) and the most live services, which the new workspace's own
     // Zetta service counts against (LAKE_SERVICES_PER_CUSTOMER); 0 means no limit. Both are
     // counted in the create transaction, under the customer's row lock; over either the create

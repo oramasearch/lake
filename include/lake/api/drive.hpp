@@ -24,7 +24,7 @@ struct ApiContext;
 // outlive the synchronous commit call; no repository reads are made by the callback.
 //
 // Every write also advances `ref`, so the repository's branch rules apply to it as to a push
-// (LSR-015, lake#924): `protection` is what load_branch_protection read before the write. A write
+// (lake#924): `protection` is what load_branch_protection read before the write. A write
 // whose rules could not be read is refused rather than made without them.
 using BranchProtectionLoad = std::expected<BranchProtectionRecords, SyncStoreError>;
 [[nodiscard]] RepositoryWriteAuthorizer

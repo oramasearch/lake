@@ -112,7 +112,7 @@ segment's Duration, or for a browser's recording without one the latest block's 
 (the movie header, or a fragmented recording's summed sample durations) and MP3 (a Xing, Info or
 VBRI frame count, else the bit rate). **The longer of the model's figure and lake's is billed**, and
 a recording whose length lake cannot read is **refused** (`invalid_input`) before the model is called
-(LSR-112, lake#979). Before that, the model's figure won and an unreadable recording counted no
+(lake#979). Before that, the model's figure won and an unreadable recording counted no
 speech, so speech-to-text could run on the platform key unbilled. Per-account rate limits and a spend
 check before the call are not built.
 

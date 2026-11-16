@@ -769,7 +769,7 @@ verify_taap_sign_in(std::string_view identity_document,
     if (pool_id.empty() || nonce.size() < 16 || !signature.is_object()) {
         return std::unexpected("TAAP sign-in fields are incomplete");
     }
-    // Only the members the verification reads (LSR-198, lake#1004): an extra member can no longer
+    // Only the members the verification reads (lake#1004): an extra member can no longer
     // make a captured assertion look new.
     for (const auto& [member, value] : signature.items()) {
         if (member != "algorithm" && member != "signing_key_identifier" &&
@@ -822,7 +822,7 @@ verify_taap_sign_in(std::string_view identity_document,
         return std::unexpected("TAAP sign-in signature does not verify");
     }
     // The replay key is what the signature authenticates: the identity, the pool, the nonce and
-    // the time, never the transport form of the request (LSR-198, lake#1004). One signed assertion
+    // the time, never the transport form of the request (lake#1004). One signed assertion
     // is one sign-in, however its signature object or identity document is spelled.
     return VerifiedTaapSignIn{
         key->taap_id, sha256_hex(key->taap_id + "\n" + body), std::move(chain_hashes)};
@@ -4065,7 +4065,7 @@ public:
             if (!existing.empty()) {
                 return std::unexpected(StoreError{"conflict", "a workspace with this name already exists"});
             }
-            // lake#987 (LSR-120): counted under the customer's row lock taken above, so two
+            // lake#987: counted under the customer's row lock taken above, so two
             // concurrent creates cannot both pass.
             if (input.max_workspaces != 0) {
                 const auto live = tx.exec_params(
@@ -4804,7 +4804,7 @@ public:
                                         .empty()) {
                     return std::unexpected(StoreError{"invalid_input", "no tunnel user"});
                 }
-                // lake#983 (LSR-116): the account's row lock serializes its grant creates, so two
+                // lake#983: the account's row lock serializes its grant creates, so two
                 // concurrent creates cannot both pass the count.
                 if (table.tunnel && create && grant_limits != nullptr &&
                     (grant_limits->per_workspace != 0 || grant_limits->per_customer != 0)) {
@@ -10183,7 +10183,7 @@ public:
         if (!rows.empty()) {
             result.user_id = rows[0][0].as<std::string>();
         } else {
-            // A new Clerk subject always gets a new account (lake#920, LSR-011). It is never
+            // A new Clerk subject always gets a new account (lake#920). It is never
             // linked to an existing account by email: that account's address was proven by no
             // one (password sign-up, SSO or SCIM provisioning, an operator) or belongs to another
             // Clerk subject, and linking would hand its holder's password, sessions, keys and

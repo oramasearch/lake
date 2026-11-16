@@ -206,7 +206,7 @@ void expect_clerk_sign_in_contract(lake::control::Store& store, const std::strin
     EXPECT_EQ(again_principal->taap_id, first_identity.custodial_taap_id);
 
     // A second Clerk subject with the same verified email is never linked to the first account
-    // (lake#920, LSR-011): it gets an account of its own, the address moves to it, and the first
+    // (lake#920): it gets an account of its own, the address moves to it, and the first
     // account keeps its sessions and its customer.
     const auto second = store.sign_in_clerk(minted("user_other_" + suffix, email));
     ASSERT_TRUE(second) << second.error().message;
@@ -349,7 +349,7 @@ TEST(Clerk, PostgresStoreSignsInLinksProvisionsAndHoldsTheSeed) {
     EXPECT_EQ(rows[0][0].as<std::string>(), rows[0][2].as<std::string>());
     EXPECT_FALSE(rows[0][1].as<std::string>().empty());
     // One credential per Clerk subject that signed in (user_, user_other_ and user_victim_), each
-    // on its own account: a subject is never linked to another's account by email (LSR-011).
+    // on its own account: a subject is never linked to another's account by email.
     const auto credentials =
         tx.exec_params("SELECT count(*) FROM credentials WHERE kind = 'oauth' AND subject LIKE $1",
                        "clerk:user_%" + suffix);
@@ -799,7 +799,7 @@ TEST(HttpServer, ClerkExchangeAcceptsANamelessPersonAndLogsWhyATokenWasRefused) 
     EXPECT_EQ(active_sessions(), 1) << "the nameless person is signed in (lake#1115)";
 
     // A template token issued to another product sharing the Clerk instance, or to no origin, is
-    // not exchanged here (LSR-012, lake#921).
+    // not exchanged here (lake#921).
     for (const json& party : {json("https://app.other-product.example.test"), json(nullptr)}) {
         const long issued = now_unix();
         json claims{{"iss", ClerkInstance::issuer},

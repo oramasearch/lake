@@ -165,7 +165,7 @@ std::string prepare_conflict(const std::filesystem::path& root,
 }
 
 // A 16 kHz mono 16-bit WAV of `seconds` of silence, base64: audio whose length lake can measure,
-// as speech-to-text requires (LSR-112, lake#979).
+// as speech-to-text requires (lake#979).
 std::string wav(double seconds) {
     const auto put = [](std::string& out, std::uint32_t value, int width) {
         for (int index = 0; index < width; ++index) {

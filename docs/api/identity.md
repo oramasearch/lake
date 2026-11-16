@@ -485,7 +485,7 @@ hex alone); `nonce` and `expires_at` are returned unchanged from `begin_identity
 **A TAAP sign-in is used once.** Its replay key is SHA-256 of the TAAP id, pool, nonce and time, the
 fields its signature covers, never the transport form of the request; and its `signature` object
 carries only `algorithm`, `signing_key_identifier`, `signing_key_label`, `signature_purpose`,
-`signed_at` and `bytes`, any other member being refused (LSR-198, lake#1004).
+`signed_at` and `bytes`, any other member being refused (lake#1004).
 
 4. A proof is used once: sign-up records `identity_proof:<challenge>` in `identity_taap_assertions`
    with the new user; an OAuth start records it as a spent row in `identity_oauth_flows` (state hash

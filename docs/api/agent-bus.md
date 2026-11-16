@@ -113,7 +113,7 @@ the engine's `create_study` and its backing `start_experiment` capability in add
 ### Task credentials by reference (lake#871)
 
 A library agent is one shared process, so a task credential it receives sits in the memory of a
-process that serves every tenant. Decided under Steve's 2026-11-14 delegation: **credentials never
+process that serves every tenant. The rule: **credentials never
 reach the agent process; Lake adds them to each request.** A claim with
 `credentials: by_reference`:
 
@@ -163,7 +163,7 @@ lands. The at-most-one-receive-per-minute deployment acceptance is not claimed b
 
 ## A task credential is confined to its workspace
 
-LSR-118 ([lake#985](https://github.com/oramasearch/lake/issues/985)). A task, launch or schedule
+[lake#985](https://github.com/oramasearch/lake/issues/985). A task, launch or schedule
 credential acts as the person who started the agent, and that person may belong to other accounts
 or other workspaces of the same account. The credential reaches none of them, whatever its input
 names:
@@ -228,7 +228,7 @@ Tests: `AgentLeases.ATaskCredentialEndsWithItsTaskAndAnotherAgentCannotNameIt` a
 ## Delegated turns
 
 An agent that delegates calls `agent_turn` with its own task credential (Ask Orama's `delegate`).
-**Delegation attenuates** (LSR-013, lake#922): a turn asked for with any agent credential holds only
+**Delegation attenuates** (lake#922): a turn asked for with any agent credential holds only
 the scopes that credential holds, plus `get_agent_task`, so no agent can mint a turn with more
 authority than its own. A confirmation carried by an agent's turn is refused (lake#989).
 Lake then records the asking task's ID as `parent_task_id` in the delegated task's body and reports

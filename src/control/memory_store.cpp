@@ -550,7 +550,7 @@ Result<Workspace> InMemoryStore::create_workspace(const NewWorkspace& input) {
             return std::unexpected(StoreError{"conflict", "a workspace with this name already exists"});
         }
     }
-    // lake#987 (LSR-120), as the PostgreSQL store counts them.
+    // lake#987, as the PostgreSQL store counts them.
     if (input.max_workspaces != 0 &&
         static_cast<std::size_t>(std::ranges::count_if(workspaces_, [&](const Workspace& row) {
             return row.customer_id == input.customer_id && row.desired != "deleted";
@@ -5534,7 +5534,7 @@ Result<ClerkUserProvisioned> InMemoryStore::clerk_user_locked(const ClerkIdentit
             result.user_id = credential.user_id;
         }
     }
-    // A new subject is never linked to an existing account by email (lake#920, LSR-011); the
+    // A new subject is never linked to an existing account by email (lake#920); the
     // verified address moves to the new account (PostgresStore::clerk_user_tx).
     if (result.user_id.empty()) {
         if (input.custodial_taap_id.empty() || input.custodial_public_key.empty() ||

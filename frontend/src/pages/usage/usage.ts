@@ -285,7 +285,7 @@ export function stackSeries(
 
 /** One CSV cell. A text cell that a spreadsheet would read as a formula (it starts with =, +, -, @,
  * a tab or a carriage return) gets a leading apostrophe, so a workspace or object name a person
- * chose stays literal text (LSR-201, lake#1007). Numbers are written as they are. */
+ * chose stays literal text (lake#1007). Numbers are written as they are. */
 export function csvCell(value: unknown): string {
   let text = value === null || value === undefined ? "" : String(value);
   if (typeof value === "string" && /^[=+\-@\t\r]/.test(text)) text = `'${text}`;

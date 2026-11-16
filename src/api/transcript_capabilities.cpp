@@ -278,7 +278,7 @@ liquid::runtime::task<Heard> transcribe_audio(ApiContext& context,
             ApiResult::failure(audio.error().code, audio.error().message, audio.error().path));
     }
     // Its length, measured before the bytes go (lake#658). Audio whose length cannot be read is
-    // refused before the model is called, since it could not be billed (LSR-112, lake#979).
+    // refused before the model is called, since it could not be billed (lake#979).
     const std::optional<double> measured = audio_duration_seconds(audio->bytes);
     if (!measured || *measured <= 0) {
         co_return refused_audio(ApiResult::failure(

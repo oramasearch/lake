@@ -222,7 +222,7 @@ test("only the operator is offered the storage limit, and the form never starts 
   assert.equal(firstLimitDimension([], false), "");
 });
 
-test("a name a person chose stays literal text in the CSV (LSR-201, lake#1007)", () => {
+test("a name a person chose stays literal text in the CSV (lake#1007)", () => {
   assert.equal(csvCell("=HYPERLINK(\"https://example.test\")"), `"'=HYPERLINK(""https://example.test"")"`);
   assert.equal(csvCell("+1"), "'+1");
   assert.equal(csvCell("-2"), "'-2");
