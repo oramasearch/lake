@@ -1,4 +1,6 @@
-// What the browser scripts share (docs/deployment/browser-testing.md): Playwright, a log with
+// SPDX-License-Identifier: MIT
+
+// What the browser scripts share (tools/e2e/README.md): Playwright, a log with
 // pass/fail checks, Clerk sign-in with a one-time ticket (lake lands a signed-in person on `/`),
 // lake's /v1 capabilities called with the browser's own session, the first top-up through Stripe's
 // test Checkout, and the person's first workspace started from Ask Orama's home (`/ask`).
@@ -56,8 +58,15 @@ export function args(usage) {
     console.error(`usage: ${usage}`);
     process.exit(2);
   }
-  if (/(^|\.)lake\.live$/.test(new URL(base).hostname) && !process.env.LAKE_E2E_ALLOW_PRODUCTION) {
-    console.error("refusing to run against lake.live (production); set LAKE_E2E_ALLOW_PRODUCTION=1 if that is meant");
+  // Production domains to refuse (comma-separated, e.g. LAKE_E2E_PROTECTED_DOMAINS=example.com):
+  // a host equal to one or beneath it needs LAKE_E2E_ALLOW_PRODUCTION=1.
+  const hostname = new URL(base).hostname;
+  const protectedDomain = (process.env.LAKE_E2E_PROTECTED_DOMAINS ?? "")
+    .split(",")
+    .map((d) => d.trim().toLowerCase())
+    .find((d) => d && (hostname === d || hostname.endsWith(`.${d}`)));
+  if (protectedDomain && !process.env.LAKE_E2E_ALLOW_PRODUCTION) {
+    console.error(`refusing to run against ${protectedDomain} (production); set LAKE_E2E_ALLOW_PRODUCTION=1 if that is meant`);
     process.exit(2);
   }
   return { base: base.replace(/\/$/, ""), ticketFile, out, rest };

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 #include <string_view>
 
@@ -10,7 +12,7 @@ struct version {
 };
 
 [[nodiscard]] constexpr version current_version() noexcept {
-    return {0, 8, 1};
+    return {0, 9, 0};
 }
 [[nodiscard]] std::string_view version_string() noexcept;
 [[nodiscard]] std::string_view build_revision_string() noexcept;

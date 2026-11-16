@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // An in-memory repository store for the methodology tests (lake#655): each repository is a list of

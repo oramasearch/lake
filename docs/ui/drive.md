@@ -125,7 +125,7 @@ Liquid client contracts:
   editing the same file while disconnected retain both edits under distinct names, publish both
   paths, expose the complete structural conflict and its preserved values through the API,
   and resolve it through the public action. It requires the bootstrap actor identity fix from
-  [liquid #262](https://github.com/oramasearch/liquid/pull/262). The scenario proof uses the recorded
+  liquid #262. The scenario proof uses the recorded
   Liquid `main` pin, including first-class conflict records and structural convergence.
 - `DriveScenario.ReplacingAnUploadedFileKeepsThePreviousVersionRestorable` proves that two uploads
   of the same file name leave two available versions on the API, that the two
@@ -143,7 +143,7 @@ Liquid client contracts:
 
 The last case exercises the repository create, pull, and materialize APIs directly. The same
 drive-client contract powers the `liquid clone` command implemented by
-[liquid #259](https://github.com/oramasearch/liquid/pull/259).
+liquid #259.
 
 ## Verify and change
 
@@ -168,4 +168,4 @@ Linux desktop presentation remains a liquid client concern. Lake documents the s
 
 Pin changes control hydration policy, never repository retention. Offline writes are local changes
 and publish through the same three-tree reconciler when connectivity returns. GNOME and KDE badge
-and pin behavior is tracked by [liquid #196](https://github.com/oramasearch/liquid/issues/196).
+and pin behavior is tracked by liquid #196.

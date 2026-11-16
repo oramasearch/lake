@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Lake's records in workspace Zettas (docs/architecture/workspace-records.md, lake#370), with Ask
 // Orama conversations as the first collection and Design → Opportunities as the first mutable one
 // (lake#376): sealing, structural isolation between workspaces and spaces, conditional writes,
@@ -105,6 +107,31 @@ inline std::string test_base64_encode(std::string_view bytes) {
         out += alphabet[(v >> 6) & 63];
         out += '=';
     }
+    return out;
+}
+
+// A mono 16 kHz, 16-bit PCM WAV of `seconds` of silence: audio whose length lake can measure, as
+// speech-to-text requires (lake#979).
+inline std::string test_wav(double seconds) {
+    const auto put = [](std::string& out, std::uint32_t value, int width) {
+        for (int index = 0; index < width; ++index) {
+            out.push_back(static_cast<char>((value >> (8 * index)) & 0xFF));
+        }
+    };
+    const auto bytes = static_cast<std::uint32_t>(seconds * 32000);
+    std::string out = "RIFF";
+    put(out, 36 + bytes, 4);
+    out += "WAVEfmt ";
+    put(out, 16, 4);
+    put(out, 1, 2);
+    put(out, 1, 2);
+    put(out, 16000, 4);
+    put(out, 32000, 4);
+    put(out, 2, 2);
+    put(out, 16, 2);
+    out += "data";
+    put(out, bytes, 4);
+    out.append(bytes, '\0');
     return out;
 }
 inline std::string test_base64_decode(std::string_view text) {
@@ -385,6 +412,8 @@ struct TwoSpaces {
     lake::api::Registry registry;
     struct Space {
         lake::control::Principal principal;
+        // The Clerk identity the person signed in with; its subject is the account's own.
+        lake::control::ClerkIdentity clerk;
         std::string customer_id;
         std::vector<std::string> workspaces;
     };
@@ -432,10 +461,10 @@ struct TwoSpaces {
             lake::control::WorkspaceConfig{dir.string(), 0}, store, zetta);
         lake::api::register_core_capabilities(registry, "test");
         for (const std::string name : {"first", "second"}) {
-            const auto session =
-                store->sign_in_clerk(person(name + "-" + lake::control::new_uuid_v4()));
-            EXPECT_TRUE(session);
             Space space;
+            space.clerk = person(name + "-" + lake::control::new_uuid_v4());
+            const auto session = store->sign_in_clerk(space.clerk);
+            EXPECT_TRUE(session);
             space.principal = *store->context_for(session->secret);
             space.customer_id = store->list_customers(10, space.principal.user_id)->front().id;
             for (const std::string workspace : {"home", "lab"}) {
@@ -858,7 +887,9 @@ TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {
     };
 
     // Without a key, speech-to-text is refused and nothing is written.
-    const std::string audio = "data:audio/webm;codecs=opus;base64,c3BlZWNo"; // "speech"
+    const std::string speech = lake::test_wav(1.0);
+    const std::string silence = lake::test_wav(2.0);
+    const std::string audio = "data:audio/webm;codecs=opus;base64," + lake::test_base64_encode(speech);
     const auto unconfigured =
         t.call(first, "transcribe", in(first, 0, {{"name", "memo"}, {"audio_base64", audio}}));
     EXPECT_EQ(unconfigured.error.code, "not_supported");
@@ -871,10 +902,10 @@ TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {
 
     // The fake transcriber: what it was sent, and the text it answers.
     std::vector<lake::api::TranscriptionRequest> heard;
-    t.transcriber = [&heard](const lake::api::TranscriptionRequest& request)
+    t.transcriber = [&heard, &silence](const lake::api::TranscriptionRequest& request)
         -> std::expected<lake::api::Transcription, lake::api::ApiError> {
         heard.push_back(request);
-        if (request.audio == "silence") {
+        if (request.audio == silence) {
             return std::unexpected(
                 lake::api::ApiError{"engine_error", "OpenAI could not transcribe the audio"});
         }
@@ -892,12 +923,12 @@ TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {
                     {"seconds", 42.5},
                     {"model", "gpt-4o-transcribe"}}));
     ASSERT_EQ(heard.size(), 1U);
-    EXPECT_EQ(heard[0].audio, "speech");
+    EXPECT_EQ(heard[0].audio, speech);
     EXPECT_EQ(heard[0].file_name, "memo.webm");
     EXPECT_EQ(heard[0].mime, "audio/webm");
     EXPECT_EQ(heard[0].language, "en");
     const auto failing = t.call(
-        first, "transcribe", in(first, 0, {{"name", "x.wav"}, {"audio_base64", "c2lsZW5jZQ=="}}));
+        first, "transcribe", in(first, 0, {{"name", "x.wav"}, {"audio_base64", lake::test_base64_encode(silence)}}));
     EXPECT_EQ(failing.error.code, "engine_error");
     // A text file is refused before it reaches the speech service (lake#594).
     const std::size_t sent_before = heard.size();
@@ -1485,7 +1516,7 @@ TEST(WorkspaceRecords, AnOpportunityStatusChangeRereadsAfterAConcurrentWrite) {
     EXPECT_EQ(listed->at(1).status, "not_yet");
 }
 
-// lake#315 part 2 (decision 54, S10): a repository's description is one sealed settings record in
+// lake#315 part 2 (S10): a repository's description is one sealed settings record in
 // the workspace Zetta of its workspace, keyed by the repository; the routing row holds none of it.
 TEST_P(WorkspaceRecordStores, RepositoryDescriptionsLiveInTheirWorkspace) {
     auto store = make_store();
@@ -1730,7 +1761,7 @@ TEST_P(WorkspaceRecordStores, RepositoryDescriptionsLiveInTheirWorkspace) {
               placed[2].description);
 }
 
-// lake#317, decision 52: an event about a workspace's data goes to that workspace's own audit,
+// lake#317: an event about a workspace's data goes to that workspace's own audit,
 // the chained, sealed collection lake_audit_events of its Zetta, queued on the request path and
 // written by the AuditRecorder's flush; control-plane events, refusals for want of authority and
 // calls that name no workspace stay in the central log. The readers show both.
@@ -2015,7 +2046,7 @@ TEST(AuditRecorder, OverflowReportsWhenDeliveryEvidenceCannotBeRecorded) {
         "other-customer", "other-workspace", lake::audit::pending({.action = "retained"})));
 }
 
-// LSR-098: an unavailable customer's workspaces cannot consume another customer's share,
+// An unavailable customer's workspaces cannot consume another customer's share,
 // including while a flush has detached the queues and new requests arrive.
 TEST_P(WorkspaceRecordStores, AuditQueueIsolatesUnavailableCustomersDuringFlush) {
     auto store = make_store();
@@ -2866,7 +2897,7 @@ TEST_P(WorkspaceRecordStores, PlatformEnvironmentsLiveInTheirRepositorysWorkspac
     control->deployments.push_back(
         platform_deployment(placed[0].repository, "production", "ready", "2026-10-01T00:02:00Z"));
     ASSERT_TRUE(sync());
-    // The newer row, and its phase appended to the workspace's audit (decision 52).
+    // The newer row, and its phase appended to the workspace's audit.
     EXPECT_EQ(writes(placed[0].workspace), before + 2);
     EXPECT_EQ(call(first, "get_environment",
                    {{"repository_id", placed[0].repository}, {"environment", "production"}})
@@ -3686,12 +3717,12 @@ TEST_P(WorkspaceRecordStores, DynamicLeasesLiveInTheirMountsWorkspace) {
     EXPECT_EQ(t.store->get_secret_lease_route(fresh.value["lease"]["id"])->due_us, 0);
 }
 
-// lake#382 (decision 54, S7): the instance transparency log stays with the instance and keeps the
+// lake#382 (S7): the instance transparency log stays with the instance and keeps the
 // leaf a relying party expects for each dynamic-secret lease, renewal and revocation (the
 // identity-exit scenario), even though the lease itself is a record of its mount's workspace and a
 // workspace audit route is available. The three capabilities stay in the central chain, so
 // finish_call appends only the recorded central event's digest commitment. Complete events and
-// routing identifiers stay in private audit (lake#953, LSR-087).
+// routing identifiers stay in private audit (lake#953).
 TEST_P(WorkspaceRecordStores, DynamicSecretsInAWorkspaceKeepTheirInstanceLogLeaf) {
     auto store = make_store();
     if (!store) {
@@ -3802,7 +3833,7 @@ TEST_P(WorkspaceRecordStores, DynamicSecretsInAWorkspaceKeepTheirInstanceLogLeaf
     }
 }
 
-// MCP connections (decision 60, lake#652, docs/api/mcp-connections.md): a connection is a sealed
+// MCP connections (lake#652, docs/api/mcp-connections.md): a connection is a sealed
 // record in its workspace; its token is a workspace secret Lake reads server-side and never
 // answers; a tool runs only once a person allowed it; a change is a person's or an auto-approved
 // agent's; every call is audited in the workspace and metered.
@@ -4158,6 +4189,27 @@ TEST_P(WorkspaceRecordStores, McpConnectionsLiveInTheirWorkspaceAndKeepTheirToke
                                       mcp_context,
                                       "test"));
     EXPECT_TRUE(json::parse(**missing)["result"]["isError"].get<bool>());
+    // lake#993: no credential, or a person of another space, reaches nothing.
+    {
+        auto anonymous = t.context(first);
+        anonymous.authorized = false;
+        anonymous.acting_identity.clear();
+        auto other_space = t.context(second);
+        for (auto* caller : {&anonymous, &other_space}) {
+            caller->path_workspace_id = home;
+            const auto refused = liquid::runtime::block_on(lake::api::mcp_dispatch_async(
+                t.registry,
+                {{"jsonrpc", "2.0"},
+                 {"id", 4},
+                 {"method", "tools/call"},
+                 {"params", {{"name", "ticket_desk__echo"}, {"arguments", {{"text", "x"}}}}}},
+                *caller,
+                "test"));
+            ASSERT_TRUE(refused && *refused);
+            EXPECT_TRUE(json::parse(**refused)["result"]["isError"].get<bool>())
+                << (caller == &anonymous ? "anonymous" : "another space");
+        }
+    }
 
     // A refused token marks the connection as needing sign-in.
     server.required_bearer = "rotated-elsewhere";
@@ -4682,6 +4734,15 @@ TEST_P(WorkspaceRecordStores, McpConnectionStreamsMirrorNotificationsAndDriveThe
                                     {"subscribe_resources", json::array({"memo://inbox"})}}));
     ASSERT_TRUE(streams.ok) << streams.error.message;
     EXPECT_EQ(streams.value["streams"]["input_topic"], "inbox-in");
+    // lake#996: a stream Lake writes itself is never a connection's topic.
+    for (const char* field : {"input_topic", "output_topic", "notifications_topic"}) {
+        for (const char* system : {"agent-tasks.agent-ask-orama", "agent-events", "build-events.b1",
+                                   "run-metrics.r1", "app-events.a1", "study-events.s1"}) {
+            const auto refused = t.call(first, "update_mcp_connection", in({{"id", id}, {field, system}}));
+            EXPECT_FALSE(refused.ok) << field << " " << system;
+            EXPECT_EQ(refused.error.path, std::string("/") + field) << field << " " << system;
+        }
+    }
 
     // One event waits on the input stream.
     {
@@ -4737,6 +4798,89 @@ TEST_P(WorkspaceRecordStores, McpConnectionStreamsMirrorNotificationsAndDriveThe
     EXPECT_NE(topics["inbox-out"].events[0].dump().find("task_id"), std::string::npos);
     EXPECT_NE(topics["inbox-out"].events[0].dump().find("triaged"), std::string::npos);
     EXPECT_EQ(worker.pass(owner).results, 0U) << "published once";
+}
+
+// lake#980: a server that takes longer than the open budget to answer its subscriptions
+// is dropped and backs off, so the next pass does not contact it; a pass out of budget starts no
+// connection and resumes where it stopped; changing the connection clears the back-off.
+TEST_P(WorkspaceRecordStores, McpStreamWorkerASlowServerBacksOffAndThePassKeepsItsBudget) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    lake::test::McpTestServer server;
+    server.slow_subscribe_ms = 300;
+    t.mcp_http = lake::api::make_mcp_http(true);
+    const auto& first = t.spaces[0];
+    const std::string home = first.workspaces[0];
+    const auto in = [&](json input) {
+        input["customer_id"] = first.customer_id;
+        input["workspace_id"] = home;
+        return input;
+    };
+    const auto created =
+        t.call(first, "create_mcp_connection", in({{"name", "Slow"}, {"url", server.url()}}));
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string id = created.value["id"];
+    const auto streams =
+        t.call(first,
+               "update_mcp_connection",
+               in({{"id", id},
+                   {"notifications_topic", "slow-notices"},
+                   {"subscribe_resources", json::array({"memo://a", "memo://b", "memo://c"})}}));
+    ASSERT_TRUE(streams.ok) << streams.error.message;
+
+    lake::api::ApiContext owner;
+    owner.store = t.store.get();
+    owner.workspaces = t.service.get();
+    owner.instance_kek = std::string(kek);
+    owner.registry = &t.registry;
+    owner.mcp_http = t.mcp_http;
+    owner.mcp_allow_private_addresses = true;
+    // Creating and updating the connection talks to the server itself; count from here.
+    const std::size_t before = server.calls("initialize").size();
+    const std::size_t subscribes_before = server.calls("resources/subscribe").size();
+
+    // Out of budget before it starts: nothing is contacted, and the workspace comes first next.
+    {
+        lake::api::McpStreamWorker spent({.pass_budget = std::chrono::milliseconds(0)});
+        const auto done = spent.pass(owner);
+        EXPECT_TRUE(done.stopped_early);
+        EXPECT_EQ(done.connections, 0U);
+        EXPECT_EQ(server.calls("initialize").size(), before);
+    }
+
+    lake::api::McpStreamWorker worker({.connection_budget = std::chrono::milliseconds(200),
+                                       .exchange_timeout = std::chrono::milliseconds(2'000),
+                                       .backoff_first = std::chrono::minutes(10)});
+    const auto opened = worker.pass(owner);
+    EXPECT_EQ(opened.connections, 1U);
+    ASSERT_EQ(server.calls("initialize").size(), before + 1);
+    EXPECT_LT(server.calls("resources/subscribe").size(), subscribes_before + 3)
+        << "the subscriptions past the budget are not sent";
+    EXPECT_TRUE(std::ranges::any_of(opened.problems, [](const std::string& problem) {
+        return problem.find("tried again later") != std::string::npos;
+    }));
+
+    // Backing off: the next pass leaves the server alone.
+    const auto waiting = worker.pass(owner);
+    EXPECT_EQ(waiting.backing_off, 1U);
+    EXPECT_EQ(server.calls("initialize").size(), before + 1);
+
+    // A changed connection starts afresh, and a prompt server is mirrored as before.
+    server.slow_subscribe_ms = 0;
+    ASSERT_TRUE(t.call(first,
+                       "update_mcp_connection",
+                       in({{"id", id}, {"subscribe_resources", json::array({"memo://a"})}}))
+                    .ok);
+    const std::size_t updated = server.calls("initialize").size();
+    const auto fresh = worker.pass(owner);
+    EXPECT_EQ(fresh.backing_off, 0U);
+    EXPECT_EQ(server.calls("initialize").size(), updated + 1);
+    for (const auto& problem : fresh.problems) {
+        ADD_FAILURE() << problem;
+    }
 }
 
 // lake#677: an agent started by a workspace stream. The streams are sealed records in the
@@ -4904,7 +5048,7 @@ TEST_P(WorkspaceRecordStores, AStreamStartsItsAgentOncePerMessageAsThePersonWhoS
 // against an agent that is gone. Another agent's, another workspace's and a finished launch are
 // left as they are. A launch whose agent was deleted outside lake is withdrawn the first time it
 // reads its agent and the workspace answers not_found.
-// LSR-086: disabling a person ends their delegated authority, including a context already
+// Disabling a person ends their delegated authority, including a context already
 // reconstructed by a stream worker. Another person's automation keeps running.
 void WorkspaceRecordStores::check_delegation_offboarding(bool suspended) {
     auto store = make_store();
@@ -4914,9 +5058,8 @@ void WorkspaceRecordStores::check_delegation_offboarding(bool suspended) {
     TwoSpaces t(store, database_uri_);
     const auto& first = t.spaces[0];
     const auto& second = t.spaces[1];
-    auto linked = person("offboard");
-    linked.email = store->get_user(first.principal.user_id)->email;
-    ASSERT_TRUE(store->sign_in_clerk(linked));
+    // The person's own Clerk subject (lake#920: a second subject never links by email).
+    const auto& linked = first.clerk;
     const lake::control::NewAgentLaunch input{.customer_id = first.customer_id,
                                               .agent_id = "agent-7",
                                               .mode = "service",
@@ -5053,9 +5196,8 @@ void WorkspaceRecordStores::check_stream_offboarding(bool suspended) {
     TwoSpaces t(store, database_uri_);
     const auto& first = t.spaces[0];
     const std::string home = first.workspaces[0];
-    auto linked = person("stream-offboard");
-    linked.email = store->get_user(first.principal.user_id)->email;
-    ASSERT_TRUE(store->sign_in_clerk(linked));
+    // The person's own Clerk subject (lake#920: a second subject never links by email).
+    const auto& linked = first.clerk;
     auto context = t.context(first);
     auto records = lake::api::workspace_records(context, first.customer_id, home);
     ASSERT_TRUE(records);
@@ -6786,6 +6928,14 @@ TEST_P(WorkspaceRecordStores, MethodologiesAreTheWorkspacesOwnAndOramasStayReadO
     const auto no_target =
         t.call(first, "run_methodology", in(first, 0, {{"id", id}, {"dataset", "sales.payers"}}));
     EXPECT_EQ(no_target.error.path, "/target");
+    // lake#997: a dataset name cannot carry SQL comment syntax past the paging clauses.
+    for (const char* hostile : {"sales.payers--", "sales.payers-- x", "sales.--payers", "-sales.payers",
+                                "sales..payers", "sales.payers.x"}) {
+        const auto refused = t.call(first,
+                                    "run_methodology",
+                                    in(first, 0, {{"id", id}, {"dataset", hostile}, {"target", "late"}}));
+        EXPECT_EQ(refused.error.path, "/dataset") << hostile;
+    }
     const auto training = t.call(first,
                                  "run_methodology",
                                  in(first,
@@ -7128,6 +7278,35 @@ TEST_P(WorkspaceRecordStores, MethodologiesAreTheWorkspacesOwnAndOramasStayReadO
     crashed.phase = "Failed";
     crashed.message = "the methodology's code exited with 1";
     ASSERT_TRUE(t.store->put_methodology_run_status(failing_run, crashed));
+    // A member who may only read the account reads it as it stands (lake#1001): nothing
+    // is queued under the reader, and no trial is stopped.
+    const auto account = store->find_policy_object("customer", first.customer_id);
+    ASSERT_TRUE(account) << account.error().message;
+    const auto reader_grant = store->create_grant(
+        {second.principal.taap_id,
+         account->id,
+         "read",
+         lake::control::identity_crypto::sha256_hex(second.principal.taap_id + account->id),
+         first.principal.taap_id,
+         lake::control::new_uuid_v4()});
+    ASSERT_TRUE(reader_grant) << reader_grant.error().message;
+    const auto calls_before_read = study_calls.size();
+    const auto read_only =
+        t.call(second, "get_experiment", in(first, 0, {{"experiment_id", "study-1"}}));
+    ASSERT_TRUE(read_only.ok) << read_only.error.code << ": " << read_only.error.message;
+    EXPECT_EQ(study_calls.size(), calls_before_read) << "a read stops no trial";
+    EXPECT_EQ(read_only.value["methodology_runs"].size(), 3U) << "a read queues no run";
+    for (const json& shown : read_only.value["methodology_runs"]) {
+        if (!shown.value("run_id", json(nullptr)).is_string()) {
+            continue;
+        }
+        EXPECT_NE(t.store->get_methodology_run(shown.at("run_id"))->created_by_user_id,
+                  second.principal.user_id)
+            << "no run names the reader";
+    }
+    // The reader is a member no more: below, another space sees none of it.
+    ASSERT_TRUE(store->revoke_grant(reader_grant->id, false));
+    // The owner's read reconciles it for the person who started it.
     const auto reconciled =
         t.call(first, "get_experiment", in(first, 0, {{"experiment_id", "study-1"}}));
     ASSERT_TRUE(reconciled.ok) << reconciled.error.message;

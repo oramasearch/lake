@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Usage over time (lake#564): the Usage dashboard's pure logic. The windows a person picks and the
  * one before each, how each dimension's unit reads, the change against the last period, readings of
  * several accounts added together, the stacked chart's series, the CSV export, limit amounts in a
@@ -197,7 +199,7 @@ export function mergeReadings(readings: Reading[]): Reading | null {
 
 /** What a dimension's tile says about the bill (lake#658): build, run and instance time are
  * measured and shown as detail, and never billed, since compute is billed as CPU, RAM, GPU and GPU
- * memory. What a workspace engine holds on its own volume (`engine_storage`, decision 61,
+ * memory. What a workspace engine holds on its own volume (`engine_storage`,
  * lake#663) is shown and not billed: the volume is, by its size. Null for a dimension the price
  * list bills. */
 export function billingNote(d: Pick<Dimension, "billed"> & { dimension?: string }): string | null {
@@ -281,9 +283,13 @@ export function stackSeries(
   return { labels: bands.map((b) => b.label), values, stacked };
 }
 
-function csvCell(value: unknown): string {
-  const text = value === null || value === undefined ? "" : String(value);
-  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+/** One CSV cell. A text cell that a spreadsheet would read as a formula (it starts with =, +, -, @,
+ * a tab or a carriage return) gets a leading apostrophe, so a workspace or object name a person
+ * chose stays literal text (lake#1007). Numbers are written as they are. */
+export function csvCell(value: unknown): string {
+  let text = value === null || value === undefined ? "" : String(value);
+  if (typeof value === "string" && /^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
 /** The reading as CSV: one row per dimension, breakdown and period, in each dimension's own unit

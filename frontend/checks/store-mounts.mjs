@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Screenshots of which services and apps mount a store, and its used space (lake#666,
 // docs/ui/drives.md#storage) at 1440 and 390 wide: Data → Drives → Storage with Mounted By and used
 // space, the delete dialog of a mounted volume, Ship → Services with a service's storage and its
@@ -21,12 +23,12 @@ const BASE = process.env.BASE ?? "http://localhost:5175";
 const viewer = {
   signed_in: true,
   administrator: false,
-  display_name: "Steve Sperandeo",
-  email: "steve@example.com",
+  display_name: "Ada Lovelace",
+  email: "ada@example.com",
   taap_id: "taap:me",
   customer_id: "me",
   workspace_id: "me-0",
-  spaces: [{ id: "me", name: "steve-x7f2", label: "Your workspaces", personal: true, kind: "individual", workspaces: [{ id: "me-0", name: "steve", customer_id: "me", status: "ready" }] }],
+  spaces: [{ id: "me", name: "ada-x7f2", label: "Your workspaces", personal: true, kind: "individual", workspaces: [{ id: "me-0", name: "ada", customer_id: "me", status: "ready" }] }],
   clerk: { enabled: false },
   password_sign_up: false,
   version: "dev",
@@ -103,7 +105,7 @@ const services = [
     customer_id: "me",
     workspace_id: "me-0",
     kind: "zetta",
-    name: "steve",
+    name: "ada",
     default: true,
     instances: 1,
     storage_gi: 5,

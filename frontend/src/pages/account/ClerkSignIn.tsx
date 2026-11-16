@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Sign-in and sign-up under Clerk (docs/api/clerk.md), ported from the server page's script
  * (web_ui_clerk_sign_in). clerk-js is loaded from the instance's own Frontend API host with the
  * publishable key; once Clerk has a session, its `lake` template token is posted once, as an

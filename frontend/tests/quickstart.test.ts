@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The quickstart process's page rules (lake#1128, docs/ui/quickstart.md): what a dropped file is
  * sent as, the first model's columns, polling, publishing a trained model, the website key and the
  * balance. `npm test`; the build runs it. */
@@ -42,7 +44,7 @@ import {
   type Column,
 } from "../src/pages/quickstart/quickstart.ts";
 
-// Steve's dataset (lake#1181) as quickstart_status answers it: every column with its detected kind.
+// The reported dataset (lake#1181) as quickstart_status answers it: every column with its detected kind.
 const people: Column[] = [
   { name: "customer_id", type: "string", kind: "identifier", title: "identifier", feature: { use: false, reason: "an identifier: it names a row" }, predict: { can: false, reason: "an identifier" } },
   { name: "First Name", type: "string", kind: "categorical", title: "category, 10 values", feature: { use: true, reason: "a category of 10 values" }, predict: { can: true, choose_value: true, values: ["Ana", "Ben"] } },

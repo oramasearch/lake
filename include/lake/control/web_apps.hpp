@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <cstddef>
@@ -47,6 +49,18 @@ struct WebApp {
     // The generation the last restart_app wrote, 0 if never (lake#1228). The operator writes it on
     // the pod template, so a restart rolls the pods even when nothing else changed.
     std::int64_t restart_generation = 0;
+    // Token rotation as desired state (migration 0112, lake#1070): the generation of tokens Lake
+    // wants, which rotation increments, and the generation the operator says `token_hashes` are
+    // (nullopt: the operator has not reported one, so it predates this change).
+    std::int64_t token_generation = 0;
+    std::optional<std::int64_t> token_hashes_generation;
+
+    // Whether `token_hashes` are the tokens Lake wants: always, while the operator reports no
+    // generation (Lake then clears the hashes to rotate, as before); otherwise only once the
+    // operator has acknowledged the current `token_generation`.
+    bool tokens_current() const {
+        return !token_hashes_generation || *token_hashes_generation == token_generation;
+    }
 };
 
 struct NewWebApp {

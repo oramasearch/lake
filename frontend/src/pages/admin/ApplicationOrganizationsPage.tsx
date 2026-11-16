@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Application organizations (`/application/organizations?id=`): one application's
  * organizations, with Delete and the create dialog (web_ui_application_organizations and its two
  * POST handlers). */

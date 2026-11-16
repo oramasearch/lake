@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/zetta_workspace.hpp"
 
 #include <algorithm>
@@ -249,8 +251,51 @@ std::optional<long long> long_poll_wait_ms(const nlohmann::json& input) {
 
 } // namespace
 
+std::string dataset_scope_header_value(const std::vector<std::string>& area) {
+    std::string value;
+    for (const std::string& dataset : area) {
+        value += (value.empty() ? "" : ", ") + dataset;
+    }
+    return value;
+}
+
+bool engine_checks_dataset_scope(std::string_view capability) {
+    return capability == "sql" || capability == "list_datasets" || capability == "get_dataset";
+}
+
+bool engine_must_enforce_dataset_scope(std::string_view capability) {
+    return capability == "sql";
+}
+
+bool dataset_scope_refusal(const ZettaControlError& error) {
+    return error.code == "unauthorized" && error.details.is_object() &&
+           error.details.contains("dataset_scope");
+}
+
 liquid::runtime::task<ZettaControlResult<nlohmann::json>> ZettaWorkspaceCaller::call(
     std::string url, std::string token, std::string capability, bool read, nlohmann::json input) {
+    return send(std::move(url), std::move(token), std::move(capability), read, std::move(input),
+                std::nullopt);
+}
+
+liquid::runtime::task<ZettaControlResult<nlohmann::json>>
+ZettaWorkspaceCaller::scoped_call(std::string url,
+                                  std::string token,
+                                  std::string capability,
+                                  bool read,
+                                  nlohmann::json input,
+                                  std::string dataset_scope) {
+    return send(std::move(url), std::move(token), std::move(capability), read, std::move(input),
+                std::move(dataset_scope));
+}
+
+liquid::runtime::task<ZettaControlResult<nlohmann::json>>
+ZettaWorkspaceCaller::send(std::string url,
+                           std::string token,
+                           std::string capability,
+                           bool read,
+                           nlohmann::json input,
+                           std::optional<std::string> dataset_scope) {
     const zetta::connect::AsyncHttpTransport& transport =
         zetta::connect::default_async_http_transport();
     if (!transport) {
@@ -264,6 +309,10 @@ liquid::runtime::task<ZettaControlResult<nlohmann::json>> ZettaWorkspaceCaller::
     request.url = url + "/v1/" + capability;
     request.headers = {{"Accept", "application/json"}, {"Authorization", "Bearer " + token}};
     request.secret_headers = {"Authorization"};
+    // A dataset-confined call (lake#1055): the engine refuses any read outside the work area.
+    if (dataset_scope) {
+        request.headers.emplace_back(std::string(dataset_scope_header), *dataset_scope);
+    }
     // A read that hangs must not hold a page for a minute (as get_run_report did before
     // zetta#1007 was fixed); actions such as compile_intent may legitimately take longer.
     request.timeout_seconds = read ? 15 : 60;
@@ -542,7 +591,12 @@ WorkspaceService::request(std::string customer_id, std::string requested_by) {
             co_return state_of(customer_id, *found);
         }
     }
-    const auto created = store_->create_workspace({customer_id, name, "prod", requested_by});
+    const auto created = store_->create_workspace({customer_id,
+                                                   name,
+                                                   "prod",
+                                                   requested_by,
+                                                   config_.max_workspaces_per_customer,
+                                                   config_.max_per_customer});
     if (!created) {
         co_return from_store<WorkspaceState>(created.error());
     }
@@ -605,10 +659,15 @@ Result<WorkspaceEndpoint> WorkspaceService::endpoint(const std::string& customer
     return WorkspaceEndpoint{state.endpoint, token};
 }
 
-liquid::runtime::task<ZettaControlResult<nlohmann::json>> WorkspaceService::call(
-    std::string customer_id, std::string workspace_id, std::string capability,
-    bool read, nlohmann::json input,
-    std::function<void(std::chrono::nanoseconds)> observe, bool cache_definitions) {
+liquid::runtime::task<ZettaControlResult<nlohmann::json>>
+WorkspaceService::call(std::string customer_id,
+                       std::string workspace_id,
+                       std::string capability,
+                       bool read,
+                       nlohmann::json input,
+                       std::function<void(std::chrono::nanoseconds)> observe,
+                       bool cache_definitions,
+                       std::optional<std::vector<std::string>> dataset_scope) {
     const auto started = std::chrono::steady_clock::now();
     const auto found = workspace(customer_id, workspace_id);
     if (!found) {
@@ -626,6 +685,57 @@ liquid::runtime::task<ZettaControlResult<nlohmann::json>> WorkspaceService::call
     if (token.empty()) {
         co_return workspace_failure<nlohmann::json>("workspace_not_ready",
                                                     "the workspace credential is not available");
+    }
+    // A dataset-confined call (lake#1055) carries the scope to an engine that enforces it, and
+    // then never touches the definitions cache: an answer kept for an unconfined call was never
+    // checked against this work area. On an engine that does not, a call lake cannot prove inside
+    // on its own (sql) is refused and never sent; any other is one lake confines itself
+    // (registry.cpp) and is sent unscoped, as before.
+    if (dataset_scope) {
+        const std::string probe_key = nlohmann::json::array({found->id, found->generation,
+                                                             workspace.endpoint}).dump();
+        const auto enforced = co_await dataset_scope_enforced(probe_key, workspace.endpoint, token);
+        if (!enforced || !*enforced) {
+            if (engine_must_enforce_dataset_scope(capability)) {
+                co_return workspace_failure<nlohmann::json>(
+                    "unauthorized",
+                    "this agent works only on " +
+                        (dataset_scope->empty() ? std::string("no dataset")
+                                                : dataset_scope_header_value(*dataset_scope)) +
+                        "; this workspace's engine cannot confine " + capability +
+                        " to a work area yet (it needs a Zetta that enforces " +
+                        std::string(dataset_scope_header) + "), so Lake does not send it");
+            }
+            dataset_scope.reset();
+        }
+    }
+    if (dataset_scope) {
+        // The engine places a scoped get_dataset only by its database (zetta#1519) and refuses a
+        // bare name; lake names the database on every confined get_dataset and never sends one
+        // without it.
+        if (capability == "get_dataset" &&
+            (!input.is_object() || !input.contains("database") || !input["database"].is_string() ||
+             input["database"].get_ref<const std::string&>().empty())) {
+            co_return workspace_failure<nlohmann::json>(
+                "unauthorized",
+                "this agent works only on " + dataset_scope_header_value(*dataset_scope) +
+                    "; name the dataset it reads with its database (<database>/<name>)");
+        }
+        auto scoped = co_await caller_->scoped_call(workspace.endpoint, token,
+                                                    std::move(capability), read, std::move(input),
+                                                    dataset_scope_header_value(*dataset_scope));
+        if (observe) {
+            observe(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - started));
+        }
+        if (!scoped) {
+            co_return workspace_failure<nlohmann::json>("store_unavailable",
+                                                        scoped.error().message);
+        }
+        if (!read && *scoped) {
+            invalidate_registry(customer_id, workspace_id);
+        }
+        co_return std::move(*scoped);
     }
     // Deployment catalogues and project/pipeline definitions change on writes, not every
     // render. Data, connections and execution state are never cached. Recheck access and
@@ -673,6 +783,36 @@ liquid::runtime::task<ZettaControlResult<nlohmann::json>> WorkspaceService::call
         }
     }
     co_return std::move(*called);
+}
+
+liquid::runtime::task<bool> WorkspaceService::dataset_scope_enforced(std::string key,
+                                                                    std::string endpoint,
+                                                                    std::string token) {
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard lock(registry_mutex_);
+        const auto known = scope_probes_.find(key);
+        if (known != scope_probes_.end() && known->second.expires > now) {
+            co_return known->second.enforced;
+        }
+    }
+    // A scope that names one dataset no workspace has: server_info declares no dataset reads, so
+    // an engine that enforces the scope refuses it, and one that ignores the header answers it.
+    auto probed = co_await caller_->scoped_call(std::move(endpoint), std::move(token),
+                                                "server_info", true, nlohmann::json::object(),
+                                                "lake_scope_probe/none");
+    const bool enforced = probed && !*probed && dataset_scope_refusal((*probed).error());
+    // Unknown (no answer, or a failure that is not the engine's refusal) is not enforced, and is
+    // asked again on the next call.
+    if (probed && (*probed || enforced)) {
+        std::lock_guard lock(registry_mutex_);
+        if (scope_probes_.size() >= 128) {
+            scope_probes_.clear();
+        }
+        scope_probes_.insert_or_assign(
+            key, ScopeProbe{enforced, std::chrono::steady_clock::now() + std::chrono::seconds(30)});
+    }
+    co_return enforced;
 }
 
 } // namespace lake::control

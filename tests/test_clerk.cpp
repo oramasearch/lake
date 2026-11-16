@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "one_thread_io.hpp"
 #include "postgres_fixture.hpp"
 
@@ -203,15 +205,37 @@ void expect_clerk_sign_in_contract(lake::control::Store& store, const std::strin
     EXPECT_EQ(again_principal->user_id, principal->user_id);
     EXPECT_EQ(again_principal->taap_id, first_identity.custodial_taap_id);
 
-    // A second Clerk subject with the same verified email links to the same lake account.
-    const auto linked = store.sign_in_clerk(minted("user_other_" + suffix, email));
-    ASSERT_TRUE(linked) << linked.error().message;
-    const auto linked_principal = store.context_for(linked->secret);
-    ASSERT_TRUE(linked_principal);
-    EXPECT_EQ(linked_principal->user_id, principal->user_id);
+    // A second Clerk subject with the same verified email is never linked to the first account
+    // (lake#920): it gets an account of its own, the address moves to it, and the first
+    // account keeps its sessions and its customer.
+    const auto second = store.sign_in_clerk(minted("user_other_" + suffix, email));
+    ASSERT_TRUE(second) << second.error().message;
+    const auto second_principal = store.context_for(second->secret);
+    ASSERT_TRUE(second_principal);
+    EXPECT_NE(second_principal->user_id, principal->user_id);
+    EXPECT_EQ(store.get_user(second_principal->user_id)->email, email);
+    EXPECT_TRUE(store.get_user(principal->user_id)->email.empty());
+    EXPECT_TRUE(store.context_for(first->secret)) << "the first account is otherwise unchanged";
     const auto still_one = store.list_customers(100, principal->user_id);
     ASSERT_TRUE(still_one);
     EXPECT_EQ(still_one->size(), 1U);
+
+    // An account whose address no one verified (an operator's, or SSO or SCIM provisioning) is
+    // never adopted: its holder's token does not reach the Clerk person's account.
+    const std::string squatted = "squatted-" + email;
+    const auto squatter_identity = minted("unused_" + suffix, squatted);
+    const auto squatter =
+        store.create_user({squatter_identity.custodial_taap_id, squatted, "Squatter"});
+    ASSERT_TRUE(squatter) << squatter.error().message;
+    const auto squatter_token = store.create_token({squatter->id, "lake", "pre", "", {"*"}, 3600});
+    ASSERT_TRUE(squatter_token) << squatter_token.error().message;
+    const auto victim = store.sign_in_clerk(minted("user_victim_" + suffix, squatted));
+    ASSERT_TRUE(victim) << victim.error().message;
+    const auto victim_principal = store.context_for(victim->secret);
+    ASSERT_TRUE(victim_principal);
+    EXPECT_NE(victim_principal->user_id, squatter->id);
+    EXPECT_EQ(store.context_for(squatter_token->secret)->user_id, squatter->id);
+    EXPECT_TRUE(store.get_user(squatter->id)->email.empty());
 
     // A new person needs a custodial identity to be created at all.
     auto without_identity = minted("user_new_" + suffix, "new-" + email);
@@ -234,7 +258,7 @@ TEST(Clerk, PublishableKeyYieldsTheFrontendApiAndIssuer) {
     ASSERT_TRUE(live);
     EXPECT_EQ(live->issuer, "https://clerk.example.com");
     // Unpadded, as Clerk issues them.
-    std::string unpadded = "pk_test_" + base64("above-seahorse-7535.clerk.accounts.dev$");
+    std::string unpadded = "pk_test_" + base64("example-456.clerk.accounts.dev$");
     while (unpadded.back() == '=') {
         unpadded.pop_back();
     }
@@ -324,10 +348,16 @@ TEST(Clerk, PostgresStoreSignsInLinksProvisionsAndHoldsTheSeed) {
     ASSERT_EQ(rows.size(), 1U);
     EXPECT_EQ(rows[0][0].as<std::string>(), rows[0][2].as<std::string>());
     EXPECT_FALSE(rows[0][1].as<std::string>().empty());
+    // One credential per Clerk subject that signed in (user_, user_other_ and user_victim_), each
+    // on its own account: a subject is never linked to another's account by email.
     const auto credentials =
         tx.exec_params("SELECT count(*) FROM credentials WHERE kind = 'oauth' AND subject LIKE $1",
                        "clerk:user_%" + suffix);
-    EXPECT_EQ(credentials[0][0].as<int>(), 2);
+    EXPECT_EQ(credentials[0][0].as<int>(), 3);
+    const auto accounts = tx.exec_params(
+        "SELECT count(DISTINCT user_id) FROM credentials WHERE kind = 'oauth' AND subject LIKE $1",
+        "clerk:user_%" + suffix);
+    EXPECT_EQ(accounts[0][0].as<int>(), 3);
 }
 
 TEST(Clerk, OperatorsRevokeEveryLiveSessionOfAUser) {
@@ -462,6 +492,9 @@ TEST(Clerk, TemplateExchangeChecksLiveAccountStateWithoutCaching) {
     std::atomic<int> status{200};
     std::atomic<int> calls{0};
     lake::api::ServerOptions options;
+    // The origins the test tokens' azp name are this Lake's (lake#921).
+    options.public_host = "lake.example.test";
+    options.host_aliases = {"us.lake.example.test"};
     options.port = 0;
     options.store = store;
     options.instance_kek = std::string(test_kek);
@@ -539,6 +572,9 @@ TEST(HttpServer, ClerkBackendStatusDoesNotBlockOtherRequests) {
     std::promise<void> release;
     auto released = release.get_future();
     lake::api::ServerOptions options;
+    // The origins the test tokens' azp name are this Lake's (lake#921).
+    options.public_host = "lake.example.test";
+    options.host_aliases = {"us.lake.example.test"};
     options.port = 0;
     options.worker_coroutines = 2;
     options.store = std::make_shared<lake::control::InMemoryStore>();
@@ -581,7 +617,7 @@ TEST(HttpServer, ClerkBackendStatusDoesNotBlockOtherRequests) {
 }
 
 namespace {
-// What lake.live's production instance issued on 2026-10-24 for a person with no name in Clerk:
+// What a production Clerk instance issues for a person with no name in Clerk:
 // the `lake` template renders `{{user.full_name}}` as null (lake#1115).
 std::string nameless_template_token(const ClerkInstance& clerk,
                                     json email = "person@example.test") {
@@ -708,12 +744,15 @@ TEST(Clerk, ARefusedTokenSaysWhyAndSummarizesWithoutPersonalClaims) {
     EXPECT_TRUE(lake::api::summarize_token("garbage").issuer.empty());
 }
 
-// The exchange end to end: the token shape lake.live refused signs in, and a refused token is
+// The exchange end to end: the token shape lake once refused signs in, and a refused token is
 // logged with its reason and registered claims, never the token or the person's claims.
 TEST(HttpServer, ClerkExchangeAcceptsANamelessPersonAndLogsWhyATokenWasRefused) {
     ClerkInstance clerk;
     auto store = std::make_shared<lake::control::InMemoryStore>();
     lake::api::ServerOptions options;
+    // The origins the test tokens' azp name are this Lake's (lake#921).
+    options.public_host = "lake.example.test";
+    options.host_aliases = {"us.lake.example.test"};
     options.port = 0;
     options.store = store;
     options.instance_kek = std::string(test_kek);
@@ -759,6 +798,29 @@ TEST(HttpServer, ClerkExchangeAcceptsANamelessPersonAndLogsWhyATokenWasRefused) 
     EXPECT_EQ(signed_in->status, 302U);
     EXPECT_EQ(active_sessions(), 1) << "the nameless person is signed in (lake#1115)";
 
+    // A template token issued to another product sharing the Clerk instance, or to no origin, is
+    // not exchanged here (lake#921).
+    for (const json& party : {json("https://app.other-product.example.test"), json(nullptr)}) {
+        const long issued = now_unix();
+        json claims{{"iss", ClerkInstance::issuer},
+                    {"aud", "lake"},
+                    {"sub", "user_test"},
+                    {"email", "person@example.test"},
+                    {"iat", issued},
+                    {"exp", issued + 300}};
+        if (!party.is_null()) {
+            claims["azp"] = party;
+        }
+        std::ostringstream quiet;
+        auto* kept = std::cerr.rdbuf(quiet.rdbuf());
+        const auto other_product = exchange(clerk.token(claims));
+        std::cerr.rdbuf(kept);
+        ASSERT_TRUE(other_product);
+        EXPECT_EQ(active_sessions(), 1) << party.dump();
+        EXPECT_NE(quiet.str().find("azp is not one of this Lake's origins"), std::string::npos)
+            << quiet.str();
+    }
+
     const long now = now_unix();
     const std::string refused_token = clerk.token({{"iss", ClerkInstance::issuer},
                                                    {"aud", "other"},
@@ -795,6 +857,9 @@ TEST(Clerk, TheSessionTokenBindsTheBrowserToItsClerkSession) {
     ClerkInstance clerk;
     auto store = std::make_shared<lake::control::InMemoryStore>();
     lake::api::ServerOptions options;
+    // The origins the test tokens' azp name are this Lake's (lake#921).
+    options.public_host = "lake.example.test";
+    options.host_aliases = {"us.lake.example.test"};
     options.port = 0;
     options.store = store;
     options.instance_kek = std::string(test_kek);

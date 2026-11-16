@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A repository's environments (web_ui.cpp web_ui_environments; serve_environments_page): their
  * figures, a search and phase filter, and each environment as a rich row. */
 import { useState } from "react";

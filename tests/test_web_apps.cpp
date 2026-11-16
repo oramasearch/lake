@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include <algorithm>
 #include <chrono>
 #include <ctime>
@@ -254,7 +256,7 @@ TEST(WebApps, DesiredStateStatusAndQuotasFollowTheContract) {
 
 TEST(WebApps, ReservedNamesAreRefusedAndOrdinaryNamesUseTheZone) {
     WebApps apps;
-    apps.apps_wildcard = "oramadev.net";
+    apps.apps_wildcard = "example.net";
     apps.apps_reserved_names = "customer-portal, internal";
     for (const char* value : {"lake",
                               "www",
@@ -297,7 +299,7 @@ TEST(WebApps, ReservedNamesAreRefusedAndOrdinaryNamesUseTheZone) {
 
     const auto created = apps.create("reports");
     ASSERT_TRUE(created.ok) << created.error.message;
-    EXPECT_EQ(created.value["host"], "reports.oramadev.net");
+    EXPECT_EQ(created.value["host"], "reports.example.net");
 }
 
 // lake#783: the operator runs an image app only when its image is pinned by digest
@@ -362,14 +364,14 @@ TEST(WebApps, AnImageAppIsRefusedUnlessItsImageIsPinnedByDigest) {
 // (lake#947): {name: "ok", host: "app.<wildcard>"} took the platform's names past the name check.
 TEST(WebApps, AnExplicitHostCannotTakeAReservedNameOrTheLakesOwnHost) {
     WebApps apps;
-    apps.apps_wildcard = "oramadev.net";
+    apps.apps_wildcard = "example.net";
     apps.apps_reserved_names = "customer-portal, internal";
-    apps.public_host = "dev-lake.oramadev.net";
+    apps.public_host = "dev-lake.example.net";
     auto regions = lake::api::regions_from_environment(
         "westus2",
         "",
-        R"([{"name":"westus2","label":"US West","host":"us.oramadev.net","latitude":47,"longitude":-122}])",
-        "picker.oramadev.net");
+        R"([{"name":"westus2","label":"US West","host":"us.example.net","latitude":47,"longitude":-122}])",
+        "picker.example.net");
     ASSERT_TRUE(regions) << regions.error();
     apps.regions = &*regions;
     const auto with_host = [&](const std::string& name, const std::string& host) {
@@ -387,16 +389,16 @@ TEST(WebApps, AnExplicitHostCannotTakeAReservedNameOrTheLakesOwnHost) {
                           {"host", host}});
     };
     int attempt = 0;
-    for (const char* value : {"app.oramadev.net",
-                              "login.oramadev.net",
-                              "auth.oramadev.net",
-                              "sso.oramadev.net",
-                              "grafana.oramadev.net",
-                              "lake.oramadev.net",
-                              "lake-eu.oramadev.net",
-                              "orama-console.oramadev.net",
-                              "customer-portal.oramadev.net",
-                              "internal.oramadev.net"}) {
+    for (const char* value : {"app.example.net",
+                              "login.example.net",
+                              "auth.example.net",
+                              "sso.example.net",
+                              "grafana.example.net",
+                              "lake.example.net",
+                              "lake-eu.example.net",
+                              "orama-console.example.net",
+                              "customer-portal.example.net",
+                              "internal.example.net"}) {
         const std::string host = value;
         const auto refused = with_host("ok-" + std::to_string(attempt++), host);
         EXPECT_EQ(refused.error.code, "invalid_input") << host;
@@ -404,7 +406,7 @@ TEST(WebApps, AnExplicitHostCannotTakeAReservedNameOrTheLakesOwnHost) {
         EXPECT_TRUE(refused.error.message.contains("is reserved"))
             << host << ": " << refused.error.message;
     }
-    for (const char* value : {"dev-lake.oramadev.net", "us.oramadev.net", "picker.oramadev.net"}) {
+    for (const char* value : {"dev-lake.example.net", "us.example.net", "picker.example.net"}) {
         const std::string host = value;
         const auto refused = with_host("ok-" + std::to_string(attempt++), host);
         EXPECT_EQ(refused.error.code, "invalid_input") << host;
@@ -413,9 +415,9 @@ TEST(WebApps, AnExplicitHostCannotTakeAReservedNameOrTheLakesOwnHost) {
             << host << ": " << refused.error.message;
     }
 
-    const auto created = with_host("ok", "shop.oramadev.net");
+    const auto created = with_host("ok", "shop.example.net");
     ASSERT_TRUE(created.ok) << created.error.message;
-    EXPECT_EQ(created.value["host"], "shop.oramadev.net");
+    EXPECT_EQ(created.value["host"], "shop.example.net");
 }
 
 TEST(WebApps, CapabilitiesAreCustomerScopedAndValidateSecretsHostsAndDeletes) {
@@ -688,7 +690,15 @@ TEST(WebApps, OperatorHashesRestrictEveryPurposeAndRotationRevokesOldTokens) {
     ASSERT_TRUE(apps.store->update_web_app(id, revoke));
     EXPECT_FALSE(apps.store->context_for("operator-events"));
     EXPECT_TRUE(apps.store->get_web_app(id)->token_hashes.empty());
-    ASSERT_TRUE(apps.store->set_web_app_token_hashes(id, hashes));
+    // An operator that acknowledges the token generation (lake#1070): rotation leaves its hashes
+    // alone, and the generation it has not acknowledged yet revokes them at once.
+    ASSERT_TRUE(apps.store->set_web_app_token_hashes(id, hashes, 1));
+    EXPECT_TRUE(apps.store->context_for("operator-events"));
+    ASSERT_TRUE(apps.store->update_web_app(id, revoke));
+    EXPECT_EQ(apps.store->get_web_app(id)->token_generation, 2);
+    EXPECT_EQ(apps.store->get_web_app(id)->token_hashes, hashes);
+    EXPECT_FALSE(apps.store->context_for("operator-events"));
+    ASSERT_TRUE(apps.store->set_web_app_token_hashes(id, hashes, 2));
     ASSERT_TRUE(apps.call("delete_app", {{"app_id", id}, {"confirm", "reports"}}).ok);
     EXPECT_FALSE(apps.store->context_for("operator-source"));
     EXPECT_FALSE(apps.store->context_for("operator-zetta"));
@@ -726,6 +736,28 @@ TEST(WebApps, ServiceBindingsAcceptAUniqueServiceName) {
     EXPECT_EQ(apps.call("bind_service_to_app", {{"app_id", id}, {"service_id", "no-such-db"}})
                   .error.code,
               "not_found");
+
+    // lake#945: a service of another workspace of the account is never bound, by id or by name,
+    // and a member who may write but not administer the account cannot bind one at all.
+    const std::string elsewhere = apps.workspace->add(apps.store, apps.customer_id, "elsewhere");
+    lake::control::NewManagedService foreign{apps.customer_id, "postgres", "ledger", apps.owner.taap_id};
+    foreign.workspace_id = elsewhere;
+    const auto other_service = apps.store->create_service(foreign);
+    ASSERT_TRUE(other_service) << other_service.error().message;
+    for (const std::string reference : {other_service->id, std::string("ledger")}) {
+        EXPECT_EQ(apps.call("bind_service_to_app", {{"app_id", id}, {"service_id", reference}})
+                      .error.code,
+                  "not_found")
+            << reference;
+    }
+    const auto account = apps.store->find_policy_object("customer", apps.customer_id);
+    ASSERT_TRUE(account);
+    ASSERT_TRUE(apps.store->create_grant(
+        {apps.other.taap_id, account->id, "write", "test-attestation", "admin", ""}));
+    const auto writer = apps.call(
+        apps.other, "bind_service_to_app", {{"app_id", id}, {"service_id", service_id}});
+    EXPECT_FALSE(writer.ok);
+    EXPECT_EQ(writer.error.code, "unauthorized") << writer.error.message;
 }
 
 namespace {

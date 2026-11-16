@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Drives (docs/api/drives.md, lake#561): a workspace's drives, each a sealed `lake_drives` record
 // in its workspace Zetta that keeps its files in a repository, as workspace files, or as shortcuts
 // only (virtual), or that browses one of the workspace's bucket or filesystem stores in place
@@ -31,6 +33,7 @@
 #include "lake/control/store_kept.hpp"
 #include "lake/control/transcripts.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "repository_path_access.hpp"
 #include "store_repository.hpp"
 #include "workspace_records_api.hpp"
 
@@ -654,7 +657,7 @@ struct StoreOpened {
     std::optional<ApiResult> failure;
 };
 
-// The fields of the workspace secret a customer's own bucket names (decision 58: the workspace's
+// The fields of the workspace secret a customer's own bucket names (the workspace's
 // credential, never Orama's), read by Lake in the workspace's secret store with its own authority:
 // the person who created the store showed they could read it (create_store). Kept in this process
 // for a minute, so a download's windows do not each read the secret.
@@ -2771,7 +2774,17 @@ liquid::runtime::task<RepositoryPaths> repository_paths(ApiContext& context,
     if (!read) {
         co_return RepositoryPaths{{}, read.error().message};
     }
-    co_return RepositoryPaths{std::move(*read), {}};
+    // Names below a path object that does not inherit are found only by a caller with a grant
+    // there, as Drive browses them (lake#975).
+    const auto access = RepositoryPathAccess::load(context, found, "main");
+    if (!access) {
+        co_return RepositoryPaths{{}, access.error().message};
+    }
+    auto readable = access->readable_entries(context, std::move(*read));
+    if (!readable) {
+        co_return RepositoryPaths{{}, readable.error().message};
+    }
+    co_return RepositoryPaths{std::move(*readable), {}};
 }
 
 RepositoryPaths awaited_paths(std::expected<RepositoryPaths, liquid::error> completed) {

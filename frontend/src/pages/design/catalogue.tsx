@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What Solutions, Solution, Methodologies and Methodology share: methodology links and chips, the
  * catalogue's toolbar filter, and the "engine does not list solutions yet" note. */
 import { Fragment } from "react";

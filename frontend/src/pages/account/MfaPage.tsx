@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Multi-factor authentication (`/mfa`). Signed in: enroll or replace a TOTP authenticator (the URI
  * and recovery codes are shown once, held only in this page's memory) and disable it. A visitor:
  * the password-and-code challenge, which signs in. */

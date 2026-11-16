@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Resend (lake#831, docs/api/orders.md#email): lake's own client for Resend's REST API. No Resend
 // SDK; the HTTP exchange is injected (ResendHttp), the server's outbound client in lake.
 
@@ -36,7 +38,16 @@ std::string_view from_address(std::string_view from) {
 } // namespace
 
 std::string ResendSettings::unavailable_reason() const {
-    return api_key.empty() ? "LAKE_RESEND_API_KEY is not set" : std::string();
+    if (api_key.empty()) {
+        return "LAKE_RESEND_API_KEY is not set";
+    }
+    if (from.empty()) {
+        return "LAKE_RESEND_FROM is not set";
+    }
+    if (support_email.empty()) {
+        return "LAKE_SUPPORT_EMAIL is not set";
+    }
+    return {};
 }
 
 bool plausible_email_address(std::string_view address) {
@@ -72,8 +83,8 @@ std::expected<ResendSettings, std::string> resend_settings_from_environment(
     if (!trim(from).empty()) {
         settings.from = std::string(trim(from));
     }
-    if (!plausible_email_address(from_address(settings.from)) ||
-        settings.from.find_first_of("\r\n") != std::string::npos) {
+    if (!settings.from.empty() && (!plausible_email_address(from_address(settings.from)) ||
+                                   settings.from.find_first_of("\r\n") != std::string::npos)) {
         return std::unexpected(std::format(
             "LAKE_RESEND_FROM must be an email address or \"Name <address>\", not \"{}\"",
             settings.from));
@@ -81,7 +92,7 @@ std::expected<ResendSettings, std::string> resend_settings_from_environment(
     if (!trim(support_email).empty()) {
         settings.support_email = std::string(trim(support_email));
     }
-    if (!plausible_email_address(settings.support_email)) {
+    if (!settings.support_email.empty() && !plausible_email_address(settings.support_email)) {
         return std::unexpected(std::format(
             "LAKE_SUPPORT_EMAIL must be an email address, not \"{}\"", settings.support_email));
     }

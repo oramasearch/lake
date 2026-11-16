@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Network → Egress and DNS (`/w/<id>/network/egress`, lake#729, docs/ui/network.md): the outside
  * destinations this workspace's workloads may reach, by DNS name or address range, for the whole
  * workspace or one workload (`list_network_egress_rules`), and "Allow a destination"

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <cstdint>
@@ -6,6 +8,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <liquid/identity.hpp>
 #include <nlohmann/json_fwd.hpp>
@@ -35,6 +38,11 @@ std::string base64url_encode(std::string_view value);
 struct VerifiedTaapSignIn {
     std::string taap_id;
     std::string assertion_id;
+    // The SHA-256 (hex) of each identity document's canonical bytes, oldest first: the presented
+    // document alone, or the whole identity_chain. The last is the chain's head; the store refuses
+    // a chain that does not reach the head it recorded, so a replaced key stops signing in
+    // (lake#1024).
+    std::vector<std::string> chain_hashes;
 };
 
 // Verifies a TAAP sign-in assertion (docs/api/identity.md#signing-in-with-a-taap-key). The
@@ -58,12 +66,20 @@ bool identity_document_is_self_certifying(const liquid::identity_document& docum
 // is self-certifying, or, given `identity_chain` (oldest first, ending with the document), the
 // current key of that chain, which liquid's verify_chain accepts, whose first document is
 // self-certifying, and whose every rotation the replaced key signed. Anything else is refused.
+// `chain_hashes`, when given, receives each document's canonical SHA-256 (hex), oldest first.
 std::expected<liquid::actor, std::string>
-bound_taap_key(std::string_view identity_document, std::span<const std::string> identity_chain);
+bound_taap_key(std::string_view identity_document,
+               std::span<const std::string> identity_chain,
+               std::vector<std::string>* chain_hashes = nullptr);
 
 // The identifier a document claims, for the audit of a refused sign-in; empty when it does not
 // decode.
 std::string claimed_taap_id(std::string_view identity_document);
+
+// A stored identity document (base64url canonical CBOR) decoded; nothing when it does not decode.
+// Used to hand a registered person's document to liquid as an attestation issuer's chain
+// (lake#1020).
+std::optional<liquid::identity_document> decode_document(std::string_view identity_document);
 
 struct OidcClaims {
     std::string subject;

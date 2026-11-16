@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Data → Drives (lake#561, docs/ui/drives.md): workspace pages, served under `/w/<id>/`. The list
  * is `/drives` (its Storage tab `?tab=storage`, lake#656); one drive is
  * `/drives/drive?id=<id>&folder=<folder>`, the address style of lake's other detail pages.

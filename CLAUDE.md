@@ -1,73 +1,25 @@
 # CLAUDE.md — lake
 
-The lake binary. **Org-wide conventions** live in
-[`oramasearch/orama-bridge`](https://github.com/oramasearch/orama-bridge) `CLAUDE.md`
-and apply in full. Project conventions live in
-[`oramasearch/liquid`](https://github.com/oramasearch/liquid) `CLAUDE.md` — vocabulary,
-document rules, confidentiality, and the decisions not to drift past. Read both.
+The lake binary: the control plane and console of Orama Lake, built on Zetta (the data plane) and
+liquid (repositories, identity and signing). Read [`README.md`](README.md) and
+[`docs/README.md`](docs/README.md) first. Vocabulary and document rules shared with liquid are in
+liquid's own `CLAUDE.md`.
 
-## Status
+## Where the status lives
 
-Status: 2026-10-27. The current release is **v0.8.1** ([`docs/releases/v0.8.1.md`](docs/releases/v0.8.1.md): fixes from the customer-insights demo: exact file text, clustering on real columns, Change App reloads onto the new version). Before it, The current release is **v0.8.0** ([`docs/releases/v0.8.0.md`](docs/releases/v0.8.0.md): agents on gpt-6.1-sol through the Responses API, and editing Apps from the console; before it the hotfix **v0.7.3** and **v0.7.2**; every release is indexed in [`docs/releases/README.md`](docs/releases/README.md)). Of the older ones, **v0.4.0** ([`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md): the security release from the multi-tenant audit and the pre-launch review, SAML sign-in, OpenID Connect discovery and `delete_account`); before it **v0.3.1** (billing through a shared Stripe account); before that **v0.3.0**
-([`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md): the lake.live order sheet and the 2026-10-18
-UX review's fixes, with its known issues); v0.2.0 ([`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md))
-added secure networking, regions, the managed key and own identity, Clerk webhooks, the agents'
-names and Ask Orama's home. `server_info` of a v0.4.0 build reports version `0.4.0`. The paragraph below describes v0.1.0, the
-first tagged release ([`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md) lists everything in it),
-and what ran on 2026-10-12. `Lake/prod` on the
-dev AKS cluster (there is no production environment yet) serves `oramasearch/lake:20261012a`, which
-is also `oramasearch/lake:v0.1.0`, built from the tag (`2e6f6d7`) against liquid `v0.1.0`
-(`f669726`). `GET /v1/server_info` reports version `0.1.0`; the OpenAPI lists 554 paths and the
-operator's schema is applied through `0083_methodology_deployments`. Its bus and workspace Zettas
-run `oramasearch/zetta:main-4015ef76` (zetta `v0.2.0`).
+This file holds the rules for working in the code, not a status log.
 
-The apex order sheet is in the source tree, not deployed (lake#831, migration `0089_cloud_orders`,
-[`docs/api/orders.md`](docs/api/orders.md)): lake.live's picker shows four offers with USD prices
-from `LAKE_ORDER_SHEET`, Stripe Checkout or an order form that skips payment, orders in
-`cloud_orders`, email through Resend (`LAKE_RESEND_API_KEY`). The operator provisions paid orders
-(orama-operator#634); recurring entitlement now has signed subscription events, paid-through/access
-deadlines and a clock-evaluated desired-state view (lake#972, migration `0097_cloud_order_entitlements`).
-The operator must vendor the schema, select `cloud_order_entitlements_guard`, register the new events
-and suspend expired orders before automatic provisioning is enabled; this paired work is not implemented
-in Lake. The credit on the monthly bill and the 5-minute promise's test are not built. See
-[`docs/api/orders.md`](docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
+- What is built, exercised locally and deployed, area by area: [`docs/design/status.md`](docs/design/status.md).
+  It distinguishes implemented, exercised locally, deployed and exercised-in-deployment behaviour;
+  never infer a deployment from a route's presence in OpenAPI.
+- What each version contains: [`docs/releases/`](docs/releases/README.md).
+- The API, area by area: [`docs/api/`](docs/api/README.md). The web app: [`docs/ui/`](docs/ui/web-app.md).
 
-Secure-networking desired state is implemented in the source tree (lake#727, `0084_network`):
-four desired/status pairs, scoped stores, signed atomic audit and app-to-service rollout rows.
-Tunnel grants end through revocation or expiry; internet egress stays implicit in the operator.
-Fourteen permission-checked capabilities expose connections, scoped credential rotation, egress,
-tunnel grants, recipient-only CSR signing, peers and effective rules through REST, OpenAPI and MCP
-(lake#728, lake#730, lake#731).
-Migration `0085_network_tunnel_ca` adds public client/relay CA fields without changing 0084.
-Session and activity reads return empty arrays with `pending: "zetta#1281"` through a provider
-interface. Operator adoption, live relay session termination and deployment are not claimed. See
-[`docs/control-plane/network.md`](docs/control-plane/network.md) and
-[`docs/api/network.md`](docs/api/network.md), [scoped credentials](docs/api/scoped-credentials.md)
-and [tunnel credentials](docs/api/tunnel-grants.md).
-Each workspace has a Network section in the console after Ship (lake#729): Overview, Connections,
-Developer Access, Private Networks, Egress and DNS, Policies and Activity, which together call all
-fourteen capabilities. Data → Connections (datasets) stays separate and each links the other. Not
-deployed. See [`docs/ui/network.md`](docs/ui/network.md) and the [Network guide](docs/guide/network.md).
-Lake serves the tunnel client itself (lake#745 part 2, no migration): the image copies the
-`zetta-tunnel` binaries (macOS arm64, Linux amd64) from the private `oramasearch/zetta-tunnel-clients`
-image pinned by digest to `LAKE_TUNNEL_CLIENTS_DIR` (default `/usr/share/lake/tunnel-clients`);
-`tunnel_client_downloads` answers, to any signed-in person, the version and per platform the SHA-256,
-size and a 15-minute link signed with the Hub upload links' HMAC under `LAKE_INSTANCE_KEK`, which
-`GET /tunnel-clients/<platform>` serves without a session; Get credentials makes installing it step 4.
-Not deployed. See [`docs/api/tunnel-clients.md`](docs/api/tunnel-clients.md).
+`tools/docs/check-status.py` (run by `DocsStatus.MatchesTheObservedOpenApi`) fails when the status
+page calls a capability undeployed that the newest snapshot in `docs/deployment/observed/` lists;
+after recording a new snapshot, update the page.
 
-Every new account starts with a managed key, and a person may use their own identity instead
-(lake#762, liquid-bridge decision 65, migration `0086_identity_links`): Lake's own password sign-up
-no longer needs an identity document and mints a managed key as a first Clerk sign-in does;
-Account → Identity (`/settings?tab=identity`) reads `account_identity` and runs *Use my own
-identity*: `begin_own_identity` verifies the `liquid identity show --document` output (an initial
-document only) and issues a ten-minute challenge, `use_own_identity` verifies the
-`liquid sign artifact <challenge>` signature with libliquid, has the managed key sign the link, and
-in one transaction records it and destroys the managed seed. The account keeps its identifier, so
-grants, audit and repositories stay; `sign_in_taap` with the own key reaches it, and a push's
-`push_change` audit names the signer and the account it acts for. Not deployed; the operator must
-vendor the schema and select `identity_links_guard`. See
-[`docs/api/identity.md#your-own-identity`](docs/api/identity.md#your-own-identity).
+## Build and test
 
 Password, MFA and recovery verification share per-account and per-client failure budgets (no instance-wide ceiling) with concurrent reservations (lake#966, LSR-100,
 `0098_authentication_attempts`); successful TOTP steps and recovery codes are consumed across
@@ -432,6 +384,13 @@ priced at OpenAI's 2x input and 1.5x output plus 30%; a `service_tier` other tha
 and `default` is always sent. Ship → Workspaces → Settings is the picker, with prices. Not deployed;
 the operator must vendor the schema and select `agent_model_prices_guard` before the image rolls. See
 [`docs/api/model-gateway.md#the-workspaces-model`](docs/api/model-gateway.md#the-workspaces-model).
+Custom domains are claimed before they route (lake#949, migration `0106_domain_claims`, Steve
+2026-11-14): `domain_claims` in the control plane holds one claim per host across every account;
+`create_domain` claims it (`conflict` for another environment) and answers the TXT record
+`_lake-challenge.<host>` with the claim's token; `verify_domain` reads it (`src/control/dns_txt.cpp`,
+the host's own name servers) and only then writes the `orama_control.domains` row; `delete_domain`
+releases it. The operator acts only on verified claims, so its release rolls first. Not deployed. See
+[`docs/api/platform.md#custom-domains`](docs/api/platform.md#custom-domains).
 A chat completion with tools to a gpt-6.x model (`responses_for_tools_models`) is sent to OpenAI's
 Responses API and answered as a chat completion, streams included (lake#1245, no migration), because
 OpenAI refuses tools on Chat Completions for those models; gpt-5.5 and calls without tools stay on
@@ -529,6 +488,12 @@ lake's own platform credentials, environment variables of the hosting platform (
 Orama's deployments; `spec.env` with a `secretKeyRef` on the dev cluster), never a user's secret
 store; without them, the manual provider, said on the Billing page and in `viewer`/`server_info`. Not deployed; the operator must vendor the schema
 and select `payment_provider_guard`. See `docs/api/billing.md#stripe`.
+Deleting a workspace keeps its unbilled usage first (lake#988, LSR-121, migration
+`0108_retained_usage`): with billing on, `delete_workspace` reads the workspace's usage since the
+account's last issued invoice and writes it as content-free quantities (`retained_usage`), refusing
+the deletion when it cannot; bills, `usage_over_time` and the model-token limit add it, and the
+recorder adds what it still held. Not deployed; the operator must vendor the schema and select
+`retained_usage_guard`. See [`docs/api/billing.md#a-deleted-workspaces-usage`](docs/api/billing.md#a-deleted-workspaces-usage).
 Compute is priced as CPU, RAM, GPU and GPU memory (lake#643, migration `0075_workload_resources`):
 the Orama operator writes `workload_resources`, what each workload (a workspace engine, service,
 store, app, image build, agent launch) is scheduled with (requests, or limits without requests;
@@ -933,6 +898,13 @@ New delegations require the dispatcher to equal the authenticated acting TAAP id
 durable agent to have an active customer-issued agent certificate (lake#957, no migration).
 Existing agents need an administrator to issue that certificate before minting another session.
 
+## Open-source release
+
+lake is to be published under MIT (lake#1275). The gates, what covers each and the checks are in
+[`docs/open-source/README.md`](docs/open-source/README.md); vulnerabilities are reported as
+[`SECURITY.md`](SECURITY.md) says; `tools/release/public-scan.sh` must exit 0 on the commit to be
+published.
+
 ## Creating users
 
 To give someone a lake account in any environment (Clerk on lake.oramadev.net, lake.live, local,
@@ -955,12 +927,44 @@ bridge:**
 
 ```
 /Users/stevesperandeo/dev/homer6/orama-work/modules/zetta-bridge/modules/zetta
+```sh
+git submodule update --init --recursive
+cmake -S . -B build -G Ninja \
+  -DLAKE_ZETTA_SOURCE_DIR=/path/to/zetta \
+  -DLAKE_LIQUID_SOURCE_DIR=/path/to/liquid
+cmake --build build -j 6
+ctest --test-dir build --output-on-failure
 ```
 
-Never from a standalone clone — one under `~/dev/oramasearch/zetta` was 1,053 commits
-behind and lacked the entire HTTP layer lake borrows. The web-serving stack lake copies is
-`include/zetta/api/server.hpp` + `src/core/api/http_server.cpp` (Beast2 on capy/corosio,
-one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
+Prerequisites and the source directories are in [`docs/build/local.md`](docs/build/local.md).
+Without `LAKE_TEST_DB_URI` the Postgres-backed cases skip; to run them, create a base database with
+a role that has `CREATEDB`, apply `db/schema.sql`, and set `LAKE_TEST_DB_URI` and
+`LAKE_INSTANCE_KEK` (see [`docs/build/testing.md`](docs/build/testing.md)). PostgreSQL tests use
+`lake::test::postgres_uri()` for a fresh database per test; the configured `LAKE_TEST_DB_URI`
+database belongs to the caller and is not modified. Query specific audit calls by request ID; use
+cursor exhaustion for whole-history assertions.
+
+A release's proof includes the tests that need a live Zetta (`LAKE_TEST_ZETTA_BINARY`). A suite that
+skips them does not prove lake reaches Zetta; say so when they did not run.
+
+A segfault, bus error or abort in any test is a memory bug, not a flake: build with AddressSanitizer
+in its own directory and run the suite under it:
+
+```sh
+cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+  -DCMAKE_C_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+  -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address
+ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build-asan
+```
+
+## Reading Zetta
+
+lake builds on Zetta, so you will read Zetta's source constantly. Read it from the checkout named
+by `LAKE_ZETTA_SOURCE_DIR`, kept at the revision lake builds against; an old clone can lack the
+HTTP layer lake borrows. **Never copy Zetta source into lake.** The web-serving stack lake follows
+is Zetta's `include/zetta/api/server.hpp` + `src/core/api/http_server.cpp` (Beast2 on
+Capy/Corosio, one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 
 ## How the server is built (and the rules that keep it Zetta-shaped)
 
@@ -980,20 +984,26 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - Lifecycle is Zetta's: construct `beast2::http_server(io_context, workers, router,
   parser_cfg, serializer_cfg)` → `bind` → `local_endpoint().port()` → `start()` →
   `io_thread` runs `io_context.run()`; `stop()` = `server->stop()`, `io_context.stop()`,
-  join. The owner loop calls `wait_for_work()` then `drain()` each tick; both are
-  placeholders until lake has a node to marshal onto.
+  join. The owner loop calls `wait_for_work()` then `drain()` each tick.
 - **The console is the web app** in `frontend/` (React, Vite, Tailwind, TypeScript), built and
   embedded by CMake and served by the `web_app` middleware: a browser's GET of any page path gets
-  its `index.html` (`Content-Security-Policy: frame-ancestors 'self'; img-src 'self' data:`), anything
+  its `index.html` (a script policy: scripts from lake and the page's inline scripts by hash, requests
+  to lake, images from lake and `data:`, `docs/serving/http.md#the-web-apps-script-policy`, lake#991), anything
   else the route or the 404. Markdown never loads an image (`docs/serving/http.md#images`, lake#943). It calls **only `/v1` capabilities**, so it can never do what the API cannot; do not add
   a server page or an HTML form handler. Build, page rules and checks: `docs/ui/web-app.md`. The
   server routes the app relies on (the cookie-setting sign-in routes and the download routes) are
   listed there and in `docs/serving/http.md`.
+  its `index.html` (`Content-Security-Policy: frame-ancestors 'self'; img-src 'self' data:`), anything
+  else the route or the 404. Markdown never loads an image (`docs/serving/http.md#images`). It calls
+  **only `/v1` capabilities**, so it can never do what the API cannot; do not add a server page or
+  an HTML form handler. Build, page rules and checks: `docs/ui/web-app.md`. The server routes the app
+  relies on (the cookie-setting sign-in routes and the download routes) are listed there and in
+  `docs/serving/http.md`.
 - **Hosted application pages and the region picker are the server-rendered surfaces**: an identity
   application's sign-in pages (`/apps/<id>/*` and its custom sign-in host), rendered by the pure
   functions in `web_ui.cpp` in the application's colours, with the theme scripts and, on the passkey
   page, one script for `navigator.credentials`; and the region picker every path of
-  `LAKE_APEX_HOST` answers (`web_ui_region_picker`, lake#757, `docs/api/regions.md`). They work
+  `LAKE_APEX_HOST` answers (`web_ui_region_picker`, `docs/api/regions.md`). They work
   without JavaScript otherwise.
 - **Nav items and headings are Title Case** — "Search Indexes", not "Search indexes": every
   rail item and section label, page and section title, and `<h1>`–`<h4>` in the web app and the
@@ -1007,39 +1017,56 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - IBM Plex Sans and Mono are self-hosted WOFF2 assets: the web app bundles them under `/ui/`, and
   the binary also serves them below content-hashed `/fonts/` URLs for the hosted pages, which link
   the content-hashed stylesheet; unhashed stylesheet and font aliases use `no-cache`. The browser
-  never needs a third-party font origin. Both use the same Orama design tokens
+  never needs a third-party font origin. Both use the same design tokens
   (`tools/ui/build-tokens.mjs`, `docs/ui/design-system.md`).
 - Static visual-direction references live under `docs/design/ui/mocks/`;
   `tools/ui/screenshot.sh` renders them at 1440×900.
-- **One auth check.** The API bearer and the UI session cookie (`lake_session`, set by
-  `POST /session`) carry the same secret and are resolved by the same code (`context_for`);
+- **One auth check.** The API bearer and the UI session cookie (`__Host-lake_session` behind TLS,
+  `lake_session` over plain HTTP: `session_cookie_name`, set by `POST /session`) carry the same secret and are resolved by the same code (`context_for`);
   never add a second path. The web app guards its own pages from the `viewer` read; a protected
   server route that remains (a download) redirects to `/sign-in` without a valid credential;
   `/metrics` uses the same check. `/healthz` and `/readyz` are deliberately unauthenticated Kubernetes probes.
 - **Cross-site requests.** An unsafe request the `lake_session` cookie authenticates must come from
   lake's own origin (`Origin` and `Sec-Fetch-Site`), and a cookie-authenticated `/v1` or `/mcp`
   `POST` must be `application/json`; bearer calls are unaffected (`refuse_cross_site`,
-  `docs/serving/http.md#cross-site-requests`, lake#561). Tests that post with a cookie send the
+  `docs/serving/http.md#cross-site-requests`). Tests that post with a cookie send the
   headers a browser would.
 - **One registry.** Every capability is registered from `src/api/capabilities.cpp` or its
-  area-specific registration file; REST,
-  OpenAPI and MCP are renderings of it and never special-case an entry. `Registry::call` is the
-  only path that authorizes and validates. Recipe: `docs/api/README.md`.
+  area-specific registration file; REST, OpenAPI and MCP are renderings of it and never
+  special-case an entry. `Registry::call` is the only path that authorizes and validates. Recipe:
+  `docs/api/README.md`.
+- **An App has only the access its binding grants.** Every capability Lake's App gateway offers is
+  checked against the App's bindings: a read needs the binding's `read` scope, an action its write
+  scope, and nothing reaches a workspace the App is not bound to. Opening a new capability to Apps
+  gives it the same check plus its own guard (`sql` is read-only always). Never widen an App's
+  access to make one App work.
 - **Two TUs name third parties:** `src/api/http_server.cpp` (Beast2, boost::http, Boost.JSON)
   and `src/control/postgres_store.cpp` (libpqxx). nlohmann::json is the API document type.
 - Operational telemetry: `GET /healthz`, `GET /readyz`, authenticated `GET /metrics`, and one JSON
   request log on stdout. Contract and metric names: `docs/serving/telemetry.md`.
-- Idle keep-alive closes are normal and produce no stderr output. Lake pins the
-  `oramasearch/beast2` `orama-main` carrier branch that suppresses its former end-of-stream line.
+- Idle keep-alive closes are normal and produce no stderr output. Lake pins a Beast2 branch that
+  suppresses its former end-of-stream line.
+
+## Where data lives
+
+- **Everything goes in a workspace Zetta**: a workspace's data, application features, credentials,
+  metrics, events, logs and history. A person can have many workspaces, each with its own Zetta.
+- **Lake's Postgres and the lake bus hold only multitenancy and dispatch**: customers and their
+  workspaces, memberships and grants, which Zetta serves which workspace, identity and sign-in, the
+  operator's desired state, the keystore, agent sessions, control-plane audit, billing records, and
+  the `agent-tasks.<agent>` dispatch topics (task ids, never content). Usage records stay in each
+  workspace Zetta. Never put workspace data in Postgres or on the bus, even "just for history".
+- **Two levels of secrets.** The instance's own keys are environment variables of the deployment.
+  A user's workspace secrets are sealed in their workspace Zetta; a Kubernetes Secret is only a
+  projection written when an app or service must mount one, never the only copy.
 
 ## What lake is built on
 
-- **Control plane: Postgres, for now.** The operator provisions a CloudNativePG cluster per
-  `Lake` (`spec.postgres`, on by default) and injects `LAKE_CONTROL_DB_URI` /
+- **Control plane: Postgres, for now. Data plane: Zetta.** The operator provisions a CloudNativePG
+  cluster per `Lake` (`spec.postgres`, on by default) and injects `LAKE_CONTROL_DB_URI` /
   `LAKE_CONTROL_DB_PASSWORD` into the pod (optional refs: the pod starts before the DB is
   bootstrapped, so treat an empty value as "not yet"), and `LAKE_ADMIN_TOKEN` from the
-  minted-once `lake-<name>-admin` Secret. **Data plane: Zetta.** Recorded in the
-  bridge `decisions.md` §6; "for now" is deliberate.
+  minted-once `lake-<name>-admin` Secret.
 - **Schema.** `db/schema.sql` is the source of truth and is compiled into the binary; `lake migrate`
   applies it (one transaction, advisory lock, the `PostgresSchema` Job's checks) and `lake manifest`
   publishes it with the Stripe events and environment the image needs (lake#1119,
@@ -1047,34 +1074,44 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `agent_model_prices_guard` in the source tree, versioned by content hash).
+  `agent_session_repositories_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means
   a new guard (the operator's `GuardTable`), idempotent SQL (`IF NOT EXISTS`), and on an existing
   Lake deleting its `PostgresSchema` so the owned object is recreated and the Job re-runs. Migrations never run in lake pods, so
   replica count cannot duplicate them.
+  publishes it with the Stripe events and environment the image needs. The operator carries a
+  byte-identical vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per
+  Lake as an owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration
+  creates, versioned by content hash). Change the schema HERE, then copy it into the operator in
+  the same change; the operator's test checks the copy carries the source-of-truth header. A schema
+  change means a new guard (the operator's `GuardTable`) and idempotent SQL (`IF NOT EXISTS`).
+  Migrations never run in lake pods, so replica count cannot duplicate them. Migration names carry
+  a unique numeric prefix (`NNNN_description`); check for a collision before merging.
+- **A setting a new version needs ships with the operator.** When lake or a pinned dependency
+  (zetta, liquid, corosio) moves, list what the new code reads from its environment and what it now
+  refuses by default; each is declared in `environment_variables()` and rendered by the operator,
+  never set by hand on a pod.
 - **Tenant model.** user and organization are identity (TAAP `taap_id`); the customer owns
   everything: individual xor organization (`customer_type_check`), one customer per identity,
   one global lowercase handle namespace (`customer_name_unique` + `customer_name_format`); the
   app generates handles and must pre-check to answer 409.
 
-**lake is the enterprise product and builds on Zetta as much as possible** — control
-plane, operational state, clustering, and **its web-serving approach**. lake must also
-host liquid repositories, so it consumes **liquid's store as a library** for repository
-data. liquid is open source and never depends on Zetta; lake sits on the other side of
-that licence boundary.
+**lake builds on Zetta as much as possible** — control plane, operational state, clustering, and
+**its web-serving approach**. lake must also host liquid repositories, so it consumes **liquid's
+store as a library** for repository data. liquid never depends on Zetta; lake sits on the other
+side of that boundary.
 
-- **Port 4900** (decided; Zetta is 4800). The `Lake` CR's `spec.port` defaults to it.
+- **Port 4900** (Zetta is 4800). The `Lake` CR's `spec.port` defaults to it.
 - **C++26**, CMake ≥ 3.28 + Ninja, Clang 17+ auto-selected as Zetta's `CMakeLists.txt`
-  does, OpenSSL 3 and libpq from Homebrew. GoogleTest v1.17.0 via FetchContent (as Zetta), not Catch2.
+  does, OpenSSL 3 and libpq. GoogleTest v1.17.0 via FetchContent (as Zetta), not Catch2.
 - **libliquid** as a library-only submodule supplies Capy, Corosio and nlohmann/json;
   **Boost.HTTP** and **Beast2** provide the HTTP/1 server. `http`, `beast2` and `libpqxx`
   remain vendored under `modules/`. Bump liquid only to its current `main`; never edit it
   through lake's copy.
 - `std::expected` at every public boundary; no exceptions across public APIs.
-- Deployed as a `Lake` CR on `oramasearch/orama-operator` (the Zetta operator, extended);
-  runs on `oramasearch/k0s`, and on our AKS cluster for now.
+- Deployed as a `Lake` custom resource of the Orama operator, on Kubernetes.
 
 ## Container image
 
@@ -1085,50 +1122,37 @@ that licence boundary.
   provides Corosio TLS and Argon2id. The runtime carries those OpenSSL shared libraries plus
   `libstdc++6 libpq5 ca-certificates`, numeric non-root `USER 10001:10001` (a named user cannot
   satisfy a `runAsNonRoot` pod security context).
-- **No CI.** Steve has said no to CI (umbrella `CLAUDE.md`). Never add, enable or extend a
-  workflow, never edit `.github/workflows/` to make CI pass, and never wait on or cite CI checks.
-  Proof is the local suite plus the cluster BuildKit Linux lane
-  (`lake-linux-test/run-lake-linux-tests.sh`, liquid-dev skill). `docs/build/ci.md` describes the
-  workflow files that remain in the repository.
-- Deployment images are built on the cluster BuildKit (liquid-dev skill) as immutable
-  `oramasearch/lake:<tag>` images, never `latest`. The Docker Hub repo is private; the `Lake` CR
-  needs `spec.pullSecretName` and the Secret in `spec.namespace`.
+- Images are built natively for `linux/amd64` and tagged immutably (`oramasearch/lake:<tag>`), never
+  `latest`.
+- **No CI.** Do not add, enable or extend a hosted CI workflow, and never cite CI checks as proof.
+  Proof is the local build and suite, stated in the pull request.
 
-## Branches: feature branches and pull requests always target `dev`
+## Branches and pull requests
 
-Steve, 2026-10-12: *"shouldn't you be merging into dev branch? we're not cutting a release yet"*, and
-*"feature branches / prs always target dev branch"*.
-
-- **Branch from `origin/dev`**, never from `main`.
-- **Open every pull request with `--base dev`**, written out. This repository's default branch on
-  GitHub is `main`, so `gh pr create` without `--base` targets `main`.
-- **Before merging, read the base back**: `gh pr view <n> --json baseRefName` must say `dev`.
+- **Branch from `dev`**, never from `main`, and **open every pull request against `dev`**, written
+  out (`gh pr create --base dev`): the GitHub default branch is `main`, so a bare `gh pr create`
+  targets it.
 - **Never push, merge or fast-forward to `main`** in ordinary work. `main` is the last release and
-  moves only by the release pull request that promotes `dev` to `main`, when Steve names a version
-  (*Cutting a release* below).
-- Images built for the dev cluster come from `dev`.
-
-The org-wide rule is in the umbrella bridge's `CLAUDE.md`
-(https://github.com/oramasearch/orama-bridge/blob/main/CLAUDE.md).
+  moves only by the release pull request that promotes `dev` to `main`.
+- Merge with a merge commit, never a squash or rebase merge. Reference issues with `Refs #N`, never
+  an auto-close keyword.
 
 ## Cutting a release
 
-A release is a tag on `main`, which is what the deployment runs. The pages and their conventions
-are in [`docs/releases/`](docs/releases/README.md); read its `README.md` first. `v0.1.0`
-(2026-10-12) was the first.
+A release is a tag on `main`. The pages and their conventions are in
+[`docs/releases/`](docs/releases/README.md); read its `README.md` first. The maintainers name the
+version.
 
-1. **Confirm what is deployed is `main`.** `GET /v1/server_info` reports the running `revision`;
-   it must be an ancestor of `origin/main`. Steve names the version.
-2. **On a branch `docs/release-vX.Y.Z`**, move the version in all three places: `version_string()`
+1. **On a branch `docs/release-vX.Y.Z`**, move the version in all three places: `version_string()`
    in `src/version.cpp`, `current_version()` in `include/lake/version.hpp` and
    `project(lake VERSION ...)` in `CMakeLists.txt`. Tests read the version from
    `lake::version_string()`; never write the number into a test. `ReleaseVersion.*`
    (`tests/test_release_version.cpp`) fails when the three disagree or when the version has no
    page in `docs/releases/` indexed in its `README.md`.
-3. **Write `docs/releases/vX.Y.Z.md`** and add it to `docs/releases/README.md`: what the release
+2. **Write `docs/releases/vX.Y.Z.md`** and add it to `docs/releases/README.md`: what the release
    includes, what it does not, known issues with their tracking issues (a security defect first),
    and verification. Claims follow `docs/design/status.md`; every number is measured.
-4. **Prove it**: build, then the full suite with `LAKE_TEST_DB_URI` set, and put the counts in the
+3. **Prove it**: build, then the full suite with `LAKE_TEST_DB_URI` set, and put the counts in the
    page. A failure is fixed or listed as a known issue with an issue filed, never left out.
 5. **Open the pull request into `main`** and merge it with a merge commit, never a squash.
 6. **Tag the merge commit** `vX.Y.Z` (`git tag vX.Y.Z <merge commit> && git push origin vX.Y.Z`),
@@ -1145,53 +1169,66 @@ are in [`docs/releases/`](docs/releases/README.md); read its `README.md` first. 
    `revision`, `/readyz` answers 200, and a browser's request for `/` (`Accept: text/html`) answers
    200. A bare `curl` of `/` answers 404 by design.
 9. **Tag the image `vX.Y.Z` in Docker Hub**, naming the digest that is deployed, without
-   rebuilding: `retag-image.py lake <YYYYMMDD><letter> vX.Y.Z` (in the `liquid-dev` skill). Both
-   tags must print the digest the running pod reports, and an anonymous request for the
-   repository must still answer 404.
+   rebuilding: `python3 -I tools/release/publish-release-image.py <YYYYMMDD><letter> vX.Y.Z`
+   (lake#994, [release-images.md](docs/deployment/release-images.md)). It refuses unless the Git
+   tag is the approved release merge commit on `main`, the image was built from it, and `vX.Y.Z`
+   does not exist yet; a release tag is never written twice. Both tags must print the digest the
+   running pod reports, and an anonymous request for the repository must still answer 404.
 10. **Move the pins and record the roll**: liquid-bridge's pin of `modules/lake` to the tag, the
     umbrella's pointer to liquid-bridge, and the deployment paragraph in liquid-bridge's
     `docs/action-plan.md`. Update **Status** above and the README's deployment line.
 
 A release is finished when the Git tag, the GitHub release and the image tag all exist and the
 cluster runs that image. `v0.1.0` is `oramasearch/lake:20261012a`, also tagged `v0.1.0`.
+4. **Promote `dev` to `main`** with a release pull request, merged with a merge commit.
+5. **Tag the merge commit** `vX.Y.Z` and publish the GitHub release from the page.
+6. **Build the image from the tag.** If `db/` changed since the previous release, the operator's
+   vendored schema moves first.
 
 ## Open decisions
 
 - **Blocking store calls generally run inline on the io thread** (one statement each).
   Password/MFA/recovery verification and MFA enrollment run on the bounded blocking pool with
-  two authentication jobs at most (lake#969); PostgreSQL uses private authentication transactions
+  two authentication jobs at most; PostgreSQL uses private authentication transactions
   so hashing cannot hold the shared store mutex. Other store calls remain inline until measured.
   See [authentication limits](docs/api/identity.md#authentication-attempt-limits).
 - **Broader Zetta linkage.** The operator-control and Loki HTTP clients link the client-only
-  transport from the authorized bridge source path. Any further Zetta target remains a separate
-  decision and must preserve one copy of the networking stack.
+  transport from the Zetta source tree. Any further Zetta target remains a separate decision and
+  must preserve one copy of the networking stack.
 
 ## Never
 
-- Never run schema migrations from the lake server process (the operator does, once per image:
-  today its PostgresSchema Job, after orama-operator#936 a Job running `lake migrate`).
+- Never run schema migrations from the lake server process (the operator does, once per image).
 - Never read an environment variable without declaring it in `environment_variables()`
   (`src/api/manifest.cpp`), nor handle a Stripe event not in `stripe_webhook_events`; the operator
   renders and subscribes from those lists.
 - Never add an auth path the API does not have; the UI session is the API bearer.
 - Never add a second attestation or signing framework. TAAP/1 is the security model.
-- Never make this repository public.
 - Never let an HTTP type leak out of `src/api/http_server.cpp`.
+- Never log a secret, a token or a request body.
 
 ## Before finishing any change
 
-1. **Document the change in `docs/<topic>/*.md`** (see `docs/README.md`): what, why, how to
-   verify, how to change. New topic → new folder + a row in `docs/README.md`. This is a must.
+1. **Document the change in `docs/<topic>/*.md`** (see `docs/README.md`) **in the same commit**:
+   what, why, how to verify, how to change. New topic → new folder + a row in `docs/README.md`.
+   This is a must.
 2. `README.md` is the front door only (what it is, build and run, pointers); never append status or
    feature sections to it. Update `docs/design/status.md` for the status of your area and
    `docs/README.md` for any new page.
-3. Does this file's **Status** and **Open decisions** still hold?
+3. Do this file's rules and **Open decisions** still hold?
 4. `cmake --build build && ctest --test-dir build` green, and the binary smoke-tested by hand.
-5. Commit means push.
+5. Push your branch and say in the pull request which tests ran.
 
-PostgreSQL tests use `lake::test::postgres_uri()` for a fresh database per test. The configured
-`LAKE_TEST_DB_URI` database belongs to the caller and is not modified. Query specific audit calls
-by request ID; use cursor exhaustion for whole-history assertions. See `docs/build/testing.md`.
+## Writing rules
+
+- **No AI attribution anywhere**: no `Co-Authored-By` trailer for an assistant, no "Generated
+  with", no session or model trailers, in commits, pull requests, tags or release notes.
+- **Never write the word "seam".** It has meant an interface, an abstract base class, an injected
+  callable, a module boundary and an extension point. Name the mechanism: **interface**,
+  **extension point**, **injected dependency**, **boundary**, or the interface a test double
+  implements.
+- **No time or size estimates.** Do the work; report what was done and what was not.
+- Report vulnerabilities privately, as `SECURITY.md` describes, never in a public issue.
 
 ## Formatting
 

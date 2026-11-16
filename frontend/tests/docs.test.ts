@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * The Docs reader (src/pages/developer/docs.ts, lake#561): pages grouped by section, the instant
  * filter over titles and headings, and the addresses of pages and headings.

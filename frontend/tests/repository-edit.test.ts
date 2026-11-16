@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Editing a repository file (lake#1239): Edit only with write access, the exact bytes committed,
  * the stale-file conflict, and the Apps a file redeploys. `npm test`; the build runs it. */
 import { test } from "node:test";

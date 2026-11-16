@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Copy-paste examples run as given (lake#439). Every REST, curl and MCP example that lake shows a
 // customer — the Ship pages' "call it from your code" blocks, the Docs section (/docs) and the API
 // documents under docs/api — is pulled out of the rendered HTML and checked against the capability

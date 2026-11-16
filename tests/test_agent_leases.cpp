@@ -1,4 +1,7 @@
+// SPDX-License-Identifier: MIT
+
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <thread>
 
@@ -7,6 +10,7 @@
 
 #include "lake/api/capabilities.hpp"
 #include "lake/control/agent_library.hpp"
+#include "lake/control/agent_task_proxy.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "postgres_fixture.hpp"
@@ -76,8 +80,10 @@ protected:
                                             lake::test::test_instance_kek());
     }
 
-    lake::api::ApiResult call(const std::string& name, json input) {
+    lake::api::ApiResult call(const std::string& name, json input,
+                              const std::string& bound_workspace = "") {
         lake::api::ApiContext context;
+        context.agent_service_workspace_id = bound_workspace;
         context.store = store.get();
         context.workspaces = workspaces.get();
         context.agent_bus = bus.get();
@@ -401,6 +407,188 @@ TEST_P(AgentLeases, RetryNoticeIsTheTasksMessage) {
     const auto task = store->get_agent_task(task_id);
     ASSERT_TRUE(task);
     EXPECT_EQ(task->message, message);
+}
+
+// lake#871: a library agent holds a task credential only while it serves that task. Once the task
+// has its answer, the credential it was handed is refused, and another agent's bus credential
+// cannot claim or report on the task.
+TEST_P(AgentLeases, ATaskCredentialEndsWithItsTaskAndAnotherAgentCannotNameIt) {
+    const auto claimed = call("claim_agent_task", json::object());
+    ASSERT_TRUE(claimed.ok) << claimed.error.message;
+    const std::string credential = claimed.value["body"]["lake_token"];
+    const auto principal = store->context_for(credential);
+    ASSERT_TRUE(principal);
+    lake::api::ApiContext context;
+    context.store = store.get();
+    context.authorized = true;
+    context.credential_kind = principal->kind;
+    context.credential_session_id = principal->session_id;
+    context.credential_token_hash = principal->workload_token_hash;
+    context.acting_identity = principal->taap_id;
+    context.instance_kek = lake::test::test_instance_kek();
+    ASSERT_TRUE(registry.call("server_info", json::object(), context).ok);
+
+    lake::api::ApiContext stranger;
+    stranger.store = store.get();
+    stranger.workspaces = workspaces.get();
+    stranger.agent_bus = bus.get();
+    stranger.authorized = true;
+    stranger.acting_identity = "agent-service:agent-experiments";
+    stranger.credential_kind = "agent_service";
+    stranger.agent_service = "agent-experiments";
+    stranger.instance_kek = lake::test::test_instance_kek();
+    const json named{{"task_id", task_id}, {"agent", "agent-experiments"}};
+    const auto taken =
+        liquid::runtime::block_on(registry.call_async("claim_agent_task", named, stranger));
+    ASSERT_TRUE(taken);
+    EXPECT_FALSE(taken->ok) << "another agent's bus credential claims no task of this agent";
+    const json usage{
+        {"task_id", task_id}, {"model_name", "gpt-5"}, {"input_tokens", 1}, {"output_tokens", 1}};
+    const auto reported =
+        liquid::runtime::block_on(registry.call_async("record_model_usage", usage, stranger));
+    ASSERT_TRUE(reported);
+    EXPECT_EQ(reported->error.code, "conflict");
+
+    ASSERT_TRUE(call("publish_agent_event", {{"type", "result"}, {"result", {{"done", true}}}}).ok);
+    EXPECT_FALSE(registry.call("server_info", json::object(), context).ok)
+        << "the finished task's credential acts no more";
+}
+
+// lake#871: claimed by reference, the task's credential never leaves Lake. The agent names the task
+// next to its own bus credential and Lake acts as the task for that request, only while the task
+// runs on that agent.
+TEST_P(AgentLeases, ByReferenceClaimHandsTheAgentNoCredential) {
+    const auto claimed = call("claim_agent_task", {{"credentials", "by_reference"}});
+    ASSERT_TRUE(claimed.ok) << claimed.error.message;
+    EXPECT_EQ(claimed.value["credentials"], "by_reference");
+    EXPECT_EQ(claimed.value["body"]["lake_token"], "");
+    EXPECT_EQ(claimed.value.dump().find("lat."), std::string::npos);
+
+    const lake::control::AgentBusKey shared{"agent-project", ""};
+    const auto principal = lake::control::agent_task_principal(*store, task_id, shared);
+    ASSERT_TRUE(principal) << principal.error().message;
+    EXPECT_EQ(principal->kind, "agent_task");
+    EXPECT_EQ(principal->session_id, "task:" + task_id);
+    EXPECT_EQ(principal->scopes, std::vector<std::string>{"server_info"});
+    // Another agent's bus credential, or a task that does not exist, acts for nothing.
+    EXPECT_FALSE(lake::control::agent_task_principal(
+        *store, task_id, lake::control::AgentBusKey{"agent-creator", ""}));
+    EXPECT_FALSE(
+        lake::control::agent_task_principal(*store, lake::control::new_uuid_v4(), shared));
+
+    // The call renews the lease exactly as the task's own credential would.
+    lake::api::ApiContext context;
+    context.store = store.get();
+    context.authorized = true;
+    context.credential_kind = principal->kind;
+    context.credential_session_id = principal->session_id;
+    context.credential_token_hash = principal->workload_token_hash;
+    context.acting_identity = principal->taap_id;
+    context.instance_kek = lake::test::test_instance_kek();
+    age(50);
+    const auto aged = store->get_agent_task(task_id)->lease_until;
+    ASSERT_TRUE(registry.call("server_info", json::object(), context).ok);
+    EXPECT_GT(store->get_agent_task(task_id)->lease_until, aged);
+
+    // Once the lease ends and the task is reclaimed, the reference opens nothing.
+    age(61);
+    pump();
+    EXPECT_FALSE(lake::control::agent_task_principal(*store, task_id, shared));
+    EXPECT_EQ(registry.call("server_info", json::object(), context).error.code, "conflict");
+}
+
+TEST_P(AgentLeases, AFinishedTaskOpensNothingByReference) {
+    ASSERT_TRUE(call("claim_agent_task", {{"credentials", "by_reference"}}).ok);
+    ASSERT_TRUE(call("publish_agent_event", {{"type", "result"}, {"result", {{"ok", true}}}}).ok);
+    EXPECT_FALSE(lake::control::agent_task_principal(
+        *store, task_id, lake::control::AgentBusKey{"agent-project", ""}));
+}
+
+// The Lake half of one library-agent process per workspace (lake#871): a bus credential bound to a
+// workspace sees, claims, reports and acts only for that workspace's tasks, and always by
+// reference.
+TEST_P(AgentLeases, AWorkspaceBoundBusCredentialReachesOnlyItsWorkspace) {
+    const std::string other = lake::control::new_uuid_v4();
+    EXPECT_EQ(call("claim_agent_task", json::object(), other).error.code, "forbidden");
+    EXPECT_EQ(call("publish_agent_event", {{"type", "progress"}, {"message", "x"}}, other)
+                  .error.code,
+              "conflict");
+
+    const auto claimed = call("claim_agent_task", json::object(), workspace_id);
+    ASSERT_TRUE(claimed.ok) << claimed.error.message;
+    EXPECT_EQ(claimed.value["credentials"], "by_reference");
+    EXPECT_EQ(claimed.value["body"]["lake_token"], "");
+    EXPECT_EQ(call("publish_agent_event", {{"type", "progress"}, {"message", "x"}}, other)
+                  .error.code,
+              "forbidden");
+    EXPECT_TRUE(
+        call("publish_agent_event", {{"type", "progress"}, {"message", "x"}}, workspace_id).ok);
+    EXPECT_FALSE(lake::control::agent_task_principal(
+        *store, task_id, lake::control::AgentBusKey{"agent-project", other}));
+    EXPECT_TRUE(lake::control::agent_task_principal(
+        *store, task_id, lake::control::AgentBusKey{"agent-project", workspace_id}));
+}
+
+TEST(AgentBusKeys, AFileNameNamesTheAgentAndItsBoundWorkspace) {
+    const auto shared = lake::control::agent_bus_key("agent-project");
+    EXPECT_EQ(shared.agent, "agent-project");
+    EXPECT_FALSE(shared.bound());
+    const auto bound =
+        lake::control::agent_bus_key("agent-project.0b6c3c1e-8d7a-4f5e-9a8b-1c2d3e4f5a6b");
+    EXPECT_EQ(bound.agent, "agent-project");
+    EXPECT_EQ(bound.workspace_id, "0b6c3c1e-8d7a-4f5e-9a8b-1c2d3e4f5a6b");
+    EXPECT_TRUE(bound.bound());
+}
+
+// The operator adds and removes a workspace's bound credential without restarting lake: each
+// lookup re-reads LAKE_AGENT_BUS_DIR when it changed, and a removed file stops working at once.
+TEST(AgentBusKeys, TheDirectoryIsReReadWhenItChanges) {
+    const auto dir = lake::test::fixture_path("agent-bus-" + lake::control::new_uuid_v4());
+    std::filesystem::create_directories(dir);
+    // Moves the directory's time on, as adding or removing an entry does, so the test does not
+    // depend on the file system's time resolution.
+    const auto touch = [&] {
+        std::filesystem::last_write_time(dir,
+                                         std::filesystem::last_write_time(dir) + 1s);
+    };
+    std::ofstream(dir / "agent-project") << "shared-token";
+    lake::control::AgentBusCredentials credentials(dir.string());
+    auto tokens = credentials.current();
+    ASSERT_EQ(tokens->size(), 1U);
+    EXPECT_EQ(tokens->at("agent-project"), "shared-token");
+    EXPECT_EQ(credentials.current(), tokens) << "unchanged: not read again";
+
+    const std::string bound = "agent-project.0b6c3c1e-8d7a-4f5e-9a8b-1c2d3e4f5a6b";
+    std::ofstream(dir / bound) << "bound-token";
+    touch();
+    tokens = credentials.current();
+    ASSERT_EQ(tokens->size(), 2U);
+    EXPECT_EQ(tokens->at(bound), "bound-token");
+
+    std::filesystem::remove(dir / bound);
+    touch();
+    tokens = credentials.current();
+    EXPECT_EQ(tokens->size(), 1U);
+    EXPECT_FALSE(tokens->contains(bound)) << "a removed credential stops working at once";
+
+    // A Kubernetes Secret update swaps the `..data` link; that alone is a change.
+    std::filesystem::remove(dir / "agent-project");
+    for (const char* version : {"..2026_11_14_a", "..2026_11_14_b"}) {
+        std::filesystem::create_directories(dir / version);
+        std::ofstream(dir / version / "agent-project") << std::string("token-") + version;
+    }
+    std::filesystem::create_directory_symlink("..2026_11_14_a", dir / "..data");
+    std::filesystem::create_symlink("..data/agent-project", dir / "agent-project");
+    touch();
+    EXPECT_EQ(credentials.current()->at("agent-project"), "token-..2026_11_14_a");
+    const auto mtime = std::filesystem::last_write_time(dir);
+    std::filesystem::remove(dir / "..data");
+    std::filesystem::create_directory_symlink("..2026_11_14_b", dir / "..data");
+    std::filesystem::last_write_time(dir, mtime);
+    EXPECT_EQ(credentials.current()->at("agent-project"), "token-..2026_11_14_b");
+
+    EXPECT_TRUE(lake::control::AgentBusCredentials("").current()->empty());
+    std::filesystem::remove_all(dir);
 }
 
 TEST(AgentLeaseConfig, ParsesPerAgentBoundsAndRejectsInvalidConfiguration) {

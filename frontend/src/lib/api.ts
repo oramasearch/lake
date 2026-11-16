@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The API client: the app calls lake's `/v1` capabilities and nothing else, the same ones MCP
  * and agents call (docs/api/README.md). A read is `GET /v1/<name>?<input>`, an action is
  * `POST /v1/<name>` with the input as JSON. Both answer `{ok, value, duration_ms}` or

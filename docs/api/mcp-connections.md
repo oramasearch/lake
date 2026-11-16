@@ -1,6 +1,6 @@
 # MCP Connections
 
-**Status: implemented 2026-10-11 in the source tree (decision 60, lake#652); not deployed.** Lake is
+**Status: implemented 2026-10-11 in the source tree (lake#652); not deployed.** Lake is
 an MCP **server** (`POST /mcp`, every capability a tool, [mcp.md](mcp.md)). It is also an MCP
 **client**: a workspace connects to remote MCP servers, and its people, Ask Orama and its agents use
 their tools through Lake. Lake runs the client server-side, so the browser and agents never hold the
@@ -48,7 +48,7 @@ has the fixed ceiling described below:
 | A tool's title / description / input schema | 256 B / 2 KiB / 16 KiB | cut at a character / cut / the tool is skipped |
 
 Remote MCP and OAuth JSON may contain at most 64 nested objects/arrays, counting the envelope
-and any batch (lake#958, LSR-092). The parser rejects the entire document before constructing
+and any batch (lake#958). The parser rejects the entire document before constructing
 a container beyond the limit. This applies to JSON and SSE answers, notifications, the SSE
 early-answer check, resource/issuer metadata, client registration, token exchange and refresh.
 Over-depth SSE events are discarded; ordinary over-depth answers fail as protocol errors.
@@ -74,8 +74,10 @@ hold the call: the transport stops reading as soon as the answer is in.
 **Addresses.** The server URL is `https://` (no user name, no fragment, at most 2048 bytes). Every
 address its name resolves to must be public: loopback, private (RFC 1918, unique local), link-local
 (the cloud metadata address `169.254.169.254` included), carrier-grade NAT, multicast and reserved
-addresses are refused, also through IPv4-mapped and NAT64 IPv6, so a connection cannot reach Lake's
-own network (its Postgres, the workspace Zettas). The check runs on the addresses actually
+addresses are refused, also through IPv4-mapped, NAT64 and 6to4 IPv6, so a connection cannot reach
+Lake's own network (its Postgres, the workspace Zettas). An IPv6 address is public only inside
+global unicast (`2000::/3`), never Teredo, benchmarking, ORCHID or documentation ranges (lake#1008),
+so IPv4-compatible, local-use NAT64 and site-local forms are refused too. The check runs on the addresses actually
 connected to, after resolution, so a name that resolves to a private address is refused however it
 was spelled. A Lake started with `LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1` (local development and tests
 only, never a deployment) also reaches loopback and private addresses, and plain `http://` to
@@ -91,7 +93,7 @@ loopback.
   Nothing of it is in PostgreSQL. Lake's store keeps only its **dispatch row** (migration
   `0079_mcp_connection_dispatch`, lake#684, lake#685): the account, workspace and connection ids,
   whether it streams, and the digest of the tools it re-exports. That is dispatch, never content.
-- **The credential** is a workspace secret (decision 58) in a secret mount of the same workspace:
+- **The credential** is a workspace secret in a secret mount of the same workspace:
   a bearer token, or the OAuth refresh token Lake writes there when a person signs in. The record
   holds only its reference, `lake-secret://<mount>/<name>#<field>`. Lake reads it server-side for
   each call (audited in the mount's workspace as `mcp_connection`) and never answers it to a
@@ -268,7 +270,9 @@ the new `url`.
 so one MCP client configured for Lake reaches Lake and what the workspace connected. Off by
 default, per connection. The schemas are the server's; Lake changes only the name, adds the
 connection's name to the description and sets `readOnlyHint` from the person's decision and
-`openWorldHint: true`. Lake's own capability names never hold `__`.
+`openWorldHint: true`. Lake's own capability names never hold `__`. A `tools/call` of such a name is held to what `tools/list` requires (lake#993): with no Lake
+credential, or from a person who may not read the workspace, it is refused before the workspace's
+connection records are opened.
 
 A `tools/call` of `<prefix>__<tool>` runs through `read_mcp_tool` or `call_mcp_tool` as the caller,
 so it is authorized, audited (`via: reexport`) and metered as theirs, and answers the server's own
@@ -295,13 +299,13 @@ digest only: the connection and its tools stay in the workspace Zetta.
 ## A connection's agent and streams
 
 The stream worker requires the person who set the streams to remain present and enabled
-(lake#951, LSR-086). Disabling them immediately blocks input-triggered launches, notifications and
+(lake#951). Disabling them immediately blocks input-triggered launches, notifications and
 result publication. On the next reachable pass it clears their streaming settings, subscriptions
 and pending results and updates the dispatch row, while retaining the connection. The existing
 records preserve pending cleanup across restarts and storage outages; another person may set up
 streams again under their own authority. See [offboarding](clerk.md#webhooks).
 
-Optional, per connection (Steve's design in lake#652):
+Optional, per connection (lake#652):
 
 - **Its agent.** `create_mcp_connection_agent {id, prompt, name?}` makes, as the person, a Python
   agent on `oramasearch/agent-runtime` (`workspace_act create_agent`, a `zetta` definition) whose
@@ -310,6 +314,10 @@ Optional, per connection (Steve's design in lake#652):
   The connection records it (`agent_id`). The workspace engine must accept `mcp:<slug>` skills
   ([zetta](https://github.com/oramasearch/zetta) PR from this epic). It runs on demand, on a
   schedule (`schedule_agent`), or from its input stream.
+- **No stream Lake writes itself** is a connection's topic (lake#996): `agent-*`,
+  `app-events.*`, `build-events.*`, `run-metrics.*`, `study-events.*` and `inbox:*` are refused for
+  `input_topic`, `output_topic` and `notifications_topic`, the same rule streams and agent triggers
+  use (`system_stream_name`).
 - **Input stream** (`input_topic`, needs the agent): a workspace topic (Train → Streams). Each new
   event starts a job of the agent (`launch_agent`, mode `job`) with
   `{connection_id, connection, topic, sequence, event}` as its input, the way the agent bus hands
@@ -331,9 +339,23 @@ Optional, per connection (Steve's design in lake#652):
 The streams act with the authority of **the person who last set the agent or a stream**
 (`streams_set_by`), as a schedule's runs act as whoever set the schedule: their permission on the
 workspace decides whether a job starts. The store root's owner runs them, and only it
-(`McpStreamWorker`, on the server's maintenance thread, every `mcp_stream_interval`, 15 s), so two
-replicas never mirror a notification twice; each pass reads at most 64 connections and 20 input
-events each.
+(`McpStreamWorker`, on a thread of its own, every `mcp_stream_interval`, 15 s), so two replicas
+never mirror a notification twice; each pass reads at most 64 connections and 20 input events each.
+
+**One slow server cannot hold the others** (lake#980). The pass, with the workspace-stream
+agents and resource repairs that share it, runs on its own thread, never on the maintenance thread
+that samples usage and runs deletions, orders and balances, so those keep their intervals whatever
+an outside server does. Its bounds are `McpStreamLimits`:
+
+| Bound | Value | Past it |
+|---|---|---|
+| A pass | 10 s | no further connection is started; the next pass begins at the workspace where this one stopped, so every workspace is reached in turn (`lake_mcp_stream_passes_stopped_early_total`) |
+| Opening one connection's stream: `initialize` and its subscriptions (at most 50) | 5 s | the remaining subscriptions are not sent, the session is dropped and the connection backs off, with a problem naming it |
+| One exchange of a stream session | 5 s | the exchange fails (a call's own exchanges keep 30 s) |
+| Back-off after a failure (a failed `initialize`, an open past its budget, a stream that errs, no credential) | 30 s, doubled each further failure, at most 15 min | the server is not contacted again until it ends (`lake_mcp_stream_backoffs_total`); a success, or a change to the connection's URL, transport, secret or subscriptions, clears it |
+
+Input events and finished results (steps 2 and 3) are not held by a back-off: they read the
+workspace's own streams, not the outside server.
 
 **Only the workspaces that stream are called** (lake#685). The connection's dispatch row says it
 `streams` when it has a notifications topic, an agent with an input topic, or finished jobs'
@@ -348,7 +370,7 @@ the workspace's `calls` (`kind: mcp_connection`).
 
 ## Servers that speak only stdio
 
-Decision 60 took remote servers first; lake#659 adds the servers that only speak stdio, an npm or
+Remote servers came first; lake#659 adds the servers that only speak stdio, an npm or
 Python package such as most reference servers. Lake runs one as an **App of the workspace**
 ([Ship Apps](web-apps.md)) whose image is Lake's own runner, `oramasearch/lake-mcp-runner` (a
 private repository and a private image of its own; we write our own, standard library Go, no MCP
@@ -377,7 +399,7 @@ Apps decides, and each step is audited as theirs):
    mcp`, port `8080` (the port the workspace's network policy admits Lake to, as for an agent), the
    name `mcp-<prefix>-<4 hex>`, and the environment: `MCP_RUNNER_TOKEN` and `MCP_STDIO_COMMAND` from
    that secret, and the person's variables, plain or from secrets, which the operator projects from
-   the workspace's secret store as for any App (decision 58, lake#625).
+   the workspace's secret store as for any App (lake#625).
 3. Keeps the connection: its URL is the App's Service in the cluster,
    `http://app-<the first 12 hex digits of the App's id>.<the workspace's namespace>.svc.cluster.local/mcp`,
    its transport `streamable_http`, its authentication the runner's token, and `app_id` and `stdio`
@@ -452,6 +474,10 @@ sends it neither the refresh token nor a pending sign-in's code and verifier, an
 neither the old sign-in nor the pending one is used. `...McpConnectionStreamsMirrorNotificationsAndDriveTheAgent`:
 notifications mirrored to their topic after a subscription, one job per input event as the person,
 and its result published once on the output topic.
+`...McpStreamWorkerASlowServerBacksOffAndThePassKeepsItsBudget` (lake#980): a server that answers
+past the open budget is dropped and not contacted on the next pass, a pass with a zero budget
+starts no connection and resumes at the same workspace, and a change to the connection clears the
+back-off.
 `...McpConnectionDispatchNamesExportsAndStreamingWorkspacesOnly`: no row for a connection that
 neither streams nor re-exports, the endpoint digest changing on export and on an allow-list change
 (and not on a refresh that changes nothing), a session that listed not told again, the worker

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/store_contents.hpp"
 
 #include "lake/control/drives.hpp"

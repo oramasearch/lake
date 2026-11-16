@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Docs (`/docs`, `/docs/:page`, lake#561), after rev-os's Docs reader: lake's guides
  * (docs/guide/*.md) from `list_docs` and `get_doc`. A left navigation grouped by section, a search
  * (titles and headings at once, the whole text through `list_docs {q}`), the guide with a "#" link

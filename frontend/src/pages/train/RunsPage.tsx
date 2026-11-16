@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Train → Runs (web_ui.cpp workspace_content "runs"): every pipeline run with figures, a search
  * and status filters, its status and its report. Also the run and experiment helpers the Run and
  * Models pages share (experimentRefs, RunSubject, TrialSubject, when). */

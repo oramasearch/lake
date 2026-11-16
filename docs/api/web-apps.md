@@ -26,7 +26,7 @@ REST and MCP expose the same registry, customer policy and signed audit records.
 | `restart_app`, `stop_app`, `start_app` | `app_id` | lifecycle intent; a restart sets `restart_generation`, which the operator puts on the pod template so the pods are replaced ([restart](../control-plane/web-apps.md#restart), lake#1228) |
 | `scale_app` | `app_id`, replicas | desired count within customer quota |
 | `set_app_zetta_binding` | `app_id`, attached | attach or detach read-only workspace access |
-| `bind_service_to_app` | `app_id`, service_id | bind a service from the same customer |
+| `bind_service_to_app` | `app_id`, service_id | bind a service of the app's own workspace; needs `admin` on the account, as `service_connection` does, since the app receives the service's credential (lake#945) |
 | `set_app_stores` | `app_id`, `stores: [{store_id, mount_path?, read_only?}]` | replace the workspace storage the app mounts ([storage.md](storage.md#mounting-a-store)): a volume at a path (one workload per volume, else `conflict`), a bucket as `STORE_<NAME>_*` environment variables; new generation and a `stores` event |
 | `unbind_service_from_app` | `app_id`, service_id | detach an existing service binding |
 | `create_service_and_bind_to_app` | `app_id`, service kind/name and optional size | create and bind in one call |
@@ -40,6 +40,8 @@ The agreed runtime and binding values are:
 >
 > `bindings_json` is exactly
 > `{"zetta": {"scopes": ["read"]} | null, "services": ["<service_id>", ...]}`.
+
+A service binding hands the app that service's connection credential, so it needs `admin` on the account (the right `service_connection` needs) and a service of **the app's own workspace**. A service of another workspace is `not_found` by id and by name (lake#945).
 
 `create_app`, `update_app` and `bind_service_to_app` accept a live service's id or its unique name
 in the customer; the stored binding is always the id. An ambiguous or unknown name is `not_found`.
@@ -75,14 +77,14 @@ and `test`, plus every name that starts with `lake-` or `orama`. Operators add d
 names with the comma-separated `LAKE_APPS_RESERVED_NAMES`; surrounding whitespace is ignored.
 `create_app` returns `invalid_input`, `<name> is reserved`, at `/name` before it writes desired
 state. An omitted, null, or empty `host` remains the default `<name>.<LAKE_APPS_WILDCARD>`, so
-`reports` with `LAKE_APPS_WILDCARD=oramadev.net` becomes `reports.oramadev.net`.
+`reports` with `LAKE_APPS_WILDCARD=example.com` becomes `reports.example.com`.
 
 An explicit `host` is held to the same names (lake#947): its label, the part before
-`.<LAKE_APPS_WILDCARD>`, may not be a reserved name, so `{name: "ok", host: "app.oramadev.net"}` is
+`.<LAKE_APPS_WILDCARD>`, may not be a reserved name, so `{name: "ok", host: "app.example.com"}` is
 refused with `invalid_input`, `<host> is reserved: <label> is a reserved name`, at `/host`. Nor may it
 be one of the Lake's own hosts: its `LAKE_PUBLIC_HOST`, its `LAKE_APEX_HOST` or the host of any region in
 `LAKE_REGIONS` (`<host> is a host of the Lake itself`, at `/host`). Those sit one label beneath the
-wildcard when the wildcard is the zone itself, as `oramadev.net` is on the managing cluster.
+wildcard when the wildcard is the zone itself, as `example.com` is on the managing cluster.
 
 Application Agent must propose a non-reserved name and should leave `host` unset unless the person
 asked for a specific address. Its `create_app` tool description identifies platform-host names as
@@ -90,7 +92,7 @@ reserved, and the confirmed turn receives the same validation as every other cal
 
 The operator owns the separate existing-record check: before publishing DNS, it must refuse a host
 that already has a DNS record it does not own and report the conflict through App status. That
-behavior belongs to the [`LakeApp` controller](https://github.com/oramasearch/orama-operator/issues/193);
+behavior belongs to the `LakeApp` controller (orama-operator#193);
 Lake does not probe or replace DNS records.
 
 Changing `auth` to `none` requires `confirm_public: true`, and so does creating an app with `auth`
@@ -122,9 +124,15 @@ nginx.ingress.kubernetes.io/auth-always-set-cookie: "true"
 nginx.ingress.kubernetes.io/auth-response-headers: X-Orama-User,X-Orama-Space
 ```
 
+`GET /apps/authorize` hands the app its session only for a **browser session** (the session cookie
+on the Lake host). A request carrying `Authorization: Bearer`, with or without a cookie, is `403`
+(lake#1058), so no script or tool carries a Lake credential through to a tenant's app host.
+The e2e probes (`tools/e2e/agents.py`) reach an app without any Lake credential: a public app
+answers 2xx, and a private one redirects an anonymous visitor to `/apps/authorize`.
+
 `GET /v1/apps/auth`, including its `/w/<workspace>/v1/apps/auth` form, resolves a live protected
 app by the host of `X-Original-URL` (ingress-nginx sets `Host` to Lake's Service and sends no
-`X-Forwarded-Host` on the auth subrequest), falling back to `X-Forwarded-Host` or `Host`. A valid host-only `lake_app_session` returns 200 with
+`X-Forwarded-Host` on the auth subrequest), falling back to `X-Forwarded-Host` or `Host`. A valid host-only `__Host-lake_app_session` returns 200 with
 `X-Orama-User` and `X-Orama-Space`. The signed token carries `app_id`, `user_id`, `workspace_id`,
 `iat`, and `exp`; its HMAC-SHA256 key is derived from the instance KEK with HKDF label
 `lake/app-session/v1`, and it expires after 12 hours. Lake rechecks current workspace membership
@@ -156,8 +164,11 @@ single-use code and redirects to `rd` with `__lake_code` appended. The forward-a
 atomically spends that code, returns the identity headers, and sets:
 
 ```text
-lake_app_session=<token>; Path=/; Secure; HttpOnly; SameSite=Lax
+__Host-lake_app_session=<token>; Path=/; Secure; HttpOnly; SameSite=Lax
 ```
+
+The cookie is always `Secure`, so it always carries the `__Host-` prefix: a sibling
+host can neither set nor shadow it, and only that name is read.
 
 There is deliberately no `Domain` attribute, so customer app code receives only its own app
 cookie and never Lake's `lake_session`. `/logout` cannot clear cookies on app hosts. The 12-hour
@@ -181,7 +192,9 @@ exact revision. Zetta calls retain the workspace read allow-list and read-only S
 ([SQL on the Zetta route](workspaces.md#sql-on-this-route), lake#1229). Every
 other capability or target is refused. The registry accepts the pull token only as HTTP Basic user
 `app`, with the token as the password. It cannot read another app or `<space>/cache/...`, and it
-cannot start uploads or publish manifests. New hashes invalidate prior tokens; unbinding or
+cannot start uploads or publish manifests. Rotation is a token generation the operator
+acknowledges: a hash verifies only while the operator's generation matches the one Lake asked for
+([token rotation](../control-plane/web-apps.md#token-rotation), lake#1070). New hashes invalidate prior tokens; unbinding or
 deletion revokes workload access. Events remain available during teardown until the operator
 reports `Deleted`.
 
@@ -224,7 +237,7 @@ closed ([metering](metering.md#app-traffic)).
 A secret environment value names one field of one secret in a secret mount of the app's own
 workspace ([secrets.md](secrets.md)); lake's secret store is its source of truth and a Kubernetes
 Secret is only the projection the operator writes at deploy (lake#625,
-[../deployment/secrets.md](../deployment/secrets.md)).
+[secrets.md](secrets.md)).
 
 - `set_app_env` takes `secret: {mount_id, name, field}`, or `secret_ref` as the string
   `lake-secret://<mount id>/<name>#<field>` (the name may contain `/` and `#`; the field follows the
@@ -238,6 +251,16 @@ Secret is only the projection the operator writes at deploy (lake#625,
   caller may read it (`get_secret_mount`), that it belongs to the app's workspace (else
   `invalid_input`), and that the secret is live and has the field (`read_secret`, else `not_found`).
   Those two reads are audited in the mount's workspace like any other.
+- **A confirmed Application Agent turn holds no secret read** (lake#891). When the person confirms a
+  proposal, `agent_turn` checks every secret reference in the proposal's `app.env` with the
+  person's own `get_secret_mount` and `read_secret`, as above; a reference they cannot satisfy
+  refuses the confirmation (path `/context/confirmed_proposal/app/env/<KEY>/secret`). The turn's
+  `create_app` then accepts exactly the references its confirmed proposal carries under the same
+  key, read from the turn's request record that lake wrote after verifying the proposal against
+  `proposal_sha256`, and checks only, server-side, that each mount still exists and belongs to the
+  app's workspace. Any other reference the turn sends is checked with the turn's own credential,
+  which has no secret read, and refused. A secret deleted between confirmation and `create_app`
+  shows when the operator projects it.
 - A Kubernetes Secret name (`db-url`, `db-credentials/password`) is refused with `invalid_input`;
   apps written before lake#625 kept theirs in `secret_env_refs`, and none existed on dev.
 - The audit event of `set_app_env` names the key and the reference, never a value.
@@ -253,7 +276,8 @@ orama-operator `docs/lake/apps.md#lake-secret-references-lake625`.
 `context.confirmed_proposal`. `agent_turn` verifies that proposal itself (lake#561): the call names
 the turn that proposed it as `proposal_task_id` and the digest the person reviewed as
 `proposal_sha256` (`get_agent_task` returns it), and lake compares both with the proposal stored in
-that turn's answer. A public app (`auth` `none` or `public`) also needs `context.confirm_public:
+that turn's answer. It also checks the proposal's secret references as the person
+([above](#secret-environment), lake#891), so the turn never needs a secret read. A public app (`auth` `none` or `public`) also needs `context.confirm_public:
 true`. The full input and refusals are in [apps.md](apps.md#applicationagent-and-ship-apps). Ask Orama can delegate app requests through `agent_turn`; it never receives
 the App write capabilities itself. See [agent-launches.md](agent-launches.md) and
 [the page contract](../ui/apps.md).

@@ -265,7 +265,7 @@ environment or a token file, or reaches the network it was not granted (methodol
 `lmr.<run id>.<secret>` for the stage and collect pods and writes only its SHA-256 to
 `methodology_run_status`; Lake resolves it by comparing digests in constant time. It acts as no
 person, reaches only `methodology_run_input`, `methodology_run_artifact` and
-`methodology_run_output` for its own run (and a pull of its own image), and stops resolving when the
+`methodology_run_output` for its own run (and a pull of its own image, only when that build is the run's own workspace's, lake#952), and stops resolving when the
 run ends:
 
 - `methodology_run_input` answers the run's spec (mode, parameters, target, features, holdout,
@@ -370,7 +370,7 @@ Deployment of the methodology's own image (`methodology serve`) mounts that volu
 credential, no service account token and no network of its own unless granted, and answers on a
 Service that only Lake's pods can reach. The serve pod checks its sandbox before it imports the code,
 as a run does. The credential reaches `methodology_deployment_input` for that deployment only (and a
-pull of its image, which kubelet repeats when a serve pod restarts), and stops resolving when it
+pull of its image, which kubelet repeats when a serve pod restarts, only when that build is the deployment's own workspace's, lake#952), and stops resolving when it
 stops.
 
 Its phase is the operator's: `Building`, `Queued` (a GPU model with no node of its class),
@@ -419,7 +419,8 @@ the rows each run holds out. A parameter without a range keeps its default. Befo
 {"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "Late payers tuning", "methodology": "W-0a1b2c3d", "dataset": "sales.payers", "target": "late", "from_defaults": true, "budgets": {"max_trials": 8, "max_parallel_trials": 2, "max_wall_time_ms": 0, "cost_cap": 0}, "confirm": true}
 ```
 
-- `dataset` is `<database>.<table>`; `target` names the column to predict (required when the
+- `dataset` is `<database>.<table>`, each part letters, digits, `_` and single `-` (never `--`, which
+  starts an SQL comment, and never at either end), checked when the run starts; `target` names the column to predict (required when the
   methodology has a target); `features` is optional (every column but the target). Or name
   `project` and `pipeline` of a pipeline whose model step is this methodology; its connect step's
   table, its target and its holdout are used.
@@ -449,6 +450,12 @@ trial is dispatched once however many callers read the experiment.
   run is queued, and a trial whose run ended without a result is ended. They answer `runner` (each
   waiting trial with its `methodology_run`) and `methodology_runs` (every trial's run: `trial`,
   `number`, `run_id`, `phase`, `message`).
+- A read never acts for the reader (lake#1001). `get_experiment` by someone who may only
+  read the account (no `write` grant) changes nothing: no run is queued, no trial is ended and no run
+  is stopped. By someone who may change the account's experiments, it reconciles for the person who
+  started the experiment: the runs it queues name the starter, it uses only the image already built
+  (never starts a build), and a trial whose methodology cannot be prepared waits instead of being
+  stopped. `stop_experiment_trial` queues the next trial the same way.
 - `stop_experiment` stops the runs of its trials that have not finished their code;
   `stop_experiment_trial` stops that trial's run. An experiment that ended runs nothing more.
 
@@ -476,8 +483,9 @@ trial is dispatched once however many callers read the experiment.
 `WorkspaceRecordStores.MethodologiesAreTheWorkspacesOwnAndOramasStayReadOnly` also starts an
 experiment on the methodology: two trials queued as training runs of its validated image, read again
 without a second run, a result reported with the experiment and trial and the third trial queued for
-the person who started it, a failed run ending its trial with the reason, and the experiment's stop
-stopping the rest. `frontend/tests/experiment-methodologies.test.ts` covers the drawer's choices.
+the person who started it, a read by a member who may only read queuing and stopping nothing, a
+failed run ending its trial with the reason on the owner's read, and the experiment's stop stopping
+the rest. `frontend/tests/experiment-methodologies.test.ts` covers the drawer's choices.
 
 ## How to verify
 

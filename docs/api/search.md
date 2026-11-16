@@ -41,6 +41,10 @@ answered the request:
 Hits are score-descending and then repository/path ordered for stable ties. A quoted query and
 regex query return score `1`; ranked text returns the combined content and path BM25F score.
 
+**A regex query is bounded** (lake#984): the pattern is at most 256 characters and may not
+repeat a group that itself repeats (`(a+)+`, `(x*y)*`), only the first 1 MiB of each file is
+searched, and a query stops scanning after two seconds, answering what matched so far.
+
 ```sh
 curl -H "Authorization: Bearer $LAKE_ADMIN_TOKEN" \
   --get --data-urlencode 'query="connection refused"' \
@@ -54,7 +58,7 @@ curl -H "Authorization: Bearer $LAKE_ADMIN_TOKEN" \
   http://127.0.0.1:4900/v1/search
 ```
 
-## Where the index lives (lake#381, decision 54 S8)
+## Where the index lives (lake#381)
 
 A repository's index is kept beside the store that serves it:
 
@@ -251,6 +255,11 @@ content. Non-text/binary format extraction belongs to the format registry work i
 The query path resolves each candidate repository to its policy object, batches the object ids
 through `control::authorize_batch(principal, objects, "read", cache)`, and emits only allowed
 hits. This is the shared attestation-backed policy engine; `admin` is its operator principal.
+**Restricted folders (lake#975).** A hit inside a path object that does not inherit is also
+decided there, at the change it was found in, as Drive decides that path; a hit the caller may not
+read there, or whose path that change's tree does not hold, is left out. The `limit` applies
+before that filter, so a page can hold fewer hits. See
+[policy.md](policy.md#restricted-folders-hold-for-every-repository-read-lake975).
 **Where search reads repositories (lake#380).** Search reads a repository only through lake's
 repository store, which lends it from the store that serves it (the account's store, or a switched
 workspace's own store) under that store's lane and on its one open instance
@@ -358,7 +367,7 @@ build/tests/lake-tests --gtest_also_run_disabled_tests \
   later change. `rebuild_search_index` as its own capability is not built; `reindex_artifacts` of
   each repository, or a wiped index, rebuilds.
 - Rollback of a workspace's index objects by the workspace Zetta is not detected, as for the store
-  ([lake#522](https://github.com/oramasearch/lake/issues/522)); a rollback reads as an older index.
+  (lake#522); a rollback reads as an older index.
 
 ## Change
 

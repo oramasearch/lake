@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /drive?repository_id=&ref=&path=&view=&sort=&direction= (web_ui_drive_folder): a Drive folder as a
  * file manager. The breadcrumb and the folder's figures; a toolbar to filter by name, sort (by
  * name, size or modified, either direction) and switch between list and grid, which write the same

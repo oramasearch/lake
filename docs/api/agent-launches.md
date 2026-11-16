@@ -37,8 +37,10 @@ older than five minutes.
 per launch, `lal.<launch id>.<secret>`, puts it in a Secret owned by the Job or Deployment, and
 writes only its SHA-256 (`credential_sha256`). lake's stores resolve such a bearer by comparing
 digests in constant time (`context_for`): it acts as the person who launched it, limited to the
-launch's `scopes`. A launch that is stopped (`desired = absent`) or not yet reported has no usable
-credential.
+launch's `scopes`, **and only in the launch's own workspace** (lake#918): a call that
+names, or is routed to (`/w/<id>/`), any other workspace is `unauthorized`, whichever account of the
+person it is in. The same holds for a schedule's credential and a task's. A launch that is stopped
+(`desired = absent`) or not yet reported has no usable credential.
 
 **A run's scopes follow its agent's skills** (agent-runtime#7). `control::agent_launch_scopes_for`
 reads the agent record's `skills` when lake stores the launch, schedule or conversation service,
@@ -57,8 +59,11 @@ and gives the credential:
 A skill's changes are never scopes: agent-runtime turns them into proposals a person confirms, and
 the confirmed change runs as that person. The few engine actions a skill lets agent-runtime call
 directly (`check_pipeline`, `start_run`, `generate_dataset`, `decide`, `record_outcome`,
-agent-runtime#11) need no scope of their own: `workspace_act`, which every run has, grants each named
-engine action ([engine-capabilities.md](engine-capabilities.md)), and the engine's policy decides. Which reads each skill grants is agent-runtime's decision
+agent-runtime#11) need no scope of their own: `workspace_act`, which every run has, grants those
+five (`control::agent_run_direct_actions`) and the engine's policy decides. **It grants no other
+action** (lake#918): a launch's or a schedule's `workspace_act` of anything else, such as
+`delete_project`, is `unauthorized` unless its scopes name that action, so code in a run cannot
+change the workspace without a person ([engine-capabilities.md](engine-capabilities.md)). Which reads each skill grants is agent-runtime's decision
 (`skills.py`, published as `skills.json`); lake vendors it with
 `tools/agents/vendor-agent-skills.py <agent-runtime>/skills.json` into
 `src/control/agent_skills.cpp` (and the labels into
@@ -68,8 +73,106 @@ leaves out `workspace_id` gets its launch's or schedule's workspace, as a task c
 task's (lake#652). A schedule's runs and a conversation
 service get the same scopes as a launch of the same agent.
 
+**A run's credential stays in its workspace, whatever object a call names** (lake#918).
+Beside the workspace a call names and the `/w/<id>/` route it reaches (lake#1286), Lake checks the
+object a call's input names before the handler runs: a repository (`repository_id`, `repository`,
+or a repository capability's `id`), an app (`app_id`), a build (`build_id`), an application or a
+secret mount. When its routing row puts it in another workspace than the task's, launch's or
+schedule's own, the call is `unauthorized` (*this agent credential belongs to another workspace
+than the one … would act in*), in any account of the person. A public repository of another
+workspace is refused too: a run stays in its own workspace, and the repository is still readable
+anonymously, without the run's credential. The input check before it (*this agent credential acts
+only in its own workspace*) refuses the same calls first. The lookup is `named_object_workspace` (`src/api/audit_routing.cpp`), the
+same routing read the audit uses to place a call's event. Verify:
+`Streams.LaunchCredentialIsBoundThroughObjectsAndRunsNoUnnamedAction`.
+
 Verify: `AgentRuns.ARunsKeyCarriesTheReadsOfItsAgentsSkillsAndNoChange` and
 `AgentRuns.EverySkillLakeOffersIsOneAgentRuntimeDefines` (tests/test_workspaces.cpp).
+
+### A run's dataset work area
+
+[lake#1055](https://github.com/oramasearch/lake/issues/1055). agent-runtime
+confines its model tools to an agent's work area (agent-runtime#23), but a custom Python
+entrypoint holds the launch credential and can call Lake directly, so Lake enforces a dataset work
+area on the credential itself:
+
+- **It is stored with the row, once.** An agent whose `work_area` is `{kind: "dataset", detail:
+  "<id>[, <id>...]"}` gets one scope `dataset:<database>/<name>` per dataset on its launch, schedule
+  or conversation service when lake stores it (`control::dataset_work_area_scopes`), and the row's
+  scopes never change. `<database>/<name>` and `<database>.<name>` are the same dataset; a bare
+  `<name>` is `datasets/<name>`, Lake's default database. An empty or malformed dataset work area
+  gives the one scope `dataset:`, which confines the run to no dataset. An agent whose definition
+  is in a Lake repository also gets `agent_definition:<repository id>@<revision>`. Every row Lake
+  makes from an agent's record also carries `work_area_recorded`. No migration: the scopes are the
+  row's existing `scopes`.
+- **Only what can be shown to stay inside is allowed**, at dispatch (`work_area_refusal` in
+  `src/api/registry.cpp`), for named capabilities and for the generic `workspace_query`,
+  `workspace_act` and `workspace_sql` routes, and so for `/workspaces/<customer>/zetta/v1/...`,
+  which calls them: `workspace_openapi`; `list_datasets`, whose answer keeps only the work area's
+  datasets and nothing else; `get_dataset` of one of its datasets, sent to the engine with its
+  database named (a bare name never resolves to another database's table), and refused unless the
+  answer is that dataset; `get_agent` of the run's own agent; and `repository_tree` /
+  `repository_file` of its definition's repository at the pinned revision. Every other call, index
+  searches and global search included (an index names a bare source table, which proves no
+  database), is `unauthorized` before any engine read: *this agent works only on
+  `<datasets>`; `<capability>` cannot be shown to stay inside that work area*. The model gateway
+  and usage reports verify their own credential and are not affected.
+
+- **A query is the engine's to confine** ([zetta#1515](https://github.com/oramasearch/zetta/issues/1515)).
+  A read-only `workspace_sql` (also `/workspaces/<customer>/zetta/v1/sql`) of a credential with a
+  work area of at least one dataset, and that holds `workspace_sql`, is not refused by Lake. Lake
+  sends it to the workspace Zetta with the header `Zetta-Dataset-Scope: <database>/<name>, ...`,
+  and the engine runs it only when every table it reads is in the work area. Its refusal is
+  `unauthorized` with `details.datasets_read` and `details.outside`, passed back as the engine
+  wrote it. Lake sends the query only to an engine that enforces the header: before the first
+  scoped call to a workspace Zetta (and again 30 seconds later, and whenever the service's
+  generation or address changes) it calls `server_info` under a scope, which an enforcing engine
+  refuses with `details.dataset_scope` and an older one answers. On an older engine the query is
+  `unauthorized` (*this workspace's engine cannot confine sql to a work area yet*) and is never
+  sent, so a Zetta that ignores the header never runs it unconfined. A scoped call is never
+  answered from, or kept in, Lake's definitions cache. No launch is granted `workspace_sql` today
+  (no skill reads it), so this is the path a query takes once one is.
+- **`list_datasets` and `get_dataset` carry the header too**
+  ([zetta#1519](https://github.com/oramasearch/zetta/issues/1519)): the engine answers only the
+  scope's datasets for `list_datasets`, and reads only the one dataset `get_dataset` names. Lake
+  still confines both itself, as above, so they are checked twice. A confined `get_dataset` always
+  goes with its `database` named beside `dataset` (the engine refuses a bare name under a scope),
+  and Lake refuses one without it rather than send it. On an engine that does not enforce the
+  header, these two are sent without it, as before, since Lake's own check stands alone there;
+  only `sql` is refused on such an engine (`control::engine_must_enforce_dataset_scope`).
+- **The other calls Lake proves inside go without the header.** Under a scope the engine refuses
+  every capability that does not declare what it reads (everything but `sql`, `list_datasets` and
+  `get_dataset`), so `workspace_openapi`, `get_agent` and the definition's repository reads are
+  checked by Lake as above and sent as before. The engine capabilities that carry the header are
+  `control::engine_checks_dataset_scope`; when the engine declares the reads of another, it is
+  added there, and its refusal above is lifted in the same change if Lake refuses it. The engine
+  keeps `score`, `explain`, `analyze_dataset`, `plan_features`, the dataset writes and the
+  pipeline actions refused under a scope, and so does Lake.
+- **Runs made before this change are re-created or flagged.** A launch, schedule or conversation
+  service whose scopes lack `work_area_recorded` was made before Lake confined runs to their work
+  area and may hold broader scopes than its agent allows; its scopes cannot change. As
+  lake#1055 recommends (re-create them), Lake
+  re-creates what it owns, and flags what a person owns.
+  - A person's conversation service (`agent_turn` to a Python agent) whose scopes are not the ones
+    the agent's record gives now is withdrawn on their next turn and a new one started; the turn
+    answers `starting`, as for a first turn.
+  - `list_agent_launches` answers `recreate: true` for a present service, or an unfinished job,
+    made before the change, and `list_agent_schedules` for a present schedule. Launch the agent
+    again (and stop the old run), or make the schedule again (and remove the old one).
+
+Verify: `AgentWorkArea.ADatasetWorkAreaBecomesCanonicalScopes`,
+`Streams.ADatasetConfinedLaunchCredentialStaysInItsWorkArea` and
+`Streams.ADatasetConfinedLaunchQueriesOnlyUnderTheEnginesDatasetScope` (tests/test_streams.cpp);
+`Workspaces.ADatasetScopedCallRunsOnlyWhereTheEngineEnforcesTheScope`,
+`Workspaces.ZettaCallerSendsTheDatasetScopeHeader`,
+`Workspaces.DatasetScopeHelpersNameTheWorkAreaAndTheEnginesRefusal` and
+`AgentRuns.RunsMadeBeforeWorkAreasAreRecreatedOrFlagged` (tests/test_workspaces.cpp).
+
+Not enforced yet: the engine's own reads of a dataset inside a `workspace_act` capability (for
+example a run started on an allowed table that joins another) are refused today only because every
+action is refused in a dataset work area; allowing actions there needs the engine to declare which
+datasets an action reads under `Zetta-Dataset-Scope` (zetta#1515 and zetta#1519 declare `sql`,
+`list_datasets` and `get_dataset` only).
 
 ## Schedules
 
@@ -146,7 +249,7 @@ in the workspace in the same way, with the `stop_reason` *Stopped: the agent `<i
 in this workspace, so the run cannot start.* The pod's next restart finds its credential no longer
 resolves, and the operator removes it. A person's `get_agent`, or a run reading another agent, stops
 nothing. The operator needs no change: it already removes the workloads of absent launches and
-schedules, and it never reads a workspace Zetta (decision 51), so it cannot tell that an agent is
+schedules, and it never reads a workspace Zetta, so it cannot tell that an agent is
 gone.
 
 Verify: `ctest --test-dir build -R DeletingAnAgentStopsItsLaunchesAndSchedules`
@@ -154,7 +257,7 @@ Verify: `ctest --test-dir build -R DeletingAnAgentStopsItsLaunchesAndSchedules`
 
 ## Stream triggers
 
-**Offboarding stops delegated automation (lake#951, LSR-086).** Launch, schedule and task
+**Offboarding stops delegated automation (lake#951).** Launch, schedule and task
 credentials require a present, enabled user. Disabling an account withdraws its launches and
 schedules and invalidates its tasks and leases atomically; creating new person-owned work and
 claiming or renewing tasks also checks the account under the offboarding lock. This protects a
@@ -262,9 +365,11 @@ native agents still answer within the call (a follow-up).
 
 `agent_turn` delivers one message to any agent and returns its answer:
 
+**A confirmation is a person's** (lake#989). `context.confirmed_proposal` sent with an agent's own credential (an `agent_task`, `agent_launch`, `agent_schedule` or `agent_service` credential) is `unauthorized`, and `context.confirmed_promotion` from one grants no promotion scopes. Only a turn a person starts can confirm.
+
 | Agent | Where the turn goes | What it is handed |
 |---|---|---|
-| **Ask Orama** (`agent-ask-orama`) | its service, `LAKE_AGENT_ENDPOINTS` | a key for this turn derived from the person's credential, carrying **every read capability and `agent_turn`, never an action**, and `lake_url` |
+| **Ask Orama** (`agent-ask-orama`) | its service, `LAKE_AGENT_ENDPOINTS` | a key for this turn derived from the person's credential, carrying **the library-agent reads and `agent_turn`, never an action, a secret or a credential**, confined to the turn's workspace ([agent-bus.md](agent-bus.md#a-task-credential-is-confined-to-its-workspace)), and `lake_url` |
 | **Project Agent** (`agent-project`) | its service | a turn key limited to `workspace_query` / `workspace_openapi`, and `zetta_base_url` = lake's agent path for the workspace. A `context` naming `project` and `graph` is a **change request**: lake adds the graph as it is (`pipeline`), the agent answers with a proposal (agent-project edit mode), and lake keeps it as an Ask Orama message and returns `review_url` (the pipeline page with `&proposal=`), where the person applies it (lake#249) |
 | **Application Agent** (`agent-application`) | its service | an `app` task with read-only workspace, dataset, Service, repository and App tools. A completed proposal returns a Ship → Apps `review_url`. A later task carrying the reviewed object at `context.confirmed_proposal`, with `proposal_task_id` and `proposal_sha256` naming the stored proposal it confirms (checked by `agent_turn`), also receives `create_repository`, `commit_repository_files`, `create_app`, and `deploy_app` |
 | **Experiments Agent** (`agent-experiments`) | its service | an `experiment`, `experiment_status` or `experiment_explain` task and a credential for the selected workspace adapter. Proposal turns can read planning inputs (including `validate_study`, the no-side-effect preflight of `create_study`) but cannot write. A later `experiment` task carrying `context.confirmed_proposal`, with `proposal_task_id` and `proposal_sha256` naming the stored proposal it confirms (checked by `agent_turn`; only the experiment, the agent's `study`, may be edited), receives workspace `create_study` and backing `start_experiment`; status receives trial monitoring/stop tools, and explanation receives promotion only with its own confirmation. Experiment data remains in workspace Zetta |

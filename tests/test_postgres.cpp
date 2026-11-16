@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "audit_test_support.hpp"
 #include "postgres_fixture.hpp"
 #include <gtest/gtest.h>
@@ -412,15 +414,19 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
     const auto repository_object =
         store->find_policy_object("repository", repository.value.at("id"));
     ASSERT_TRUE(repository_object) << repository_object.error().message;
-    const ApiResult path = call("create_object",
-                                {{"object_type", "path"},
-                                 // Named for the repository it sits in (lake#913).
-                                 {"external_id",
-                                  repository.value.at("id").get<std::string>() + ":node-" + suffix},
-                                 {"parent_id", repository_object->id},
-                                 {"inherit", true}});
-    ASSERT_TRUE(path.ok) << path.error.message;
-    ASSERT_TRUE(call("get_object", {{"id", path.value.at("id")}}).ok);
+    // create_object places a path object from the repository's tree (lake#1030), which this
+    // test has no repository store for; the object is made in the store, as lake makes them.
+    const auto path_object = store->create_policy_object(
+        {"path",
+         // Named for the repository it sits in (lake#913).
+         repository.value.at("id").get<std::string>() + ":node-" + suffix,
+         repository_object->id,
+         "admin",
+         lake::control::new_uuid_v4(),
+         true});
+    ASSERT_TRUE(path_object) << path_object.error().message;
+    const json path{{"id", path_object->id}};
+    ASSERT_TRUE(call("get_object", {{"id", path.at("id")}}).ok);
     ASSERT_TRUE(call("list_objects", {{"parent_id", repository_object->id}}).ok);
 
     const ApiResult grant = call("create_grant",
@@ -429,7 +435,7 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
                                   {"role", "read"}});
     ASSERT_TRUE(grant.ok) << grant.error.message;
     ASSERT_TRUE(call("list_grants", {{"object_id", repository_object->id}}).ok);
-    const ApiResult access = call("effective_access", {{"object_id", path.value.at("id")}});
+    const ApiResult access = call("effective_access", {{"object_id", path.at("id")}});
     ASSERT_TRUE(access.ok) << access.error.message;
     EXPECT_FALSE(access.value.at("items").empty());
 }
@@ -660,26 +666,25 @@ TEST(PostgresCapabilities, SearchFiltersRepositoryCandidates) {
         uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
     ASSERT_TRUE(store->ping()) << store->ping().error().message;
     const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    const std::string customer = "search-customer-" + suffix;
-    const std::string allowed_repository = "allowed-" + suffix;
-    const std::string denied_repository = "denied-" + suffix;
-    const auto customer_object = store->create_policy_object(
-        {"customer", customer, "", "admin", "postgres-search-customer", true});
-    ASSERT_TRUE(customer_object) << customer_object.error().message;
-    const auto allowed_object = store->create_policy_object({"repository",
-                                                             allowed_repository,
-                                                             customer_object->id,
-                                                             "admin",
-                                                             "postgres-search-allowed",
-                                                             true});
+    // Real rows: a hit whose repository row cannot be read is dropped, so the account
+    // and its two repositories exist, each with the policy object create_repository makes.
+    const auto user = store->create_user({"taap:postgres-search-" + suffix, "", "Search"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer_row =
+        store->create_customer({"individual", user->id, "", "search-" + suffix});
+    ASSERT_TRUE(customer_row) << customer_row.error().message;
+    const std::string customer = customer_row->id;
+    const auto workspace = lake::test::repository_workspace(*store, customer);
+    const auto allowed_row =
+        store->create_repository({customer, "allowed", "", "private", workspace});
+    ASSERT_TRUE(allowed_row) << allowed_row.error().message;
+    const auto denied_row =
+        store->create_repository({customer, "denied", "", "private", workspace});
+    ASSERT_TRUE(denied_row) << denied_row.error().message;
+    const std::string allowed_repository = allowed_row->id;
+    const std::string denied_repository = denied_row->id;
+    const auto allowed_object = store->find_policy_object("repository", allowed_repository);
     ASSERT_TRUE(allowed_object) << allowed_object.error().message;
-    const auto denied_object = store->create_policy_object({"repository",
-                                                            denied_repository,
-                                                            customer_object->id,
-                                                            "admin",
-                                                            "postgres-search-denied",
-                                                            true});
-    ASSERT_TRUE(denied_object) << denied_object.error().message;
     const auto grant = store->create_grant({"reader",
                                             allowed_object->id,
                                             "read",
@@ -1086,7 +1091,7 @@ TEST(PostgresUsageLimits, OneLimitPerDimensionAndZeroRemovesIt) {
     EXPECT_EQ(store->usage_limits(lake::control::new_uuid_v4()).error().code, "not_found");
 }
 
-// Billing records (migration 0073, lake#564, decision 56): the price list (one stored row per
+// Billing records (migration 0073, lake#564): the price list (one stored row per
 // publication since lake#635) and invoices with frozen lines and payment state, in the control
 // plane. billing_subscriptions stays in the schema, unused since lake#635 (no plans to choose).
 TEST(PostgresBilling, PriceListsAndInvoicesFollowTheContract) {
@@ -1416,8 +1421,205 @@ TEST(PostgresServices, CreateListAndWithdrawFollowTheContract) {
     EXPECT_TRUE(listed_with(crm->id)) << "other services are unaffected";
 }
 
+// lake#1301 (orama-operator#781): migration 0111 refuses a service whose workspace belongs to
+// another customer, however the row is written, and a workspace whose Zetta service or customer
+// would disagree with its services. Status writes and withdrawals are never checked.
+TEST(PostgresServices, AServiceIsNeverRoutedToAnotherCustomersWorkspace) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    std::vector<std::string> customers;
+    std::vector<lake::control::Workspace> workspaces;
+    for (const std::string who : {"mine", "theirs"}) {
+        const auto user = store->create_user({"taap:1:ed25519:route-" + who + "-" + suffix,
+                                              "route-" + who + "-" + suffix + "@example.com",
+                                              "Routing"});
+        ASSERT_TRUE(user) << user.error().message;
+        const auto customer =
+            store->create_customer({"individual", user->id, "", "route-" + who + "-" + suffix});
+        ASSERT_TRUE(customer) << customer.error().message;
+        const auto workspace = store->create_workspace({customer->id, "home", "dev", ""});
+        ASSERT_TRUE(workspace) << workspace.error().message;
+        customers.push_back(customer->id);
+        workspaces.push_back(*workspace);
+    }
+    const std::string& mine = customers[0];
+    const std::string& theirs_workspace = workspaces[1].id;
+
+    // The store's own insert: refused by the trigger, behind lake's own caller check.
+    lake::control::NewManagedService crossed{mine, "postgres", "crossed", "taap:x"};
+    crossed.workspace_id = theirs_workspace;
+    const auto refused = store->create_service(crossed);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "invalid_input") << refused.error().message;
+
+    lake::control::NewManagedService own{mine, "postgres", "crm", "taap:x"};
+    own.workspace_id = workspaces[0].id;
+    const auto crm = store->create_service(own);
+    ASSERT_TRUE(crm) << crm.error().message;
+    const auto unassigned = store->create_service({mine, "postgres", "legacy", "taap:x"});
+    ASSERT_TRUE(unassigned) << "a service may still name no workspace: "
+                            << unassigned.error().message;
+
+    pqxx::connection connection(uri);
+    const auto refuses = [&](const std::string& sql, const std::string& id,
+                             const std::string& value) {
+        EXPECT_THROW(([&] {
+                         pqxx::work tx(connection);
+                         tx.exec_params(sql, id, value);
+                         tx.commit();
+                     })(),
+                     pqxx::check_violation)
+            << sql;
+    };
+    // Raw writes are refused too: moving a service to another customer's workspace, or the
+    // service to another customer while it names this one's workspace.
+    refuses("UPDATE services SET workspace_id = $2::uuid WHERE id = $1::uuid", crm->id,
+            theirs_workspace);
+    refuses("UPDATE services SET customer_id = $2::uuid WHERE id = $1::uuid", crm->id,
+            customers[1]);
+    refuses("UPDATE services SET workspace_id = $2::uuid WHERE id = $1::uuid", unassigned->id,
+            theirs_workspace);
+    // From the workspace's side: its Zetta service must be its customer's, and it cannot move to
+    // another customer while services of this one name it.
+    refuses("UPDATE workspaces SET zetta_service_id = $2::uuid WHERE id = $1::uuid",
+            workspaces[0].id, workspaces[1].zetta_service_id);
+    refuses("UPDATE workspaces SET customer_id = $2::uuid WHERE id = $1::uuid", workspaces[0].id,
+            customers[1]);
+    {
+        // Naming a workspace of the same customer, or none, is allowed (rolled back here).
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE services SET workspace_id = $2::uuid WHERE id = $1::uuid",
+                       unassigned->id, workspaces[0].id);
+        tx.exec_params("UPDATE services SET workspace_id = NULL WHERE id = $1::uuid", crm->id);
+    }
+
+    // Status writes (the operator's service_status row) and withdrawals touch neither routing
+    // column.
+    {
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO service_status (service_id, phase, message) "
+                       "VALUES ($1::uuid, 'Ready', 'service ready')",
+                       crm->id);
+        tx.exec_params("UPDATE services SET updated_at = now() WHERE id = $1::uuid", crm->id);
+        tx.commit();
+    }
+    const auto withdrawn = store->withdraw_service(crm->id);
+    ASSERT_TRUE(withdrawn) << withdrawn.error().message;
+    EXPECT_EQ(store->get_service(crm->id)->workspace_id, workspaces[0].id);
+
+    {
+        pqxx::work tx(connection);
+        EXPECT_FALSE(tx.exec("SELECT 1 FROM schema_migrations "
+                             "WHERE version = '0111_service_workspace_routing'")
+                         .empty());
+        EXPECT_FALSE(
+            tx.exec("SELECT to_regclass('service_workspace_routing_guard')")[0][0].is_null());
+        EXPECT_EQ(tx.exec("SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgname IN "
+                          "('service_workspace_routing', 'workspace_service_routing')")[0][0]
+                      .as<int>(),
+                  2);
+    }
+
+    // Applying the migration again, unrecorded and then recorded, keeps the rows and the checks.
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0111_service_workspace_routing");
+    ASSERT_NE(start, std::string::npos);
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        if (pass == 0) {
+            tx.exec("DELETE FROM schema_migrations WHERE version = '0111_service_workspace_routing'");
+        }
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        tx.commit();
+    }
+    EXPECT_EQ(store->get_service(crm->id)->workspace_id, workspaces[0].id);
+    refuses("UPDATE services SET workspace_id = $2::uuid WHERE id = $1::uuid", unassigned->id,
+            theirs_workspace);
+}
+
 // lake#1228: restart_app writes restart_generation, the column the operator renders on the pod
 // template; any other change leaves it.
+// lake#987, against either store: an account at LAKE_WORKSPACES_PER_CUSTOMER live
+// workspaces, or at LAKE_SERVICES_PER_CUSTOMER live services (a workspace's own Zetta is one), is
+// refused its next workspace with quota_exceeded; a deleted workspace stops counting, and another
+// account is unaffected.
+static void expect_workspace_limits(lake::control::Store& store, const std::string& suffix) {
+    const auto first_user = store.create_user(
+        {"taap:1:ed25519:wsl-a-" + suffix, "wsl-a-" + suffix + "@example.com", "Limits A"});
+    const auto other_user = store.create_user(
+        {"taap:1:ed25519:wsl-b-" + suffix, "wsl-b-" + suffix + "@example.com", "Limits B"});
+    ASSERT_TRUE(first_user) << first_user.error().message;
+    ASSERT_TRUE(other_user) << other_user.error().message;
+    const auto account =
+        store.create_customer({"individual", first_user->id, "", "wsl-a-" + suffix});
+    const auto other = store.create_customer({"individual", other_user->id, "", "wsl-b-" + suffix});
+    ASSERT_TRUE(account) << account.error().message;
+    ASSERT_TRUE(other) << other.error().message;
+
+    const auto limited = [](const std::string& customer_id, const std::string& name) {
+        lake::control::NewWorkspace input{customer_id, name, "prod", "taap:x"};
+        input.max_workspaces = 2;
+        return input;
+    };
+    const auto one = store.create_workspace(limited(account->id, "one"));
+    ASSERT_TRUE(one) << one.error().message;
+    const auto two = store.create_workspace(limited(account->id, "two"));
+    ASSERT_TRUE(two) << two.error().message;
+    const auto three = store.create_workspace(limited(account->id, "three"));
+    ASSERT_FALSE(three);
+    EXPECT_EQ(three.error().code, "quota_exceeded");
+    const auto listed = store.list_workspaces(account->id);
+    ASSERT_TRUE(listed);
+    EXPECT_EQ(listed->size(), 2U) << "nothing is written when the limit refuses";
+
+    // Another account still creates one.
+    const auto elsewhere = store.create_workspace(limited(other->id, "one"));
+    EXPECT_TRUE(elsewhere) << elsewhere.error().message;
+
+    // No limit (0) is the default.
+    EXPECT_TRUE(store.create_workspace({account->id, "unlimited", "prod", "taap:x"}));
+
+    // A deleted workspace no longer counts.
+    lake::control::WorkspacePatch deleted;
+    deleted.desired = "deleted";
+    ASSERT_TRUE(store.update_workspace(one->id, deleted));
+    ASSERT_TRUE(store.update_workspace(two->id, deleted));
+    EXPECT_TRUE(store.create_workspace(limited(account->id, "after")));
+
+    // The workspace's own Zetta counts against the service limit.
+    lake::control::NewWorkspace by_services{other->id, "two", "prod", "taap:x"};
+    by_services.max_services = 1;
+    const auto refused = store.create_workspace(by_services);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "quota_exceeded");
+    by_services.max_services = 2;
+    EXPECT_TRUE(store.create_workspace(by_services));
+}
+
+TEST(WorkspaceLimits, MemoryStoreRefusesTheNextWorkspaceOnly) {
+    lake::control::InMemoryStore store;
+    expect_workspace_limits(store, lake::control::new_uuid_v4().substr(0, 8));
+}
+
+TEST(WorkspaceLimits, PostgresStoreRefusesTheNextWorkspaceOnly) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    expect_workspace_limits(*store, lake::control::new_uuid_v4().substr(0, 8));
+}
+
 TEST(PostgresWebApps, ARestartRecordsTheGenerationTheOperatorRollsThePodsOn) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
@@ -1469,6 +1671,93 @@ TEST(PostgresWebApps, ARestartRecordsTheGenerationTheOperatorRollsThePodsOn) {
             .as<std::int64_t>(),
         restarted->generation);
     EXPECT_FALSE(tx.exec("SELECT to_regclass('app_restarts_guard')")[0][0].is_null());
+}
+
+// lake#1070: rotation is desired state. Lake asks for the next token generation, a hash verifies
+// only while the operator's acknowledged generation matches, and Lake writes token_hashes_json only
+// for an operator that has never reported a generation.
+TEST(PostgresWebApps, TokenRotationIsAGenerationTheOperatorAcknowledges) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:rotate-" + suffix, "rotate-" + suffix + "@example.com", "Apps"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "rt-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto workspace = store->create_workspace({customer->id, "apps", "dev", ""});
+    ASSERT_TRUE(workspace);
+    lake::control::NewWebApp app;
+    app.customer_id = customer->id;
+    app.workspace_id = workspace->id;
+    app.name = "rotating";
+    app.mode = "image";
+    app.image = "registry.example/rotating@sha256:" + std::string(64, 'b');
+    app.framework = "container";
+    app.port = 8080;
+    app.host = "rotating-" + suffix + ".apps.example.test";
+    const auto created = store->create_web_app(app);
+    ASSERT_TRUE(created) << created.error().message;
+    EXPECT_EQ(created->token_generation, 0);
+    EXPECT_FALSE(created->token_hashes_generation);
+
+    // An events token: an image app has no source token (a source token needs a runtime app's
+    // repository and revision), and the events purpose verifies for any app's mode.
+    const std::string token = "rotate-events-" + suffix;
+    const json hashes{{"events", lake::control::identity_crypto::sha256_hex(token)}};
+    // What the operator writes: the hashes, and from an upgraded operator, their generation.
+    const auto operator_writes = [&](const json& values, std::optional<std::int64_t> generation) {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        if (generation) {
+            tx.exec_params("UPDATE apps SET token_hashes_json = $2::jsonb, "
+                           "token_hashes_generation = $3 WHERE id = $1::uuid",
+                           created->id,
+                           values.dump(),
+                           *generation);
+        } else {
+            tx.exec_params("UPDATE apps SET token_hashes_json = $2::jsonb WHERE id = $1::uuid",
+                           created->id,
+                           values.dump());
+        }
+        tx.commit();
+    };
+    lake::control::WebAppPatch rotate;
+    rotate.rotate_tokens = true;
+
+    // An operator that reports no generation: Lake clears the hashes, as before.
+    operator_writes(hashes, std::nullopt);
+    ASSERT_TRUE(store->context_for(token));
+    const auto legacy = store->update_web_app(created->id, rotate);
+    ASSERT_TRUE(legacy) << legacy.error().message;
+    EXPECT_EQ(legacy->token_generation, 1);
+    EXPECT_TRUE(legacy->token_hashes.empty());
+    EXPECT_FALSE(store->context_for(token));
+
+    // An operator that acknowledges: Lake leaves the hashes alone and the mismatch revokes them.
+    operator_writes(hashes, 1);
+    ASSERT_TRUE(store->context_for(token));
+    const auto acknowledged = store->update_web_app(created->id, rotate);
+    ASSERT_TRUE(acknowledged) << acknowledged.error().message;
+    EXPECT_EQ(acknowledged->token_generation, 2);
+    EXPECT_EQ(acknowledged->token_hashes, hashes);
+    EXPECT_EQ(acknowledged->token_hashes_generation, 1);
+    EXPECT_FALSE(store->context_for(token));
+
+    // The operator mints the next generation; only its tokens verify.
+    const std::string replacement = "rotate-replacement-" + suffix;
+    operator_writes({{"events", lake::control::identity_crypto::sha256_hex(replacement)}}, 2);
+    EXPECT_FALSE(store->context_for(token));
+    EXPECT_TRUE(store->context_for(replacement));
+
+    pqxx::connection connection(uri);
+    pqxx::work tx(connection);
+    EXPECT_FALSE(tx.exec("SELECT to_regclass('app_token_generation_guard')")[0][0].is_null());
 }
 
 TEST(PostgresWebApps, DesiredStateQuotaNotifyAndOperatorStatusFollowTheContract) {
@@ -2623,7 +2912,7 @@ TEST(PostgresMovedTables, MigrationRefusesRowsWithNoRecordedWorkspaceOwner) {
     drop.commit();
 }
 
-// Migration 0064 (decision 54, S11): repository_refs, a copy of liquid's refs nothing read, is
+// Migration 0064 (S11): repository_refs, a copy of liquid's refs nothing read, is
 // dropped (lake#319) and never recreated by a rerun. The description that 0064 left in the row
 // for the copy is gone too (0070), so the row is routing only and a create under a chosen id keeps
 // it.
@@ -2708,7 +2997,7 @@ TEST(PostgresRepositories, MigrationDropsRefsAndTheRowIsRoutingOnly) {
     EXPECT_FALSE(tx.exec("SELECT to_regclass('repository_records_guard')")[0][0].is_null());
 }
 
-// Migration 0066 (decision 54 S14, lake#513): a repository 0051 left without a workspace is
+// Migration 0066 (lake#513): a repository 0051 left without a workspace is
 // assigned its space's only live workspace once the space has exactly one, with its routing and
 // description owners recorded; a space with two workspaces is left alone and reported. The
 // trigger lets only the migration's own block make that change: every other change of
@@ -4025,7 +4314,7 @@ TEST(PostgresBilling, CronRunsAreAWorkloadKindAndTheirEndIsRead) {
     EXPECT_EQ(runs->front().status_updated_at, "2026-10-11T03:02:30Z");
 }
 
-// LSR-095: model/direction rates and frozen invoice lines must survive the PostgreSQL constraints.
+// Model/direction rates and frozen invoice lines must survive the PostgreSQL constraints.
 TEST(PostgresBilling, ModelDirectionPricesAndInvoiceLinesRoundTrip) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {

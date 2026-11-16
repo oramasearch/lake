@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/policy.hpp"
 
 #include <algorithm>
@@ -98,6 +100,54 @@ AuthorizationDecision decide(const std::string& object_id,
         }
     }
     return AuthorizationDecision{false, object_id, {}, {}, false};
+}
+
+constexpr int max_confinement_depth = 256;
+
+// Whether `object_id` lies inside the cache's confinement (lake#985): its whole parent
+// chain, followed past any inheritance cut, reaches the confined customer's object, and every
+// repository on the chain belongs to the confined workspace when one is set. Anything that cannot
+// be read or proven is outside.
+Result<bool>
+inside_confinement(Store& store, const std::string& object_id, AuthorizationCache& cache) {
+    const AuthorizationConfinement& confinement = cache.confinement;
+    if (confinement.customer_id.empty()) {
+        return false;
+    }
+    if (const auto known = cache.confined_objects.find(object_id);
+        known != cache.confined_objects.end()) {
+        return known->second;
+    }
+    bool inside = false;
+    std::string current = object_id;
+    for (int depth = 0; !current.empty() && depth < max_confinement_depth; ++depth) {
+        auto object = store.get_policy_object(current);
+        if (!object) {
+            if (object.error().code != "not_found") {
+                return std::unexpected(object.error());
+            }
+            break;
+        }
+        if (object->object_type == "repository" && !confinement.workspace_id.empty()) {
+            const auto repository = store.get_repository(object->external_id);
+            if (!repository) {
+                if (repository.error().code != "not_found") {
+                    return std::unexpected(repository.error());
+                }
+                break;
+            }
+            if (repository->workspace_id != confinement.workspace_id) {
+                break;
+            }
+        }
+        if (object->object_type == "customer") {
+            inside = object->external_id == confinement.customer_id;
+            break;
+        }
+        current = object->parent_id;
+    }
+    cache.confined_objects.emplace(object_id, inside);
+    return inside;
 }
 
 } // namespace
@@ -300,7 +350,19 @@ authorize_batch(Store& store,
     }
     const auto& grants = cache.grants[principal_taap_id];
     for (const auto& object_id : policy_objects) {
-        decisions.emplace(object_id, decide(object_id, action, cache.paths[object_id], grants));
+        AuthorizationDecision decision = decide(object_id, action, cache.paths[object_id], grants);
+        if (decision.allowed && cache.confinement.active) {
+            // An agent credential acts only inside its own account and workspace (lake#985),
+            // whatever else the person it acts for may reach.
+            const auto inside = inside_confinement(store, object_id, cache);
+            if (!inside) {
+                return std::unexpected(inside.error());
+            }
+            if (!*inside) {
+                decision = AuthorizationDecision{false, object_id, {}, {}, false};
+            }
+        }
+        decisions.emplace(object_id, std::move(decision));
     }
     return decisions;
 }

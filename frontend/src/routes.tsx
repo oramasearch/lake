@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The route registry: every page group's screens joined, the rail's items in lake's order, and the
  * lookups the shell, breadcrumbs and command palette share. */
 import type { Session } from "@/lib/session";

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Effective Access: who can reach one object, with which actions, and from where. One renderer
  * (web_ui_effective_access) behind two kinds of route: `/access?object_id=` names a policy object
  * (serve_access_page); `/repository/access`, `/organization/access` and `/team/access` take `?id=`
@@ -8,6 +10,8 @@ import type { UseQueryResult } from "@tanstack/react-query";
 import { ShieldCheck } from "lucide-react";
 import { useRead, type Row } from "@/lib/api";
 import { Button, Chip, DataTable, ErrorBlock, FilterChips, Mono, Page, SearchInput, Stat, StatRow, Toolbar } from "@/lib/ui";
+import { SignerName } from "../repositories/forge";
+import { signerText, type People } from "../repositories/signers";
 import { PanelEmpty, RoleBadge, countBy, matches, useMetaTrail, useParam } from "./shared";
 
 const ENTITY: Record<string, string> = {
@@ -55,7 +59,9 @@ function AccessTable({ q }: { q: UseQueryResult<Row> }) {
   const [search, setSearch] = useState("");
   const [role, setRole] = useState<string | null>(null);
   const all = q.data?.items as Row[] | undefined;
-  const rows = all?.filter((e) => matches(search, e.principal_taap_id, e.source_object_id) && (!role || e.role === role));
+  // entity_effective_access names each principal's account (lake#1326); effective_access does not.
+  const people = q.data?.people as People | undefined;
+  const rows = all?.filter((e) => matches(search, people ? signerText(e.principal_taap_id, people) : "", e.principal_taap_id, e.source_object_id) && (!role || e.role === role));
   return (
     <>
       {all && all.length > 0 && (
@@ -75,7 +81,12 @@ function AccessTable({ q }: { q: UseQueryResult<Row> }) {
         rows={rows}
         empty={<PanelEmpty title="No effective grants">{all?.length ? "Clear the search or the role filter to see more." : "Nobody has access to this object yet."}</PanelEmpty>}
         columns={[
-          { key: "principal", label: "Principal", sort: (e) => e.principal_taap_id, render: (e) => <Mono short={40}>{e.principal_taap_id}</Mono> },
+          {
+            key: "principal",
+            label: "Principal",
+            sort: (e) => (people ? signerText(e.principal_taap_id, people) : e.principal_taap_id),
+            render: (e) => (people ? <SignerName id={e.principal_taap_id} people={people} /> : <Mono short={40}>{e.principal_taap_id}</Mono>),
+          },
           { key: "role", label: "Role", sort: (e) => e.role, render: (e) => <RoleBadge role={e.role} /> },
           {
             key: "actions",

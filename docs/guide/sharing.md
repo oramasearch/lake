@@ -154,7 +154,8 @@ through the whole repository or an organization.
 
 ## Limits
 
-- Links need a future expiry in UTC, written as an RFC 3339 time.
+- Links need a future expiry in UTC, written as an RFC 3339 time ending in `Z`, such as
+  `2026-12-31T23:59:59Z`; an offset such as `+02:00` or a date alone is refused.
 - A link is held in one workspace and can be listed and revoked only through that workspace.
   Deleting the workspace deletes its links.
 - No passcodes on links.
@@ -177,7 +178,7 @@ People without `share` who open the sharing page see the refusal and nothing els
 |---|---|
 | `unauthorized` on the sharing page | You may read the folder but not share it. Ask someone with **Share** on it. |
 | `invalid_input` at `/workspace_id` | The workspace is not a live workspace of the repository's owner. Choose one from the page. |
-| `invalid_input` at `/expires_at` | The expiry is not in the future. |
+| `invalid_input` at `/expires_at` | The expiry is not in the future, or is not a UTC time written `YYYY-MM-DDTHH:MM:SSZ`. |
 | `not_found` at `/link_id` when revoking | The link is held in another workspace. Open the sharing page with that workspace. |
 | A recipient's link says the share is not recognized | The link was revoked, has expired, or its workspace was deleted. Create a new one. |
 | A recipient cannot open a subfolder | That subfolder has its own, narrower policy; links never widen it. |

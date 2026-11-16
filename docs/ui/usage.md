@@ -36,7 +36,7 @@ Top to bottom:
   -hours, GPU in GPU-minutes or -hours), and its change against the last period with an arrow. A
   dimension the reading answers with `billed: false` (build, run and instance time, lake#658) says
   *Detail, not billed* under it (`billingNote`); Engine Storage (`engine_storage`, what a
-  workspace engine holds on its own volume, decision 61, lake#663) says *Detail, billed as the
+  workspace engine holds on its own volume, lake#663) says *Detail, billed as the
   engine's volume*. Pressing a tile charts it (`?dimension=`).
 - **Over Time.** A uPlot chart (`pages/usage/UsageChart.tsx`, as Train and Ship's charts) of the
   chosen dimension, stacked **By workspace** or **By kind**: the six largest bands and Other

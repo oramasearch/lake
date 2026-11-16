@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <cstdint>
@@ -15,10 +17,10 @@
 
 namespace lake::control {
 
-// A workspace's MCP connection (decision 60, lake#652, docs/api/mcp-connections.md): Lake as the
+// A workspace's MCP connection (lake#652, docs/api/mcp-connections.md): Lake as the
 // client of a remote MCP server. It lives in the workspace Zetta of its workspace, in the sealed
 // collection `lake_mcp_connections`, found by its space. Its credential is never on the record:
-// the record names a workspace secret (decision 58), `lake-secret://<mount>/<name>#<field>`.
+// the record names a workspace secret, `lake-secret://<mount>/<name>#<field>`.
 
 // What a person decided about one of the server's tools: whether people, agents and Ask Orama of
 // the workspace may use it, and whether it changes something (then it is a proposal a person

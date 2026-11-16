@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The Docs reader's rules (lake#561): the guides `list_docs` answers grouped by section, the
  * instant filter over titles and headings, and the addresses of a page and a heading. No imports
  * from the app, so `tests/docs.test.ts` runs it directly. */

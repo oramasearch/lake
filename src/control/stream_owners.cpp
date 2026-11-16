@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/stream_owners.hpp"
 
 #include <array>

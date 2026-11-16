@@ -1,7 +1,6 @@
 # Personal customer provisioning
 
-Decision 40 in [liquid-bridge #26](https://github.com/oramasearch/liquid-bridge/issues/26)
-requires a person signing up to own a customer. `sign_up_password` in the `lake` pool now
+A person signing up owns a customer. `sign_up_password` in the `lake` pool now
 creates that tenant and its access grant before returning a browser session. The existing
 registry entry serves REST, OpenAPI, MCP, and the hosted form with the same behavior.
 Application pools remain isolated application identities; their sign-up does not allocate a
@@ -71,7 +70,7 @@ before that it links to `/workspaces`, because every repository belongs to one w
 is no default (lake#315). The form chooses the workspace, which names its account.
 The web app calls `create_repository` through the registry and opens the created repository. An
 unauthenticated caller or a user naming another customer's ID cannot create a repository there.
-The homepage and navigation redesign remain [#135](https://github.com/oramasearch/lake/issues/135).
+The homepage and navigation redesign remain #135.
 
 ## Verify and change
 

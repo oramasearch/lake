@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Browser keys (lake#1152, docs/api/browser-keys.md): the key a website's own page holds to search
 // one published index, and ask one published model, of one workspace.
 //
@@ -9,7 +11,7 @@
 //
 // The key acts as no person: what it may do is its binding, which Registry::call checks on every
 // call it makes (registry.cpp, authorize_browser_key), with its origins against `Origin` and its
-// calls a minute. Its hash and binding are a control-plane row (`browser_keys`, decision 53), like
+// calls a minute. Its hash and binding are a control-plane row (`browser_keys`), like
 // every other credential; nothing about it is in a workspace Zetta.
 
 #include <algorithm>

@@ -1,6 +1,6 @@
 # The quickstart process
 
-lake#1128. Steve, 2026-10-24: *"it's meant to get new users having success early"*.
+lake#1128. The Quickstart gets new users to a first success early.
 
 ## What it is
 
@@ -98,9 +98,8 @@ with its storage `type` and, from lake#1181, its detected `kind` ([columns](#col
 
 ## Columns
 
-lake#1181. Steve, 2026-10-24, after the Quickstart on lake-dev (v0.7.0) refused a dataset with a date
-column (`transform_required: add_snapshot_date`) and showed the raw code: *"it should be able to use
-any type of columns (auto-detect)"*.
+lake#1181. The Quickstart uses any type of column and detects each kind. Before, v0.7.0 refused a
+dataset with a date column (`transform_required: add_snapshot_date`) and showed the raw code.
 
 **Detection.** `start_quickstart` asks the engine's own column profile, `analyze_dataset`
 (`sample_rows` 10000, `as_of` the snapshot date), and keeps each column's kind on the record
@@ -146,7 +145,7 @@ columns are left out of the first model**: zetta v0.5.0's `train_model` takes no
 `run` capability's dataset contract does), and the website's model answers come from the rows search
 returns, so a feature the rows do not hold could not be answered. Once `train_model` takes one,
 dates can become features measured from the snapshot date
-([zetta#1494](https://github.com/oramasearch/zetta/issues/1494)).
+(zetta#1494).
 
 **The training copy.** When the dataset trains as it is (every input usable or left out by the
 engine itself, the column to predict already 0/1, a unique column naming the rows), `train_model`
@@ -249,9 +248,8 @@ sign-in that made it, so signing out leaves the website working.
 
 ## The agent prompt
 
-lake#1185. Steve, 2026-10-24: *"you should have a tab for copy agent prompt (default), and another tab
-for just the source code... but the copy prompt should include the source and the full context for
-the agent to success in installing it into their website"*.
+lake#1185. Two tabs: *Copy agent prompt* (the default) and the source code alone. The prompt
+carries the source and the full context an agent needs to install it into a website.
 
 `quickstart_snippets` answers `prompt`, one Markdown block a person pastes into a coding agent in
 their website's project (`agent_prompt` in `src/api/quickstart_capabilities.cpp`). It holds:
@@ -283,9 +281,8 @@ prompt* tab, and the snippets in *Source code* ([../ui/quickstart.md](../ui/quic
 ## The conversation (lake#1182)
 
 The model step starts with a conversation, not a guessed column. Before lake#1182 a dataset with no
-yes-or-no column ended in *Nothing to Predict Yet*; Steve, 2026-10-25: *"shouldn't this be an agent
-chat conversation?"*, approved with *"maybe it generates some potential opportunities... or apps?
-maybe a dashboard with analysis?"*.
+yes-or-no column ended in *Nothing to Predict Yet*. It is now an agent conversation, which can suggest
+opportunities, apps or a dashboard with analysis.
 
 `start_quickstart_conversation` calls `send_ask_message` as the same person, nested through the
 registry, so the conversation is an ordinary Ask Orama conversation: kept in the workspace Zetta
@@ -439,8 +436,8 @@ and the quickstart's state is one sealed record per quickstart in the collection
 body holds the dataset, index, training settings and run id, model id, the conversation's id
 (lake#1182), and each step's last error.
 Nothing of the quickstart's own is added to lake's PostgreSQL control plane: the workspace a person
-gets is the one `start_workspace` makes, and the website key is a browser key (`browser_keys`,
-decision 53), both of which multitenancy already holds. Audit goes to the workspace's own chain
+gets is the one `start_workspace` makes, and the website key is a browser key (`browser_keys`),
+both of which multitenancy already holds. Audit goes to the workspace's own chain
 (`audit_routing.cpp`).
 
 ## Verify
@@ -459,7 +456,7 @@ decision 53), both of which multitenancy already holds. Audit goes to the worksp
   dates found in values, and every refusal explained without its code.
 - `Quickstart.AnyColumnTypesTrainADatedDatasetIsPreparedNotRefused`,
   `ATransformRequiredLakeCanSatisfyIsAppliedAndTriedOnce` and `WhatCannotBeTrainedIsSaidInPlainWords`
-  run Steve's shape (first name, country, a date, an id, free text, numbers, an empty and a constant
+  run a reported dataset's shape (first name, country, a date, an id, free text, numbers, an empty and a constant
   column) through the test double, including a `transform_required` retry.
 - `QuickstartZetta.ADatedDatasetWithAnyColumnTypesTrainsAndAnswersOnARealEngine` trains that shape
   on a real Zetta (v0.5.0), publishes it and predicts on the search hits' rows, date included.
@@ -492,7 +489,7 @@ decision 53), both of which multitenancy already holds. Audit goes to the worksp
   `quickstart_status` until `trained`, `train_quickstart` again, `quickstart_snippets` with
   `origins`; the key in the code answers `search_index` and `predict` with that `Origin`, and 403
   with another.
-- In a browser: `tools/e2e/quickstart.mjs` ([../deployment/browser-testing.md](../deployment/browser-testing.md)).
+- In a browser: `tools/e2e/quickstart.mjs` ([../../tools/e2e/README.md](../../tools/e2e/README.md)).
 
 ## How to change it
 

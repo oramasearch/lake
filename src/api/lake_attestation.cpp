@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake_attestation.hpp"
 
 #include <cstddef>

@@ -122,7 +122,7 @@ Answers use `application/scim+json`, SCIM's `ListResponse` and SCIM's error sche
 connection, list users from a terminal:
 
 ```
-curl -s https://lake.oramadev.net/scim/v2/Users \
+curl -s https://lake.example.com/scim/v2/Users \
   -H "Authorization: Bearer $SCIM_TOKEN"
 ```
 

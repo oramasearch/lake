@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /webhooks?repository_id= (web_ui_webhooks): each webhook with its signed delivery history; a
  * failed delivery can be retried. Figures on top: webhooks, deliveries and failures. */
 import { useState } from "react";

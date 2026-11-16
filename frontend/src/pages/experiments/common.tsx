@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What the four Experiments pages share (web_ui_experiments.cpp and experiments.js): the shell
  * (heading, trail, notice, Live), the capability client, tables, the confirmed actions, the live
  * follow loop and the metric charts with their toolbar. */

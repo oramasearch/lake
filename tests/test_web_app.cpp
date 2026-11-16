@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The web app's serving rules (docs/ui/web-app.md): which requests are answered with index.html,
 // and how the embedded files are cached.
 #include "lake/api/web_app.hpp"
@@ -9,8 +11,10 @@
 #include <sstream>
 #include <string>
 
+using lake::api::inline_script_hashes;
 using lake::api::web_app_asset;
 using lake::api::web_app_cache_control;
+using lake::api::web_app_content_security_policy;
 using lake::api::web_app_index;
 using lake::api::web_app_serves;
 
@@ -120,4 +124,57 @@ TEST(WebApp, FrontDoorDocQuotesTheHomePage) {
         at = section.find("**", close + 2);
     }
     EXPECT_GE(quoted, 10U) << "the Landing copy section quotes the homepage";
+}
+
+// lake#991: the console's script policy allows lake's own files and the page's inline scripts by
+// hash, nothing a later injection could add.
+TEST(WebApp, ContentSecurityPolicyAllowsOnlyTheInlineScriptsThePageCarries) {
+    // SHA-256 of "alert(1)", base64: what a browser computes for that element's text.
+    const std::string page = "<html><head><script>alert(1)</script>"
+                             "<SCRIPT type=\"module\" src=\"/ui/index.js\"></SCRIPT>"
+                             "<script id=\"lake-viewer\" type=\"application/json\">{}</script>"
+                             "</head></html>";
+    EXPECT_EQ(inline_script_hashes(page), " 'sha256-bhHHL3z2vDgxUt0W3dWQOrprscmda2Y5pLsLg4GF+pI='");
+    const std::string policy = web_app_content_security_policy(page, "");
+    EXPECT_EQ(policy,
+              "default-src 'self'; script-src 'self' "
+              "'sha256-bhHHL3z2vDgxUt0W3dWQOrprscmda2Y5pLsLg4GF+pI='; style-src 'self' "
+              "'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; "
+              "media-src 'self' blob:; worker-src 'self' blob:; frame-src 'self' https:; "
+              "frame-ancestors 'self'; base-uri 'none'; object-src 'none'; form-action 'self'");
+    EXPECT_EQ(policy.find("'unsafe-inline'; img"), policy.find("'unsafe-inline'"))
+        << "inline is allowed for styles only, never scripts";
+    // A data block, or a script with a src, adds no hash.
+    EXPECT_EQ(inline_script_hashes("<script type=\"application/json\">alert(1)</script>"), "");
+    EXPECT_EQ(inline_script_hashes("<script src=\"/a.js\">alert(1)</script>"), "");
+}
+
+TEST(WebApp, ContentSecurityPolicyUnderClerkNamesOnlyItsFrontendApi) {
+    const std::string policy = web_app_content_security_policy("", "clerk.example.test");
+    EXPECT_NE(policy.find("script-src 'self' https://clerk.example.test "
+                          "https://challenges.cloudflare.com;"),
+              std::string::npos)
+        << policy;
+    EXPECT_NE(policy.find("connect-src 'self' https://clerk.example.test;"), std::string::npos)
+        << policy;
+    EXPECT_NE(policy.find("img-src 'self' data: https://img.clerk.com;"), std::string::npos)
+        << policy;
+}
+
+TEST(WebApp, TheBuiltIndexRunsUnderItsPolicy) {
+    // Every inline script of the embedded index.html is listed by hash, so the theme script runs.
+    const std::string_view index = web_app_index();
+    if (index.empty()) {
+        GTEST_SKIP() << "the web app is not built";
+    }
+    const std::string policy = web_app_content_security_policy(index, "");
+    std::size_t inline_scripts = 0;
+    for (std::size_t at = 0; (at = index.find("<script>", at)) != std::string_view::npos; ++at) {
+        ++inline_scripts;
+    }
+    std::size_t hashes = 0;
+    for (std::size_t at = 0; (at = policy.find("'sha256-", at)) != std::string::npos; ++at) {
+        ++hashes;
+    }
+    EXPECT_EQ(hashes, inline_scripts) << policy;
 }

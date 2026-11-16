@@ -1,7 +1,7 @@
 # Apps: Lake and operator contract
 
-The shared contract is [lake#293](https://github.com/oramasearch/lake/issues/293), implemented by
-[orama-operator#199](https://github.com/oramasearch/orama-operator/pull/199). Apps are distinct from
+The shared contract is lake#293, implemented by
+orama-operator#199. Apps are distinct from
 the application identity pools in [apps.md](../api/apps.md). The customer API is
 [web-apps.md](../api/web-apps.md).
 
@@ -28,7 +28,7 @@ Migration `0041_app_forward_auth` adds the short-lived, single-use authorization
 to hand a Lake session to an app host without widening the Lake cookie domain. The current
 deployment guard is `app_forward_auth_guard`; the operator must vendor the schema.
 Workspace assignment and event-client cutover are tracked in
-[orama-operator#216](https://github.com/oramasearch/orama-operator/issues/216).
+orama-operator#216.
 
 | Columns | Writer |
 |---|---|
@@ -37,7 +37,8 @@ Workspace assignment and event-client cutover are tracked in
 | `framework, port, replicas, host, auth` | Lake |
 | `bindings_json, env_json, secret_env_refs, desired, generation` | Lake |
 | `restart_generation` | Lake ([restart](#restart)) |
-| `token_hashes_json` | operator; Lake may only clear it for rotation |
+| `token_generation` | Lake ([token rotation](#token-rotation)) |
+| `token_hashes_json`, `token_hashes_generation` | operator; Lake clears `token_hashes_json` to rotate only while `token_hashes_generation` is NULL ([token rotation](#token-rotation)) |
 | `phase, url, ready, message, observed_generation` | operator |
 | `updated_at` | both |
 
@@ -63,7 +64,7 @@ customer lock. Hosts are unique and must be one label beneath `LAKE_APPS_WILDCAR
 `restart_app` bumps `generation` like every edit and also sets `restart_generation` to that new
 generation (migration `0104_app_restarts`, lake#1228). Before, a restart changed only `generation`:
 the operator rendered the same pod template, Kubernetes replaced nothing, and the App kept serving
-the old process (Steve pressed Restart on production on 2026-10-26 and had to delete the pod by
+the old process (a Restart on 2026-10-26 needed the pod deleted by
 hand). The operator reads `restart_generation` and, when it is above 0, writes it on the pod
 template as the annotation `orama.cloud/lake-app-restart`, so each restart is a new template and
 the Deployment rolls its pods. No other edit changes it, so scaling or changing access never
@@ -72,6 +73,38 @@ nothing. The operator reads the column tolerantly (absent before the migration r
 operator side is orama-operator's LakeApp `spec.sync.restartGeneration`.
 
 `get_app` answers `restart_generation`. A stopped app's Restart starts it, as before.
+
+### Token rotation
+
+Detaching an app's Zetta rotates its tokens (`set_app_zetta_binding`, `WebAppPatch::rotate_tokens`).
+By lake#1070, rotation is desired state that the
+operator acknowledges, and Lake stops writing the operator's column. Migration
+`0112_app_token_generation` adds:
+
+- `token_generation` (Lake, default 0): the generation of tokens Lake wants. Rotation increments it.
+- `token_hashes_generation` (operator, NULL until it reports): the generation of the hashes in
+  `token_hashes_json`, written with them.
+
+A hash verifies only while `token_hashes_generation` equals `token_generation`
+(`WebApp::tokens_current`, checked in `web_app_token_purpose` on every call), so rotation still
+revokes every token in the same transaction, the image pull included, until the operator writes
+hashes for the new generation.
+
+**Gated on what the operator reports.** While `token_hashes_generation` is NULL the operator
+predates this change: hashes verify as before, and rotation also clears `token_hashes_json`, the
+old behaviour that such an operator needs to mint again. Once the operator writes a generation
+for an app, Lake never writes that app's `token_hashes_json` again. The operator half:
+
+1. Read `token_generation` and `token_hashes_generation` with each app. Mint new tokens when
+   `token_hashes_generation` is NULL, below `token_generation`, or the hashes are empty, and write
+   `token_hashes_json` and `token_hashes_generation = token_generation` in one statement,
+   conditioned on `token_generation` still being the value read.
+2. Write `token_hashes_generation` on every app it reconciles, existing ones included, so no app
+   stays on the NULL path.
+3. Only then revoke `UPDATE (token_hashes_json)` on `apps` from `lake_runtime`.
+
+An operator rolled back to one that reports no generation leaves a rotated app without a valid
+token until it is upgraded again: it fails closed, never open.
 
 The binding contract is:
 
@@ -90,7 +123,7 @@ references (lake#625): one field of one secret in a secret mount of the app's wo
 the secret, never a value and never a Kubernetes Secret. The operator owns a `LakeSealedSecret` with
 a `lake` source for each secret, which lake's `mint_sealed_secret` answers sealed to the cluster's
 delivery key ([../api/secrets.md](../api/secrets.md#projections),
-[../deployment/secrets.md](../deployment/secrets.md)). Lake no longer writes a Kubernetes Secret
+[../api/secrets.md](../api/secrets.md)). Lake no longer writes a Kubernetes Secret
 name here; the operator still reads the old `<secret>` and `<secret>/<key>` forms of rows written
 before.
 

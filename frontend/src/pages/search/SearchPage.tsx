@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Search (`/search?q=&in=repositories,code,datasets,drives,…`): one query across the places a person
  * chooses with checkboxes. Each place is searched through the capability its own page reads, at
  * once and side by side; results come back grouped by place, each group with its count, and a

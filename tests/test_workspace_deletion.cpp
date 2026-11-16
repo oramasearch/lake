@@ -1,4 +1,6 @@
-// Deleting a workspace cascades (decision 54 S12, lake#514, docs/api/workspaces.md#deletion): its
+// SPDX-License-Identifier: MIT
+
+// Deleting a workspace cascades (lake#514, docs/api/workspaces.md#deletion): its
 // repositories (live and tombstoned inside retention, retention cut short), apps, unfinished builds
 // and tenant images go with it, the confirmation names them first, a deletion interrupted after its
 // transaction resumes, only an administrator of the space may delete, and the central audit keeps

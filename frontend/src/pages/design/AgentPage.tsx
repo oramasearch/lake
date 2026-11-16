@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Design → Agent (lake#653): one agent's design. One of the workspace's own (`?id=`, read with
  * `get_agent`) shows its definition, where it is used and every revision of it
  * (`list_agent_revisions`), with Edit (a new revision), Restore, Duplicate and Delete. One of

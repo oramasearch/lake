@@ -1,8 +1,10 @@
+// SPDX-License-Identifier: MIT
+
 // Deleting what a workspace holds (lake#645, docs/api/deletion.md): its datasets, trained models,
 // runs and search indexes, which live in the workspace's engine, and a person's Ask Orama
 // conversations, which are lake's records in the workspace Zetta. Each is a named capability with
 // `dry_run`, so a caller first sees what would go; the event goes to the workspace's own audit
-// chain (decision 52). The organization, invitation, grant and secret mount deletions live beside
+// chain. The organization, invitation, grant and secret mount deletions live beside
 // their siblings (capabilities.cpp, secrets_capabilities.cpp).
 
 #include <cctype>

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Quickstart (`/` for a signed-in person, lake#1128, docs/ui/quickstart.md): drop a dataset and
  * Lake takes it to search and model answers on your own website. Every step is a capability
  * (start_quickstart, quickstart_status, train_quickstart, quickstart_snippets), so an agent can do

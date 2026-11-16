@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/platform_records.hpp"
 
 #include <algorithm>

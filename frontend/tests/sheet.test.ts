@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The phone's full-screen sheet, ported from rev-os (lake#561): the page lock shared by Ask Orama
  * and every `Modal sheet`, where the sheet goes, and how far a field is scrolled to clear the
  * keyboard. `npm test`; the build runs it. */

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Dictation, shared by Ask Orama's message box and the Transcripts page (lake#561), ported from
  * rev-os. Pure functions and one small session switch; `npm test` covers them
  * (tests/dictation.test.ts). */

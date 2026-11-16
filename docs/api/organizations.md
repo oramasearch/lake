@@ -9,7 +9,7 @@ through `accept_invitation`.
 | Capability | Kind | Required input | Result |
 |---|---|---|---|
 | `list_organizations` / `get_organization` | read | `limit` / `id` | organizations; `get_organization` also names the organization's own account as `customer_id` (null when it has none, lake#561) |
-| `create_organization` | action | `taap_id?`, `display_name?`, `customer_id?` | organization |
+| `create_organization` | action | `taap_id?` (the operator only, lake#872), `display_name?`, `customer_id?` | organization |
 | `list_teams` / `get_team` | read | `organization_id` / `id` | teams |
 | `create_team` | action | `organization_id`, `name`, `display_name?` | team |
 | `list_memberships` / `get_membership` | read | scope (omit for your own) and `id` | memberships |
@@ -75,7 +75,7 @@ organization with `customer_id`; the new organization object becomes a child of 
 
 Only a current **organization-scope owner**, or the instance operator, may create an `owner`
 membership or invitation, assign `owner`, or change or remove an existing owner, including a
-team owner (LSR-099, lake#965). A team owner or a direct `admin` grant does not satisfy this rule.
+team owner (lake#965). A team owner or a direct `admin` grant does not satisfy this rule.
 Both stores check ownership inside the membership write. PostgreSQL serializes these
 writes on the organization row, so authority and the last-owner count cannot be raced by another
 membership change. Organization creation and personal-account conversion establish the initial
@@ -168,7 +168,7 @@ expired or already revoked invitation is `409 conflict` (an accepted one is a me
 
 ## Verify and change
 
-Run the unit and Postgres tests documented in [`../build/ci.md`](../build/ci.md). The acceptance
+Run the unit and Postgres tests documented in [`../build/local.md`](../build/local.md). The acceptance
 coverage is in `tests/test_policy.cpp`; the production-store capability round trip is in
 `tests/test_postgres.cpp`. Self-service is covered by
 `Organizations.APersonCreatesAnOrganizationInvitesAndAColleagueJoinsItsSpace` and

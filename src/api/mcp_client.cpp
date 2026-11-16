@@ -1,4 +1,6 @@
-// Lake as an MCP client (decision 60, lake#652, docs/api/mcp-connections.md#the-client). Pure
+// SPDX-License-Identifier: MIT
+
+// Lake as an MCP client (lake#652, docs/api/mcp-connections.md#the-client). Pure
 // protocol over an injected McpHttp: no HTTP library is named here.
 
 #include "lake/api/mcp_client.hpp"
@@ -177,6 +179,26 @@ bool mcp_public_address(const std::vector<std::uint8_t>& bytes) {
     if (bytes[0] == 0x00 && bytes[1] == 0x64 && bytes[2] == 0xFF && bytes[3] == 0x9B &&
         std::all_of(bytes.begin() + 4, bytes.begin() + 12, [](auto b) { return b == 0; })) {
         return v4(bytes[12], bytes[13], bytes[14], bytes[15]); // NAT64, 64:ff9b::/96
+    }
+    // Only global unicast, 2000::/3, is public (lake#1008). That refuses every other form,
+    // among them IPv4-compatible ::a.b.c.d, site-local fec0::/10, local-use NAT64 64:ff9b:1::/48,
+    // unique-local, link-local and multicast.
+    if ((bytes[0] & 0xE0) != 0x20) {
+        return false;
+    }
+    if (bytes[0] == 0x20 && bytes[1] == 0x02) {
+        return v4(bytes[2], bytes[3], bytes[4], bytes[5]); // 6to4, 2002::/16, by its embedded IPv4
+    }
+    if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x00) {
+        if (bytes[3] == 0x00) {
+            return false; // Teredo, 2001::/32: its IPv4 is hidden, so it is never trusted
+        }
+        if (bytes[3] == 0x02 && bytes[4] == 0x00 && bytes[5] == 0x00) {
+            return false; // benchmarking, 2001:2::/48
+        }
+        if ((bytes[3] & 0xF0) == 0x10 || (bytes[3] & 0xF0) == 0x20) {
+            return false; // ORCHID and ORCHIDv2, 2001:10::/28 and 2001:20::/28
+        }
     }
     if (std::all_of(bytes.begin(), bytes.begin() + 15, [](auto b) { return b == 0; })) {
         return false; // :: and ::1

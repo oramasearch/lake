@@ -1,10 +1,12 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // SAML 2.0 Web Browser SSO for an enterprise SSO provider (docs/api/sso.md#saml-sign-in, lake#836).
 //
 // Lake is the service provider. It sends an AuthnRequest over the HTTP-Redirect binding and takes
 // the identity provider's Response over the HTTP-POST binding at its Assertion Consumer Service.
-// Verification is Lake's own (no XML or XML-security library; liquid decision 32 does the same
+// Verification is Lake's own (no XML or XML-security library; liquid does the same
 // for X.509): a strict XML reader that refuses DTDs, entities other than the predefined ones and
 // processing instructions, Exclusive XML Canonicalization 1.0 without comments, and XML Signature
 // verification with the provider's registered certificate. Every value Lake uses is read from the

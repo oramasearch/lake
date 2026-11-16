@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // What the stream worker shares with the MCP connection capabilities (lake#652): the bearer a

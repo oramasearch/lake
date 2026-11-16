@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // Local fakes of the providers a store drive browses (lake#664): an S3 server that checks SigV4,

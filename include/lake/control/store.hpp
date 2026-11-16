@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 #include <algorithm>
 #include <array>
@@ -55,6 +57,12 @@ struct User {
 struct Organization {
     std::string id, taap_id, display_name, created_at, updated_at;
 };
+// Who signed or holds something, as a person reads it (lake#1326): the account a TAAP identity acts
+// for, that account's display name and its handle (its own account's name). Never an email.
+struct SignerName {
+    std::string kind; // "user" or "organization"
+    std::string display_name, handle;
+};
 struct Customer {
     std::string id, customer_type, user_id, organization_id, name, created_at, updated_at;
 };
@@ -102,7 +110,7 @@ struct ForgeRecord {
 // A row of the retired forge_records table with its recorded owner (migration 0054): its
 // repository's workspace, or empty with the reason it is not copied (`needs_selection` while the
 // repository has no workspace, `workspace_deleted` when that workspace is gone).
-// A central audit event about a workspace's data, recorded before decision 52, with the
+// A central audit event about a workspace's data, recorded before the audit split, with the
 // workspace its copy goes to (lake#317, migration 0063). An empty workspace_id stays central.
 struct LegacyAuditEvent {
     audit::Event event;
@@ -264,7 +272,7 @@ struct IssuedSession {
 // a minute. It belongs to the workspace, not to the sign-in that made it: it lives until it is
 // revoked or reaches its optional expiry. Its secret is `lbk.<id>.<secret>`; the control plane
 // keeps its SHA-256 and binding beside the other credentials (`browser_keys`, migration
-// 0102_browser_keys, multitenancy: decision 53) and never the secret.
+// 0102_browser_keys, multitenancy) and never the secret.
 inline constexpr std::string_view browser_key_credential_prefix = "lbk.";
 // The most origins one key lists, and its default and largest calls a minute.
 inline constexpr std::size_t browser_key_max_origins = 20;
@@ -294,6 +302,19 @@ struct IssuedBrowserKey {
 struct BrowserKeyAdmission {
     bool allowed = true;
     int retry_after_seconds = 0;
+};
+// A custom domain's claim (lake#949, migration 0106_domain_claims, docs/api/platform.md#custom-
+// domains): which environment of which account holds a host on this Lake, and whether it proved it
+// controls the name. One claim per host across every account. `token` is what the tenant publishes
+// as a TXT record at `_lake-challenge.<host>`; `state` is `pending` until verify_domain reads it,
+// then `verified`. Only a verified claim's domain row reaches the operator.
+inline constexpr std::string_view domain_challenge_label = "_lake-challenge.";
+struct DomainClaim {
+    std::string host, customer_id, workspace_id, repository_id, environment, tls, token, state,
+        verified_at, created_at;
+};
+struct NewDomainClaim {
+    std::string host, customer_id, workspace_id, repository_id, environment, tls, token;
 };
 struct Principal {
     std::string user_id, taap_id, session_id, device_id, pool_id, kind;
@@ -331,8 +352,8 @@ struct NewPasswordUser {
     // The new user's id, chosen by the caller so that an application's workspace can record the
     // user before lake's own row exists (lake#353); empty: the store chooses one.
     std::string user_id;
-    // The managed key lake minted for a lake-pool sign-up without an identity document (lake#762,
-    // decision 65); empty when the person brought their own document.
+    // The managed key lake minted for a lake-pool sign-up without an identity document
+    // (lake#762); empty when the person brought their own document.
     std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
     // Required with identity_document (lake#931).
     IdentityProof identity_proof;
@@ -342,6 +363,10 @@ struct PasswordSignIn {
 };
 struct TaapSignIn {
     std::string pool_id, taap_id, assertion_id, device_name;
+    // The verified chain's document hashes, oldest first (VerifiedTaapSignIn::chain_hashes). The
+    // store refuses a chain that does not pass through the head it recorded for taap_id, and
+    // records a longer chain's head (lake#1024).
+    std::vector<std::string> chain_hashes;
 };
 struct MfaEnrollment {
     std::string secret;
@@ -393,7 +418,9 @@ struct ClerkUserState {
 struct ClerkUserProvisioned {
     std::string user_id, taap_id;
     bool created = false; // a new account, with a managed key and a personal customer
-    bool linked = false;  // the subject was linked to an account found by its verified email
+    // A new subject is never linked to an existing account by email (lake#920): the
+    // id of the Lake-pool account its verified address was taken from, or empty.
+    std::string email_taken_from;
 };
 // Which key an account signs with (lake#762, docs/api/identity.md#your-own-identity). `managed`:
 // lake minted and holds the key. `own`: the person's own liquid identity, either registered at
@@ -440,7 +467,7 @@ struct UsageLimit {
     int warn_percent = 80;
     std::string updated_at;
 };
-// Billing records (migration 0073, lake#564, decision 56, docs/api/billing.md): the price list and
+// Billing records (migration 0073, lake#564, docs/api/billing.md): the price list and
 // the invoices lake issues. Control-plane multitenancy; usage stays in each workspace Zetta and
 // only the quantity billed per dimension is frozen on a line. Amounts are integer millionths of the
 // currency's unit. Lake is priced by usage only (lake#635): each publication of the price list is
@@ -502,7 +529,7 @@ struct BillingContact {
     std::string customer_id, email, name, line1, line2, city, postal_code, state, country;
     std::string updated_at;
 };
-// A prepaid account balance (migration 0099, lake#1114, liquid-bridge decision 67,
+// A prepaid account balance (migration 0099, lake#1114,
 // docs/api/billing.md#balance): billing, so in the control plane. Credits are paid top-ups and
 // grants from Orama (lake#1134); charges
 // are the account's usage priced at the list in force, one row a month (usage stays in each
@@ -728,6 +755,23 @@ struct CloudOrder {
     int email_attempts = 0;
     std::string email_error, email_retry_at;
     CloudOrderEntitlement entitlement;
+    // When the person who sent an order form proved they read its contact email by following the
+    // confirmation link (lake#1000, migration 0107); empty until then. Until it is set, the only
+    // email the order sends is the confirmation itself (docs/api/orders.md#email).
+    std::string contact_email_confirmed_at;
+};
+// Whether mail about the order may go to its contact email and reach support: a checkout order's
+// mail is only about a payment Stripe took from the person at that address (paid, ready, failed),
+// and an order form's address must be confirmed first (lake#1000).
+inline bool cloud_order_contact_confirmed(const CloudOrder& order) {
+    return order.path == "checkout" || !order.contact_email_confirmed_at.empty();
+}
+// How many orders name an address and its domain lately (lake#1000): the per-recipient limits on
+// the anonymous order form. `email_last_day` compares the whole address without case over the last
+// 24 hours; `domain_last_hour` the part after the last `@` over the last hour.
+struct CloudOrderRecipientCounts {
+    int email_last_day = 0;
+    int domain_last_hour = 0;
 };
 // A new order: `path` checkout starts it in `pending_payment`, order_form in `submitted`.
 struct NewCloudOrder {
@@ -826,6 +870,27 @@ struct AppTransfer {
     std::uint64_t out_bytes = 0;
     std::string observed_at;
 };
+// The usage a deleted workspace consumed and no issued invoice has billed yet, kept centrally
+// before the workspace's records go (migration 0108_retained_usage, lake#988,
+// docs/api/billing.md#a-deleted-workspaces-usage). Content-free: a dimension, the labels billing
+// reads (`kind`, `class`, `model`), a bucket start and a quantity. `source` is `rollup` (what
+// delete_workspace read from the workspace Zetta, one point a day) or `late` (counter values the
+// usage recorder still held when the workspace was deleted, one point an hour, added).
+struct RetainedUsagePoint {
+    std::string workspace_id;
+    std::string source = "rollup";
+    std::string dimension;
+    std::map<std::string, std::string> labels;
+    std::int64_t at_ms = 0;
+    double value = 0;
+    bool gauge = false;
+};
+// One workspace's rollup: the window it covers, [from_ms, to_ms).
+struct RetainedUsageSet {
+    std::string workspace_id, customer_id;
+    std::int64_t from_ms = 0, to_ms = 0;
+    std::string retained_at;
+};
 struct Workspace {
     std::string id, customer_id, name, environment;
     std::string desired = "running";
@@ -846,11 +911,18 @@ struct Workspace {
 };
 struct NewWorkspace {
     std::string customer_id, name, environment, created_by_taap_id;
+    // lake#987: the most live (not deleted) workspaces the customer may have
+    // (LAKE_WORKSPACES_PER_CUSTOMER) and the most live services, which the new workspace's own
+    // Zetta service counts against (LAKE_SERVICES_PER_CUSTOMER); 0 means no limit. Both are
+    // counted in the create transaction, under the customer's row lock; over either the create
+    // answers quota_exceeded.
+    std::size_t max_workspaces = 0;
+    std::size_t max_services = 0;
 };
 struct WorkspacePatch {
     std::optional<std::string> name, environment, desired;
 };
-// Deleting a workspace cascades (decision 54 S12, lake#514, docs/api/workspaces.md#deletion).
+// Deleting a workspace cascades (lake#514, docs/api/workspaces.md#deletion).
 // One object it destroyed: a repository (`live`, or `tombstoned` inside its retention, when the
 // workspace was deleted), an app, a build it cancelled, or a tenant image repository (`name` is
 // the OCI repository, `<space>/<name>` or `<space>/cache/<name>`, and `id` is empty).
@@ -925,7 +997,7 @@ struct AccountDeletion {
     std::int64_t invoices_kept = 0, open_invoices = 0;
     std::string deleted_at; // empty for a dry run
 };
-// Where a tenant image repository lives (lake#383, decision 54 S4-S6, migration 0068): the
+// Where a tenant image repository lives (lake#383, migration 0068): the
 // content-free central route from `<space>/<name>` (the space by its customer id, `name` the path
 // below it, `<image>` or `cache/<image>`) to the workspace whose Zetta holds the repository's
 // manifests and tags. It holds no manifest, digest or tag. The route never changes: its workspace,
@@ -933,7 +1005,7 @@ struct AccountDeletion {
 struct OciRepositoryRoute {
     std::string customer_id, name, workspace_id, created_at, updated_at;
 };
-// The volume snapshot policy of one target (migration 0069, operator#260, decision 54 S13):
+// The volume snapshot policy of one target (migration 0069, operator#260):
 // `store` (lake's own store volume) or a workspace id. Content-free: a five-field cron schedule
 // in UTC, how many snapshots the operator keeps, and `requested_at`, a one-off request the
 // operator honors when it is newer than the target's last snapshot. `status` is the operator's
@@ -1102,7 +1174,7 @@ inline std::string managed_service_slug(std::string_view prefix, std::string_vie
     }
     return hex.size() == 32 ? std::string(prefix) + "-" + hex.substr(0, 12) : std::string();
 }
-// The service catalog (docs/control-plane/services.md, liquid-bridge decision 47), in menu
+// The service catalog (docs/control-plane/services.md), in menu
 // order. The schema's service_kind_check lists the same keys.
 // `ready_seconds` is how long a new service of the kind usually takes from Create to Ready on
 // lake's Services page, measured with tools/e2e/start-times.py and rounded up to 5 s
@@ -1113,7 +1185,7 @@ struct ServiceKind {
     int ready_seconds = 60;
 };
 inline constexpr ServiceKind service_kinds[] = {
-    {"zetta", "Zetta", 30},          // Steve, 2026-09-26 (measured once at 41 s)
+    {"zetta", "Zetta", 30},          // chosen 2026-09-26 (measured once at 41 s)
     {"cassandra", "Cassandra", 420}, // not yet measured without a node scale-up (lake#197)
     {"clickhouse", "ClickHouse", 75},
     {"duckdb", "DuckDB", 30},
@@ -1161,7 +1233,7 @@ struct ManagedStore {
     std::string workspace_id;
     // Where the store's contents are (lake#664, in `stores.spec`): for the customer's own bucket
     // (r2, s3, b2, gcs, azure) its name, endpoint and the folder in it the store covers, and the
-    // workspace secret that opens it (decision 58: the workspace's credential, never Orama's);
+    // workspace secret that opens it (the workspace's credential, never the operator's);
     // for a `lake` store the liquid repository that keeps it. Empty otherwise.
     std::string bucket, endpoint_url, prefix;
     std::string credential_mount_id, credential_name;
@@ -1617,9 +1689,12 @@ struct SsoIdentity {
     std::string subject;
     std::string email;
     std::string display_name;
-    std::string taap_id;
+    std::string taap_id; // the operator's sign_in_sso only; ignored when a managed key is given
     std::string device_name;
     nlohmann::json claims;
+    // The managed key Lake minted for the account a just-in-time sign-in creates (lake#872). Lake
+    // never takes a new account's identity from the browser or the identity provider.
+    std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
 };
 struct ScimUser {
     std::string provider_id;
@@ -1635,9 +1710,12 @@ struct NewScimUser {
     std::string external_id;
     std::string email;
     std::string display_name;
-    std::string taap_id;
+    std::string taap_id; // ignored when a managed key is given (lake#872)
     bool active = true;
     nlohmann::json attributes;
+    // The managed key Lake minted for the account a create makes (lake#872); a SCIM client never
+    // chooses a new account's identity.
+    std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
 };
 struct ScimGroup {
     std::string provider_id;
@@ -1757,6 +1835,9 @@ struct AgentSession {
     std::string issued_at;
     std::string expires_at; // "never" for a non-expiring key (lake#234)
     std::string revoked_at; // empty while the key is usable
+    // The repository the session's delegation names (migration 0113, lake#1346). Empty only for a
+    // key minted before it, which no longer verifies.
+    std::string repository_id;
 
     bool never_expires() const {
         return expires_at == "never";
@@ -1777,6 +1858,7 @@ struct NewAgentSession {
     std::int64_t expires_unix = 0;
     std::string issued_at;
     std::string expires_at;
+    std::string repository_id;
 };
 
 // One participant of a root recovery ceremony (migration 0093, lake#934): the TAAP id that holds
@@ -1871,6 +1953,11 @@ public:
     // organization's display name. Unknown identities are absent from the map (lake#445).
     virtual Result<std::map<std::string, std::string>>
     principal_names(const std::vector<std::string>& taap_ids) = 0;
+    // The name and handle of the account each TAAP identity acts for (lake#1326): a user's own
+    // identifier or the own identity linked to it (as account_for_identity), or an organization's
+    // identifier. Deleted accounts and unknown identities are absent from the map.
+    virtual Result<std::map<std::string, SignerName>>
+    signer_names(const std::vector<std::string>& taap_ids) = 0;
 
     virtual Result<Organization> create_organization(const NewOrganization&) = 0;
     virtual Result<std::vector<Organization>> list_organizations(int limit) = 0;
@@ -1913,7 +2000,7 @@ public:
     virtual Result<void> set_repository_liquid_id(const std::string& id,
                                                   const std::string& liquid_id) = 0;
     virtual Result<std::vector<Repository>> repositories_without_liquid_id(int limit) = 0;
-    // The central audit events about a workspace's data (decision 52, lake#317), for the
+    // The central audit events about a workspace's data (lake#317), for the
     // one-shot copy into workspace Zettas only. Assigning records the workspace of each event
     // whose action is one of `workspace_actions` and that was not refused for want of authority,
     // as migration 0063 does, for events an earlier lake wrote after it. Listing pages the
@@ -2115,9 +2202,13 @@ public:
                                                               const std::string& id) = 0;
     virtual Result<std::vector<NetworkEgressRule>>
     list_network_egress_rules(const NetworkScope&) = 0;
-    virtual Result<NetworkTunnelGrant> create_network_tunnel_grant(const NetworkScope&,
-                                                                   const NetworkTunnelGrantSpec&,
-                                                                   const NetworkActor&) = 0;
+    // Refused with quota_exceeded when the workspace or its account already holds the most active
+    // grants `limits` allows (lake#983), counted in the same transaction as the insert.
+    virtual Result<NetworkTunnelGrant>
+    create_network_tunnel_grant(const NetworkScope&,
+                                const NetworkTunnelGrantSpec&,
+                                const NetworkActor&,
+                                const NetworkTunnelGrantLimits&) = 0;
     virtual Result<NetworkTunnelGrant> update_network_tunnel_grant(const NetworkScope&,
                                                                    const std::string& id,
                                                                    const NetworkTunnelGrantSpec&,
@@ -2364,6 +2455,19 @@ public:
     // local demos.
     virtual Result<std::vector<AppTransfer>> app_transfer(const std::string& since_hour) = 0;
     virtual Result<void> add_app_transfer(const AppTransfer& row) = 0;
+    // A deleted workspace's unbilled usage (migration 0108, lake#988). retain_workspace_usage
+    // replaces the workspace's `rollup` points and its set in one transaction, so a repeated
+    // delete_workspace writes the same rollup again; `late` points are kept. add_retained_usage
+    // adds one `late` counter value to a workspace that has a set (not_found without one).
+    // retained_usage answers every point of the account's workspaces in [from_ms, to_ms), both
+    // sources; retained_usage_sets every set of the account.
+    virtual Result<void> retain_workspace_usage(const RetainedUsageSet& set,
+                                                const std::vector<RetainedUsagePoint>& points) = 0;
+    virtual Result<void> add_retained_usage(const RetainedUsagePoint& point) = 0;
+    virtual Result<std::vector<RetainedUsagePoint>>
+    retained_usage(const std::string& customer_id, std::int64_t from_ms, std::int64_t to_ms) = 0;
+    virtual Result<std::vector<RetainedUsageSet>>
+    retained_usage_sets(const std::string& customer_id) = 0;
     virtual Result<BillingPlan> put_billing_plan(const BillingPlan& plan) = 0;
     virtual Result<Invoice> create_invoice(const Invoice& invoice) = 0;
     virtual Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) = 0;
@@ -2476,6 +2580,14 @@ public:
     virtual Result<std::vector<CloudOrder>> claim_cloud_order_emails(int limit,
                                                                      int lease_seconds) = 0;
     virtual Result<void> record_cloud_order_email(const CloudOrderEmailOutcome& outcome) = 0;
+    // Records that the order's contact email is confirmed (lake#1000), once: a second call answers
+    // the order unchanged. `expired` when the order was created more than `max_age_seconds` ago and
+    // is not confirmed yet; `not_found` for no such order. The first confirmation is one event
+    // (submitted to submitted, actor lake) in the order's history.
+    virtual Result<CloudOrder> confirm_cloud_order_email(const std::string& id,
+                                                         int max_age_seconds) = 0;
+    virtual Result<CloudOrderRecipientCounts>
+    count_cloud_order_recipients(const std::string& email) = 0;
     // Events not yet in the central audit log, oldest first, and marking them recorded.
     virtual Result<std::vector<CloudOrderEvent>> unaudited_cloud_order_events(int limit) = 0;
     virtual Result<void> mark_cloud_order_events_audited(const std::vector<std::int64_t>& ids) = 0;
@@ -2633,9 +2745,10 @@ public:
                                                             const std::string& origin) = 0;
     virtual Result<IssuedSession> sign_in_passkey(const PasskeyAssertion&) = 0;
     virtual Result<IssuedSession> sign_in_oauth(const OAuthIdentity&) = 0;
-    // Signs in the lake-pool user linked to this Clerk subject. With no link, it links the lake
-    // user with the same email; with neither, it creates the user with the custodial identity
-    // and provisions their personal customer, as password sign-up does.
+    // Signs in the lake-pool user linked to this Clerk subject. With no link, it creates the user
+    // with the custodial identity and provisions their personal customer, as password sign-up
+    // does. It never links an existing account found by email (lake#920): the verified address
+    // moves from any account holding it to the new one.
     virtual Result<IssuedSession> sign_in_clerk(const ClerkIdentity&) = 0;
     // Clerk webhooks (lake#765, docs/api/clerk.md#webhooks).
     // user.created: what a first sign_in_clerk does to the account, without a session. Repeating
@@ -2656,7 +2769,8 @@ public:
                                                const std::string& session_id,
                                                std::int64_t revoked_at) = 0;
     // user.updated: the email (when non-empty) and display name of the account linked to the
-    // subject; not_found when none is linked, conflict when another account has the email.
+    // subject; not_found when none is linked. A verified email another Lake-pool account holds
+    // moves to this one (lake#920).
     virtual Result<std::string> update_clerk_user(const ClerkIdentity&) = 0;
     // user.deleted: disables the account linked to the subject and revokes every session, token
     // and device of it. Withdraws its launches/schedules and invalidates tasks and leases in
@@ -2684,6 +2798,11 @@ public:
     // The account identifier a TAAP identity acts for: itself for an account's own identifier,
     // the account's identifier for a linked own identity; not_found otherwise.
     virtual Result<std::string> account_for_identity(const std::string& taap_id) = 0;
+    // The identity document a person registered for a TAAP identifier (base64url canonical CBOR):
+    // the initial document an account signed up with (identity_documents) or the own identity it
+    // linked (identity_links.own_document); not_found for an identifier no account registered.
+    // An attestation's issuer is verified against it (lake#1020, docs/api/models.md).
+    virtual Result<std::string> registered_identity_document(const std::string& taap_id) = 0;
     virtual Result<void> register_oauth_provider(const OAuthProvider&) = 0;
     virtual Result<OAuthProvider> get_oauth_provider(const std::string& pool_id,
                                                      const std::string& provider) = 0;
@@ -2707,6 +2826,22 @@ public:
     // Counts one call in the key's current minute (shared by every replica, since it is a row):
     // refused once the minute holds `rate_limit_per_minute` calls.
     virtual Result<BrowserKeyAdmission> admit_browser_key_call(const std::string& id) = 0;
+    // Custom-domain claims (lake#949). claim_domain is one statement: it inserts a pending claim
+    // with the caller's token, or, when the same environment already holds the host, answers that
+    // claim (its token and state unchanged, its tls updated); `conflict` when another environment,
+    // of any account, holds it. get_domain_claim is not_found for an unclaimed host.
+    // verify_domain_claim sets `verified` on the environment's claim whose token is still `token`
+    // (not_found otherwise); a verified claim stays verified. release_domain_claim removes the
+    // environment's claim of the host, and does nothing when it holds none.
+    virtual Result<DomainClaim> claim_domain(const NewDomainClaim&) = 0;
+    virtual Result<DomainClaim> get_domain_claim(const std::string& host) = 0;
+    virtual Result<DomainClaim> verify_domain_claim(const std::string& host,
+                                                    const std::string& repository_id,
+                                                    const std::string& environment,
+                                                    const std::string& token) = 0;
+    virtual Result<void> release_domain_claim(const std::string& host,
+                                              const std::string& repository_id,
+                                              const std::string& environment) = 0;
     virtual Result<std::vector<Session>> list_sessions(const std::string& user_id,
                                                        const std::string& pool_id) = 0;
     virtual Result<void> revoke_session(const std::string& user_id,

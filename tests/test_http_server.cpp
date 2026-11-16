@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "audit_test_support.hpp"
 #include "identity_proof_test_support.hpp"
 #include "postgres_fixture.hpp"
@@ -53,8 +55,10 @@
 #include "audit_test_support.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/clerk_webhooks.hpp"
+#include "lake/api/liquid_clients.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/server.hpp"
+#include "lake/api/web_app.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_runs.hpp"
@@ -525,10 +529,19 @@ TEST(WebAppHttp, BrowsersGetTheAppAndCustomDomainsTheirHostedSignIn) {
         ASSERT_TRUE(page.starts_with("HTTP/1.1 200")) << path << "\n" << page.substr(0, 300);
         EXPECT_EQ(response_header(page, "content-type"), "text/html; charset=utf-8") << path;
         // Framed only by lake, and images only from lake (lake#943): Markdown an agent wrote can
-        // make the browser contact no other server.
+        // make the browser contact no other server. Scripts only from lake and the page's own
+        // inline scripts by hash, requests only to lake (lake#991).
         EXPECT_EQ(response_header(page, "content-security-policy"),
-                  "frame-ancestors 'self'; img-src 'self' data:")
+                  lake::api::web_app_content_security_policy(lake::api::web_app_index(), ""))
             << path;
+        const std::string policy = response_header(page, "content-security-policy");
+        EXPECT_NE(policy.find("script-src 'self'"), std::string::npos) << policy;
+        EXPECT_NE(policy.find("connect-src 'self';"), std::string::npos) << policy;
+        EXPECT_NE(policy.find("img-src 'self' data:;"), std::string::npos) << policy;
+        EXPECT_NE(policy.find("frame-ancestors 'self'"), std::string::npos) << policy;
+        EXPECT_NE(policy.find("object-src 'none'"), std::string::npos) << policy;
+        EXPECT_EQ(policy.find("'unsafe-eval'"), std::string::npos) << policy;
+        EXPECT_EQ(response_header(page, "x-content-type-options"), "nosniff") << path;
         // The page carries this request's viewer, so it is personal and never stored by a cache.
         EXPECT_EQ(response_header(page, "cache-control"), "private, no-store") << path;
         EXPECT_NE(page.find("<div id=\"root\">"), std::string::npos) << path;
@@ -540,6 +553,8 @@ TEST(WebAppHttp, BrowsersGetTheAppAndCustomDomainsTheirHostedSignIn) {
             << path << ": no lake_workspace cookie remembers a page any more";
         const std::string other = get(connection, path, false);
         EXPECT_TRUE(other.starts_with("HTTP/1.1 404")) << path << "\n" << other.substr(0, 300);
+        // Every answer, a JSON 404 included, is never sniffed into another type (lake#991).
+        EXPECT_EQ(response_header(other, "x-content-type-options"), "nosniff") << path;
     }
     // The retired forms are gone: nothing is created through them.
     const std::string form =
@@ -1128,6 +1143,34 @@ TEST_P(HttpResponseIsolation, FreshSignUpOwnsFirstRepositoryWithZeroInitialMeter
     ASSERT_TRUE(signup.starts_with("HTTP/1.1 200")) << signup;
     const std::string cookie = response_cookie_pair(signup);
     ASSERT_TRUE(cookie.starts_with("lake_session=")) << signup;
+    // Behind TLS the session is a __Host- cookie: Secure, Path=/, no Domain, so a sibling
+    // subdomain cannot set or shadow it, and the plain name is not read there.
+    {
+        auto tls = connect();
+        const std::string tls_signin = tls->request(
+            "POST",
+            "/v1/sign_in_password",
+            nlohmann::json{{"email", email}, {"password", password_}, {"device_name", "browser"}}
+                .dump(),
+            "",
+            "HTTP/1.1",
+            {},
+            "application/json",
+            {{"X-Forwarded-Proto", "https"}});
+        ASSERT_TRUE(tls_signin.starts_with("HTTP/1.1 200")) << tls_signin;
+        EXPECT_NE(tls_signin.find("Set-Cookie: __Host-lake_session="), std::string::npos) << tls_signin;
+        EXPECT_NE(tls_signin.find("; Secure"), std::string::npos) << tls_signin;
+        EXPECT_EQ(tls_signin.find("Domain="), std::string::npos) << tls_signin;
+        const std::string plain = tls->request("GET",
+                                               "/v1/list_customers",
+                                               {},
+                                               cookie,
+                                               "HTTP/1.1",
+                                               {},
+                                               "application/json",
+                                               {{"X-Forwarded-Proto", "https"}});
+        EXPECT_FALSE(plain.starts_with("HTTP/1.1 200")) << plain;
+    }
     const auto customers = get_v1(*client, cookie, "list_customers");
     ASSERT_TRUE(customers.at("ok"));
     ASSERT_EQ(customers.at("value").at("items").size(), 1U);
@@ -1140,6 +1183,49 @@ TEST_P(HttpResponseIsolation, FreshSignUpOwnsFirstRepositoryWithZeroInitialMeter
     EXPECT_TRUE(usage.at("value").at("items").empty());
     EXPECT_EQ(usage.at("value").at("summary").at("storage").at("repositories_bytes"), 0);
     EXPECT_FALSE(usage.at("value").at("over_quota"));
+    // A route that issues a session checks the origin with no session present (lake#977):
+    // a page elsewhere cannot post a credential and sign this browser in.
+    {
+        auto browser = connect();
+        // Signing in takes no identity document: only sign-up does.
+        const std::string credential =
+            nlohmann::json{{"email", email}, {"password", password_}, {"device_name", "browser"}}
+                .dump();
+        const std::string cross = browser->request("POST",
+                                                   "/v1/sign_in_password",
+                                                   credential,
+                                                   "",
+                                                   "HTTP/1.1",
+                                                   {},
+                                                   "application/json",
+                                                   {{"Origin", "https://attacker.example.test"},
+                                                    {"Sec-Fetch-Site", "cross-site"}});
+        EXPECT_TRUE(cross.starts_with("HTTP/1.1 403")) << cross;
+        EXPECT_EQ(cross.find("Set-Cookie:"), std::string::npos) << cross;
+        const std::string plain = browser->request(
+            "POST", "/v1/sign_in_password", credential, "", "HTTP/1.1", {}, "text/plain");
+        EXPECT_TRUE(plain.starts_with("HTTP/1.1 403")) << plain;
+        for (const char* form : {"/identity/clerk-session", "/session"}) {
+            const std::string refused = browser->request("POST",
+                                                         form,
+                                                         "token=x",
+                                                         "",
+                                                         "HTTP/1.1",
+                                                         {},
+                                                         "application/x-www-form-urlencoded",
+                                                         {{"Origin", "https://attacker.example.test"}});
+            EXPECT_TRUE(refused.starts_with("HTTP/1.1 403")) << form << "\n" << refused;
+        }
+        const std::string own = browser->request("POST",
+                                                 "/v1/sign_in_password",
+                                                 credential,
+                                                 "",
+                                                 "HTTP/1.1",
+                                                 {},
+                                                 "application/json",
+                                                 {{"Sec-Fetch-Site", "same-origin"}});
+        EXPECT_TRUE(own.starts_with("HTTP/1.1 200")) << own;
+    }
     // A repository belongs to a workspace (lake#315): without one, none is created.
     const auto [early_response, early] = post_v1(
         *client,
@@ -1333,7 +1419,7 @@ TEST_P(HttpResponseIsolation, ATokenIsIssuedAndRevokedWithTheBrowserSession) {
     EXPECT_FALSE(after.starts_with("HTTP/1.1 200")) << "a revoked token no longer authenticates";
 }
 
-// lake#1163 (Steve: "don't revoke api keys on signout"): a key made in a browser keeps working
+// lake#1163 (signing out never revokes API keys): a key made in a browser keeps working
 // after that browser signs out through /logout, and a key derived from it too. Revoking the key
 // itself still ends its descendant.
 TEST_P(HttpResponseIsolation, AKeyMadeInABrowserOutlivesThatBrowsersSignOut) {
@@ -2424,8 +2510,7 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesProjects) {
               1);
 
     // The Project Agent designs the new project's pipeline in the background, and reading its task
-    // (the project page's latest_agent_task) compiles the design once it is done (Steve,
-    // 2026-09-27).
+    // (the project page's latest_agent_task) compiles the design once it is done.
     const auto latest_build =
         store_->latest_agent_task(customer_id, "build:" + project, connection->workspace_id);
     ASSERT_TRUE(latest_build) << "creating the project started the Project Agent";
@@ -4387,6 +4472,15 @@ TEST_P(HttpResponseIsolation, ProtectedAppAuthorizationHandsOffAHostOnlySession)
                            lake_cookie);
     ASSERT_TRUE(wrong_redirect.starts_with("HTTP/1.1 400")) << wrong_redirect;
 
+    // A bearer never opens the handoff, alone or beside the session (lake#1058).
+    const std::string bearer_session = lake_cookie.substr(lake_cookie.find('=') + 1);
+    for (const std::string& cookie : {std::string(), return_cookie + "; " + lake_cookie}) {
+        const std::string by_bearer =
+            connection.request("GET", authorize, {}, cookie, "HTTP/1.1", bearer_session);
+        EXPECT_TRUE(by_bearer.starts_with("HTTP/1.1 403")) << by_bearer;
+        EXPECT_EQ(by_bearer.find("__lake_code"), std::string::npos) << by_bearer;
+    }
+
     const std::string authorized =
         connection.request("GET", authorize, {}, return_cookie + "; " + lake_cookie);
     ASSERT_TRUE(authorized.starts_with("HTTP/1.1 302")) << authorized;
@@ -4415,7 +4509,8 @@ TEST_P(HttpResponseIsolation, ProtectedAppAuthorizationHandsOffAHostOnlySession)
     EXPECT_EQ(response_header(exchanged, "x-orama-user"), principal->user_id);
     EXPECT_EQ(response_header(exchanged, "x-orama-space"), workspace->id);
     const std::string app_cookie_header = response_header(exchanged, "set-cookie");
-    EXPECT_TRUE(app_cookie_header.starts_with("lake_app_session="));
+    // Always Secure, so always the __Host- name: no sibling host can plant or shadow it.
+    EXPECT_TRUE(app_cookie_header.starts_with("__Host-lake_app_session=")) << app_cookie_header;
     EXPECT_NE(app_cookie_header.find("; Path=/; Secure; HttpOnly; SameSite=Lax"),
               std::string::npos);
     EXPECT_EQ(app_cookie_header.find("Domain="), std::string::npos);
@@ -4445,7 +4540,7 @@ TEST_P(HttpResponseIsolation, ProtectedAppAuthorizationHandsOffAHostOnlySession)
     const std::string expired = connection.request("GET",
                                                    auth_path,
                                                    {},
-                                                   "lake_app_session=" + *expired_token,
+                                                   "__Host-lake_app_session=" + *expired_token,
                                                    "HTTP/1.1",
                                                    {},
                                                    {},
@@ -5109,8 +5204,8 @@ TEST(HttpServer, WorkspaceMcpSessionsLearnThatExportedToolsChanged) {
     EXPECT_FALSE(told(post(call, fresh)));
 }
 
-// A server reports Orama's published terms and privacy policy by default, and the configured ones
-// when they are set (LAKE_TERMS_URL, LAKE_PRIVACY_URL; liquid-bridge#15).
+// A server reports no terms or privacy policy by default, and the configured ones when they are
+// set (LAKE_TERMS_URL, LAKE_PRIVACY_URL).
 TEST(HttpServer, ViewerCarriesTheTermsAndPrivacyLinks) {
     for (const bool configured : {false, true}) {
         lake::api::ServerOptions options;
@@ -5127,9 +5222,54 @@ TEST(HttpServer, ViewerCarriesTheTermsAndPrivacyLinks) {
         const auto viewer =
             nlohmann::json::parse(response_body(connection.request("GET", "/v1/viewer")))["value"];
         EXPECT_EQ(viewer["legal"]["terms_url"],
-                  configured ? "https://acme.example/terms" : "https://www.orama.com/legal/terms");
-        EXPECT_EQ(viewer["legal"]["privacy_url"], configured ? "" : "https://www.orama.com/legal/privacy");
+                  configured ? "https://acme.example/terms" : "");
+        EXPECT_EQ(viewer["legal"]["privacy_url"], "");
     }
+}
+
+// lake#1324: a liquid client outside the supported range is told so before any route, in the
+// envelope a REST caller reads or, on a sync path, in the sync protocol's error body. server_info
+// always answers, so a client can learn the range.
+TEST(HttpServer, ALiquidClientOutsideTheSupportedRangeIsToldSo) {
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.worker_coroutines = 1;
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    HttpConnection connection(server.port());
+    const auto newest = lake::api::newest_supported_liquid();
+    const std::string too_new = lake::api::to_string({newest.major, newest.minor + 1, 0});
+    const auto with_version = [&](std::string_view method,
+                                  std::string_view path,
+                                  const std::string& version,
+                                  std::string_view content_type = "application/json") {
+        return connection.request(
+            method, path, {}, {}, "HTTP/1.1", {}, content_type, {{"Liquid-Version", version}});
+    };
+
+    const std::string info = with_version("GET", "/v1/server_info", too_new);
+    ASSERT_TRUE(info.starts_with("HTTP/1.1 200")) << info;
+    EXPECT_EQ(nlohmann::json::parse(response_body(info))["value"]["liquid"],
+              lake::api::liquid_clients_json());
+
+    const std::string refused = with_version("GET", "/v1/viewer", too_new);
+    ASSERT_TRUE(refused.starts_with("HTTP/1.1 400")) << refused;
+    const auto body = nlohmann::json::parse(response_body(refused));
+    EXPECT_EQ(body["error"]["code"], "unsupported_client_version");
+    EXPECT_EQ(body["error"]["message"], lake::api::liquid_client_refusal(too_new));
+
+    const std::string served = with_version("GET", "/v1/viewer", lake::api::to_string(newest));
+    EXPECT_TRUE(served.starts_with("HTTP/1.1 200")) << served;
+    EXPECT_TRUE(connection.request("GET", "/v1/viewer").starts_with("HTTP/1.1 200"));
+
+    const std::string sync = with_version("POST",
+                                          "/v1/repositories/no-such-repository/sync/pull",
+                                          too_new,
+                                          lake::api::liquid_sync_media_type);
+    ASSERT_TRUE(sync.starts_with("HTTP/1.1 400")) << sync;
+    EXPECT_EQ(response_header(sync, "content-type"), "application/vnd.liquid.error-v1");
+    EXPECT_NE(sync.find("newer than this Lake supports"), std::string::npos);
 }
 
 // With Clerk, the web app mounts Clerk's sign-in (docs/api/clerk.md); lake keeps the exchange and
@@ -5177,12 +5317,17 @@ TEST(HttpServer, ClerkExchangeRefusesAForgedTokenAndSignOutEndsClerkToo) {
                            "application/json");
     ASSERT_TRUE(sign_in.starts_with("HTTP/1.1 403")) << sign_in.substr(0, 400);
     EXPECT_TRUE(response_header(sign_in, "set-cookie").empty());
-    // Clerk's sign-in shows its images from Clerk's image host, and from nowhere else (lake#943).
+    // Clerk's sign-in shows its images from Clerk's image host, and from nowhere else (lake#943);
+    // clerk-js loads and talks only to the instance's own Frontend API host (lake#991).
     const std::string page = connection.request(
         "GET", "/sign-in", {}, {}, "HTTP/1.1", {}, "text/plain", {{"Accept", "text/html"}});
     ASSERT_TRUE(page.starts_with("HTTP/1.1 200")) << page.substr(0, 300);
-    EXPECT_EQ(response_header(page, "content-security-policy"),
-              "frame-ancestors 'self'; img-src 'self' data: https://img.clerk.com");
+    const std::string policy = response_header(page, "content-security-policy");
+    EXPECT_NE(policy.find("img-src 'self' data: https://img.clerk.com;"), std::string::npos)
+        << policy;
+    EXPECT_NE(policy.find("connect-src 'self' https://"), std::string::npos) << policy;
+    EXPECT_NE(policy.find("script-src 'self'"), std::string::npos) << policy;
+    EXPECT_NE(policy.find("https://challenges.cloudflare.com"), std::string::npos) << policy;
 
     const std::string refused =
         connection.request("POST", "/identity/clerk-session", "token=not.a.jwt&device_name=b");
@@ -5400,7 +5545,7 @@ TEST(HttpServer, IdleKeepAliveCloseWritesNothingToStderr) {
     EXPECT_EQ(captured_stderr.finish(), "");
 }
 
-// Decision 54 S9 (lake#384): a request log line names the route pattern and the identifiers it
+// lake#384: a request log line names the route pattern and the identifiers it
 // captured, never the raw path, and a request routed to a workspace is counted in that workspace's
 // own `lake_requests` series by the owner loop.
 TEST(HttpServer, RequestLogsNameRoutesAndEachWorkspaceGetsItsOwnRequestSeries) {
@@ -5875,7 +6020,7 @@ struct ReplicationServer {
     }
 };
 
-// lake#915 (LSR-004): a repository owner points replicate_repository at a server they run. Lake
+// lake#915: a repository owner points replicate_repository at a server they run. Lake
 // refuses it before connecting, so the instance's replication credential is never sent there. The
 // operator is refused the same way: only configured peers receive the credential. The refusal is
 // audited in the customer's log with the source it named.
@@ -5898,7 +6043,7 @@ TEST(RepositoryReplication, ASourceThatIsNotAConfiguredPeerNeverReceivesTheCrede
         << "lake connected to a source that is not a configured peer:\n"
         << endpoint.heads().front();
 
-    // Repository events go to the repository's workspace audit (decision 52); `audit` reads it.
+    // Repository events go to the repository's workspace audit; `audit` reads it.
     HttpConnection reader(lake_server.server->port());
     const std::string answered_audit =
         reader.request("GET",

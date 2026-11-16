@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/capabilities.hpp"
 #include "lake/api/forge.hpp"
 
@@ -182,8 +184,14 @@ ForgeTask<ApiResult> list_records(std::string kind, const json& input, ApiContex
         co_return forge_records_failure(records.error());
     }
     json items = json::array();
+    // Who opened, reviews, approved or commented, by name (lake#1326).
+    const bool names_signers = kind == "review" || kind == "review_comment";
+    std::vector<std::string> signers;
     for (const control::ForgeRecord& record : *records) {
         json output = control::to_json(record);
+        if (names_signers) {
+            forge_record_signers(record.value, signers);
+        }
         if (record.kind == "webhook") {
             output["value"].erase("secret");
         }
@@ -197,7 +205,11 @@ ForgeTask<ApiResult> list_records(std::string kind, const json& input, ApiContex
         }
         items.push_back(std::move(output));
     }
-    co_return ApiResult::success({{"items", std::move(items)}});
+    json out{{"items", std::move(items)}};
+    if (names_signers) {
+        out["people"] = signer_people(context, signers);
+    }
+    co_return ApiResult::success(std::move(out));
 }
 
 // This repository's record `id` of `kind`; `not_found` at `/<field>` when there is none.
@@ -235,7 +247,7 @@ ForgeTask<ApiResult> update_record(RepositoryForge& forge, const control::ForgeR
     co_return ApiResult::success(control::to_json(**updated));
 }
 
-// Who wrote an issue or an issue comment (lake#598), or opened a review (LSR-077): the caller's
+// Who wrote an issue or an issue comment (lake#598), or opened a review: the caller's
 // TAAP identity, set by lake and never taken from the input (the schemas refuse those members). A
 // GitHub import keeps the GitHub login it read instead. A review records its opener as `opened_by`,
 // not `author`: liquid's forge client reads a review comment's `author` as an actor object.
@@ -297,7 +309,7 @@ std::string string_member(const json& value, const char* key) {
     return found != value.end() && found->is_string() ? found->get<std::string>() : std::string{};
 }
 
-// update_review (LSR-077). An approval is lake's record of who gave it and for which change,
+// update_review. An approval is lake's record of who gave it and for which change,
 // `approval: {by, change_id}`, never the caller's input. Approving needs `review` on the
 // repository and is refused to the person who opened the review; any other state withdraws it.
 // Branch protection counts only such an approval, checked again when the push is
@@ -737,12 +749,18 @@ void add_list(Registry& registry,
               std::string kind,
               bool allows_anonymous_public_read = false) {
     std::string description = forge_description(name);
+    json output_schema = records_schema();
+    if (kind == "review" || kind == "review_comment") {
+        // The signers' names (lake#1326).
+        output_schema["properties"]["people"] = signer_people_schema();
+        description += " `people` names each opener, reviewer, approver and author's account.";
+    }
     registry.add(Capability{
         .name = std::move(name),
         .title = std::move(title),
         .description = std::move(description),
         .input_schema = repository_input({{"limit", {{"type", "integer"}}}}, json::array()),
-        .output_schema = records_schema(),
+        .output_schema = std::move(output_schema),
         .kind = CapabilityKind::Read,
         .object = "repository",
         .action = "read",
@@ -782,10 +800,10 @@ bool allowed_pusher(const json& rule, const std::string& identity) {
     });
 }
 
-// Whether an approved review of exactly `change_id` counts for this push (LSR-077): its approval
+// Whether an approved review of exactly `change_id` counts for this push: its approval
 // is lake's record for that change, given by someone other than the pusher and the review's
 // opener, who still holds `review` on the rule's object now. An approval lake did not record
-// (one written before LSR-077, or carried in by an import) never counts.
+// (one written before the separation-of-duty rule, or carried in by an import) never counts.
 control::Result<bool> approved_review(control::Store& store,
                                       const std::string& pusher,
                                       control::AuthorizationCache& authorization_cache,

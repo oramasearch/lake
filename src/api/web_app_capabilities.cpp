@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/capabilities.hpp"
 
 #include <algorithm>
@@ -226,7 +228,7 @@ app_host(const json& input, const std::string& name, const ApiContext& context) 
     // An explicit host is held to the same reserved names as an app's name (lake#947): its label
     // is the name it takes beneath the wildcard. And it may never be one of the Lake's own hosts:
     // its public host, the apex host of its region picker or a region's host, which sit beneath
-    // the wildcard when the wildcard is the zone itself (oramadev.net on the managing cluster).
+    // the wildcard when the wildcard is the zone itself.
     const std::string label = host.substr(0, host.size() - wildcard.size() - 1);
     if (reserved_name(label, context.apps_reserved_names)) {
         return std::unexpected(ApiResult::failure(
@@ -348,11 +350,47 @@ std::expected<std::pair<json, json>, ApiResult> normalized_app_env(const json& e
     return std::pair{std::move(plain), std::move(secret_refs)};
 }
 
+// The secret references of the calling Application Agent turn's confirmed proposal (lake#891):
+// `{KEY: "lake-secret://…"}` from `context.confirmed_proposal.app.env` of the turn's request, a
+// record lake wrote in its workspace (lake#374) after agent_turn verified the proposal against the
+// one the person reviewed (`proposal_sha256`) and checked these references with the person's own
+// credential (check_proposed_app_secret_references). Empty for any other caller, and when the
+// turn's request cannot be read.
+liquid::runtime::task<json> confirmed_secret_references(const ApiContext& context) {
+    constexpr std::string_view prefix = "task:";
+    if (context.credential_kind != "agent_task" || context.store == nullptr ||
+        !context.credential_session_id.starts_with(prefix)) {
+        co_return json::object();
+    }
+    auto task = context.store->get_agent_task(context.credential_session_id.substr(prefix.size()));
+    if (!task || task->agent != "agent-application" ||
+        !control::settled(co_await load_agent_task_content(context, *task))) {
+        co_return json::object();
+    }
+    const json proposal = task->body.value("context", json::object()).is_object()
+                              ? task->body.at("context").value("confirmed_proposal", json())
+                              : json();
+    if (!proposal.is_object() || !proposal.value("app", json()).is_object()) {
+        co_return json::object();
+    }
+    const auto env = normalized_app_env(proposal.at("app").value("env", json::object()));
+    co_return env ? env->second : json::object();
+}
+
 // Each secret reference must name a mount of the app's workspace that the caller may read, and a
 // live secret with that field. Checked with the caller's own credential (get_secret_mount and
 // read_secret, each audited in the mount's workspace); the value read is never kept or answered.
-liquid::runtime::task<std::optional<ApiResult>> check_secret_references(
-    const json& secret_refs, const std::string& workspace_id, ApiContext& context) {
+//
+// A confirmed Application Agent turn holds no secret read (lake#891). A reference its confirmed
+// proposal carries under the same key (`confirmed`, from confirmed_secret_references) was checked
+// with the person's credential when they confirmed it, so here lake checks only, server-side, that
+// the mount still exists and belongs to the app's workspace. Any other reference the turn sends is
+// checked with its own credential, and refused.
+liquid::runtime::task<std::optional<ApiResult>>
+check_secret_references(const json& secret_refs,
+                        const std::string& workspace_id,
+                        ApiContext& context,
+                        const json& confirmed = json::object()) {
     if (secret_refs.empty()) {
         co_return std::nullopt;
     }
@@ -364,6 +402,24 @@ liquid::runtime::task<std::optional<ApiResult>> check_secret_references(
         const std::string path = "/env/" + key + "/secret";
         if (!reference) {
             co_return ApiResult::failure("invalid_input", "not a Lake secret reference", path);
+        }
+        if (confirmed.is_object() && confirmed.contains(key) && confirmed.at(key) == stored) {
+            if (context.store == nullptr) {
+                co_return ApiResult::failure("store_unavailable",
+                                             "no store to check secret references");
+            }
+            const auto route = context.store->get_secret_mount_route(reference->mount_id);
+            if (!route) {
+                co_return ApiResult::failure(
+                    "not_found", "no secret mount " + reference->mount_id, path);
+            }
+            if (route->workspace_id != workspace_id) {
+                co_return ApiResult::failure(
+                    "invalid_input",
+                    "the secret mount belongs to another workspace than the app",
+                    path);
+            }
+            continue;
         }
         ApiContext inner = context;
         inner.audit_details = json::object();
@@ -402,10 +458,17 @@ liquid::runtime::task<std::optional<ApiResult>> check_secret_references(
 
 // A binding names a live service by id or, for agents and people, by its unique name in the
 // customer. The stored binding is always the id.
-std::optional<control::ManagedService>
-bound_service(const std::string& reference, const std::string& customer_id, ApiContext& context) {
+// Only a service of the app's own workspace can be bound (lake#945): its connection is that
+// workspace's, and an app of another workspace must never receive its credential.
+std::optional<control::ManagedService> bound_service(const std::string& reference,
+                                                     const std::string& customer_id,
+                                                     const std::string& workspace_id,
+                                                     ApiContext& context) {
     if (auto service = context.store->get_service(reference);
         service && service->customer_id == customer_id && service->desired == "present") {
+        if (service->workspace_id != workspace_id) {
+            return std::nullopt;
+        }
         return *service;
     }
     auto listed = context.store->list_services(customer_id);
@@ -414,7 +477,8 @@ bound_service(const std::string& reference, const std::string& customer_id, ApiC
     }
     std::optional<control::ManagedService> found;
     for (const control::ManagedService& service : *listed) {
-        if (service.desired != "present" || service.name != reference) {
+        if (service.desired != "present" || service.name != reference ||
+            service.workspace_id != workspace_id) {
             continue;
         }
         if (found) {
@@ -425,8 +489,35 @@ bound_service(const std::string& reference, const std::string& customer_id, ApiC
     return found;
 }
 
-std::expected<json, ApiResult>
-normalized_bindings(const json& value, const std::string& customer_id, ApiContext& context) {
+// Binding a service hands the app that service's connection credential, which
+// service_connection gives only to an administrator of the account (lake#945): a binding needs the
+// same right. Empty: allowed.
+std::optional<ApiResult> service_binding_refused(const std::string& customer_id, ApiContext& context) {
+    if (context.operator_credential) {
+        return std::nullopt;
+    }
+    const auto object = context.store->find_policy_object("customer", customer_id);
+    if (!object) {
+        return ApiResult::failure(object.error().code, object.error().message);
+    }
+    const auto decision = control::authorize(
+        *context.store, context.acting_identity, object->id, "admin", context.authorization_cache);
+    if (!decision) {
+        return ApiResult::failure(decision.error().code, decision.error().message);
+    }
+    if (!decision->allowed) {
+        return ApiResult::failure(
+            "unauthorized",
+            "binding a service gives the app its credential: only an administrator of the account may",
+            "/bindings/services");
+    }
+    return std::nullopt;
+}
+
+std::expected<json, ApiResult> normalized_bindings(const json& value,
+                                                   const std::string& customer_id,
+                                                   const std::string& workspace_id,
+                                                   ApiContext& context) {
     if (!value.is_object()) {
         return std::unexpected(
             ApiResult::failure("invalid_input", "bindings must be an object", "/bindings"));
@@ -449,16 +540,22 @@ normalized_bindings(const json& value, const std::string& customer_id, ApiContex
         return std::unexpected(ApiResult::failure(
             "invalid_input", "bindings.services must be an array", "/bindings/services"));
     }
+    if (!services.empty()) {
+        if (auto refused = service_binding_refused(customer_id, context)) {
+            return std::unexpected(*refused);
+        }
+    }
     for (const json& service_id : services) {
         if (!service_id.is_string()) {
             return std::unexpected(ApiResult::failure(
                 "invalid_input", "service ids must be strings", "/bindings/services"));
         }
-        auto service = bound_service(service_id.get<std::string>(), customer_id, context);
+        auto service =
+            bound_service(service_id.get<std::string>(), customer_id, workspace_id, context);
         if (!service) {
             return std::unexpected(ApiResult::failure(
                 "not_found",
-                "no such service in this account (use a live service's id or unique name)",
+                "no such service in this app's workspace (use a live service's id or unique name)",
                 "/bindings/services"));
         }
         if (std::ranges::find(output["services"], json(service->id)) == output["services"].end()) {
@@ -629,6 +726,19 @@ json deployment_properties() {
 
 } // namespace
 
+liquid::runtime::task<std::optional<ApiResult>> check_proposed_app_secret_references(
+    const json& app, const std::string& workspace_id, ApiContext& context) {
+    const auto env = normalized_app_env(app.value("env", json::object()));
+    if (!env) {
+        co_return env.error();
+    }
+    auto checked = co_await check_secret_references(env->second, workspace_id, context);
+    if (!checked) {
+        co_return ApiResult::failure("store_error", checked.error().message);
+    }
+    co_return std::move(*checked);
+}
+
 void register_web_app_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_apps",
@@ -789,8 +899,18 @@ void register_web_app_capabilities(Registry& registry) {
             if (!env) {
                 co_return env.error();
             }
+            // A confirmed Application Agent turn's references were checked as the person when
+            // they confirmed its proposal (lake#891).
+            json confirmed = json::object();
+            if (!env->second.empty() && context.credential_kind == "agent_task") {
+                // A failed read confirms nothing, so every reference is checked as the caller.
+                auto references = co_await confirmed_secret_references(context);
+                if (references) {
+                    confirmed = std::move(*references);
+                }
+            }
             auto checked = co_await check_secret_references(
-                env->second, input.at("workspace_id").get<std::string>(), context);
+                env->second, input.at("workspace_id").get<std::string>(), context, confirmed);
             if (!checked) {
                 co_return ApiResult::failure("store_error", checked.error().message);
             }
@@ -805,8 +925,10 @@ void register_web_app_capabilities(Registry& registry) {
             if (!host) {
                 co_return host.error();
             }
-            auto bindings = normalized_bindings(
-                input.value("bindings", json::object()), input.at("customer_id"), context);
+            auto bindings = normalized_bindings(input.value("bindings", json::object()),
+                                                input.at("customer_id"),
+                                                input.at("workspace_id"),
+                                                context);
             if (!bindings) {
                 co_return bindings.error();
             }
@@ -1250,12 +1372,17 @@ void register_web_app_capabilities(Registry& registry) {
             if (!app) {
                 co_return app.error();
             }
-            auto service =
-                bound_service(input.at("service_id").get<std::string>(), app->customer_id, context);
+            if (auto refused = service_binding_refused(app->customer_id, context)) {
+                co_return *refused;
+            }
+            auto service = bound_service(input.at("service_id").get<std::string>(),
+                                         app->customer_id,
+                                         app->workspace_id,
+                                         context);
             if (!service) {
                 co_return ApiResult::failure(
                     "not_found",
-                    "no such service in this account (use a live service's id or unique name)");
+                    "no such service in this app's workspace (use a live service's id or unique name)");
             }
             json services = app->bindings.value("services", json::array());
             if (std::ranges::find(services, json(service->id)) == services.end()) {

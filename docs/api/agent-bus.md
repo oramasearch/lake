@@ -1,8 +1,8 @@
 # The agent bus: agent traffic over Zetta pub/sub
 
-**Issue:** [lake#269](https://github.com/oramasearch/lake/issues/269); where a task lives:
-[lake#374](https://github.com/oramasearch/lake/issues/374),
-[lake#375](https://github.com/oramasearch/lake/issues/375) · **Code:**
+**Issue:** lake#269; where a task lives:
+lake#374,
+lake#375 · **Code:**
 `include/lake/control/agent_bus.hpp`, `src/control/agent_bus.cpp`, the bus capabilities in
 `src/api/workspace_capabilities.cpp` · **Tests:** `AgentRuns.LibraryAgentsTakeTasksAndAnswerOverTheBus`,
 `HttpResponseIsolation.LibraryAgentsFinishEveryTurnKindWithoutAWorkspaceEcho`, the Ask Orama,
@@ -80,7 +80,7 @@ claim, and the credential is handed over once and never stored.
 | Capability | Kind | Who | What |
 |---|---|---|---|
 | `receive_agent_tasks {agent, workspace_id?, from_sequence?, wait_ms?}` | read | that library agent | the tasks on `agent-tasks.<agent>` from `from_sequence`, without those already claimed; an optional workspace filters the reply; `next_sequence` continues |
-| `claim_agent_task {task_id, agent, workspace_id?}` | action | that library agent | take the task; the body with its credential. An optional workspace must match. A second claim, or a claim by another agent, is a `conflict` |
+| `claim_agent_task {task_id, agent, workspace_id?, credentials?}` | action | that library agent | take the task; the body with its credential, or with none when `credentials` is `by_reference` ([below](#task-credentials-by-reference-lake871)). An optional workspace must match. A second claim, or a claim by another agent, is a `conflict` |
 | `publish_agent_event {task_id, agent, type, workspace_id?, message?, result?}` | action | that library agent | publish on the task workspace's `agent-events`, only for a claimed, unfinished task; an optional workspace must match |
 | `receive_agent_events {customer_id, workspace_id, task_id, from_sequence?, wait_ms?}` | read | whoever asked the task (or the operator) | retained task events and current task state |
 
@@ -99,7 +99,7 @@ Lake capability and Zetta-shaped proxy calls, including clients that use the unp
 
 Ask Orama's turns have kind `api`, except New Methodology's draft (lake#688): kind
 `methodology_draft`, with the person's description as the message and `context: {name?,
-target_kind?}`. Its credential is Ask Orama's usual one (every read, no action); the answer's
+target_kind?}`. Its credential is Ask Orama's usual one (the library-agent reads, no action); the answer's
 `result` is the draft's files, which `draft_methodology {task_id}` checks before anything is offered
 ([methodologies.md](methodologies.md#drafts)).
 
@@ -110,16 +110,127 @@ analysis remain in the selected workspace Zetta, reached with the claimed task c
 initial proposal has no experiment write; a new task carrying the reviewed proposal receives only
 the engine's `create_study` and its backing `start_experiment` capability in addition to its reads.
 
-The service token (`LAKE_AGENT_SERVICE_TOKEN`) is never a bus credential: user-created agents on
-agent-runtime hold it too, and customer code must not be able to take another person's task. Long
+### Task credentials by reference (lake#871)
+
+A library agent is one shared process, so a task credential it receives sits in the memory of a
+process that serves every tenant. The rule: **credentials never
+reach the agent process; Lake adds them to each request.** A claim with
+`credentials: by_reference`:
+
+- mints the task's credential and stores its SHA-256 as the claim, exactly as before, but never
+  answers it: every `"{{credential}}"` in the body becomes an empty string, and the answer says
+  `credentials: by_reference`;
+- the agent then calls Lake (capabilities, MCP, the Zetta-shaped `/w/<workspace>/workspaces/...`
+  path) with **its own bus credential as the bearer** and the header
+  **`X-Lake-Agent-Task: <task id>`**;
+- Lake resolves that pair to the task's principal (`control/agent_task_proxy.hpp`) only while the
+  task is present, claimed and `Running` on that agent; anything else is refused as an invalid
+  credential, never answered as the bus credential. The principal carries the claim's digest, so
+  each call renews the lease and a reclaimed or finished task opens nothing, as with the
+  credential itself.
+
+A compromised agent process therefore holds no credential it can take elsewhere, and can act only
+for the tasks it is running at that moment, only through Lake, with each task's scopes and in each
+task's workspace. The default stays `in_body` until the library agents move to `by_reference`
+(their own repositories); then the in-body mode is removed.
+
+**One agent process per workspace (enterprise and isolated installs).** A file
+`<agent>.<workspace id>` in `LAKE_AGENT_BUS_DIR` is a bus credential bound to that workspace, for
+an agent process that serves it alone. With it, `receive_agent_tasks` lists only that workspace's
+tasks, a claim or event for another workspace's task is `forbidden`, `record_model_usage` accepts
+only that workspace's tasks, `X-Lake-Agent-Task` opens only that workspace's tasks, and every
+claim is by reference whatever it asks. Starting the per-workspace process and mounting its
+credential is the operator's part (https://github.com/oramasearch/orama-operator/pull/1176), which
+it does only for an image whose `lake manifest` lists the feature `agent_bus_workspace_credentials`.
+
+**Lake re-reads `LAKE_AGENT_BUS_DIR` when it changes** (`control::AgentBusCredentials`), so the
+operator adds or removes a workspace's credential without restarting lake. Each bus-credential
+lookup compares the directory's modification time and the target of Kubernetes' `..data` link
+(which a Secret update swaps) with the last read, and reads the files again when either differs:
+a file added is accepted, and a file removed stops working, on the first request after the change
+reaches the directory. The kubelet's own delay in updating a mounted Secret still applies.
+
+The service token (`LAKE_AGENT_SERVICE_TOKEN`) is never a bus credential, and no user-created agent
+holds it (agent-runtime#14). Lake presents it only to the library agents. To a person's service
+launch it presents that launch's own token, `agent_launch_service_token`: hex HMAC-SHA256 of
+`agent-launch:<launch id>` keyed by the service token, which the Orama operator gives the launch as
+its `AGENT_SERVICE_TOKEN`. The person's code in that pod therefore cannot call a library agent, and
+one launch's token does not open another. Lake and the operator roll together for it. Long
 polls accept up to 60 seconds (`wait_ms`), but the authorized upstream currently caps each receive
 at 30 seconds; Lake clamps accordingly and allows a 40-second transport timeout. Runtime idle
-backoff is required until [Zetta's longer poll](https://github.com/oramasearch/zetta/issues/1174)
+backoff is required until Zetta's longer poll (zetta#1174)
 lands. The at-most-one-receive-per-minute deployment acceptance is not claimed by this PR.
+
+## A task credential is confined to its workspace
+
+[lake#985](https://github.com/oramasearch/lake/issues/985). A task, launch or schedule
+credential acts as the person who started the agent, and that person may belong to other accounts
+or other workspaces of the same account. The credential reaches none of them, whatever its input
+names:
+
+- **Every policy decision of the call is confined.** `prepare_call` (`src/api/registry.cpp`) sets
+  `AuthorizationConfinement` on the call's authorization cache: the task's (launch's, schedule's)
+  account and workspace. `control::authorize` and `authorize_batch` then allow an object only when
+  its whole parent chain, followed past any inheritance cut, reaches that account's `customer`
+  object, and every repository on the chain belongs to that workspace. A repository that cannot be
+  shown to belong to it, or a row that cannot be read, is outside. Checks that start a fresh cache
+  (`control::fresh_cache_like`) keep the confinement, and so does `search`'s check of each hit
+  (`search::Query::confined`), so a search finds nothing in another account or workspace. The person's own identity object
+  (`principal/<taap id>`) is not an account's object and is decided as before; the task's scopes
+  decide whether such a capability may be called at all.
+- **An input naming another account or workspace is refused** before any handler reads it: a
+  `customer_id` or `workspace_id` other than the task's, any other id in `workspace_ids`, or a
+  repository (`repository_id`, `repository`, or `id` on a repository capability) of another account
+  or workspace. The answer is `unauthorized`, *this agent credential acts only in its own
+  workspace*.
+- **A library agent that reads for a person carries a generated read list, not every read.**
+  Ask Orama's turn key carries `agent_turn`, `workspace_openapi`, `workspace_query` and each
+  capability `library_agent_may_read` accepts (`src/api/workspace_capabilities.cpp`): reads only,
+  never one whose object is a secret, secret mount, principal, sign-in, application, certificate,
+  session or agent-bus object, and never a named read of secrets, keys, sessions, devices, grants,
+  invitations, SSO, SCIM or recovery state (`read_secret`, `list_secrets`, `secret_metadata`,
+  `list_sessions`, `list_sso_providers`, ...). Agent-ask-orama's own exclusion list stays as a
+  second check.
+
+Tests: `Policy.AConfinedDecisionAllowsOnlyObjectsInsideItsAccountAndWorkspace`,
+`Policy.LibraryAgentReadsLeaveOutSecretsAndCredentials` and
+`Streams.TaskCredentialReadsOnlyItsOwnWorkspacesResources`.
+
+## What a library agent holds, and the trust placed in it
+
+lake#871. A library agent (Ask Orama, its specialists, the Application Agent and the rest of the
+Agent Library) is one shared process per agent that serves every tenant, with one bus credential.
+Claiming a task fills the task body's `{{credential}}` with a task credential that acts as the
+person who started the turn. What bounds that credential today:
+
+- **It lives only while its task runs.** Every call with it renews the claim
+  (`renew_agent_task_lease` in `prepare_call`), which requires the task to be `Running` under the
+  same credential digest; a retry clears the digest, and a finished, failed or reclaimed task's
+  credential is refused. A compromised process holds the credentials of the tasks it is serving at
+  that moment, never earlier ones.
+- **It acts only in its task's account and workspace**
+  ([above](#a-task-credential-is-confined-to-its-workspace), lake#985), with the task's scopes.
+- **The bus credential names only its own agent's running tasks.** `claim_agent_task`,
+  `publish_agent_event` and `record_model_usage` refuse a task of another agent, and
+  `record_model_usage` also refuses one that is not `Running` (`conflict`, `/task_id`), so the bus
+  credential cannot report usage into any workspace whose task it is not serving.
+
+What it does not bound: while a turn runs, the shared process holds that turn's credential in
+clear, beside the credentials of the other tenants' turns it is serving at the same moment. Lake
+therefore trusts every library-agent image it dispatches to (`LAKE_AGENT_ENDPOINTS`) as it trusts
+its own code: they are Orama's private images, pinned by the operator, and never customer code.
+Whether the boundary moves (a library-agent process per workspace, or credentials that never reach
+the process in clear) is open on lake#871.
+
+Tests: `AgentLeases.ATaskCredentialEndsWithItsTaskAndAnotherAgentCannotNameIt` and
+`RecordModelUsage.ABusCredentialReportsOnlyItsOwnRunningTask`.
 
 ## Delegated turns
 
 An agent that delegates calls `agent_turn` with its own task credential (Ask Orama's `delegate`).
+**Delegation attenuates** (lake#922): a turn asked for with any agent credential holds only
+the scopes that credential holds, plus `get_agent_task`, so no agent can mint a turn with more
+authority than its own. A confirmation carried by an agent's turn is refused (lake#989).
 Lake then records the asking task's ID as `parent_task_id` in the delegated task's body and reports
 the delegated turn on the asking turn (lake#451), so whoever follows the asking turn sees which
 agent is working without following a second task:
@@ -286,7 +397,7 @@ Streams browses without consuming. App/build events are workspace topics, not bu
 | `LAKE_DATA_PLANE_URL`, `LAKE_DATA_PLANE_TOKEN` | lake's own Zetta, the bus. It needs an image with pub/sub (zetta `dev` from f8ad170) |
 | `LAKE_AGENT_ENDPOINTS` | the library agents; one `agent-tasks.<agent>` topic each |
 | `LAKE_AGENT_LEASE_SECONDS` | optional comma-separated `key=seconds` pairs, e.g. `agent-project=600,agent-experiments=1200`; omitted agents use 600; integers must be 60–3600 inclusive; malformed, unknown or duplicate entries fail startup |
-| `LAKE_AGENT_BUS_DIR` | the library agents' bus credentials, a file per agent named by its key (mounted from `lake-<name>-agent-bus`) |
+| `LAKE_AGENT_BUS_DIR` | the library agents' bus credentials, a file per agent named by its key (mounted from `lake-<name>-agent-bus`); a file `<agent>.<workspace id>` is a credential bound to that workspace ([by reference](#task-credentials-by-reference-lake871)) |
 
 Without the bus, a library agent's turn answers `store_unavailable`. A lake run with
 `--memory-store` uses an in-memory bus. The startup line reports `agent_bus`: `zetta`, `memory` or
@@ -294,14 +405,14 @@ Without the bus, a library agent's turn answers `store_unavailable`. A lake run 
 
 ## Verify on a deployment
 
-Native regression tests are `Stores/AgentLeases.*` (memory and PostgreSQL) and
+Native regression tests are `Stores/AgentLeases.*` (memory and PostgreSQL), `AgentBusKeys.*` and
 `AgentLeaseConfig.*`. They age clocks without sleeping, exercise three expiries, credential
 revocation, event/capability renewal, racing terminal writes, retry publication recovery, the
 retry notice as the task's message, the indexed migration and schema reapplication. Run full CTest
 with local PostgreSQL in static and shared builds; see [local builds](../build/local.md).
 To change policy, update both stores, config bounds, schema checks and these tests together.
 
-The [#389 regression](https://github.com/oramasearch/lake/issues/389) is covered locally by a fake
+The #389 regression is covered locally by a fake
 library agent receiving, claiming, publishing progress and publishing its result without a
 workspace field. The HTTP test runs `app`, `solution:` and `experiment` turns against both stores,
 checks dispatch metadata, and reads workspace data with the task credential through the original
@@ -311,8 +422,8 @@ exercises Ask Orama and the Ship App proposal flow without echoing workspace IDs
 
 `tools/e2e/agents.py <base-url> <token-file> <customer-id> <workspace-id> [T1 …]` is the agents' live scenario
 suite: each library agent over the bus, as the person whose key it holds, with a pass condition per
-scenario. T1–T10 are the scenarios tracked at https://github.com/oramasearch/lake/issues/276
-through https://github.com/oramasearch/lake/issues/285. T11 builds a data App with
+scenario. T1–T10 are the scenarios tracked at lake#276
+through lake#285. T11 builds a data App with
 Application Agent, confirms the exact proposal, waits for deployment, and requests its URL. It
 prints one line per scenario and exits 1 when one fails. T12 gives Experiments Agent a goal,
 confirms its exact experiment, waits for trials and requests the explanation. Run the relevant scenario
@@ -327,7 +438,7 @@ the repository's isolated database fixture.
 
 ```sh
 export TMPDIR="$PWD/.cache/proof-tmp"
-export LAKE_TEST_DB_URI=postgresql://stevesperandeo@127.0.0.1:5432/lake_issue414_proof_20260930
+export LAKE_TEST_DB_URI=postgresql://lake@127.0.0.1:5432/lake_issue414_proof_20260930
 ctest --test-dir build --output-on-failure -j 1
 ctest --test-dir build-shared --output-on-failure -j 1
 ```
@@ -356,6 +467,11 @@ Operator schema/configuration handoff and task-scoped event credentials remain t
 described above.
 
 ## Not yet
+
+- The library agents still claim `in_body`: each moves to `credentials: by_reference` in its own
+  repository (agent-runtime's bus client first), and then Lake drops the in-body mode (lake#871).
+- The operator's per-workspace agent process, gated on the manifest feature, is in
+  https://github.com/oramasearch/orama-operator/pull/1176 (lake#871).
 
 - Custom Python agents on `agent-runtime` still answer within the call.
 - Streaming subscriptions (SSE) replace the long poll when Zetta ships them.

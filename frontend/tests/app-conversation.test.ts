@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Changing an App in a conversation (lake#1240): the thread keeps its turns, only the newest
  * proposal can be confirmed, a confirm is the existing agent_turn confirmation that commits and
  * redeploys, and the page learns when it was applied. `npm test`; the build runs it. */

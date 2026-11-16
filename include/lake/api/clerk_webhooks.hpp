@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // Clerk webhooks (lake#765, docs/api/clerk.md#webhooks): Clerk's user events create, update and

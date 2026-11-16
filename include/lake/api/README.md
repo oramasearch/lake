@@ -12,7 +12,7 @@ including a JSON shape/count guard used before graph copies and engine saves (la
 only refusals; the full registry call still validates and authorizes the operation.
 `requires_credential` retains that early gate for handlers that own their authorization. Anonymous
 MCP envelopes have a separate 256 KiB cap. See [body admission](../../../docs/serving/http.md#request-body-limits).
-`oidc_jwks.hpp` declares the shared Clerk/OIDC key cache with injectable fetch and monotonic clock. `ServerOptions.oidc_jwks_fetch` replaces its transport in HTTP tests. See [bounded refresh](../../../docs/api/clerk.md#bounded-key-refresh-lake956-lsr-090).
+`oidc_jwks.hpp` declares the shared Clerk/OIDC key cache with injectable fetch and monotonic clock. `ServerOptions.oidc_jwks_fetch` replaces its transport in HTTP tests. See [bounded refresh](../../../docs/api/clerk.md#bounded-key-refresh-lake956).
 
 `tunnel_clients.hpp` declares the tunnel client downloads (lake#745): the platform allow-list,
 `read_tunnel_clients`, the signed-link helpers (`signed_link_signature`, `signed_link_matches`) and
@@ -27,7 +27,7 @@ capability reuses `ApiContext.pki`. See [tunnel credentials](../../../docs/api/t
 (lake#561, [web-app.md](../../../docs/ui/web-app.md)): an identity application's hosted sign-in
 pages, the stylesheet and fonts they link, the Docs guides `list_docs` and `get_doc` read, a handler
 failure's page, and the pure helpers capabilities share (`web_ui_escape`, `web_ui_space_label`,
-`web_ui_source_units`). `web_app.hpp` declares the embedded app and which requests it answers.
+`web_ui_source_units`). `web_app.hpp` declares the embedded app, which requests it answers and its Content-Security-Policy (lake#991).
 
 `Capability::post_alias` gives read capabilities a JSON POST route as well as GET, preserving
 read policy and identical OpenAPI/MCP schemas. See `docs/api/streams.md` and `docs/ui/streams.md`
@@ -41,7 +41,7 @@ tunnel, peer, effective-rule, session and activity contract is in
 OpenAI's request and answer) and `openai_transcriber`. `registry.hpp` declares the `Transcriber`
 injected dependency on `ApiContext` and `ServerOptions` (lake#561, `docs/api/transcripts.md`).
 
-`mcp_client.hpp` is Lake as an MCP client (decision 60, lake#652, `docs/api/mcp-connections.md`):
+`mcp_client.hpp` is Lake as an MCP client (lake#652, `docs/api/mcp-connections.md`):
 `McpClient` speaks Streamable HTTP and HTTP+SSE over an injected `McpHttp` (the server's transport,
 `make_mcp_http`, or a test's), with `McpLimits` bounding every exchange; `SseParser`,
 `parse_mcp_url`, `resolve_mcp_url` and `mcp_public_address` are the pure parts. `ApiContext` and
@@ -109,7 +109,7 @@ See [the HTTP body-limit contract](../../../docs/serving/http.md).
 transfer and build records on their way to the workspace Zettas (lake#348, lake#349).
 `ApiContext::metering_recorder` points at the server's; `ServerOptions::metering_flush_interval`
 and `metering_max_pending` configure it. A null recorder (no workspaces) records nothing.
-`audit_routing.hpp` declares the audit classification (decision 52, lake#317): `audit_log_of` for
+`audit_routing.hpp` declares the audit classification (lake#317): `audit_log_of` for
 every registered capability, `audit_route` for one call and `workspace_audit_route` for an event
 recorded outside the registry, and `record_audit`. `audit_recorder.hpp` declares `AuditRecorder`,
 the bounded queue of workspace audit events on their way to each workspace's chain;
@@ -131,11 +131,11 @@ metering contract's tables: `capability_meters()`, `calls_only_capabilities()`,
 image bytes by workspace.
 `registry.hpp`'s `Transcription` carries the tokens a speech-to-text model reports. See
 [metering](../../../docs/api/metering.md#usage-over-time). `billing.hpp`'s `UsageQuantities` and `bill_lines` price a GPU class at its own rate (lake#643).
-`billing.hpp` declares billing (lake#564,
-decision 56): the `PaymentProvider` interface and its manual implementation, `billing_enabled`
+`billing.hpp` declares billing (lake#564):
+the `PaymentProvider` interface and its manual implementation, `billing_enabled`
 (`LAKE_BILLING`), `register_billing_capabilities` (called by `ApiServer` only where
 `ServerOptions::billing` is on), `billing_registered`, and the pure `price_of` and `bill_lines`. See
-[billing](../../../docs/api/billing.md). Since lake#620 (decision 57) it also declares
+[billing](../../../docs/api/billing.md). Since lake#620 it also declares
 `PaymentProviders` (the provider in use: `fixed_payment_providers`, or
 `environment_payment_providers`, Stripe from the keys lake was started with, lake#628), `PaymentStatus` and
 `payment_status_json`, and `receive_payment_notice`, the webhook's logic. `stripe.hpp` declares
@@ -155,7 +155,7 @@ kept customer first and answers a replacement for one Stripe no longer has
 client (`send_resend_email` over an injected `ResendHttp`) and its settings
 (`resend_settings_from_environment`). `request_recorder.hpp` declares `RequestRecorder`, the
 bounded per-workspace `lake_requests` counts on their way to each workspace Zetta's time series
-(decision 54 S9, lake#384); `registry.hpp`'s `RequestAttribution` (`ApiContext::request_attribution`)
+(lake#384); `registry.hpp`'s `RequestAttribution` (`ApiContext::request_attribution`)
 is what one HTTP request's capability calls resolved: its outermost capability, its workspace and
 its request id. `ServerOptions::request_series_flush_interval` (ten seconds) and
 `request_series_max_pending` (16,384) configure it. See
@@ -168,7 +168,7 @@ instance KEK.
 `parse_lake_secret_ref`, `lake_secret_ref`) and `register_sealed_delivery_capabilities`
 (`mint_sealed_secret`). See [secrets](../../../docs/api/secrets.md#projections).
 
-`balance.hpp` declares the prepaid balance (lake#1114, decision 67): `BalanceSettings` from the
+`balance.hpp` declares the prepaid balance (lake#1114): `BalanceSettings` from the
 `LAKE_BALANCE_*` variables, `BalanceRuntime` (settings, the Resend mailer, the link origin) that
 `ApiContext::balance` carries where billing is on, `balance_view` (states, `add_micros`),
 `add_funds_link`, `paid_work_capabilities()` (the one list `Registry::add` marks as
@@ -184,10 +184,10 @@ adds `ApiResult::warnings`, `ApiContext::balance` and `registry_depth`, and
 `forge.hpp` declares `BranchProtectionRecords` and `load_branch_protection`: the rules, reviews and
 releases a push needs, read from the repository's workspace before the push (lake#341), and
 `evaluate_branch_protection` over that snapshot. `verified_release_changes` contains only changes
-whose selected results were freshly verified in that repository during the load (LSR-106).
+whose selected results were freshly verified in that repository during the load.
 `RepositoryArtifact::verified_source` is populated only by result-bound SLSA verification of
 `LAKE_SOURCE_REPOSITORY_ID` and `LAKE_SOURCE_CHANGE_ID`, never from generic signature checks.
-See [source binding](../../../docs/api/forge.md#source-binding-lsr-106).
+See [source binding](../../../docs/api/forge.md#source-binding).
 
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.
@@ -265,13 +265,13 @@ outbound client (plain http to `*.svc.cluster.local` only), tests inject a fake.
 
 `mcp_client.hpp` declares `mcp_max_json_depth` (64 nested containers) and `mcp_parse_json` for
 remote MCP and OAuth response bodies. Invalid or over-depth JSON returns a discarded value.
-See [MCP connection limits](../../../docs/api/mcp-connections.md#the-client) (lake#958, LSR-092).
+See [MCP connection limits](../../../docs/api/mcp-connections.md#the-client) (lake#958).
 
-`sync_store.hpp` defines `RepositoryWriteAuthorizer` (lake#962, LSR-096), invoked before mutation
+`sync_store.hpp` defines `RepositoryWriteAuthorizer` (lake#962), invoked before mutation
 under the repository lock with the immutable tree being committed to main. `drive.hpp` declares
 `repository_write_authorizer` for destination and recursive descendant checks; its context must
 outlive the synchronous store call. See [drive.md](../../../docs/api/drive.md).
-Model entitlement and model/direction billing (LSR-095, lake#961) are documented in
+Model entitlement and model/direction billing (lake#961) are documented in
 [`model-gateway.md`](../../../docs/api/model-gateway.md). The configured exact model/provider allowlist applies before dispatch on every transport;
 billing additionally requires positive model input and output rates. `model_tokens` classes
 preserve raw counts and bill each direction separately. `test_model_gateway.cpp` and
@@ -297,7 +297,11 @@ calls share an in-process client bucket. See [the contract](../../../docs/api/id
 `white_label.hpp` declares a white-labelled Lake's hosts (`InstanceHosts`: public host, aliases, control
 host) and SSO-only sign-in (`sso_only_refusal`). `ServerOptions` carries `host_aliases` and
 `sign_in_sso_provider`; `ApiContext` carries `sign_in_sso_provider`. See
-[white-label sign-in](../../../docs/deployment/white-label-sign-in.md) (lake#1136).
+white-label sign-in (lake#1136).
 
 `resource_repairs.hpp` (lake#1207) declares `run_resource_repair_pass` and `note_deployment`, the
 pass and the hook behind notifications and auto-fix ([docs/api/notifications.md](../../../docs/api/notifications.md)).
+
+`registry.hpp`'s `ApiContext::agent_service_workspace_id` is the workspace a library agent's bus
+credential is bound to, empty for the shared one (lake#871,
+[agent-bus.md](../../../docs/api/agent-bus.md#task-credentials-by-reference-lake871)).

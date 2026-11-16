@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/oidc_jwks.hpp"
 
 #include <algorithm>

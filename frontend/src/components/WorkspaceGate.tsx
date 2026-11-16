@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The workspace gate shared by Design, Train and Ship pages (lake's web_ui_workspace and
  * workspace_gate, web_ui.cpp): why the page is unavailable (no space, no workspace control plane, a
  * failed status read), the gate while the workspace Zetta is not ready (failed, being prepared, or

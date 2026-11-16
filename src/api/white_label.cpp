@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/white_label.hpp"
 
 #include <algorithm>
@@ -104,7 +106,12 @@ bool is_host_alias(const std::vector<std::string>& aliases, std::string_view hos
 
 std::string alias_redirect_location(std::string_view public_host, std::string_view target) {
     std::string location = "https://" + std::string(public_host);
-    if (target.starts_with('/') && !target.starts_with("//") && !target.starts_with("/\\")) {
+    // A control character or backslash anywhere can turn a path into another host once a browser
+    // reads it (lake#990).
+    if (target.starts_with('/') && !target.starts_with("//") && !target.starts_with("/\\") &&
+        std::ranges::none_of(target, [](unsigned char c) {
+            return c < 0x20 || c == 0x7f || c == '\\';
+        })) {
         location += target;
     } else {
         location += '/';

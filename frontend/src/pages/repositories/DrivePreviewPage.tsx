@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /drive/preview?repository_id=&ref=&path= (web_ui_drive_preview): a Drive file previewed by
  * lake's format registry, beside the file's facts. The preview is the server's own escaped markup
  * (text, Markdown, CSV, JSON, or an image, PDF, video or audio element over a data URI), inserted as

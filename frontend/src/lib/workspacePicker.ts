@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What the top bar's workspace picker shows (components/WorkspacePicker.tsx, lake#638): who owns
  * each group of workspaces, what the pill says, when the filter box appears and what it keeps. Pure,
  * so `npm test` covers it. */
@@ -24,8 +26,8 @@ export function ownerKind(space: PickerSpace): "Your account" | "Organization" |
   return space.kind === "organization" ? "Organization" : "Account";
 }
 
-/** A group's name as written: the person for their own account (never the generated handle, Steve
- * 2026-10-10), else the owner's name. */
+/** A group's name as written: the person for their own account (never the generated handle),
+ * else the owner's name. */
 export function ownerName(space: PickerSpace, viewer: PickerViewer): string {
   if (space.personal) return viewer.display_name?.trim() || viewer.email?.trim() || "You";
   return space.label?.trim() || space.name;

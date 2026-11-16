@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The instance brand (lake#1135, lake#1137, docs/serving/brand.md): Lake's own brand changes
 // nothing, a custom brand reaches every page lake renders, every email and every agent surface
 // with no Lake, Orama or lake.live left, and an invalid brand is refused.
@@ -136,6 +138,8 @@ lake::control::CloudOrder sample_order() {
     order.contact_email = "ada@example.com";
     order.state = "submitted";
     order.created_at = "2026-10-24T12:00:00Z";
+    // Confirmed, so the order's own emails go to it rather than the confirmation (lake#1000).
+    order.contact_email_confirmed_at = "2026-10-24T12:05:00Z";
     return order;
 }
 
@@ -261,12 +265,12 @@ TEST(BrandConfig, InvalidSettingsAreRefusedNamingTheSetting) {
         {"no support address",
          [](BrandSources& s) { s.support_email.clear(); },
          "LAKE_BRAND_SUPPORT_EMAIL"},
-        {"Orama's support address",
-         [](BrandSources& s) { s.support_email = "support@orama.com"; },
+        {"this Lake's support address",
+         [](BrandSources& s) { s.support_email = "help@lake.example.com"; },
          "LAKE_BRAND_SUPPORT_EMAIL"},
         {"no sender", [](BrandSources& s) { s.email_from.clear(); }, "LAKE_BRAND_EMAIL_FROM"},
         {"Lake's sender",
-         [](BrandSources& s) { s.email_from = "Acme <orders@lake.live>"; },
+         [](BrandSources& s) { s.email_from = "Acme <orders@mail.lake.example.com>"; },
          "LAKE_BRAND_EMAIL_FROM"},
         {"a sender that is no address",
          [](BrandSources& s) { s.email_from = "Acme Data"; },
@@ -284,7 +288,8 @@ TEST(BrandConfig, InvalidSettingsAreRefusedNamingTheSetting) {
     for (const Case& c : cases) {
         BrandSources sources = acme_sources();
         c.change(sources);
-        const auto brand = brand_from_sources(sources, default_resend_from, default_support_email);
+        const auto brand = brand_from_sources(
+            sources, "Lake <orders@lake.example.com>", "support@lake.example.com");
         ASSERT_FALSE(brand) << c.why;
         EXPECT_NE(brand.error().find(c.setting), std::string::npos)
             << c.why << ": " << brand.error();
@@ -351,7 +356,8 @@ TEST(BrandConfig, TheFileGivesTheBrandAndTheEnvironmentWins) {
 // Lake's own brand sends exactly the email it sent before the brand existed.
 TEST(BrandEmail, LakesOwnBrandSendsTheSameEmail) {
     set_instance_brand(Brand{});
-    auto settings = resend_settings_from_environment("re_lake1135fakekey0001", "", "");
+    auto settings = resend_settings_from_environment(
+        "re_lake1135fakekey0001", "Lake <orders@example.com>", "support@example.com");
     ASSERT_TRUE(settings) << settings.error();
     const auto sheet = order_sheet_from_environment("");
     ASSERT_TRUE(sheet) << sheet.error();
@@ -359,16 +365,16 @@ TEST(BrandEmail, LakesOwnBrandSendsTheSameEmail) {
         *sheet, customer_regions(), *settings, sample_order(), "customer", "https://x/orders/1");
     EXPECT_EQ(customer.subject,
               "We received your Lake order (0b6f2c1e-1111-4222-8333-444455556666)");
-    EXPECT_EQ(customer.reply_to, "support@orama.com");
+    EXPECT_EQ(customer.reply_to, "support@example.com");
     EXPECT_TRUE(customer.text.starts_with(
         "Thank you. We received your order form and will be in touch shortly. Nothing has been "
         "charged and nothing is set up until we have spoken.\n\nYour order: https://x/orders/1\n\n"
         "Order: 0b6f2c1e-1111-4222-8333-444455556666\n"))
         << customer.text;
     EXPECT_TRUE(customer.text.ends_with(
-        "\nQuestions: reply to this email or write to support@orama.com.\n"))
+        "\nQuestions: reply to this email or write to support@example.com.\n"))
         << customer.text;
-    EXPECT_EQ(settings->from, "Lake <orders@lake.live>");
+    EXPECT_EQ(settings->from, "Lake <orders@example.com>");
 
     BalanceView view;
     view.balance_micros = -2'500'000;

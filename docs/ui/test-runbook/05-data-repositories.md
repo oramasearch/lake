@@ -199,8 +199,9 @@ Expect:
 - A file opens `/file?repository_id=…&ref=main&path=…`. A folder opens
   `/repository/tree?id=…&ref=main#<path>`.
 - **All <n> paths** opens the tree. It shows only when there are more than 12 paths.
-- A change row shows its first message line, "<author> · <relative>" and its abbreviated id. The
-  title opens `/change?repository_id=…&id=…`.
+- A change row shows its first message line, "<author's name> @<handle> · <relative>" and its
+  abbreviated id. Hovering the name shows the whole signing key. A key no account acts for reads
+  "Unknown signer" and a short key (lake#1326). The title opens `/change?repository_id=…&id=…`.
 
 #### REPO-013 · The README is rendered and raw HTML is not run · P1
 As: owner · Needs: TD-REPO
@@ -221,12 +222,15 @@ As: owner · Needs: TD-REPO
 4. Press **Escape**.
 
 Expect:
-- The card reads "Create an account token on this instance under **Tokens** and export it as
-  `LIQUID_TOKEN` in your terminal. Use a token issued by this instance only." **Tokens** links to `/tokens`.
+- The card reads "Create an API token on this instance under Account → **Tokens** with the
+  *liquid and liquify* scopes, and export it as `LIQUID_TOKEN` in your terminal. Use a token
+  issued by this instance only." **Tokens** links to `/tokens`.
 - The block **First checkout into a new directory** holds
   `liquid clone '<origin>/v1/repositories/<id>' './<name>'`, then `cd './<name>'` on the next line.
 - The block **From that checkout, after capturing and naming your changes** holds
   `liquid push '<origin>/v1/repositories/<id>'`.
+- Below the blocks a line names **liquify**, liquid's IDE: open the checkout with
+  `liquify './<name>'`, or clone it from liquify's start screen with the repository's URL.
 - The modal is titled "Clone This Repository" with the subtitle `<owner>/<name>`, and shows the
   same blocks.
 - **Copy** turns to "Copied" for about two seconds. The pasted text matches the block exactly.
@@ -298,7 +302,7 @@ As: owner, then member · Needs: TD-REPO
 2. As `member`, open `TD-REPO` and read the same card.
 
 Expect:
-- Step 1: one row per principal (abbreviated id + role chip). The link opens
+- Step 1: one row per principal (name and `@handle`, the key on hover, + role chip). The link opens
   `/repository/access?id=<id>` ([15-organization.md](15-organization.md)).
 - Step 2: "Effective access is unavailable: <message>" (a reader has no `share`). Confirm the
   message. The rest of the page works.
@@ -384,7 +388,8 @@ Expect:
 - The facts bar reads "C++", "<n> lines", the size, "<n> changes in its blame" (or "1 change in
   its blame") and "Blob <abbreviated id>".
 - Comments, strings and C++ keywords are coloured.
-- Every line has a number, and the blame column shows the change id, the author and a date.
+- Every line has a number, and the blame column shows the change id, the author's name and
+  `@handle`, and a date.
 
 #### REPO-028 · Link to a line and to a range · P1
 As: owner · Needs: TD-REPO
@@ -439,7 +444,7 @@ As: owner · Needs: TD-REPO
 
 Expect:
 - Heading "Change Log", sub "Every change cut on this repository, newest first."
-- Figures: **Changes** ("in the log"), **Authors** ("distinct identities") and **Latest** (relative;
+- Figures: **Changes** ("in the log"), **Authors** ("distinct signers") and **Latest** (relative;
   the sub is the date and time).
 - Columns: **Change**, **Author** and **When**. **Author** and **When** sort; **Change** does not.
 - Each title is the message's first line, with a leading `# ` removed, or "Untitled change". The
@@ -452,7 +457,8 @@ As: owner · Needs: TD-REPO
 2. Type `zzzz`.
 
 Expect:
-- The counter reads "<rows> of <all>". Message, author and id are all searched.
+- The counter reads "<rows> of <all>". Message, the author's name, handle and key, and id are all
+  searched.
 - Step 2: "No change matches" / "Clear the search to see every change."
 
 #### REPO-034 · An empty change log · P2
@@ -469,7 +475,7 @@ As: owner · Needs: TD-REPO
 1. Open the change with the multi-line Markdown message.
 
 Expect:
-- The heading is the first line without `# `. The sub has the id, "by `<author>` · <relative>",
+- The heading is the first line without `# `. The sub has the id, "by <author's name> @<handle> · <relative>",
   and a review state chip when the change has a review.
 - The header has **Copy identifier** and a two-button group, **Unified** and **Side by side**.
   **Unified** is pressed.
@@ -480,7 +486,8 @@ Expect:
   - **Checks**.
 - The **Description** card renders the Markdown body after the first line.
 - **Files changed** lists each path with its status chips and "+a −r". Each path jumps to `#diff-<slug>`.
-- The side cards are **Details** (Author, Created, Parents, Identifier), **Review** and **Checks and attestations**.
+- The side cards are **Details** (Author by name, Created, Parents, Identifier), **Review** (reviewers by
+  name) and **Checks and attestations**. Each review comment starts with its author's name when it has one.
 - The **Diff** section has one panel per file:
   - kind, old path, mode (`<old> → <new>`) and blobs.
   - Hunks headed `@@ -a,b +c,d @@`.

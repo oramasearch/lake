@@ -24,9 +24,9 @@ offered **Create account** too.
 **Terms and privacy.** Every sign-up and sign-in form, Clerk's and lake's own, ends with *By
 creating an account, you agree to the Terms of Service and acknowledge the Privacy Policy.* (*By
 signing in, …* on sign-in), both linked from `viewer.legal` and opening in a new tab
-(`LegalNotice`, liquid-bridge#15). The instance sets the URLs (`LAKE_TERMS_URL`, `LAKE_PRIVACY_URL`,
+(`LegalNotice`). The instance sets the URLs (`LAKE_TERMS_URL`, `LAKE_PRIVACY_URL`,
 default Orama's published pages) or turns either off; see
-[`../deployment/sign-in.md`](../deployment/sign-in.md#terms-and-privacy).
+[`../api/clerk.md`](../api/clerk.md).
 
 ## Landing copy
 

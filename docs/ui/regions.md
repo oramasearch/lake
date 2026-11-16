@@ -1,6 +1,6 @@
 # Regions in the Web App
 
-lake#757, decision 64. The API, the variables and the apex picker are in
+lake#757. The API, the variables and the apex picker are in
 [`../api/regions.md`](../api/regions.md).
 
 ## What exists

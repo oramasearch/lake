@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Direct Grants (`/grants?object_id=`): the roles granted directly on one policy object
  * (web_ui_grants, serve_grants_page). */
 import { useState } from "react";

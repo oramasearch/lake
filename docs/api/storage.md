@@ -14,7 +14,7 @@ browsable as a drive ([Browsing a store](#browsing-a-store)):
 - **Your own bucket** — `object` on `r2` (Cloudflare R2), `s3` (AWS S3), `b2` (Backblaze B2),
   `gcs` (Google Cloud Storage) or `azure` (Azure Blob): a bucket in the customer's own account,
   opened with **the workspace's credential**, a secret of the workspace's secret store the store
-  names (decision 58). Never Orama's: Lake has no cloud account of its own for customers' data.
+  names. Never Orama's: Lake has no cloud account of its own for customers' data.
 - **Kept by Lake in the workspace** — `object` or `filesystem` on `zetta`: a sealed tree in the
   workspace Zetta ([below](#browsing-a-store)).
 - **A liquid repository** — `object` or `filesystem` on `lake` (*Drive*): a repository of the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/manifest.hpp"
 
 #include <array>
@@ -127,6 +129,11 @@ constexpr std::array environment = {
         false,
         false,
         "HTTP(S) origin for repository commands (default https://$LAKE_PUBLIC_HOST)"},
+    EnvironmentVariable{"LAKE_GIT_IMPORT_ROOT",
+                        false,
+                        false,
+                        "Staging root import_github_repository reads, one folder per customer "
+                        "(lake#925)"},
     EnvironmentVariable{"LAKE_HOST_ALIASES", false, false, "Other hosts that are this Lake; browser pages there redirect to LAKE_PUBLIC_HOST (lake#1136)"},
     EnvironmentVariable{"LAKE_HTTP_HEADER_TIMEOUT_SECONDS",
                         false,
@@ -227,7 +234,7 @@ constexpr std::array environment = {
                         false,
                         "Subscription expiry grace (default 259200)"},
     EnvironmentVariable{
-        "LAKE_ORDER_SHEET", false, false, "JSON merged over the apex order sheet's default offers"},
+        "LAKE_ORDER_SHEET", false, false, "The apex order sheet's offers and prices (default: off, none)"},
     EnvironmentVariable{
         "LAKE_PLATFORM_SYNC_SECONDS", false, false, "Platform poll interval (default 15)"},
     EnvironmentVariable{"LAKE_PRICE_COMPUTE_SECOND_MICROS",
@@ -275,8 +282,8 @@ constexpr std::array environment = {
                         false,
                         true,
                         "Bearer presented to peer Lakes; never the admin token"},
-    EnvironmentVariable{"LAKE_RESEND_API_KEY", false, true, "Orama's Resend key for order email"},
-    EnvironmentVariable{"LAKE_RESEND_FROM", false, false, "Order email sender"},
+    EnvironmentVariable{"LAKE_RESEND_API_KEY", false, true, "The Resend key lake sends email with"},
+    EnvironmentVariable{"LAKE_RESEND_FROM", false, false, "Email sender (no default: unset, no email is sent)"},
     EnvironmentVariable{"LAKE_SEALING_PUBLIC_KEY",
                         false,
                         false,
@@ -288,7 +295,7 @@ constexpr std::array environment = {
     EnvironmentVariable{"LAKE_SERVICES_PER_CUSTOMER",
                         false,
                         false,
-                        "Caps live services per account (default 0: no limit)"},
+                        "Caps live services per account, each workspace's Zetta included (default 0: no limit)"},
     EnvironmentVariable{"LAKE_SERVICE_DIR",
                         false,
                         false,
@@ -313,7 +320,7 @@ constexpr std::array environment = {
     EnvironmentVariable{
         "LAKE_STRIPE_WEBHOOK_SECRET", false, true, "Signing secret of the Stripe webhook endpoint"},
     EnvironmentVariable{
-        "LAKE_SUPPORT_EMAIL", false, false, "Where orders go (default support@orama.com)"},
+        "LAKE_SUPPORT_EMAIL", false, false, "Where orders go (no default: unset, no email is sent)"},
     EnvironmentVariable{"LAKE_TERMS_URL", false, false, "The terms of service sign-up and sign-in link to (default Orama's; off: none)"},
     EnvironmentVariable{
         "LAKE_TRANSCRIBE_MODEL", false, false, "The speech model (default gpt-4o-transcribe)"},
@@ -331,10 +338,22 @@ constexpr std::array environment = {
                         false,
                         false,
                         "The tunnel client downloads (default /usr/share/lake/tunnel-clients)"},
+    EnvironmentVariable{"LAKE_TUNNEL_GRANTS_PER_CUSTOMER",
+                        false,
+                        false,
+                        "Caps active tunnel grants per account (default 500; 0: no limit, lake#983)"},
+    EnvironmentVariable{"LAKE_TUNNEL_GRANTS_PER_WORKSPACE",
+                        false,
+                        false,
+                        "Caps active tunnel grants per workspace (default 100; 0: no limit, lake#983)"},
     EnvironmentVariable{"LAKE_WEBHOOK_ALLOW_PRIVATE_ADDRESSES",
                         false,
                         false,
                         "1 lets webhooks reach private addresses (development)"},
+    EnvironmentVariable{"LAKE_WORKSPACES_PER_CUSTOMER",
+                        false,
+                        false,
+                        "Caps live workspaces per account (default 0: no limit, lake#987)"},
     EnvironmentVariable{"LAKE_WORKSPACE_STORE_LEASE_SECONDS",
                         false,
                         false,
@@ -347,6 +366,17 @@ constexpr std::array environment = {
                         false,
                         false,
                         "Where liquid keeps Lake's local signing identity (default $HOME/.liquid)"},
+    EnvironmentVariable{"LIQUID_IDENTITY_KEY_CUSTODY",
+                        false,
+                        false,
+                        "What seals a new liquid identity's wrapping key (default passphrase on "
+                        "Linux; the operator sets passphrase, lake#1352)"},
+    EnvironmentVariable{"LIQUID_IDENTITY_PASSPHRASE_FILE",
+                        false,
+                        false,
+                        "An owner-only file (0400) holding the identity passphrase, mounted from a "
+                        "Secret the operator creates once per Lake; a pod without it and without an "
+                        "identity does not start (lake#1352)"},
     EnvironmentVariable{"SSL_CERT_FILE", false, false, "Trust roots for outbound TLS"},
     EnvironmentVariable{"ZETTA_EGRESS_ALLOW",
                         true,
@@ -415,6 +445,11 @@ nlohmann::json operator_manifest() {
              "the database could not be reached within the wait"}}}}},
         {"stripe", {{"webhook_events", events}, {"products", products}}},
         {"environment", variables},
+        // What this image supports that the operator switches on (additive under version 1).
+        // agent_bus_workspace_credentials: a LAKE_AGENT_BUS_DIR file `<agent>.<workspace id>` is a
+        // bus credential bound to that workspace, and the directory is re-read when it changes
+        // (lake#871, docs/api/agent-bus.md); orama-operator#1176 runs per-workspace agents on it.
+        {"features", json::array({"agent_bus_workspace_credentials"})},
     };
 }
 

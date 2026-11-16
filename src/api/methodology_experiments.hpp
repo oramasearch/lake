@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <string>
@@ -16,16 +18,29 @@
 // written before the run is queued, so a trial is dispatched once.
 namespace lake::api {
 
+// Who current_experiment acts for (lake#1001).
+enum class ExperimentReconcile {
+    // The caller started the experiment just now (start_experiment): its runs are the caller's.
+    as_caller,
+    // A write by someone who may change the account's experiments (stop_experiment_trial), or a
+    // read by one (get_experiment): the runs are queued for whoever started the experiment, from
+    // its image already built; a trial whose source cannot be prepared waits, never stopped.
+    as_starter,
+    // A read by someone who may only read: nothing is queued, ended or stopped.
+    none,
+};
+
 // An experiment as the engine answered it, made current: for a workspace methodology's running
 // experiment, every waiting trial without a Lake run is dispatched, and every trial whose Lake run
-// ended without a result is ended with its reason (the engine then admits the next). Answers the
-// experiment with `runner` (each waiting trial with its `methodology_run`) and `methodology_runs`
-// (every trial's Lake run: trial, number, run_id, phase, message). An experiment of Orama's
-// methodologies comes back unchanged.
+// ended without a result is ended with its reason (the engine then admits the next), as
+// `reconcile` allows. Answers the experiment with `runner` (each waiting trial with its
+// `methodology_run`) and `methodology_runs` (every trial's Lake run: trial, number, run_id, phase,
+// message). An experiment of Orama's methodologies comes back unchanged.
 liquid::runtime::task<nlohmann::json> current_experiment(ApiContext& context,
                                                          const std::string& customer_id,
                                                          const std::string& workspace_id,
-                                                         nlohmann::json experiment);
+                                                         nlohmann::json experiment,
+                                                         ExperimentReconcile reconcile);
 
 // Withdraws the Lake runs of an experiment's trials that are still running: every trial's, or the
 // one trial's (its engine Run id) when `trial` is given.

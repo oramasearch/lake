@@ -1,4 +1,6 @@
-// Billing (lake#564, decision 56, docs/api/billing.md): the price list (usage only, lake#635: one
+// SPDX-License-Identifier: MIT
+
+// Billing (lake#564, docs/api/billing.md): the price list (usage only, lake#635: one
 // rate per dimension, no plans, no fee, nothing included), the bill worked out from usage read
 // through usage_over_time, invoices with their frozen lines and payment state, the manual provider,
 // and the switch that leaves billing absent on an enterprise install.
@@ -7,6 +9,7 @@
 
 #include <chrono>
 #include <format>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -366,7 +369,7 @@ TEST(Billing, AMonthsBillIsWorkedOutFromTheUsageOfEveryWorkspace) {
     rig.recorder.sample(rig.lab, "repositories", gib, day1);
     rig.recorder.sample(rig.home, "drive_files", 3 * gib, day2);
     rig.recorder.sample(rig.lab, "repositories", gib, day2);
-    // What an engine holds on its own volume is not billed as storage (decision 61, lake#663).
+    // What an engine holds on its own volume is not billed as storage (lake#663).
     rig.recorder.sample(rig.home, "workspace_data", 10 * gib, day1);
     rig.recorder.sample(rig.lab, "models", 10 * gib, day2);
     rig.flush();
@@ -959,7 +962,7 @@ TEST(UsageContract, TransferFromAnyRecorderCallerIsShownAndBilled) {
     EXPECT_EQ((*billed)["amount_micros"], 200'000) << "4 GiB at $0.05";
 }
 
-// LSR-095: the bill reads the model/direction classes instead of blending all model tokens.
+// The bill reads the model/direction classes instead of blending all model tokens.
 TEST(Billing, ModelInputAndOutputHaveExactPricesAndCannotFallBackToTheBlendedRate) {
     BillingRig rig;
     const auto last = this_month() - std::chrono::months{1};
@@ -1015,4 +1018,143 @@ TEST(Billing, ModelInputAndOutputHaveExactPricesAndCannotFallBackToTheBlendedRat
     const auto empty = rig.call("bill_preview", input);
     EXPECT_FALSE(empty.ok);
     EXPECT_EQ(empty.error.code, "conflict");
+}
+
+// lake#988: deleting a workspace never takes its consumed usage off a bill that has not
+// been issued. delete_workspace retains the usage before the cascade, the month's bill and
+// usage_over_time still count it, values the recorder held are added later, a repeated delete
+// writes the same rollup, and a deletion whose usage cannot be read is refused.
+TEST(Billing, ADeletedWorkspacesUsageStaysOnTheUnissuedBill) {
+    BillingRig rig;
+    rig.publish(1);
+    const auto now = std::chrono::system_clock::now();
+    const std::string period = month_name(first_of(this_month()));
+    rig.recorder.add(rig.home, "calls", 1000, {{"kind", "api"}}, now);
+    rig.recorder.add(rig.lab, "calls", 2000, {{"kind", "api"}}, now);
+    rig.flush();
+    auto owner = rig.owner_context();
+    const auto calls_billed = [&] {
+        const auto bill =
+            rig.call("bill_preview", {{"customer_id", rig.customer}, {"period", period}});
+        EXPECT_TRUE(bill.ok) << bill.error.message;
+        EXPECT_TRUE(bill.value["complete"]);
+        const json* calls = line(bill.value, "calls");
+        return calls == nullptr ? json(nullptr) : (*calls)["quantity"];
+    };
+    EXPECT_EQ(calls_billed(), 3000);
+
+    // A deletion whose usage cannot be read is refused, and nothing is deleted.
+    rig.workspaces.records(rig.lab).metric_unavailable_next = 10;
+    const auto refused =
+        rig.call("delete_workspace",
+                 {{"customer_id", rig.customer}, {"workspace_id", rig.lab}, {"confirm", "lab"}},
+                 owner);
+    EXPECT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "store_unavailable") << refused.error.message;
+    EXPECT_EQ(rig.store->get_workspace(rig.lab)->desired, "running");
+    rig.workspaces.records(rig.lab).metric_unavailable_next = 0;
+
+    const auto deleted =
+        rig.call("delete_workspace",
+                 {{"customer_id", rig.customer}, {"workspace_id", rig.lab}, {"confirm", "lab"}},
+                 owner);
+    ASSERT_TRUE(deleted.ok) << deleted.error.message;
+    EXPECT_EQ(rig.store->get_workspace(rig.lab)->desired, "deleted");
+    const auto sets = rig.store->retained_usage_sets(rig.customer);
+    ASSERT_TRUE(sets);
+    ASSERT_EQ(sets->size(), 1U);
+    EXPECT_EQ((*sets)[0].workspace_id, rig.lab);
+    EXPECT_EQ(calls_billed(), 3000) << "the deleted workspace's calls stay on the bill";
+
+    // A value the recorder still held for the deleted workspace is added, not dropped.
+    rig.recorder.add(rig.lab, "calls", 500, {{"kind", "api"}}, now);
+    rig.flush();
+    EXPECT_EQ(rig.recorder.totals().dropped_workspace_deleted, 0U);
+    EXPECT_EQ(calls_billed(), 3500);
+
+    // The whole account's usage names the deleted workspace; a chosen one is live only.
+    const auto usage = rig.call(
+        "usage_over_time",
+        {{"customer_id", rig.customer},
+         {"from", period + "-01T00:00:00Z"},
+         {"to", month_name(first_of(this_month() + std::chrono::months{1})) + "-01T00:00:00Z"},
+         {"granularity", "month"},
+         {"dimensions", json::array({"calls"})}},
+        owner);
+    ASSERT_TRUE(usage.ok) << usage.error.message;
+    bool named = false;
+    for (const json& workspace : usage.value["workspaces"]) {
+        if (workspace["workspace_id"] == rig.lab) {
+            named = true;
+            EXPECT_TRUE(workspace["deleted"]);
+            EXPECT_TRUE(workspace["measured"]);
+        }
+    }
+    EXPECT_TRUE(named);
+    EXPECT_EQ(usage.value["dimensions"][0]["total"], 3500);
+
+    // Repeating the delete of a deleted workspace changes nothing on the bill.
+    const auto again =
+        rig.call("delete_workspace",
+                 {{"customer_id", rig.customer}, {"workspace_id", rig.lab}, {"confirm", "lab"}},
+                 owner);
+    EXPECT_TRUE(again.ok) << again.error.message;
+    EXPECT_EQ(calls_billed(), 3500);
+
+    // What is retained is content-free: no object ids, only the labels billing reads.
+    const auto points =
+        rig.store->retained_usage(rig.customer, 0, std::numeric_limits<std::int64_t>::max());
+    ASSERT_TRUE(points);
+    for (const auto& point : *points) {
+        EXPECT_TRUE(point.labels.size() <= 3U) << "only kind, class and model are kept";
+        EXPECT_FALSE(point.labels.contains("object_id"));
+    }
+}
+
+// The store keeps a rollup per workspace: a repeated rollup replaces it, late values add up, and
+// a late value for a workspace with no rollup is refused (lake#988).
+TEST(RetainedUsage, ARollupIsReplacedAndLateValuesAddUp) {
+    lake::control::InMemoryStore store;
+    const auto user = store.create_user({"taap:1:ed25519:retained", "r@example.test", "R"});
+    ASSERT_TRUE(user);
+    const auto customer = store.create_customer({"individual", user->id, "", "retained"});
+    ASSERT_TRUE(customer);
+    const auto workspace =
+        store.create_workspace({customer->id, "gone", "dev", "taap:1:ed25519:retained"});
+    ASSERT_TRUE(workspace) << workspace.error().message;
+    const lake::control::RetainedUsagePoint late{.workspace_id = workspace->id,
+                                                 .source = "late",
+                                                 .dimension = "calls",
+                                                 .labels = {{"kind", "api"}},
+                                                 .at_ms = 3'600'000,
+                                                 .value = 5};
+    EXPECT_EQ(store.add_retained_usage(late).error().code, "not_found");
+    const lake::control::RetainedUsageSet set{.workspace_id = workspace->id,
+                                              .customer_id = customer->id,
+                                              .from_ms = 0,
+                                              .to_ms = 86'400'000};
+    lake::control::RetainedUsagePoint rolled{.workspace_id = workspace->id,
+                                             .dimension = "calls",
+                                             .labels = {{"kind", "api"}},
+                                             .at_ms = 0,
+                                             .value = 10};
+    ASSERT_TRUE(store.retain_workspace_usage(set, {rolled}));
+    ASSERT_TRUE(store.add_retained_usage(late));
+    ASSERT_TRUE(store.add_retained_usage(late));
+    rolled.value = 12;
+    ASSERT_TRUE(store.retain_workspace_usage(set, {rolled}));
+    const auto points = store.retained_usage(customer->id, 0, 86'400'000);
+    ASSERT_TRUE(points);
+    double rollup = 0, added = 0;
+    for (const auto& point : *points) {
+        (point.source == "rollup" ? rollup : added) += point.value;
+    }
+    EXPECT_EQ(rollup, 12) << "a repeated rollup replaces the first";
+    EXPECT_EQ(added, 10) << "late values are kept and add up";
+    const lake::control::RetainedUsageSet other{.workspace_id = workspace->id,
+                                                .customer_id = lake::control::new_uuid_v4(),
+                                                .from_ms = 0,
+                                                .to_ms = 1};
+    EXPECT_EQ(store.retain_workspace_usage(other, {}).error().code, "not_found")
+        << "a workspace is retained only under its own account";
 }

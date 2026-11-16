@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Regions in the web app (lake#757): read from `server_info`, nothing when the Lake has no region.
  * `npm test`; the build runs it. */
 import { test } from "node:test";
@@ -7,8 +9,8 @@ import { accountRegionSentence, currentRegion, orderSheetLinks, otherRegions, re
 const production = {
   region: { name: "swedencentral", label: "Europe" },
   regions: [
-    { name: "swedencentral", label: "Europe", host: "eu.lake.live" },
-    { name: "eastus", label: "United States", host: "us.lake.live" },
+    { name: "swedencentral", label: "Europe", host: "eu.lake.example.com" },
+    { name: "eastus", label: "United States", host: "us.lake.example.com" },
   ],
 };
 const nonprod = { region: null, regions: [] };
@@ -22,9 +24,9 @@ test("the current region is server_info's region, and nothing on a Lake without 
 });
 
 test("the other regions are every region but this one, in order", () => {
-  assert.deepEqual(otherRegions(production), [{ name: "eastus", label: "United States", host: "us.lake.live" }]);
+  assert.deepEqual(otherRegions(production), [{ name: "eastus", label: "United States", host: "us.lake.example.com" }]);
   assert.deepEqual(otherRegions({ ...production, region: { name: "eastus", label: "United States" } }), [
-    { name: "swedencentral", label: "Europe", host: "eu.lake.live" },
+    { name: "swedencentral", label: "Europe", host: "eu.lake.example.com" },
   ]);
   assert.deepEqual(otherRegions(nonprod), []);
   // A list without a region of our own offers nothing: there is no "here" to leave.
@@ -33,7 +35,7 @@ test("the other regions are every region but this one, in order", () => {
 });
 
 test("another region is its own host's front page", () => {
-  assert.equal(regionUrl({ name: "eastus", label: "United States", host: "us.lake.live" }), "https://us.lake.live/");
+  assert.equal(regionUrl({ name: "eastus", label: "United States", host: "us.lake.example.com" }), "https://us.lake.example.com/");
 });
 
 test("sign-in and sign-up say which region the account is in, and nothing without a region", () => {
@@ -52,18 +54,18 @@ test("a workspace shows the region of the Lake it was created on", () => {
 });
 
 test("the region selector leads back to the order sheet where there is one (lake#831)", () => {
-  assert.deepEqual(orderSheetLinks({ ...production, order_sheet_url: "https://lake.live/" }), {
-    newSetup: "https://lake.live/",
-    onPrem: "https://lake.live/order/on-prem",
+  assert.deepEqual(orderSheetLinks({ ...production, order_sheet_url: "https://lake.example.com/" }), {
+    newSetup: "https://lake.example.com/",
+    onPrem: "https://lake.example.com/order/on-prem",
   });
   // A configured URL with a path still leads to the sheet at its origin.
-  assert.deepEqual(orderSheetLinks({ order_sheet_url: "https://lake.live/pricing" }), {
-    newSetup: "https://lake.live/",
-    onPrem: "https://lake.live/order/on-prem",
+  assert.deepEqual(orderSheetLinks({ order_sheet_url: "https://lake.example.com/pricing" }), {
+    newSetup: "https://lake.example.com/",
+    onPrem: "https://lake.example.com/order/on-prem",
   });
   assert.equal(orderSheetLinks({ ...production, order_sheet_url: null }), null);
   assert.equal(orderSheetLinks(production), null);
-  assert.equal(orderSheetLinks({ order_sheet_url: "http://lake.live/" }), null);
+  assert.equal(orderSheetLinks({ order_sheet_url: "http://lake.example.com/" }), null);
   assert.equal(orderSheetLinks({ order_sheet_url: "javascript:alert(1)" }), null);
   assert.equal(orderSheetLinks(undefined), null);
 });

@@ -1,6 +1,6 @@
 # Scoped Connection Credentials
 
-Lake issue [#731](https://github.com/oramasearch/lake/issues/731) gives one app-to-service
+Lake issue #731 gives one app-to-service
 connection its own revocable credential scope. It completes Lake's side of decision D4 in the
 operator's [secure-networking design](https://github.com/oramasearch/orama-operator/blob/dev/docs/infrastructure/secure-networking.md#credentials-on-connections-decision-d4).
 The operator owns native datastore enforcement; Lake owns the customer's desired scope, shows the
@@ -23,7 +23,7 @@ workspace-secret reference and requests rotation or removal.
 `access` is exactly `read` or `write`; `schema` is an optional nonempty name. A null scope declares
 network reachability without asking for a credential. Unknown fields and credential bytes are
 rejected. The per-connection role and its grants are the operator's work, beginning with Postgres in
-[orama-operator#469](https://github.com/oramasearch/orama-operator/issues/469). The service's owner
+orama-operator#469. The service's owner
 credential is not part of Lake's desired or observed row.
 
 ## What Lake Shows
@@ -73,4 +73,4 @@ contract and the operator issue together.
 
 Build with at most six jobs and run the focused and complete static and shared suites against a
 fresh local PostgreSQL database. The exact commands and counts for this change are recorded in
-[the proof record](../build/scoped-credentials-proof.md).
+the proof record.

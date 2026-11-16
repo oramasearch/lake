@@ -54,8 +54,9 @@ with a linked successor, optionally moving it to a FIDO2 or PIV hardware key
 liquid authenticates to Lake with a token, not a password.
 
 1. Open the account menu → **Tokens** → **New token**.
-2. Name it, and in **Capability scopes, comma separated** enter
-   `refs,find_missing,push,pull,upload_chunks,read_chunk` (the drawer offers them in one click).
+2. Name it, and in **Capability scopes, comma separated** press **Use these** beside the
+   *liquid and liquify* list, which fills in
+   `refs,find_missing,push,pull,upload_chunks,read_chunk,list_reviews,create_review,update_review,list_review_comments,create_review_comment,map_review_anchors,list_branch_protections`: clone, pull and push, and the reviews liquify opens and comments on.
 3. Create it and copy the secret; it is shown once.
 4. Export it in your shell: `export LIQUID_TOKEN=<the token>`.
 
@@ -75,7 +76,7 @@ lifetimes are covered in [Tokens and Keys](/docs/tokens).
 Open the repository on Lake and press **Clone**. The dialog's first block is:
 
 ```sh
-liquid clone https://lake.oramadev.net/v1/repositories/<repository id> analytics
+liquid clone https://lake.example.com/v1/repositories/<repository id> analytics
 cd analytics
 ```
 
@@ -105,8 +106,8 @@ liquid diff <change a> <change b>
 ## Push and Pull
 
 ```sh
-liquid push https://lake.oramadev.net/v1/repositories/<repository id>
-liquid pull https://lake.oramadev.net/v1/repositories/<repository id>
+liquid push https://lake.example.com/v1/repositories/<repository id>
+liquid pull https://lake.example.com/v1/repositories/<repository id>
 liquid refs
 ```
 
@@ -125,10 +126,10 @@ Push and pull need the network. Every other command works offline against the ch
 `liquid review` works on Lake's reviews for the repository named by `--lake <repository URL>`:
 
 ```sh
-liquid review list --lake https://lake.oramadev.net/v1/repositories/<repository id> --state open
-liquid review open <change id> --lake https://lake.oramadev.net/v1/repositories/<repository id>
-liquid review comment <review id> src/parse.cpp:42@<change id> "Handle an empty file here." --lake https://lake.oramadev.net/v1/repositories/<repository id>
-liquid review approve <review id> --lake https://lake.oramadev.net/v1/repositories/<repository id>
+liquid review list --lake https://lake.example.com/v1/repositories/<repository id> --state open
+liquid review open <change id> --lake https://lake.example.com/v1/repositories/<repository id>
+liquid review comment <review id> src/parse.cpp:42@<change id> "Handle an empty file here." --lake https://lake.example.com/v1/repositories/<repository id>
+liquid review approve <review id> --lake https://lake.example.com/v1/repositories/<repository id>
 ```
 
 `show`, `close`, `watch` and `protections` work the same way, and `--json` writes stable JSON. A

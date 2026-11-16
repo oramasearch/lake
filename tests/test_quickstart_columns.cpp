@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The quickstart's column rules (lake#1181, docs/api/quickstart.md#columns): each column's kind
 // from the engine's profile, the columns offered first, the training copy, and the engine's
 // refusals in plain words. Pure: no engine.
@@ -34,7 +36,7 @@ json profiled(const std::string& name,
             {"top_values", values}};
 }
 
-// Steve's dataset (lake#1181): a first name, a country, a date, and the rest of what files hold.
+// The reported dataset (lake#1181): a first name, a country, a date, and the rest of what files hold.
 json people_analysis() {
     return {{"columns",
              json::array({profiled("customer_id", "identifier", 60, {{"c-1", 1}, {"c-2", 1}}),

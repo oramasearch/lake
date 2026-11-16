@@ -1,43 +1,39 @@
 # Orders: the Apex Order Sheet
 
-lake#831. Steve, 2026-10-18: *"this picker here could actually be a sales order thing"*, *"this is
-basically an order sheet. Make it convenient to order"*, and *"this should be hooked into stripe and
-will deploy with the mgmt server (operator) upon successful purchase ... please allow a user to
-submit an order form for a larger order and skip paying if they want to ... (log it to controldb
-postgres and send an email to support@orama.com with resend vendor)"*.
+lake#831. The apex host can be an order sheet: every way to get Lake, paid through Stripe Checkout and
+provisioned by the Orama operator, or sent as an order form that is recorded in the control plane and
+emailed to support. It is **off by default** and sells nothing until an instance configures its
+offerings ([Configuration](#configuration)).
 
 The page itself is described in [`../ui/regions.md`](../ui/regions.md#the-order-sheet); the region
 choice it keeps is [`regions.md`](regions.md#the-apex-picker). Provisioning paid orders is the
-Orama operator's half: https://github.com/oramasearch/orama-operator/issues/634.
+Orama operator's half (orama-operator#634).
 
 ## What exists
 
-The apex host (`LAKE_APEX_HOST`, `lake.live`) shows every way to get Lake, with its price in USD:
+The apex host (`LAKE_APEX_HOST`) shows every way to get Lake that the configuration lists, with its
+price in USD. There are four kinds of option; an instance offers the shared one and any of the three
+paid offers, each with its own monthly fee and included usage credit:
 
-| Offer | Price (default) | Included usage credit | How it is ordered |
+| Offer | Price | Included usage credit | How it is ordered |
 |---|---|---|---|
 | Shared, in a region that runs today | Usage-based, at the published price list | — | Continue to the region's host, exactly as the picker did |
-| Private warehouse (`private_warehouse`): a dedicated warehouse on shared hardware, in a shared region | $1,000 / month | $400 (40%) | Stripe Checkout, or the order form |
-| Dedicated cluster (`dedicated_cluster`): a Kubernetes cluster on the provider and in the region the customer chooses | $5,000 / month | $2,000 (40%) | Stripe Checkout (providers the operator provisions), or the order form |
-| On-prem (`on_prem`): source available, full service (Metis), SOC 2 compliant; any provider or bare metal, any accelerators, any region, multi-region with geo-based load balancing and failover | From $10,000 / month | 40% of the fee | The order form only |
+| Private warehouse (`private_warehouse`): a dedicated warehouse on shared hardware, in a shared region | `monthly_usd` | `credit_percent` of the fee | Stripe Checkout, or the order form |
+| Dedicated cluster (`dedicated_cluster`): a Kubernetes cluster on the provider and in the region the customer chooses | `monthly_usd` | `credit_percent` of the fee | Stripe Checkout (providers the operator provisions), or the order form |
+| On-prem (`on_prem`): any provider or bare metal, any accelerators, any region | From `monthly_usd` (`starting_from`) | `credit_percent` of the fee | The order form only |
 
-Every offer says backups are included. Usage beyond the credit is billed at the published price
-list; how a bill applies the credit is in [billing.md](billing.md#order-sheet-subscriptions).
+Usage beyond the credit is billed at the published price list.
 
-**Your own domain, white-labelled.** Private Warehouse and every offer above it (Dedicated
-Cluster, On-Prem) list *"Your own domain, white-labelled (available on request)"* as a feature;
-the shared option does not (lake#1129, Steve, 2026-10-24). A customer on one of those offers can
-have their Lake serve their own brand at their own address (for example `data.example.com`)
-instead of `lake.live`. It is a line of plan data in each offer's `features`, not page copy, and it
+**Your own domain, white-labelled.** An offer can list *"Your own domain, white-labelled
+(available on request)"* as a feature (lake#1129). A customer on that offer can have their Lake
+serve their own brand at their own address (for example `data.example.com`). It is a line of plan data in each offer's `features`, not page copy, and it
 says *on request* because it is arranged with support, not self-serve: Lake has custom domains for
 **applications** today (`create_domain`), not yet for a whole warehouse. What a white-labelled
 warehouse still needs (the customer's domain and TLS on a zone they own, branding with no Orama or
-Lake marks, sign-in on their domain, the agent surfaces on their domain) is filed and linked from
-https://github.com/oramasearch/lake/issues/1129. Drop *"(available on request)"* only when that is
-delivered.
+Lake marks, sign-in on their domain, the agent surfaces on their domain) is tracked in lake#1129.
 
 **Two paths, one table.** Every order is a row of `cloud_orders` in lake's control-plane
-PostgreSQL (orders are multitenancy and billing, decision 56; nothing from a workspace is in it):
+PostgreSQL (orders are multitenancy and billing; nothing from a workspace is in it):
 
 - **Pay** (private warehouse, dedicated cluster in a `checkout` region of a `checkout` provider): the order is recorded
   `pending_payment`, lake creates a Stripe Checkout Session and sends the person there. Stripe's
@@ -66,12 +62,13 @@ apex path is the sheet, exactly as every path was the picker.
 | `POST` any other path with `region=<name>` | `302` to `https://<region host><path>?<query>` with the `lake_region` cookie, unchanged |
 | `GET /order/private-warehouse`, `/order/dedicated-cluster`, `/order/on-prem` | The offer's order form; `?location=<provider>:<region>`, a shared region name, or `other` preselects where it runs |
 | `GET /order/price-list` | The published price list in force this month (the `billing_plans` publication `price_list_for` picks), or a sentence when none is published |
-| `POST /order` (`application/x-www-form-urlencoded`, at most 32 KiB) | Fields `offer`, `path` (`checkout` or `order_form`), `location`, `contact_name`, `contact_email`, `company`, `details`, `quantity` and the hidden `website`. Pay: `302` to Stripe Checkout. Order form: `200` with the order id and the status link. Invalid: `400` with the form and each field's error. `413` over 32 KiB, `429` over the limits, `503` when the order cannot be recorded or the checkout cannot start (the order is then `cancelled` and the form offers the order form path) |
+| `POST /order` (`application/x-www-form-urlencoded`, at most 32 KiB) | Fields `offer`, `path` (`checkout` or `order_form`), `location`, `contact_name`, `contact_email`, `company`, `details`, `quantity` and the hidden `website`. Pay: `302` to Stripe Checkout. Order form: `200` with the order id and the status link; the contact email is sent a confirmation link (lake#1000). Invalid: `400` with the form and each field's error. `413` over 32 KiB, `429` over the limits, `503` when the order cannot be recorded or the checkout cannot start (the order is then `cancelled` and the form offers the order form path) |
+| `GET /orders/<id>/confirm?token=<token>`, `POST /orders/<id>/confirm` (`token` in the form) | An order form's confirmation (lake#1000, [email](#email)): `GET` shows one button, `POST` confirms the contact email and sends the order to support. `404` for a token that does not match, `410` after 7 days |
 | `GET /orders/<id>?token=<token>` | The order's status: its state in words, what was ordered, and the host once `ready`. `404` for a token that does not match. `checkout=cancelled` (Stripe's cancel URL) says the payment was not completed |
 
 `/billing/stripe/webhook` is not on the apex: Stripe's endpoint is the regional host of the Lake
-that serves the apex (for production, `https://eu.lake.live/billing/stripe/webhook` while
-`LAKE_APEX_HOST` is set on the Europe member), because that Lake's PostgreSQL holds the orders.
+that serves the apex (for example `https://eu.lake.example.com/billing/stripe/webhook` when
+`LAKE_APEX_HOST` is set on the Europe Lake), because that Lake's PostgreSQL holds the orders.
 
 ### Validation
 
@@ -99,15 +96,25 @@ The apex is anonymous, so the form cannot flood support:
   process. Checkout orders and order forms have separate in-all caps (lake#838), so order forms,
   which anyone can send, can never use up the cap a paying customer is counted against. Past a
   limit: `429`, nothing recorded.
-- **The address** ([client addresses](../deployment/client-addresses.md), lake#1083), from a
-  trusted proxy (`LAKE_TRUSTED_PROXY_CIDRS`), is `X-Real-IP`, which the ingress (ingress-nginx)
+- **The address** ([client addresses](../deployment/client-addresses.md), lake#1083, lake#1132,
+  lake#1006), from the proxy listener (`LAKE_PROXY_PORT`) or a trusted proxy
+  (`LAKE_TRUSTED_PROXY_CIDRS`), is `X-Real-IP`, which the ingress (ingress-nginx)
   always sets itself, overwriting any a sender wrote; else the last `X-Forwarded-For` hop (the one
   the nearest proxy appended); else the proxy's own address. From any other peer it is the peer's
   address, whatever headers it sent. Lake never reads `CF-Connecting-IP` or the first
   `X-Forwarded-For` hop: a sender that reaches the ingress without passing Cloudflare could write
-  either and land in a fresh bucket with each request (lake#838). Which client address to trust is
-  the ingress's decision: until it trusts Cloudflare's header from Cloudflare's ranges (https://github.com/oramasearch/orama-operator/issues/719),
+  either and land in a fresh bucket with each request (lake#838). Hosted code (a workspace's app,
+  service or Zetta) may reach lake's main port directly, past the ingress (lake#1006): with
+  the proxy listener on, the main port believes no peer, so such a caller is counted on its own pod
+  address whatever it sends, and cannot spend the in-all budget by naming new addresses
+  (`OrdersApex.ForwardingHeadersFromAnUntrustedPeerNeverMakeAFreshBucket`). The operator renders
+  the listener (orama-operator#961); until it does, the private
+  ranges are believed on the main port and the per-recipient limits below still bound the mail
+  such a caller can cause. Which client address to trust is
+  the ingress's decision: until it trusts Cloudflare's header from Cloudflare's ranges (orama-operator#719),
   visitors behind one Cloudflare edge share a bucket.
+- **Per recipient** (lake#1000): at most three order forms an address a day and twenty a domain
+  an hour, and each mails its address only a confirmation ([email](#email)).
 - **Honeypot**: the form has a field named `website` that is off-screen and `aria-hidden`; people
   never fill it. A form that fills it is answered with a confirmation and nothing is recorded or
   sent (`lake_cloud_orders_refused_total{reason="honeypot"}`).
@@ -116,75 +123,77 @@ The apex is anonymous, so the form cannot flood support:
 
 ## Configuration
 
-One source for offers, prices, credit, providers and regions: `default_order_sheet_json()` in
-`src/api/orders.cpp`, the defaults below, with **`LAKE_ORDER_SHEET`** merged over it as an RFC 7386
-JSON merge patch, read and validated once at startup (`order_sheet_from_environment`). An object
-key replaces or merges; an array replaces the default's array whole. Nothing on the page is copy
-outside it.
+One source for offers, prices, credit, providers and regions: **`LAKE_ORDER_SHEET`**, merged as an
+RFC 7386 JSON merge patch over the default (`default_order_sheet_json` in `src/api/orders.cpp`),
+read and validated once at startup (`order_sheet_from_environment`). An object key replaces or
+merges; an array replaces the default's array whole. Nothing on the page is copy outside it.
+
+**The default is off and sells nothing**: no offers, no providers, no trust claims, no promise.
+lake carries no offer or price of its own; an instance that sells through its apex sets them all.
+An offer left out of `offers` is not sold.
+
+```json
+{
+  "enabled": false,
+  "url": "",
+  "currency": "USD",
+  "shared": {"title": "Shared", "summary": "…", "features": [], "price_list_url": "",
+             "promise": "", "show_promise": false},
+  "offers": {},
+  "providers": [],
+  "trust": [],
+  "limits": {"orders_per_client_per_hour": 5, "orders_per_hour": 60,
+             "orders_per_email_per_day": 3, "orders_per_domain_per_hour": 20}
+}
+```
+
+An example `LAKE_ORDER_SHEET` that sells two offers (illustrative values):
 
 ```json
 {
   "enabled": true,
-  "url": "",
-  "currency": "USD",
-  "shared": {"title": "Shared", "summary": "…", "features": ["…", "Backups included", "…"],
-             "price_list_url": "", "promise": "Train and serve a model in 5 minutes for under $5",
-             "show_promise": false},
+  "shared": {"features": ["No monthly fee: usage-based", "Backups included"]},
   "offers": {
-    "private_warehouse": {"title": "Private Warehouse", "monthly_usd": 1000, "credit_percent": 40,
-                          "checkout": true, "starting_from": false, "summary": "…", "features": ["…"]},
-    "dedicated_cluster": {"title": "Dedicated Cluster", "monthly_usd": 5000, "credit_percent": 40,
-                          "checkout": true, …},
-    "on_prem": {"title": "On-Prem", "monthly_usd": 10000, "credit_percent": 40, "checkout": false,
-                "starting_from": true, …}
+    "private_warehouse": {"title": "Private Warehouse", "summary": "A dedicated warehouse on shared hardware.",
+                          "features": ["Backups included"], "monthly_usd": 100, "credit_percent": 40,
+                          "checkout": true},
+    "dedicated_cluster": {"title": "Dedicated Cluster", "summary": "A Kubernetes cluster of your own.",
+                          "features": ["Backups included"], "monthly_usd": 500, "credit_percent": 40,
+                          "checkout": true}
   },
   "providers": [
     {"id": "azure", "label": "Microsoft Azure", "checkout": true, "regions": [
-      {"id": "eastus", "label": "United States (Virginia)"}, {"id": "westus2", …},
-      {"id": "swedencentral", …}, {"id": "westeurope", …}, {"id": "canadacentral", "label": "Canada (Toronto)"},
-      {"id": "japaneast", "label": "Asia (Tokyo)", "checkout": false},
-      {"id": "southeastasia", "label": "Asia (Singapore)", "checkout": false}]},
-    {"id": "aws", "label": "Amazon Web Services", "checkout": false, "regions": […]},
-    {"id": "gcp", "label": "Google Cloud", "checkout": false, "regions": […]}
+      {"id": "eastus", "label": "United States (Virginia)"},
+      {"id": "japaneast", "label": "Asia (Tokyo)", "checkout": false}]}
   ],
-  "trust": [
-    {"text": "SOC 2 compliant: ask for the report", "url": "mailto:support@orama.com?subject=SOC%202%20report"},
-    {"text": "Source available, with access to the source code", "url": "mailto:support@orama.com?subject=Source%20access"}
-  ],
-  "limits": {"orders_per_client_per_hour": 5, "orders_per_hour": 60}
+  "trust": [{"text": "SOC 2 report on request", "url": "mailto:support@example.com?subject=SOC%202%20report"}]
 }
 ```
 
-- **`enabled`** `false`: the apex is the plain region picker of lake#757 and `/order…` paths are
-  picker paths again.
+- **`enabled`** `false` (the default): the apex is the plain region picker of lake#757 and
+  `/order…` paths are picker paths again.
+- **`offers.<id>`**: `title`, `summary` and `monthly_usd` (whole dollars, 1 to 100,000,000) are
+  required; `features`, `credit_percent` (0 to 100), `starting_from` and `checkout` are optional.
+  `on_prem` cannot be `checkout`.
 - **`url`**: where the sheet is, for the web app's "New setup…" and "On-prem…" entries
   (`server_info.order_sheet_url`). Empty: `https://<LAKE_APEX_HOST>/` on the Lake that serves the
-  apex, and none elsewhere. Set it (`{"url":"https://lake.live/"}`) on the other regional Lakes so
-  their web app links back to the sheet.
-- **`providers[].checkout`**: whether the operator provisions on that provider. Only Azure is
-  `true`, because the operator creates clusters on Azure only today; the others are ordered through
-  the order form until it supports them, and the form marks them "(order form)".
+  apex, and none elsewhere. Set it (`{"url":"https://lake.example.com/"}`) on the other regional
+  Lakes so their web app links back to the sheet.
+- **`providers`**: required (at least one) when `dedicated_cluster` is offered.
+  **`providers[].checkout`** is whether the operator provisions on that provider; the others are
+  ordered through the order form, which marks them "(order form)".
 - **`providers[].regions[].checkout`**: whether the operator can create a cluster in that region;
   it defaults to the provider's value and cannot be `true` on a provider whose `checkout` is
-  `false` (startup stops naming the field). The operator reaches only the Azure regions in its
-  `cloudRegionLocations` (orama-operator#635, `internal/controller/lake_regions.go`: canadacentral,
-  centralus, eastus, eastus2, francecentral, germanywestcentral, northeurope, southcentralus,
-  swedencentral, uksouth, westeurope, westus, westus2, westus3). So the default lists Tokyo
-  (`japaneast`) and Singapore (`southeastasia`) with `checkout: false`: they appear in the form as
-  "(order form: we'll confirm availability)", and paying for them is refused with "This region is
-  ordered with the order form: we will confirm availability." before anything is recorded or sent
-  to Stripe. When the operator reaches a new region, set its `checkout` to `true` (or drop the
-  override) in the same release.
-- **`shared.show_promise`** is **off by default**. The line *"Train and serve a model in 5 minutes
-  for under $5"* is shown only while the test that backs it passes and is recorded in
-  [billing.md](billing.md#the-shared-tiers-promise); it is not recorded yet, so do not switch it on.
-- **`trust`**: each claim is shown only with a link (`https` or `mailto`) that backs it. Change the
-  links to the published report and the source-access terms when they exist; only what is true at
-  launch is claimed.
-- Prices are whole dollars, USD only (the price list and Stripe bill USD). The prices and the 40%
-  credit are the call's figures and are among the decisions still open in lake#831 (whether they
-  become price-list plans first; the credit's percentage, expiry and on-prem meaning; the region
-  list per provider; multi-region pricing).
+  `false` (startup stops naming the field). The operator reaches only the regions in its
+  `cloudRegionLocations` (orama-operator#635, `internal/controller/lake_regions.go`); list any
+  other region with `checkout: false`. It appears in the form as "(order form: we'll confirm
+  availability)", and paying for it is refused with "This region is ordered with the order form: we
+  will confirm availability." before anything is recorded or sent to Stripe.
+- **`shared.promise`** and **`shared.show_promise`**: an optional lead line for the shared option,
+  shown only when `show_promise` is `true` (startup refuses `true` with an empty promise). Show it
+  only while it is true.
+- **`trust`**: each claim is shown only with a link (`https` or `mailto`) that backs it.
+- Prices are whole dollars, USD only (the price list and Stripe bill USD).
 
 An invalid value stops startup with exit code 2 and one line naming the field, for example
 `lake: LAKE_ORDER_SHEET.offers.private_warehouse.monthly_usd must be between 1 and 100000000`.
@@ -252,15 +261,44 @@ words, sent from `LAKE_BRAND_EMAIL_FROM` with the brand's support address as Rep
 ([`../serving/brand.md`](../serving/brand.md#where-it-is-read), lake#1135). Lake's own brand sends
 exactly the email below.
 
+**An order form's address is confirmed first** (lake#1000, migration
+`0107_order_email_confirmation`). Anyone can type any address into the anonymous form, so until the
+person who sent it shows they read that address, lake sends it exactly one email, the
+confirmation, and tells support nothing:
+
+- The confirmation says only that an order form named the address, the order id, and the link
+  `https://<apex>/orders/<id>/confirm?token=<token>` (HMAC-SHA-256 under `LAKE_INSTANCE_KEK` over
+  the id, distinct from the status token, `order_confirmation_token`). No offer, price, field or
+  free text. Its idempotency key ends `-confirm-customer`, and it is recorded as
+  `customer_emailed_state = confirm`, so it goes once.
+- `GET` of the link shows one button; only its `POST` back to `/orders/<id>/confirm` confirms, so a
+  mail scanner that follows links confirms nothing. The link works for 7 days after the order
+  (`order_confirmation_max_age_seconds`); later the page says it expired (410) and nothing is
+  sent. A wrong token is a 404.
+- Confirming sets `contact_email_confirmed_at`, records one `submitted` to `submitted` event
+  (`contact email confirmed`) in the order's history and audit, and from then on the table below
+  applies: support gets every field (with `Email confirmed:`), the customer its copy.
+- **A checkout order needs no confirmation.** All its mail (paid, ready, failed) follows a payment
+  Stripe Checkout took from the person at the address lake handed Stripe, who sends its own
+  receipt there; a stranger cannot cause it without paying.
+- **Per-recipient limits**, whoever sends: at most `orders_per_email_per_day` order forms (default
+  3) may name one address (compared without case) in 24 hours, and `orders_per_domain_per_hour`
+  (default 20) one domain in an hour (`limits` in `LAKE_ORDER_SHEET`). Past either: `429`, nothing
+  recorded or sent (`lake_cloud_orders_refused_total{reason="recipient"|"domain"}`). They are
+  counted from `cloud_orders` in the control plane, so every replica sees the same; two orders sent
+  at the same instant may both pass. With the per-client and in-all limits above, they bound the
+  mail anyone can make lake send to an address to three confirmations a day.
+
 | State | Support (`LAKE_SUPPORT_EMAIL`) | Customer (the contact email) |
 |---|---|---|
+| `submitted`, not confirmed | — | The confirmation link only |
 | `submitted` | Every field and the order id; reply-to the customer | A copy, with the status link |
 | `paid` | Every field and the order id | Payment received, with the status link |
 | `ready` | — | Ready, with the host and the status link |
 | `failed` | Every field, the order id and the failure reason | A problem, support has been told |
 
 **The customer's copy carries nothing the sender typed.** It goes to whatever address was typed into
-an anonymous form, so it must not relay a stranger's words from `orders@lake.live`: no name, company,
+an anonymous form, so it must not relay a stranger's words from the Lake's sender: no name, company,
 details or failure reason, and no greeting with the name. It has Lake's own wording, the offer, where
 it runs (the configuration's labels, or "Not listed: as described"), the quantity, the price and
 credit, the order id, the status link, and the host once `ready`. Support's email keeps every field,
@@ -275,13 +313,14 @@ each outcome. A failure is retried after 1, 2, 4 … minutes, at most an hour ap
 passes through a state quickly (paid, then ready before the pass) is emailed about the state it is
 in.
 
-**Without the key** the order is still recorded and the page says it was received; the order's
-`email_error` says `LAKE_RESEND_API_KEY is not set`, a `cloud_order_email_waiting` line is logged,
+**Without the key, the sender or the support address** the order is still recorded and the page says it was received; the order's
+`email_error` names the missing variable (for example `LAKE_RESEND_API_KEY is not set`), a `cloud_order_email_waiting` line is logged,
 and the pass logs `cloud_order_email_disabled` once. The emails stay due and go out on the first
-pass after lake restarts with the key.
+pass after lake restarts with all three.
 
-The sender is `LAKE_RESEND_FROM` (default `Lake <orders@lake.live>`), whose domain must be verified
-in Resend before anything is delivered.
+The sender is `LAKE_RESEND_FROM` (for example `Lake <orders@example.com>`, no default), whose domain
+must be verified in Resend before anything is delivered. Support's copy goes to `LAKE_SUPPORT_EMAIL`
+(no default).
 
 ## Status links
 
@@ -309,7 +348,7 @@ Lake writes every column; the operator reads `paid` rows and writes only `state`
 `failure_reason`, `claimed_by`, `claimed_at` and `cloud_order_events` rows. The trigger keeps
 `updated_at` on every write and announces a `paid` order on the `lake_cloud_orders` channel.
 
-## Recurring entitlement (LSR-105, lake#972)
+## Recurring entitlement (lake#972)
 
 Migration `0097_cloud_order_entitlements` keeps each checkout order's unique Stripe subscription
 and customer, `subscription_status`, `paid_through`, `entitlement_access_until`,
@@ -359,8 +398,7 @@ schema again; a later migration that wants a new column in the view appends it a
 
 The unique index `cloud_orders_subscription_unique` on `stripe_subscription_id` makes a subscription
 belong to one order. Creating it fails, and with it the whole schema apply, if two existing orders
-already share a subscription id; such rows must be corrected first. On the existing Lakes every order
-is test data.
+already share a subscription id; such rows must be corrected first.
 
 | Column | Values |
 |---|---|
@@ -393,7 +431,7 @@ pre-Checkout delivery and invalid signatures. Stripe's field and event contracts
 ## Metrics
 
 `lake_cloud_orders_total{offer,path}` (orders recorded), `lake_cloud_orders_refused_total{reason}`
-(`honeypot`, `rate`, `size`) and `lake_cloud_order_emails_total{recipient,outcome}` (`sent`,
+(`honeypot`, `rate`, `size`, `recipient`, `domain`) and `lake_cloud_order_emails_total{recipient,outcome}` (`sent`,
 `failed`); [telemetry.md](../serving/telemetry.md).
 
 ## Not yet
@@ -402,19 +440,15 @@ pre-Checkout delivery and invalid signatures. Stripe's field and event contracts
   takes it forward from the email.
 - **A signed-in customer's own clusters in the picker** needs one identity across regions (lake#758).
 - **The credit on the monthly bill** (the credit applied first, the rest as usage lines) is not
-  built: [billing.md](billing.md#order-sheet-subscriptions).
-- **The 5-minute promise** stays off until its test is recorded.
-- **A restore rehearsed on each tier** (orama-operator#127) backs the backups line.
-- **Real keys**: Stripe live (lake#754) and a Resend key with a verified sending domain are
-  platform secrets still to be set ([../deployment/resend.md](../deployment/resend.md),
-  [../deployment/stripe.md](../deployment/stripe.md)).
+  built: an order is not yet linked to a lake account (lake#758, lake#832).
+- **A restore rehearsed on each tier** (orama-operator#127) backs a backups line.
 - `organization_id` is a nullable column for lake#832 (orders and servers belonging to
   organizations); the apex is anonymous and never sets it today.
 
 ## How to verify
 
-- `ctest --test-dir build -R 'Orders|Resend'` runs `tests/test_orders.cpp`: the default and the
-  merge patch, every startup error, the form's checks for each offer and path, the status token,
+- `ctest --test-dir build -R 'Orders|Resend'` runs `tests/test_orders.cpp`: the empty default and the
+  merge patch over an example sheet, every startup error, the form's checks for each offer and path, the status token,
   the rate limit, who is emailed about which state and what the emails say, the Resend client
   against a test double for HTTP (headers, body, idempotency key, refusals), the Checkout request
   with each offer's Lake product and a missing product's message,
@@ -422,12 +456,17 @@ pre-Checkout delivery and invalid signatures. Stripe's field and event contracts
   the memory store and in PostgreSQL (with orama-operator#635's own statements), and over HTTP the
   sheet, an order form recorded and emailed, a paid order through Checkout, the webhook and
   `ready`, a failed checkout, the honeypot, the rate limit, the size limit, a missing Resend key and
-  a retried email.
+  a retried email; the confirmation (lake#1000: `OrdersEmail.WhoIsToldAboutWhichState`,
+  `OrdersEmail.TheCustomersCopyCarriesNothingTheSenderTyped`, the store contract's confirmation and
+  recipient counts, `OrdersApex.AnOrderFormIsRecordedAndEmailedAndNeverProvisioned` through the
+  link, `OrdersApex.OneAddressIsMailedAtMostThreeConfirmationsADay`,
+  `OrdersConfig.PerRecipientLimitsAreConfigurable`).
 - By hand, with a local Lake (the apex host set to the loopback address so a browser can open it):
 
   ```
   LAKE_REGION=swedencentral LAKE_APEX_HOST=127.0.0.1 \
-  LAKE_REGIONS='[{"name":"swedencentral","label":"Europe","host":"eu.lake.live","latitude":"60.67488","longitude":"17.14127"},{"name":"eastus","label":"United States","host":"us.lake.live","latitude":"37.3719","longitude":"-79.8164"}]' \
+  LAKE_REGIONS='[{"name":"swedencentral","label":"Europe","host":"eu.lake.example.com","latitude":"60.67488","longitude":"17.14127"},{"name":"eastus","label":"United States","host":"us.lake.example.com","latitude":"37.3719","longitude":"-79.8164"}]' \
+  LAKE_ORDER_SHEET="$(cat my-order-sheet.json)" \
   ./build/lake --memory-store --listen 127.0.0.1:4900
   open http://127.0.0.1:4900/
   curl -s -d 'offer=on_prem&path=order_form&contact_name=Ada&contact_email=ada%40example.com&details=Bare+metal' \
@@ -437,7 +476,7 @@ pre-Checkout delivery and invalid signatures. Stripe's field and event contracts
 ## How to change it
 
 - Prices, credit, offers' words, providers, regions, trust links and limits: `LAKE_ORDER_SHEET`
-  on the Lake, or the default in `src/api/orders.cpp` with this page.
+  on the Lake. The default in `src/api/orders.cpp` stays empty.
 - The pages: `web_ui_order_sheet`, `web_ui_order_form`, `web_ui_order_received`,
   `web_ui_order_status` and `web_ui_price_list` in `src/api/web_ui.cpp`; styles `.order-*` in
   `src/api/web_ui_styles.inc`.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Data → MCP Connections (lake#652, src/pages/mcp/logic.ts): the "Try it" form a tool's own JSON
  * Schema makes and the arguments its values make, the prefix shown while a name is typed, the
@@ -103,7 +105,7 @@ test("statuses, calls and answers read in words", () => {
     assert.equal(resultText({content : [], structured_content : {id : "T-1"}}), "{\n  \"id\": \"T-1\"\n}");
 });
 
-test("the re-export switch says who can then call the tools (decision 60)", () => {
+test("the re-export switch says who can then call the tools", () => {
     const words = exportWarning("Ticket Desk");
     assert.match(words, /Anyone who may call Lake's tools in this workspace/);
     assert.match(words, /Ticket Desk/);

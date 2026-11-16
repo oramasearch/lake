@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+
 """Writes src/control/time_zones.cpp: the IANA time zone names lake accepts for a schedule (lake#586).
 
 A schedule's time zone becomes a Kubernetes CronJob's spec.timeZone, which Kubernetes refuses

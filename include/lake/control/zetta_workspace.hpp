@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <cstddef>
@@ -9,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <liquid/runtime.hpp>
 #include <nlohmann/json.hpp>
@@ -18,6 +21,8 @@
 
 namespace lake::control {
 
+class AgentBusCredentials;
+
 // Installs the egress allowlist zetta's client consults for every connection lake makes to a Zetta
 // (the bus and each workspace Zetta). zetta v0.5.0's client refuses all but loopback until one is
 // installed (lake#1097); the operator renders the list as ZETTA_EGRESS_ALLOW, in zetta's syntax
@@ -25,7 +30,7 @@ namespace lake::control {
 // installed, or nullopt.
 std::optional<std::string> install_zetta_egress_policy(std::string_view allow);
 
-// A customer's managed services (docs/control-plane/services.md, liquid-bridge decision 46): Zetta
+// A customer's managed services (docs/control-plane/services.md): Zetta
 // and Postgres clusters that lake records in its control Postgres and the Orama operator runs.
 // The operator mounts each Ready service's connection into lake as `<service_dir>/<slug>.json`.
 // The customer's workspace, the Zetta cluster Design, Train and Ship delegate to
@@ -33,6 +38,9 @@ std::optional<std::string> install_zetta_egress_policy(std::string_view allow);
 struct WorkspaceConfig {
     std::string service_dir;          // LAKE_SERVICE_DIR
     std::size_t max_per_customer = 0; // LAKE_SERVICES_PER_CUSTOMER; 0 (the default) means no limit
+    // LAKE_WORKSPACES_PER_CUSTOMER: live workspaces per customer (lake#987); 0 (the default) means
+    // no limit.
+    std::size_t max_workspaces_per_customer = 0;
     // The Agent Library's running agents (LAKE_AGENT_ENDPOINTS, set by the operator), keyed by
     // repository name (agent_library.hpp).
     std::map<std::string, std::string> agent_endpoints;
@@ -51,6 +59,11 @@ struct WorkspaceConfig {
     // agent in LAKE_AGENT_BUS_DIR, named by its key, which the operator mounts into that agent
     // alone. Never the service token, which user-created agents on agent-runtime also hold.
     std::map<std::string, std::string> agent_bus_tokens;
+    // The same credentials read from LAKE_AGENT_BUS_DIR and re-read whenever the directory
+    // changes (control/agent_task_proxy.hpp, lake#871), so a workspace's bound credential is
+    // picked up or dropped without restarting lake. When set, it is used instead of
+    // agent_bus_tokens.
+    std::shared_ptr<AgentBusCredentials> agent_bus_credentials;
     std::map<std::string, int> agent_lease_seconds;
 
     bool configured() const {
@@ -63,7 +76,7 @@ struct WorkspaceConfig {
 std::map<std::string, std::string> read_agent_bus_tokens(const std::string& directory);
 
 // `ws-` followed by the first 12 hexadecimal digits of the customer id; empty when the id is not
-// a UUID. The slug of a customer's first workspace, which decision 45 created clusters under.
+// a UUID. The slug of a customer's first workspace, which earlier versions created clusters under.
 std::string workspace_slug(std::string_view customer_id);
 
 // A service as the API and the pages show it: never its credential.
@@ -105,6 +118,30 @@ struct WorkspaceState {
     nlohmann::json to_json() const;
 };
 
+// The per-call dataset scope (lake#1055, zetta#1515, docs/api/agent-launches.md#a-runs-dataset-
+// work-area). Lake sends a dataset-confined credential's work area to the workspace Zetta as this
+// header, so the engine, which parses the call, refuses a read outside it. The header only ever
+// narrows what lake's own bearer may do there.
+inline constexpr std::string_view dataset_scope_header = "Zetta-Dataset-Scope";
+// The header's value for a work area (each `<database>/<name>`, as dataset_work_area answers):
+// the datasets joined by ", ", or empty for a work area of no dataset.
+std::string dataset_scope_header_value(const std::vector<std::string>& area);
+// The engine capabilities whose reads the workspace Zetta checks against the header: `sql`, a
+// SELECT of scoped tables (zetta#1515), and `list_datasets` and `get_dataset`, which answer only
+// the scope's datasets (zetta#1519). Under a scope the engine refuses every other capability,
+// because it does not declare what it reads; lake proves its own allowed calls of those
+// (get_agent, workspace_openapi, ...) itself and sends them without the header.
+bool engine_checks_dataset_scope(std::string_view capability);
+// Of those, the ones lake cannot prove inside the work area on its own (`sql`): on an engine that
+// does not enforce the header they are refused, never sent. The others (list_datasets,
+// get_dataset) lake also confines itself (registry.cpp), so on such an engine they are sent
+// without the header, as before.
+bool engine_must_enforce_dataset_scope(std::string_view capability);
+// Whether a workspace engine answer to a probe under a dataset scope shows that the engine
+// enforces the scope: a Zetta that knows the header refuses `server_info` under any scope with
+// `unauthorized` and `details.dataset_scope`, and one that does not know it answers the call.
+bool dataset_scope_refusal(const ZettaControlError& error);
+
 // One capability call on a workspace cluster. Injected so tests need no HTTP server.
 class WorkspaceCaller {
 public:
@@ -117,6 +154,20 @@ public:
          std::string capability,
          bool read,
          nlohmann::json input) = 0;
+    // The same call confined to `dataset_scope` (dataset_scope_header_value) by the
+    // Zetta-Dataset-Scope header. The default sends it without the header, as a Zetta that does
+    // not know the header would treat it; WorkspaceService probes before it relies on the engine.
+    virtual liquid::runtime::task<ZettaControlResult<nlohmann::json>>
+    scoped_call(std::string url,
+                std::string token,
+                std::string capability,
+                bool read,
+                nlohmann::json input,
+                std::string dataset_scope) {
+        static_cast<void>(dataset_scope);
+        return call(std::move(url), std::move(token), std::move(capability), read,
+                    std::move(input));
+    }
 };
 
 class ZettaWorkspaceCaller final : public WorkspaceCaller {
@@ -126,6 +177,22 @@ public:
                                                                    std::string capability,
                                                                    bool read,
                                                                    nlohmann::json input) override;
+    liquid::runtime::task<ZettaControlResult<nlohmann::json>>
+    scoped_call(std::string url,
+                std::string token,
+                std::string capability,
+                bool read,
+                nlohmann::json input,
+                std::string dataset_scope) override;
+
+private:
+    liquid::runtime::task<ZettaControlResult<nlohmann::json>>
+    send(std::string url,
+         std::string token,
+         std::string capability,
+         bool read,
+         nlohmann::json input,
+         std::optional<std::string> dataset_scope);
 };
 
 // Where a workspace's Zetta answers and the token lake presents to it (the operator's mounted
@@ -186,11 +253,20 @@ public:
     // its token, which cannot be undone. Refuses when no workspace is requested.
     liquid::runtime::task<ZettaControlResult<WorkspaceState>> withdraw(std::string customer_id);
     // Calls `capability` on the customer's own cluster. Refuses when the workspace is not ready.
+    // `dataset_scope`, for a call of a dataset-confined credential that the engine checks
+    // (engine_checks_dataset_scope), is the work area (each `<database>/<name>`). On a workspace
+    // Zetta seen to enforce the scope (dataset_scope_enforced) the call carries the
+    // Zetta-Dataset-Scope header and is never answered from or kept in the definitions cache; a
+    // scoped get_dataset must name its `database` (the engine refuses a bare name under a scope).
+    // On one that does not, a capability lake cannot prove itself
+    // (engine_must_enforce_dataset_scope) is refused `unauthorized` and never sent, and any other
+    // is sent as an unconfined call.
     liquid::runtime::task<ZettaControlResult<nlohmann::json>>
     call(std::string customer_id, std::string workspace_id, std::string capability,
          bool read, nlohmann::json input,
          std::function<void(std::chrono::nanoseconds)> observe = {},
-         bool cache_definitions = false);
+         bool cache_definitions = false,
+         std::optional<std::vector<std::string>> dataset_scope = std::nullopt);
     // The workspace Zetta's address and credential, under the readiness rule call() applies:
     // workspace_not_ready until the operator reports it Ready with an address and its token.
     Result<WorkspaceEndpoint> endpoint(const std::string& customer_id,
@@ -206,8 +282,18 @@ private:
         std::string workspace_id;
     };
 
+    struct ScopeProbe {
+        bool enforced = false;
+        std::chrono::steady_clock::time_point expires;
+    };
+
     WorkspaceState state_of(const std::string& customer_id,
                             const std::optional<ManagedService>& service) const;
+    // Whether the workspace Zetta at `endpoint` enforces Zetta-Dataset-Scope: a probe of
+    // `server_info` under a scope, remembered for a short time either way under `key` (the
+    // service, its generation and its address), so an upgrade is seen soon and a rollback too.
+    liquid::runtime::task<bool> dataset_scope_enforced(std::string key, std::string endpoint,
+                                                       std::string token);
     Result<std::optional<ManagedService>> default_service(const std::string& customer_id);
 
     WorkspaceConfig config_;
@@ -216,6 +302,7 @@ private:
     std::mutex registry_mutex_;
     std::map<std::string, RegistryEntry> registry_cache_;
     std::uint64_t registry_epoch_ = 0;
+    std::map<std::string, ScopeProbe> scope_probes_;
 };
 
 } // namespace lake::control

@@ -58,7 +58,7 @@ link. Ship links to Models everywhere.
 
 **How to verify.** Open each row of the table above and hover an abbreviated level for its full
 value. `tools/e2e/walkthrough.mjs` screenshots show the trail on every page it walks
-([../deployment/browser-testing.md](../deployment/browser-testing.md)).
+([../../tools/e2e/README.md](../../tools/e2e/README.md)).
 
 **How to change.** A new rail item gets its breadcrumb for free, and so does a screen that its
 list page `owns`. A new page with an entity in its URL calls `useTrail` (or one of the helpers

@@ -401,9 +401,7 @@ As: operator · Needs: billing on
 1. Open **Administration → Billing**.
 
 Expect:
-- Title "Price List", sub starting "One rate per kind of usage, and one per GPU class."; banner
-  "Metis Is Not on This List" with "Metis is enterprise software priced by Orama's sales team. This
-  list prices Orama Cloud usage only."
+- Title "Price List", sub starting "One rate per kind of usage, and one per GPU class."
 - Card label "In Force Since <Month YYYY>" (or "Not Published Yet" with "Nothing is published on
   this Lake yet. The rows start from Orama Cloud's list rates; publish them to start billing."),
   title "Rates".

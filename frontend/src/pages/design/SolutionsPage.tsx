@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Design → Solutions (lake#597): Orama's solutions catalogue, read-only, and the workspace's own
  * solutions, which a person creates, edits and deletes, each card marked "Orama" or "Yours". A
  * toolbar filters by who a solution is from, by whether Orama's runs here, and by a search; New

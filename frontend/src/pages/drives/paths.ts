@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Drives' pure helpers (lake#561, docs/ui/drives.md): drive paths and names, the upload plan for
  * a folder chosen or dropped with its subfolders, the move plan for items dragged onto a folder,
  * sorting, range selection and upload chunks. No React and no `@/` imports, so

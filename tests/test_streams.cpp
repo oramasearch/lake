@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <format>
@@ -19,6 +22,7 @@
 #include "postgres_fixture.hpp"
 #include "repository_test_support.hpp"
 #include "stream_fixture.hpp"
+#include "lake/control/agent_runs.hpp"
 
 namespace {
 using nlohmann::json;
@@ -187,6 +191,311 @@ TEST_F(Streams, TaskCredentialCannotSelectAnotherWorkspaceInTheSameSpace) {
     EXPECT_EQ(events->front().draft.details.value("acting_agent", ""), "agent-project");
 }
 
+// lake#918: a launch's credential, like a task's, acts only in the workspace it was made
+// for, whichever workspace a call names.
+TEST_F(Streams, LaunchCredentialCannotSelectAnotherWorkspaceInTheSameSpace) {
+    const auto second = workspace->add(store, customer, "second");
+    lake::control::NewAgentLaunch row;
+    row.customer_id = customer;
+    row.agent_id = "a-1";
+    row.agent_name = "Watcher";
+    row.mode = "job";
+    row.trigger = "manual";
+    row.scopes = {"list_streams"};
+    row.workspace_id = workspace->id;
+    const auto launch = store->create_agent_launch(row);
+    ASSERT_TRUE(launch) << launch.error().message;
+    context.session_credential = true;
+    context.operator_credential = false;
+    context.credential_kind = "agent_launch";
+    context.credential_session_id = "launch:" + launch->id;
+    context.scopes = {"list_streams"};
+    const auto refused = call("list_streams", {{"customer_id", customer}, {"workspace_id", second}});
+    EXPECT_EQ(refused.error.code, "unauthorized");
+    // The input check of lake#985 refuses the named workspace first, before the binding
+    // of the validated workspace (lake#1286) would; both refuse it.
+    EXPECT_NE(refused.error.message.find("acts only in its own workspace"), std::string::npos)
+        << refused.error.message;
+    // A schedule's credential naming a launch that is not its own matches no workspace.
+    context.credential_kind = "agent_schedule";
+    context.credential_session_id = "schedule:missing";
+    EXPECT_EQ(call("list_streams", {{"customer_id", customer}, {"workspace_id", workspace->id}})
+                  .error.code,
+              "unauthorized");
+}
+
+// lake#985: a task credential acts only in its task's account and workspace, also when
+// the input names a resource and no workspace: another account, another account's repository and
+// another workspace's repository of the same account are refused before any handler reads them.
+TEST_F(Streams, TaskCredentialReadsOnlyItsOwnWorkspacesResources) {
+    const auto elsewhere = store->create_repository(
+        {other, "elsewhere", "", "private", lake::test::repository_workspace(*store, other)});
+    ASSERT_TRUE(elsewhere) << elsewhere.error().message;
+    const auto second = workspace->add(store, customer, "second");
+    const auto sibling = store->create_repository({customer, "sibling", "", "private", second});
+    ASSERT_TRUE(sibling) << sibling.error().message;
+    const auto task = store->create_agent_task({.customer_id = customer,
+                                                .agent = "agent-ask-orama",
+                                                .kind = "test",
+                                                .workspace_id = workspace->id,
+                                                .scopes = {"list_streams", "get_repository"}});
+    ASSERT_TRUE(task);
+    context.credential_token_hash = lake::control::identity_crypto::sha256_hex("confined-claim");
+    ASSERT_TRUE(
+        store->claim_agent_task(task->id, "agent-ask-orama", context.credential_token_hash));
+    context.session_credential = true;
+    context.operator_credential = false;
+    context.credential_kind = "agent_task";
+    context.credential_session_id = "task:" + task->id;
+    context.scopes = {"list_streams", "get_repository"};
+
+    const auto other_account = call("list_streams", {{"customer_id", other}});
+    EXPECT_EQ(other_account.error.code, "unauthorized");
+    EXPECT_NE(other_account.error.message.find("its own workspace"), std::string::npos);
+    for (const std::string& repository : {elsewhere->id, sibling->id}) {
+        json args{{"repository_id", repository}};
+        const auto refused =
+            liquid::runtime::block_on(registry.call_async("get_repository", args, context));
+        ASSERT_TRUE(refused);
+        EXPECT_EQ(refused->error.code, "unauthorized") << repository;
+    }
+    EXPECT_TRUE(call("list_streams", {{"customer_id", customer}}).ok);
+}
+
+// lake#918: a launch's credential reaches only its own workspace through the object its
+// input names, whose workspace the handler derives (here a repository), and its `workspace_act`
+// runs no action its credential does not name. A public repository of another workspace is refused
+// too: the run stays in its own workspace.
+TEST_F(Streams, LaunchCredentialIsBoundThroughObjectsAndRunsNoUnnamedAction) {
+    const auto second = workspace->add(store, customer, "second");
+    const auto own = store->create_repository({customer, "own", "", "private", workspace->id});
+    const auto foreign = store->create_repository({customer, "foreign", "", "private", second});
+    const auto open = store->create_repository({customer, "open", "", "public", second});
+    ASSERT_TRUE(own && foreign && open);
+    lake::control::NewAgentLaunch row;
+    row.customer_id = customer;
+    row.agent_id = "a-1";
+    row.agent_name = "Watcher";
+    row.mode = "job";
+    row.trigger = "manual";
+    row.scopes = {"repository_tree", "workspace_act"};
+    row.created_by_taap_id = "taap:stream-owner";
+    row.workspace_id = workspace->id;
+    const auto launch = store->create_agent_launch(row);
+    ASSERT_TRUE(launch) << launch.error().message;
+    context.session_credential = true;
+    context.operator_credential = false;
+    context.credential_kind = "agent_launch";
+    context.credential_session_id = "launch:" + launch->id;
+    context.scopes = row.scopes;
+    const auto tree = [&](const std::string& id) {
+        context.request_id = lake::control::new_uuid_v4();
+        const auto result = liquid::runtime::block_on(
+            registry.call_async("repository_tree", {{"id", id}, {"ref", "main"}}, context));
+        EXPECT_TRUE(result);
+        return *result;
+    };
+    const auto refused = tree(foreign->id);
+    EXPECT_EQ(refused.error.code, "unauthorized");
+    EXPECT_NE(refused.error.message.find("own workspace"), std::string::npos) << refused.error.message;
+    const auto own_tree = tree(own->id);
+    EXPECT_NE(own_tree.error.code, "unauthorized") << own_tree.error.message;
+    const auto public_tree = tree(open->id);
+    EXPECT_EQ(public_tree.error.code, "unauthorized")
+        << "a public repository of another workspace is refused to the run's credential";
+
+    // workspace_act alone runs no action: the run's code proposes, a person confirms.
+    const auto acted = call("workspace_act",
+                            {{"customer_id", customer},
+                             {"capability", "delete_project"},
+                             {"input", {{"project", "p-1"}}}});
+    EXPECT_EQ(acted.error.code, "unauthorized");
+    EXPECT_NE(acted.error.message.find("does not grant the workspace action delete_project"),
+              std::string::npos)
+        << acted.error.message;
+}
+
+// lake#1055: an agent's dataset work area becomes scopes on its launch
+// credential, in one canonical form, and a malformed one confines the run to nothing.
+TEST(AgentWorkArea, ADatasetWorkAreaBecomesCanonicalScopes) {
+    using lake::control::dataset_work_area;
+    using lake::control::dataset_work_area_scopes;
+    const json agent{
+        {"skills", json::array({"search"})},
+        {"work_area",
+         {{"kind", "dataset"}, {"detail", "public/accounts, public.accounts, orders"}}},
+        {"definition", {{"source", "lake"}, {"repository_id", "repo-1"}, {"revision", "abc123"}}}};
+    const auto scopes = lake::control::agent_launch_scopes_for(agent);
+    const auto area = dataset_work_area(scopes);
+    ASSERT_TRUE(area);
+    EXPECT_EQ(*area, (std::vector<std::string>{"public/accounts", "datasets/orders"}));
+    const auto source = lake::control::agent_definition_source(scopes);
+    ASSERT_TRUE(source);
+    EXPECT_EQ(source->first, "repo-1");
+    EXPECT_EQ(source->second, "abc123");
+
+    for (const json& detail : {json(""), json("public/"), json("a/b/c"), json(7)}) {
+        const auto none = dataset_work_area(
+            dataset_work_area_scopes({{"work_area", {{"kind", "dataset"}, {"detail", detail}}}}));
+        ASSERT_TRUE(none) << detail.dump();
+        EXPECT_TRUE(none->empty()) << detail.dump() << " confines the run to no dataset";
+    }
+    EXPECT_FALSE(dataset_work_area(lake::control::agent_launch_scopes_for(
+        json{{"work_area", {{"kind", "workspace"}, {"detail", ""}}}})));
+}
+
+// lake#1055: a launch credential confined to a dataset work area reaches,
+// called directly as custom Python can, only that work area: another database's table of the same
+// name, an index search, a generic workspace call and another repository are refused before any
+// engine read.
+TEST_F(Streams, ADatasetConfinedLaunchCredentialStaysInItsWorkArea) {
+    lake::control::NewAgentLaunch row;
+    row.customer_id = customer;
+    row.agent_id = "a-1";
+    row.agent_name = "Searcher";
+    row.mode = "job";
+    row.trigger = "manual";
+    row.scopes = lake::control::agent_launch_scopes_for(
+        json{{"skills", json::array({"search"})},
+             {"work_area", {{"kind", "dataset"}, {"detail", "allowed_public/accounts"}}},
+             {"definition",
+              {{"source", "lake"}, {"repository_id", "definition-repo"}, {"revision", "r1"}}}});
+    row.workspace_id = workspace->id;
+    const auto launch = store->create_agent_launch(row);
+    ASSERT_TRUE(launch) << launch.error().message;
+    context.session_credential = true;
+    context.operator_credential = false;
+    context.credential_kind = "agent_launch";
+    context.credential_session_id = "launch:" + launch->id;
+    context.scopes = launch->scopes;
+    context.scopes.push_back("list_streams");
+    // No launch is granted queries today; this one is, to show the engine's scope decides them.
+    context.scopes.push_back("workspace_sql");
+
+    const auto refused = [&](const std::string& name, json args) {
+        args["customer_id"] = customer;
+        const auto result = call(name, std::move(args));
+        EXPECT_EQ(result.error.code, "unauthorized") << name;
+        EXPECT_NE(result.error.message.find("allowed_public/accounts"), std::string::npos)
+            << result.error.message;
+    };
+    refused("workspace_query",
+            {{"capability", "get_dataset"}, {"input", {{"dataset", "restricted/accounts"}}}});
+    refused("workspace_query",
+            {{"capability", "get_dataset"},
+             {"input", {{"dataset", "accounts"}, {"database", "restricted"}}}});
+    // A bare name is Lake's default database, never a table of that name elsewhere.
+    refused("workspace_query",
+            {{"capability", "get_dataset"}, {"input", {{"dataset", "accounts"}}}});
+    refused("workspace_query", {{"capability", "search"}, {"input", {{"query", "x"}}}});
+    // A query is the engine's to confine (zetta#1515); this one does not enforce the scope, so
+    // Lake does not send it.
+    refused("workspace_sql", {{"statement", "SELECT * FROM restricted.accounts"}});
+    EXPECT_TRUE(std::ranges::none_of(workspace->caller->calls,
+                                     [](const auto& sent) { return sent.first == "sql"; }));
+    refused("list_streams", json::object());
+    refused("repository_tree", {{"id", "definition-repo"}, {"ref", "main"}});
+}
+
+// lake#1055 (zetta#1515, zetta#1519): a dataset-confined launch's query, list_datasets and
+// get_dataset reach a workspace Zetta that enforces Zetta-Dataset-Scope carrying the launch's work
+// area; the other calls Lake proves inside on its own go without it, because the engine refuses
+// under a scope every capability that does not declare what it reads. A work area of no dataset
+// has nothing to query.
+TEST_F(Streams, ADatasetConfinedLaunchQueriesOnlyUnderTheEnginesDatasetScope) {
+    const auto confine = [&](const std::string& detail) {
+        lake::control::NewAgentLaunch row;
+        row.customer_id = customer;
+        row.agent_id = "a-1";
+        row.agent_name = "Analyst";
+        row.mode = "job";
+        row.trigger = "manual";
+        row.scopes = lake::control::agent_launch_scopes_for(
+            json{{"work_area", {{"kind", "dataset"}, {"detail", detail}}}});
+        row.workspace_id = workspace->id;
+        const auto launch = store->create_agent_launch(row);
+        EXPECT_TRUE(launch) << launch.error().message;
+        context.session_credential = true;
+        context.operator_credential = false;
+        context.credential_kind = "agent_launch";
+        context.credential_session_id = "launch:" + launch->id;
+        context.scopes = launch->scopes;
+        // No launch is granted queries today (no skill reads workspace_sql); this one is.
+        context.scopes.push_back("workspace_sql");
+    };
+    confine("allowed_public/accounts, allowed_public.orders");
+    workspace->caller->enforces_dataset_scope = true;
+    workspace->caller->answers["sql"] = {{"columns", json::array({"n"})},
+                                         {"rows", json::array({json::array({3})})}};
+    const auto queried =
+        call("workspace_sql",
+             {{"customer_id", customer}, {"statement", "SELECT * FROM allowed_public.accounts"}});
+    ASSERT_TRUE(queried.ok) << queried.error.message;
+    ASSERT_FALSE(workspace->caller->scoped.empty());
+    EXPECT_EQ(workspace->caller->scoped.back(),
+              (std::pair<std::string, std::string>{
+                  "sql", "allowed_public/accounts, allowed_public/orders"}));
+
+    // The engine's refusal of a table outside the work area reaches the agent with its details.
+    workspace->caller->responder =
+        [](const std::string& capability,
+           const json&) -> std::optional<lake::control::ZettaControlResult<json>> {
+        if (capability != "sql") {
+            return std::nullopt;
+        }
+        return lake::control::ZettaControlResult<json>(std::unexpected(lake::control::ZettaControlError{
+            "unauthorized",
+            "'sql' reads restricted.accounts, which is outside the dataset scope",
+            "",
+            {{"datasets_read", {"restricted.accounts"}}, {"outside", {"restricted.accounts"}}}}));
+    };
+    const auto outside =
+        call("workspace_sql",
+             {{"customer_id", customer}, {"statement", "SELECT * FROM restricted.accounts"}});
+    EXPECT_EQ(outside.error.code, "unauthorized");
+    workspace->caller->responder = nullptr;
+
+    // zetta#1519: list_datasets and get_dataset carry the scope too (Lake still filters and
+    // checks their answers), and get_dataset goes with its database named.
+    workspace->caller->answers["list_datasets"] = {{"datasets", json::array()}};
+    EXPECT_TRUE(call("workspace_query",
+                     {{"customer_id", customer}, {"capability", "list_datasets"}, {"input", json::object()}})
+                    .ok);
+    EXPECT_EQ(workspace->caller->scoped.back(),
+              (std::pair<std::string, std::string>{
+                  "list_datasets", "allowed_public/accounts, allowed_public/orders"}));
+    workspace->caller->answers["get_dataset"] = {{"name", "accounts"}, {"database", "allowed_public"}};
+    const auto read = call("workspace_query",
+                           {{"customer_id", customer},
+                            {"capability", "get_dataset"},
+                            {"input", {{"dataset", "allowed_public.accounts"}}}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(workspace->caller->scoped.back().first, "get_dataset");
+    json sent_get;
+    for (const auto& [capability, sent_input] : workspace->caller->calls) {
+        if (capability == "get_dataset") {
+            sent_get = sent_input;
+        }
+    }
+    EXPECT_EQ(sent_get.value("database", std::string()), "allowed_public");
+    EXPECT_EQ(sent_get.value("dataset", std::string()), "accounts");
+    // get_agent is not declared by the engine, so it goes without the scope.
+    const std::size_t scoped = workspace->caller->scoped.size();
+    workspace->caller->answers["get_agent"] = {{"id", "a-1"}};
+    EXPECT_TRUE(call("workspace_query",
+                     {{"customer_id", customer}, {"capability", "get_agent"}, {"input", {{"id", "a-1"}}}})
+                    .ok);
+    EXPECT_EQ(workspace->caller->scoped.size(), scoped);
+
+    // No dataset: Lake refuses the query itself.
+    confine("");
+    const std::size_t sent = workspace->caller->calls.size();
+    const auto nothing =
+        call("workspace_sql", {{"customer_id", customer}, {"statement", "SELECT 1"}});
+    EXPECT_EQ(nothing.error.code, "unauthorized");
+    EXPECT_EQ(workspace->caller->calls.size(), sent);
+}
+
 TEST_F(Streams, DeletedAppsAndExpiredBuildsAreReapedWithoutTouchingLiveTopics) {
     const auto app = store->create_web_app({.customer_id = customer, .workspace_id = workspace->id,
         .name = "deleted-app", .mode = "image", .image = "app:v1", .host = "deleted.test"});
@@ -353,6 +662,53 @@ TEST_F(Streams, ReadsWritesDeletesAndCreatorOwnershipUseSpacePolicy) {
     context.operator_credential = true;
     EXPECT_TRUE(call("delete_stream", drop).ok);
 }
+// lake#986: a workspace's agent-events carry each turn's answer, which is the person's
+// who asked. A member reads the events of their own turns only, browsing or selecting a task.
+TEST_F(Streams, AgentEventsShowAMemberOnlyTheirOwnTurns) {
+    lake::control::WorkspaceAgentBus events(workspace->service.get(), customer, workspace->id);
+    ASSERT_TRUE(liquid::runtime::block_on(events.create_topic("agent-events")).value());
+    // A task is requested by an active account, and carries the scopes its agent is given.
+    const auto ada = store->create_user({"taap:stream-ada", "", "Ada"});
+    const auto grace = store->create_user({"taap:stream-grace", "", "Grace"});
+    ASSERT_TRUE(ada && grace);
+    lake::control::AgentTask mine_row;
+    mine_row.customer_id = customer;
+    mine_row.agent = "agent-ask-orama";
+    mine_row.kind = "test";
+    mine_row.workspace_id = workspace->id;
+    mine_row.scopes = {"browse_stream"};
+    mine_row.requested_by_user_id = ada->id;
+    auto theirs_row = mine_row;
+    theirs_row.requested_by_user_id = grace->id;
+    const auto mine = store->create_agent_task(mine_row);
+    const auto theirs = store->create_agent_task(theirs_row);
+    ASSERT_TRUE(mine && theirs);
+    ASSERT_TRUE(liquid::runtime::block_on(events.publish(
+        "agent-events", {{"task_id", mine->id}, {"reply", "ada's answer"}}, mine->id)).value());
+    ASSERT_TRUE(liquid::runtime::block_on(events.publish(
+        "agent-events", {{"task_id", theirs->id}, {"reply", "grace's answer"}}, theirs->id)).value());
+
+    const auto object = store->find_policy_object("customer", customer);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(store->create_grant({"reader", object->id, "read", "test-attestation", "admin", ""}));
+    context.operator_credential = false;
+    context.acting_identity = "reader";
+    context.acting_user_id = ada->id;
+    const auto browsed = call("browse_stream", input("agent-events"));
+    ASSERT_TRUE(browsed.ok) << browsed.error.message;
+    EXPECT_NE(browsed.value.dump().find("ada's answer"), std::string::npos);
+    EXPECT_EQ(browsed.value.dump().find("grace's answer"), std::string::npos);
+    auto selected = input("agent-events");
+    selected["task"] = theirs->id;
+    EXPECT_EQ(call("browse_stream", selected).error.code, "not_found");
+
+    context.acting_identity = "admin";
+    context.acting_user_id.clear();
+    context.operator_credential = true;
+    EXPECT_NE(call("browse_stream", input("agent-events")).value.dump().find("grace's answer"),
+              std::string::npos);
+}
+
 TEST_F(Streams, AgentDocumentationIncludesEveryStreamToolAndConfirmationGuidance) {
     const auto groups = lake::api::agent_docs::tool_groups(registry);
     const auto group = std::ranges::find(groups, "Streams", &lake::api::agent_docs::Group::title);

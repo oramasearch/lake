@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/audit_routing.hpp"
 
 #include <algorithm>
@@ -12,10 +14,10 @@ namespace lake::api {
 namespace {
 
 // Control-plane and identity capabilities, and those that span the workspaces of a space or the
-// whole instance: their events stay in the central log (decision 52). Sorted.
+// whole instance: their events stay in the central log. Sorted.
 constexpr std::array central = std::to_array<std::string_view>({
     "accept_invitation",
-    // The prepaid balance is billing, in the control plane (lake#1114, decision 56).
+    // The prepaid balance is billing, in the control plane (lake#1114).
     "account_balance",
     // Which key an account signs with is identity (lake#762).
     "account_identity",
@@ -40,7 +42,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "begin_passkey_registration",
     "begin_passkey_sign_in",
     "begin_root_recovery",
-    // Billing is account configuration in the control plane (decision 56, lake#564).
+    // Billing is account configuration in the control plane (lake#564).
     "bill_preview",
     "billing_account",
     "cancel_recovery",
@@ -54,9 +56,11 @@ constexpr std::array central = std::to_array<std::string_view>({
     "configure_recovery_contact",
     "convert_personal_space",
     "copy_workspace_records",
+    // An ACME account binding is a credential of the customer's certificate authority (lake#919).
+    "create_acme_external_account_binding",
     // A browser key is a credential, kept with the others in the control plane (lake#1152).
     "create_browser_key",
-    // Coupon codes are billing, in the control plane (lake#1156, decision 56).
+    // Coupon codes are billing, in the control plane (lake#1156).
     "create_coupon",
     "create_customer",
     "create_federation_issuer",
@@ -95,7 +99,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "get_team",
     "get_user",
     "get_workspace",
-    // Credits from Orama are billing, in the control plane (lake#1134, decision 56).
+    // Credits from Orama are billing, in the control plane (lake#1134).
     "grant_balance_credit",
     "identity",
     "initialize_tuf",
@@ -583,6 +587,7 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "upload_drive_files",
     "validate_methodology",
     "verify",
+    "verify_domain",
     "verify_model_provenance",
     "workspace_act",
     "workspace_openapi",
@@ -619,33 +624,38 @@ std::string text(const nlohmann::json& input, const char* key) {
                : std::string();
 }
 
-// The workspace a workspace capability's input names through its object. Each read is one
-// indexed PostgreSQL lookup of a routing row; no workspace is called.
-std::string object_workspace(const Capability* capability,
-                             const nlohmann::json& input,
-                             const ApiContext& context) {
+} // namespace
+
+NamedObjectWorkspace named_object_workspace(const Capability* capability,
+                                            const nlohmann::json& input,
+                                            const ApiContext& context) {
+    if (context.store == nullptr) {
+        return {};
+    }
     control::Store& store = *context.store;
     const std::string object = capability ? capability->object : std::string();
-    const auto repository_workspace = [&store](const std::string& id) -> std::string {
+    const auto repository_workspace = [&store](const std::string& id) -> NamedObjectWorkspace {
         if (id.empty()) {
             return {};
         }
         const auto repository = store.get_repository(id);
-        return repository ? repository->workspace_id : std::string();
+        return repository ? NamedObjectWorkspace{repository->workspace_id,
+                                                 repository->visibility == "public"}
+                          : NamedObjectWorkspace{};
     };
     for (const char* key : {"repository_id", "repository"}) {
-        if (auto found = repository_workspace(text(input, key)); !found.empty()) {
+        if (auto found = repository_workspace(text(input, key)); !found.workspace_id.empty()) {
             return found;
         }
     }
     if (object == "repository") {
-        if (auto found = repository_workspace(text(input, "id")); !found.empty()) {
+        if (auto found = repository_workspace(text(input, "id")); !found.workspace_id.empty()) {
             return found;
         }
     }
     if (const std::string mount = text(input, "mount_id"); !mount.empty()) {
         if (const auto route = store.get_secret_mount_route(mount)) {
-            return route->workspace_id;
+            return {route->workspace_id};
         }
     }
     std::string application = text(input, "application_id");
@@ -654,19 +664,41 @@ std::string object_workspace(const Capability* capability,
     }
     if (!application.empty()) {
         if (const auto found = store.get_application(application)) {
-            return found->workspace_id;
+            return {found->workspace_id};
         }
     }
     if (const std::string app = text(input, "app_id"); !app.empty()) {
         if (const auto found = store.get_web_app(app)) {
-            return found->workspace_id;
+            return {found->workspace_id};
         }
     }
     if (const std::string build = text(input, "build_id"); !build.empty()) {
         if (const auto found = store.get_build(build)) {
-            return found->workspace_id;
+            return {found->workspace_id};
         }
     }
+    return {};
+}
+
+namespace {
+
+// The workspace a workspace capability's input names through its object. Each read is one
+// indexed PostgreSQL lookup of a routing row; no workspace is called.
+std::string object_workspace(const Capability* capability,
+                             const nlohmann::json& input,
+                             const ApiContext& context) {
+    control::Store& store = *context.store;
+    if (auto named = named_object_workspace(capability, input, context);
+        !named.workspace_id.empty()) {
+        return named.workspace_id;
+    }
+    const auto repository_workspace = [&store](const std::string& id) -> std::string {
+        if (id.empty()) {
+            return {};
+        }
+        const auto repository = store.get_repository(id);
+        return repository ? repository->workspace_id : std::string();
+    };
     // An app or build credential acts for its app or build (Registry's token checks set these).
     const std::string& audited = context.audit_object;
     if (audited.starts_with("app/") && uuid_shaped(audited.substr(4))) {

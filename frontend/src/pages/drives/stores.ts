@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Data → Drives → Storage (lake#656, docs/ui/drives.md#storage): the words and figures for the
  * workspace's stores (buckets, filesystems and volumes; `list_stores` in the API). Pure, so
  * `tests/drives.test.ts` runs it under Node. The page says "storage"; the API says "store". */

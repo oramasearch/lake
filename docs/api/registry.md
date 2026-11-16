@@ -26,7 +26,7 @@ goes into that workspace's liquid store, never into `blobs/`; `blobs/` keeps the
 and the tenant blobs pushed before, until the copy moves them and a later, approved step removes
 the files.
 
-Writes use a sibling temporary file followed by rename. OCI upload sessions are staged separately;
+Writes use a sibling temporary file followed by rename. **An OCI upload session belongs to the repository that started it** (lake#998): its repository is recorded with it, and an append or a finish naming another repository answers `404 BLOB_UPLOAD_UNKNOWN`, whatever push access the caller holds there. OCI upload sessions are staged separately;
 completion recalculates SHA-256 and refuses bytes that do not match the requested digest. A
 manifest is accepted only when it is schema version 2 JSON and every referenced config or layer
 digest is already present. Blob and digest-manifest reads also require that a tag in the requested
@@ -35,7 +35,7 @@ repository references the object, so a known tenant digest cannot be read throug
 ## Media types and isolation
 
 The registry answers on the console's origin, so the bytes it serves must never become a page
-there ([lake#930](https://github.com/oramasearch/lake/issues/930)). A manifest that is valid JSON
+there (lake#930). A manifest that is valid JSON
 can also be markup; served as `text/html`, it would run as the console.
 
 - **Lake chooses a manifest's media type.** A manifest push (`PUT /v2/<repository>/manifests/<reference>`,
@@ -66,7 +66,7 @@ browsers never render it as a document.
 
 ## Where a tenant image lives
 
-The registry splits (decision 54 S4-S6, [lake#383](https://github.com/oramasearch/lake/issues/383)
+The registry splits (lake#383
 phase A). A tenant OCI repository, `<space>/<name>` or `<space>/cache/<name>`, belongs to one
 workspace. npm, Python, debuginfod and legacy one-component OCI repositories stay with the instance,
 as a named exception: one instance-wide namespace with public reads.
@@ -78,7 +78,7 @@ as a named exception: one instance-wide namespace with public reads.
   in place; it is deleted with its workspace, or by the operator (below).
 - **Creating a repository names its workspace.** A build's first push routes only its own target,
   `<image>` and `cache/<image>` of `<authority>/<space>/<image>:<tag>`, from the build row's
-  workspace; a build pushing any other unrouted name of its account is OCI `403 DENIED`. Anything
+  workspace. A build's push token writes **only** those two, whether or not another name is already routed to its workspace: any other write, such as a tag of an app's image in the same workspace, is OCI `403 DENIED` (lake#909), because code the build runs can read the token. Its reads stay within the workspace. Anything
   else (the administrator, a person) calls `create_image_repository` with `customer_id`,
   `workspace_id` and `name` first; a missing, malformed or unknown `workspace_id`, or one that is
   not a live workspace of the account, is `invalid_input` at `/workspace_id`, and an invalid name at
@@ -106,8 +106,8 @@ as a named exception: one instance-wide namespace with public reads.
   the last one (last writer wins, as OCI expects). A tag carries its manifest's references, so a
   blob read and the image byte count read only the tags; a blob `GET` lists every tag of its
   repository.
-- **Blobs are objects of the workspace's liquid store** (phase B, decision 54 S5;
-  [lake#380](https://github.com/oramasearch/lake/issues/380), [workspace-store.md](../architecture/workspace-store.md)).
+- **Blobs are objects of the workspace's liquid store** (phase B;
+  lake#380, [workspace-store.md](../architecture/workspace-store.md)).
   Liquid names an object by its own hash (BLAKE3 in a workspace store) and the store is encrypted
   below liquid, so the SHA-256 a client sends finds the blob through its record: `lake_oci_blobs`
   holds, per blob the account pushed into the workspace, its digest, size and `object` (the liquid
@@ -130,13 +130,13 @@ as a named exception: one instance-wide namespace with public reads.
   record that names another object than the one a verified push just stored names other bytes (or
   none the store holds): the push rewrites it at the revision read. If the old object was rooted, the
   record keeps it in `superseded`: liquid's lease API cannot release a root by its object, so those
-  roots wait for [liquid#342](https://github.com/oramasearch/liquid/issues/342).
+  roots wait for liquid#342.
 - **Image blobs are liquid roots.** Nothing in liquid refers to an image blob; only its record
   does. Each stored blob is rooted with a liquid lease for a century (`store::lease_root`), so a
   liquid collection of the workspace store keeps it. The record says so (`rooted`), and a re-push
   of an object its record already names as rooted adds no second lease; the copy roots, once, an
   object in place that was stored before lake rooted image blobs (`rooted` in its answer). A durable pin API is
-  [liquid#342](https://github.com/oramasearch/liquid/issues/342). A manifest pushed into the workspace may reference only blobs recorded
+  liquid#342. A manifest pushed into the workspace may reference only blobs recorded
   there (otherwise OCI `400 MANIFEST_BLOB_UNKNOWN`), with the sizes the records hold, so knowing
   another account's or another workspace's digest does not publish its layer.
 - **Pulls stream from the store.** A tenant blob is served only when a tag of the requested
@@ -240,6 +240,14 @@ An app pull token is accepted only as HTTP Basic user `app`, with the token as i
 re-hashes it against the current app row and allows manifest and blob `GET`/`HEAD` only for the
 exact `<space>/<app name>` repository. Other apps, cache repositories, upload starts, blob writes,
 and manifest publication receive OCI `403 DENIED`. Rotation or app deletion revokes it.
+
+A methodology run's credential (`lmr.…`) is accepted only as HTTP Basic user `methodology-run`, and
+a served methodology model's (`lmd.…`) only as user `methodology-deployment`, the names the Orama
+operator writes into their pull Secrets. Each pulls, read only, the image of its own build, and only
+when that build is its own workspace's (lake#952, [methodologies.md](methodologies.md)). Until
+v0.9.0 Lake's Basic parser dropped both user names, so neither could pull.
+`RegistryStore.AMethodologyRunPullsOnlyABuildOfItsOwnWorkspace` proves the run's pull and the
+refusal of another workspace's build.
 
 ## Protocol routes
 

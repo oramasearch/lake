@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "../identity_proof_test_support.hpp"
 #include "../personal_customer_test_support.hpp"
 #include "../postgres_fixture.hpp"

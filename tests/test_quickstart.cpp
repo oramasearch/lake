@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The quickstart process (lake#1128, docs/api/quickstart.md): start_quickstart, quickstart_status,
 // train_quickstart and quickstart_snippets compose upload_dataset, create_index, expose_index,
 // train_model and expose_model through the registry, and keep their state in the workspace Zetta.
@@ -690,7 +692,7 @@ TEST(Quickstart, AStepThatFailsIsKeptWithWhyAndResumed) {
     EXPECT_EQ(exposed.value["state"], "done");
 }
 
-// lake#1181: Steve's dataset on lake-dev (v0.7.0): a first name, a country and a date, with an id,
+// lake#1181: a reported dataset (v0.7.0): a first name, a country and a date, with an id,
 // free text, numbers, an empty column and one that never changes. Training refused with
 // `transform_required: add_snapshot_date`; now every kind is detected and prepared.
 struct People {
@@ -803,7 +805,7 @@ TEST(Quickstart, AnyColumnTypesTrainADatedDatasetIsPreparedNotRefused) {
     ASSERT_FALSE(calls_of(q, "analyze_dataset").empty());
     EXPECT_EQ(calls_of(q, "analyze_dataset").back()["as_of"], snapshot);
 
-    // Steve's exact choice: Country to predict, First Name names a row.
+    // The reported choice: Country to predict, First Name names a row.
     auto training = q.by(me,
                          "train_quickstart",
                          {{"workspace_id", me.workspace_id},
@@ -1676,7 +1678,7 @@ TEST(QuickstartZetta, ADatasetBecomesSearchAndModelAnswersOnARealEngine) {
     std::filesystem::remove_all(dir, ignored);
 }
 
-// lake#1181 on a real Zetta: Steve's shape (a first name, a country, a date, with an id, free text,
+// lake#1181 on a real Zetta: the reported shape (a first name, a country, a date, with an id, free text,
 // numbers and a two-valued plan). v0.7.0 refused it with transform_required: add_snapshot_date.
 TEST(QuickstartZetta, ADatedDatasetWithAnyColumnTypesTrainsAndAnswersOnARealEngine) {
     const char* url = std::getenv("LAKE_TEST_ZETTA_URL");
@@ -1764,7 +1766,7 @@ TEST(QuickstartZetta, ADatedDatasetWithAnyColumnTypesTrainsAndAnswersOnARealEngi
     EXPECT_TRUE(started.value["snapshot_date"].is_string());
     const std::string index_id = started.value["index"]["id"];
 
-    // Steve's choice.
+    // The reported choice.
     auto training =
         call("train_quickstart", {{"target", "Country"}, {"entity_column", "First Name"}});
     ASSERT_TRUE(training.ok) << training.error.message;
@@ -1803,7 +1805,7 @@ TEST(QuickstartZetta, ADatedDatasetWithAnyColumnTypesTrainsAndAnswersOnARealEngi
 // lake#1203 on a real Zetta: the Quickstart's clustering (M-3), as Ask Orama proposes it, trains
 // end to end. On lake-dev the engine refused it ("segmentation has no supervised holdout or ranked
 // top_k; configure its K range in the graph hints") because Lake sent a held-out share. The rows
-// are named by a text id, as Steve's customers file is.
+// are named by a text id, as a typical customers file is.
 TEST(QuickstartZetta, AClusteringModelTrainsOnARealEngine) {
     const char* url = std::getenv("LAKE_TEST_ZETTA_URL");
     const char* token = std::getenv("LAKE_TEST_ZETTA_TOKEN");
@@ -1861,7 +1863,7 @@ TEST(QuickstartZetta, AClusteringModelTrainsOnARealEngine) {
         return completed ? std::move(*completed) : lake::api::ApiResult{};
     };
 
-    // Customers in three clear groups: a text id names each row, as in Steve's file.
+    // Customers in three clear groups: a text id names each row, as in a typical customers file.
     const std::vector<std::string> countries{"Canada", "France", "Japan"};
     std::string csv = "Customer Id,Country,Age,Orders,Spend\n";
     for (int i = 0; i < 90; ++i) {

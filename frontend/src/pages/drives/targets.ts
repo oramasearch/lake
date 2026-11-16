@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What a drive is and what a shortcut points at (lake#561, docs/ui/drives.md): the words a page
  * shows and the page each shortcut opens. Pure, so `tests/drives.test.ts` runs it under Node. */
 

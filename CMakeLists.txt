@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 cmake_minimum_required(VERSION 3.28)
 
 # lake is C++26 on the same coroutine stack as Zetta (Capy/Corosio/Beast2), which
@@ -27,7 +29,7 @@ if(NOT DEFINED CMAKE_CXX_COMPILER AND NOT LAKE_USE_SYSTEM_COMPILER)
   endif()
 endif()
 
-project(lake VERSION 0.8.1 LANGUAGES C CXX)
+project(lake VERSION 0.9.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -145,6 +147,8 @@ set(BOOST_ENABLE_CMAKE ON)
 FetchContent_Declare(
   boost_core_libs
   URL https://github.com/boostorg/boost/releases/download/boost-1.91.0-1/boost-1.91.0-1-cmake.tar.xz
+  # The SHA-256 Boost publishes beside the archive (lake#1003); a changed archive fails configure.
+  URL_HASH SHA256=cc5dc5006ecbdf0051f90979be31b4eee5987d9ae14ae9fb9c03cfa43fa3cdad
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
   EXCLUDE_FROM_ALL
 )
@@ -238,6 +242,7 @@ add_library(lake-core STATIC
   src/control/lake_identity.cpp
   src/control/saml.cpp
   src/control/browser_keys.cpp
+  src/control/dns_txt.cpp
   src/control/callers.cpp
   src/control/agents.cpp
   src/control/pki.cpp
@@ -282,6 +287,7 @@ add_library(lake-core STATIC
   src/control/repository_records.cpp
   src/control/oci_records.cpp
   src/control/agent_task_records.cpp
+  src/control/agent_task_proxy.cpp
   src/control/metering.cpp
   src/control/workspace_audit.cpp
   "${LAKE_LIQUID_SOURCE_DIR}/src/scan/detectors.cpp"
@@ -330,6 +336,7 @@ add_library(lake-core STATIC
   src/api/console_capabilities.cpp
   src/api/forge_capabilities.cpp
   src/api/repository_people.cpp
+  src/api/repository_path_access.cpp
   src/api/export_capabilities.cpp
   src/api/github_import_capabilities.cpp
   src/api/pki_capabilities.cpp
@@ -342,6 +349,7 @@ add_library(lake-core STATIC
   src/api/billing_capabilities.cpp
   src/api/balance.cpp
   src/api/client_address.cpp
+  src/api/liquid_clients.cpp
   src/api/coupons.cpp
   src/api/stripe.cpp
   src/api/audit_routing.cpp
@@ -442,7 +450,8 @@ endforeach()
 if(LAKE_BUILD_TESTS)
   FetchContent_Declare(googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG        v1.17.0)
+    # v1.17.0, pinned by commit so a moved tag cannot change it (lake#1003).
+    GIT_TAG        52eb8108c5bdec04579160ae17225d66034bd723)
   set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(googletest)

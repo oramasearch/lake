@@ -48,12 +48,59 @@ All capabilities resolve the repository's local `environment` policy object and 
 | `environment_logs` | `read` | `repository_id`, `environment`, optional `since`, `limit`, `direction` | `{items: [{ts,pod,container,line}], next_since}` |
 | `set_environment_env` | `write` | `repository_id`, `environment`, `key`, `value` | appended row identity |
 | `unset_environment_env` | `write` | `repository_id`, `environment`, `key` | appended tombstone identity |
-| `create_domain` | `deploy` | `repository_id`, `environment`, `host`, `tls` | pending domain request; `tls` is `acme` or `provided` |
-| `delete_domain` | `deploy` | `repository_id`, `environment`, `host` | pending domain tombstone |
+| `create_domain` | `deploy` | `repository_id`, `environment`, `host`, `tls` | the host's claim and the TXT record that proves control (`verification`); `tls` is `acme` or `provided`. A host that is one of this Lake's own names is `invalid_input` at `/host` (lake#949): equal to or below its public host, the zone that host is in, an alias (`LAKE_HOST_ALIASES`) or the apps wildcard. Nothing reaches the operator until `verify_domain` ([custom domains](#custom-domains)) |
+| `verify_domain` | `deploy` | `repository_id`, `environment`, `host` | reads `_lake-challenge.<host>`; when it holds the claim's token, the claim is `verified` and the pending domain request is written for the operator |
+| `delete_domain` | `deploy` | `repository_id`, `environment`, `host` | releases the environment's claim and writes the pending domain tombstone |
 
 Environment values are plain configuration only. Before appending, Lake runs libliquid's inline
 secret detector over `KEY=value`; a match is refused with `use a sealed secret`. Sealed-secret
 references are tracked separately in #129.
+
+## Custom domains
+
+A custom domain is claimed before anything routes it (lake#949). Claims are in
+lake's Postgres control plane, `domain_claims` (migration `0106_domain_claims`,
+[schema](../control-plane/schema.md#domain-claims-migration-0106_domain_claims)): one row per host,
+across every account of this Lake, so a host belongs to one environment at a time. It is
+multitenancy (which environment of which account holds a name), not workspace data.
+
+1. **`create_domain` claims the host** in one statement. The host is lowercased (a trailing dot
+   dropped). Another environment holding it, of any account or of the same repository, is
+   `409 conflict` at `/host`. The same environment asking again answers the same claim and token
+   (and takes the new `tls`). The answer:
+
+   ```json
+   {"repository_id": "…", "environment": "production", "host": "www.example.com", "tls": "acme",
+    "status": "pending", "deleted": false,
+    "verification": {"state": "pending", "verified_at": "",
+                     "record": {"type": "TXT", "name": "_lake-challenge.www.example.com",
+                                "value": "<64 lowercase hex digits>"}}}
+   ```
+
+   No domain row is written yet: the operator never sees an unverified claim.
+2. **The tenant publishes the TXT record** at their DNS provider: name `_lake-challenge.<host>`,
+   value the token. Other TXT records at that name are ignored.
+3. **`verify_domain` reads it.** Lake asks the name servers of its own host (`/etc/resolv.conf`; in a
+   pod, the cluster's DNS) over UDP, again over TCP when the answer is truncated, two seconds per
+   server (`src/control/dns_txt.cpp`). When one record equals the token, the claim becomes
+   `verified` (`verified_at` set) and lake appends the domain row to `orama_control.domains`, as
+   `create_domain` used to. Otherwise it is `409 conflict` at `/host` (no record yet, or not this
+   claim's token) or `503 store_unavailable` (no name server answered); the claim stays `pending`
+   and can be verified again. A host this environment has not claimed is `404 not_found`. Calling it
+   on a verified claim writes the request again, which retries a row write that failed.
+4. **The operator acts only on verified claims.** It reads `domain_claims` from the control plane
+   and refuses, with the reason on the domain's status row, a domain row whose host has no verified
+   claim of that repository and environment (orama-operator, `planLakeDomains`).
+5. **`delete_domain` releases the claim** (only this environment's) and writes the tombstone. The
+   host is then free to claim again.
+
+A verified claim is not checked again: removing the TXT record later does not unroute the host.
+Pending claims do not expire. The web app shows the record after **Create domain** and verifies it
+with **Verify**; `create_domain` again shows the same record. Tests: `Stores/DomainClaims.*`
+(`tests/test_domain_claims.cpp`, both stores), `DnsTxt.*` (the TXT question and answer), and
+`PlatformFixture.AnUnverifiedDomainIsNeverWrittenForTheOperator`,
+`VerifyDomainFailsUntilTheRecordHoldsTheToken` and `AHostIsClaimedByOneEnvironmentAcrossCustomers`
+(`tests/test_platform.cpp`).
 
 ## Proposed operator rows
 
@@ -131,7 +178,7 @@ remains, so an unknown id does not reopen repositories on every poll.
 The workspace keeps the row with `repository` set to lake's id, so the pages and the record
 checks find it, and with the operator's value in `operator_repository` when it was another one. The
 operator matches environment values and domains to a deployment by its exact `repository` value, so
-`set_environment_env`, `unset_environment_env`, `create_domain` and `delete_domain` write their rows
+`set_environment_env`, `unset_environment_env`, `verify_domain`, `create_domain` and `delete_domain` write their rows
 under the `operator_repository` of the environment's current deployment, or lake's id when it has
 none.
 
@@ -172,7 +219,7 @@ policy objects stay. The cutover is in
 A lake started without `LAKE_OPERATOR_ZETTA_URL` and `LAKE_OPERATOR_ZETTA_TOKEN` (and without
 `LAKE_LOGS_URL`) has no platform service. Every platform capability (`list_environments`,
 `get_environment`, `list_deployments`, `set_environment_env`, `unset_environment_env`,
-`create_domain`, `delete_domain`, `environment_logs`) then answers `501 not_supported`:
+`create_domain`, `verify_domain`, `delete_domain`, `environment_logs`) then answers `501 not_supported`:
 
 ```json
 {"ok": false, "error": {"code": "not_supported", "path": "",
@@ -187,7 +234,7 @@ because the web app shows it to people. `store_unavailable` stays the answer whe
 configured and the operator control plane is unreachable (above).
 
 To turn Deployments on, set both variables in the `Lake` CR's `spec.env` (the operator's Zetta
-URL and a bearer it accepts; [aks.md](../deployment/aks.md)) and restart lake. Verify with
+URL and a bearer it accepts) and restart lake. Verify with
 `GET /v1/list_environments?repository_id=<id>`, which then answers `200` with the repository's
 environments (`items`), and with `GET /healthz`, which reports `platform: ready`.
 `PlatformFixture.WithoutThePlatformMirrorEveryCallSaysDeploymentsAreNotSetUp`

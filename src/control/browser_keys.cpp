@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Browser keys (lake#1152, docs/api/browser-keys.md): the origin rule a key's list follows and the
 // principal its credential resolves to. The stores keep the rows; the registry checks the binding.
 

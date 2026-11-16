@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Developer → API and Developer → MCP, the parts that are rules rather than layout: the
  * `create_token` input a key form builds, how a token's scopes read, and the OpenAPI document
  * turned into searchable groups of operations with a curl line each. No imports from the app, so
@@ -40,8 +42,22 @@ export const LIFETIMES: { value: Lifetime; label: string }[] = [
   { value: "never", label: "Never (a standing key)" },
 ];
 
-/** The scopes `git`/`liquid` push and pull need (the hint Tokens has always given). */
-export const LIQUID_SCOPES = "refs,find_missing,push,pull,upload_chunks,read_chunk";
+/** The "liquid and liquify" preset (lake#1328): what the liquid CLI and liquify call with one API
+ * token. Clone, pull and push (the sync capabilities), then reviews: list them and their comments,
+ * open and update one, comment, and carry comments across a revised change (liquid's
+ * `forge_client`), and the branch protections `liquid review` reads. Developer → API and
+ * Account → Tokens offer the same list. */
+export const LIQUID_SYNC_SCOPES = ["refs", "find_missing", "push", "pull", "upload_chunks", "read_chunk"];
+export const LIQUID_REVIEW_SCOPES = [
+  "list_reviews",
+  "create_review",
+  "update_review",
+  "list_review_comments",
+  "create_review_comment",
+  "map_review_anchors",
+  "list_branch_protections",
+];
+export const LIQUID_SCOPES = [...LIQUID_SYNC_SCOPES, ...LIQUID_REVIEW_SCOPES].join(",");
 
 /** "a, b,,c " → ["a", "b", "c"]: trimmed, empties dropped. */
 export function commaSeparated(value: string): string[] {

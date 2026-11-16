@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/model_gateway.hpp"
 
 #include "lake/api/billing.hpp"

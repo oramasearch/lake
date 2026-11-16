@@ -1,5 +1,9 @@
 # Public control types
 
+`identity_crypto::verify_taap_sign_in` answers `VerifiedTaapSignIn::chain_hashes` (each identity
+document's canonical SHA-256, oldest first), which `TaapSignIn` carries to the store so a replaced
+TAAP key stops signing in after its rotation is recorded (lake#1024).
+
 `User::disabled_at` retains offboarding state for administrative reads and the stream workers.
 Person-owned agent creation, claims, renewal and credential resolution require an active account;
 offboarding withdraws its launches/schedules and invalidates its tasks in the same store operation
@@ -184,27 +188,29 @@ usage limits (migration `0072_usage_limits`, lake#564): content-free configurati
 in workspace Zettas.
 `store.hpp`'s `BillingPlan`, `BillingPrice`, `Invoice` and `InvoiceLine`, with `billing_plans`,
 `put_billing_plan`, `create_invoice`, `list_invoices`, `get_invoice` and `set_invoice_state`, are
-billing records (migration `0073_billing`, lake#564, decision 56; since lake#635 each publication
+billing records (migration `0073_billing`, lake#564; since lake#635 each publication
 of the usage-only price list is one `BillingPlan` row, and the subscription methods are gone because
 there is no plan to choose): control-plane multitenancy; usage stays in
 workspace Zettas and an invoice line keeps only the quantity billed. `PaymentEvent`,
 `PaymentEventResult`, `billing_provider_customer`, `set_billing_provider_customer`,
 `replace_billing_provider_customer` and `apply_payment_event` are the payment provider's records
-(migration `0074_payment_provider`, lake#620, decision 57): the provider's customer per account,
+(migration `0074_payment_provider`, lake#620): the provider's customer per account,
 replaced only from the id read when the provider no longer has it (lake#856), and its notices,
 applied once by event id. `CloudOrder`, `NewCloudOrder`, `CloudOrderTransition`,
 `CloudOrderPayment`, `CloudOrderEvent` and `CloudOrderEmailOutcome`, with
 `create_cloud_order`, `get_cloud_order`,
 `PaymentEventResult`, `billing_provider_customer`, `set_billing_provider_customer` and
 `apply_payment_event` are the payment provider's records (migration `0074_payment_provider`,
-lake#620, decision 57): the provider's customer per account and its notices, applied once by event
+lake#620): the provider's customer per account and its notices, applied once by event
 id. `BillingContact`, `billing_contact`, `set_billing_contact` and `billing_contact_problem` are each
 account's billing email, name and address (migration `0090_billing_contacts`, lake#857), a billing
 record replaced whole on every save; `set_invoice_provider_status` records whether an invoice's
 email was sent (`send_failed`), moving a due invoice only from the status its caller read. `CloudOrder`, `NewCloudOrder`, `CloudOrderTransition`, `CloudOrderPayment`, `CloudOrderEvent`
 and `CloudOrderEmailOutcome`, with `create_cloud_order`, `get_cloud_order`,
 `transition_cloud_order`, `apply_cloud_order_payment`, `claim_cloud_order_emails`,
-`record_cloud_order_email`, `unaudited_cloud_order_events` and `mark_cloud_order_events_audited`,
+`record_cloud_order_email`, `confirm_cloud_order_email`, `count_cloud_order_recipients`
+(lake#1000: the contact email's confirmation and the per-recipient limits; `CloudOrderRecipientCounts`,
+`cloud_order_contact_confirmed`), `unaudited_cloud_order_events` and `mark_cloud_order_events_audited`,
 are the apex order sheet's orders (migration `0089_cloud_orders`, lake#831,
 [orders](../../../docs/api/orders.md)), implemented in both stores and the instrumented wrapper.
 `application_credential_records.hpp` holds the application's credentials in its workspace (lake#352,
@@ -231,6 +237,10 @@ found by the application, with the five-minute lifetime as the collection's rete
 (read, then `remove` at the revision read; every refusal of the code is `unauthorized`). `apps.hpp`
 adds the code's instants and revision; `store.hpp` no longer declares
 `create_/consume_application_authorization_code` (the retired table is dropped by `0070`).
+`agent_task_proxy.hpp` declares task credentials by reference (lake#871): the `X-Lake-Agent-Task`
+header, `AgentBusKey` (an agent and the workspace its bus credential is bound to),
+`agent_task_principal`, and `AgentBusCredentials` (LAKE_AGENT_BUS_DIR re-read when it changes;
+`zetta_workspace.hpp`'s `WorkspaceConfig::agent_bus_credentials` holds it).
 `agent_task_records.hpp` holds what was written for an agent task in its workspace (lake#374,
 lake#375): the codec (one record per task, keyed by it and found by its space) with the request,
 the agent's latest message, its answer and the finished phase. `record_agent_task_content` writes
@@ -239,7 +249,7 @@ an event with `if_revision`, rereads on a conflict and leaves a finished record 
 the store answers its dispatch half only (an empty `body`, a null `result`, and as `message` only
 lake's notice); `create_agent_task` keeps a caller-made `id`, `record_agent_task_event` takes no
 message or answer (the retired content columns are dropped by `0070`).
-`workspace_audit.hpp` holds a workspace's audit chain (decision 52, lake#317): the
+`workspace_audit.hpp` holds a workspace's audit chain (lake#317): the
 `lake_audit_events` collection, chained and copied events, `append_workspace_audit_event`,
 `find_workspace_audit_tail`, `list_workspace_audit` and `verify_workspace_audit`.
 `workspace_records.hpp`'s `list` takes an optional `keep` predicate. `store.hpp` declares
@@ -307,6 +317,13 @@ requests by kind for the process metrics and a request's `Server-Timing`, and
 `WorkspaceService::endpoint`, and `store.hpp` `Workspace::store_moved_at` and
 `mark_workspace_store_moved` (migration `0067`).
 
+`zetta_workspace.hpp`'s `dataset_scope_header`, `dataset_scope_header_value`,
+`engine_checks_dataset_scope`, `engine_must_enforce_dataset_scope`, `dataset_scope_refusal`, `WorkspaceCaller::scoped_call` and the
+`dataset_scope` argument of `WorkspaceService::call` send a dataset-confined credential's work area
+to the workspace Zetta as `Zetta-Dataset-Scope` (lake#1055, zetta#1515), only to an engine a probe
+shows enforces it. `agent_runs.hpp`'s `work_area_recorded_scope` and `records_work_area` tell a row
+made with its work area from one made before (docs/api/agent-launches.md#a-runs-dataset-work-area).
+
 `store.hpp`'s `WorkloadResources` (lake#643, migration `0075_workload_resources`) is what the Orama
 operator reports a workload is scheduled with; `Store::workload_resources` lists every row and
 `put_workload_resources` is the operator's write, for tests. `BillingPrice::class_name` and
@@ -354,3 +371,12 @@ admission/completion interface. `authentication.hpp` settles outcomes and normal
 refusals. Capacity includes in-flight work; verified success clears account/client failures;
 there is no instance-wide ceiling. See [the contract](../../../docs/api/identity.md#authentication-attempt-limits)
 (lake#966).
+
+`store.hpp` holds custom-domain claims (lake#949, migration `0106_domain_claims`): `DomainClaim`,
+`NewDomainClaim`, `domain_challenge_label`, and the Store calls `claim_domain` (one claim per host
+across accounts; `conflict` for another environment), `get_domain_claim`, `verify_domain_claim` (only
+the claim's own token) and `release_domain_claim`. `dns_txt.hpp` is the TXT lookup verify_domain
+uses.
+`web_apps.hpp`'s `WebApp` carries `token_generation` and `token_hashes_generation` (migration
+`0112`, lake#1070); `tokens_current` says whether the operator's hashes are the generation Lake
+wants. The memory store's `set_web_app_token_hashes` takes the generation an operator acknowledges.

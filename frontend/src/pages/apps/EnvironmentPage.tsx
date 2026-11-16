@@ -1,8 +1,10 @@
+// SPDX-License-Identifier: MIT
+
 /** One environment (web_ui.cpp web_ui_environment; serve_environment_page and the four
  * serve_platform_form routes), as a Split: environment variables, domains and deployment history
  * on the left; the current deployment and its logs on the right. The forms call their
  * capabilities and stay on the page. */
-import { type FormEvent } from "react";
+import { type FormEvent, useState } from "react";
 import { Navigate, useSearchParams } from "react-router-dom";
 import { Plus, ScrollText } from "lucide-react";
 import { act, useRead, type Row } from "@/lib/api";
@@ -20,6 +22,9 @@ export default function EnvironmentPage() {
   const environment = useRead<Row>(repositoryId && name ? "get_environment" : null, { repository_id: repositoryId, environment: name }, { workspace: null });
   const deployments = useRead<{ items?: Row[] }>(repositoryId && name ? "list_deployments" : null, { repository_id: repositoryId, environment: name, limit: 100 }, { workspace: null });
   const runner = useRunner();
+  // The TXT record the last create_domain answered (lake#949): the host reaches the operator only
+  // once verify_domain finds it.
+  const [challenge, setChallenge] = useState<Row | null>(null);
   if (!repositoryId || !name) return <Navigate to="/repositories" replace />;
 
   const scope = { repository_id: repositoryId, environment: name };
@@ -32,6 +37,21 @@ export default function EnvironmentPage() {
     });
   };
   const remove = (key: string, capability: string, input: Row, done: string) => runner.run(key, () => act(capability, { ...scope, ...input }), done);
+  const claimDomain = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const element = event.currentTarget;
+    const form = formValues(event);
+    void runner.run("domain", () => act("create_domain", { ...scope, host: form.host, tls: form.tls }), `Domain ${form.host} claimed`).then((value) => {
+      if (value === undefined) return;
+      element.reset();
+      setChallenge(value as Row);
+    });
+  };
+  const verifyDomain = (host: string) =>
+    void runner.run(`verify-${host}`, () => act("verify_domain", { ...scope, host }), `${host} verified and requested`).then((value) => {
+      if (value !== undefined) setChallenge(null);
+    });
+  const record = (challenge?.verification as Row | undefined)?.record as Row | undefined;
 
   const loading = repository.isLoading || environment.isLoading;
   const failed = repository.isError ? repository : environment.isError ? environment : null;
@@ -176,9 +196,26 @@ export default function EnvironmentPage() {
                   ]}
                 />
               )}
+              {challenge && record && (
+                <div className="border-t border-hairline px-4 py-3 text-[13px]">
+                  <p className="m-0">
+                    To prove you control <code>{text(challenge, "host")}</code>, publish this record at your DNS provider, then verify it. Nothing is routed until then.
+                  </p>
+                  <KeyValue
+                    rows={[
+                      ["Type", <code key="t">{text(record, "type")}</code>],
+                      ["Name", <code key="n" className="break-all">{text(record, "name")}</code>],
+                      ["Value", <code key="v" className="break-all">{text(record, "value")}</code>],
+                    ]}
+                  />
+                  <Button loading={runner.busy === `verify-${text(challenge, "host")}`} onClick={() => verifyDomain(text(challenge, "host"))}>
+                    Verify
+                  </Button>
+                </div>
+              )}
               <form
                 className="row-form grid grid-cols-1 items-end gap-2 border-t border-hairline px-4 py-3 sm:grid-cols-[1fr_10rem_auto]"
-                onSubmit={submit("domain", "create_domain", (form) => `Domain ${form.host} requested`, (form) => ({ host: form.host, tls: form.tls }))}
+                onSubmit={claimDomain}
               >
                 <label>
                   Host <input name="host" required />

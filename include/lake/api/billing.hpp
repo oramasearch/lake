@@ -1,6 +1,8 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
-// Billing (lake#564, decision 56, docs/api/billing.md): Orama Cloud's price list, the bill for a
+// Billing (lake#564, docs/api/billing.md): Orama Cloud's price list, the bill for a
 // month worked out from an account's metered usage, and the invoices lake issues. Lake is priced
 // by usage only (lake#635): list rates per usage dimension and class, no plans, no fee, nothing
 // included. Billing records live in lake's control Postgres (migration 0073); usage stays in each
@@ -146,7 +148,7 @@ struct NoticeRejection {
 };
 
 // The interface a payment provider implements (docs/api/billing.md#payment-providers). Lake
-// ships the manual one and Stripe (decision 57, lake#620); a provider is lake's own code against
+// ships the manual one and Stripe (lake#620); a provider is lake's own code against
 // the provider's HTTP API, never its SDK.
 class PaymentProvider {
 public:

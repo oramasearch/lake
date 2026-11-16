@@ -65,7 +65,7 @@ What is on the store volume, and how each part is written:
 | `<customer>/repositories/<id>/` (refs, journal, checkpoint, replication cursor) | libliquid repository on the customer store handle, opened once and cached; cursor via a fixed `.tmp` name | **unsafe**: cached state, shared temporary name |
 | Drive content | a liquid repository in the customer store | **unsafe**, as the store |
 | Models and datasets | liquid sync into the customer store | **unsafe**, as the store |
-| `<customer>/index/` (search segments and manifest of unswitched workspaces' repositories) | `search::Service`, per-account state loaded once and republished from memory | **unsafe**: a publication drops the other process's segments. A switched workspace's index is not here: it is beside its store in its workspace Zetta, written under the store's lease fence (lake#381, [search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)) |
+| `<customer>/index/` (search segments and manifest of unswitched workspaces' repositories) | `search::Service`, per-account state loaded once and republished from memory | **unsafe**: a publication drops the other process's segments. A switched workspace's index is not here: it is beside its store in its workspace Zetta, written under the store's lease fence (lake#381, [search.md](../api/search.md#where-the-index-lives-lake381)) |
 | `<node>/registry/` OCI blobs | uploads under unique ids, blobs renamed into content-addressed paths | safe in the test (444 manifests, 888 blobs, no loss) |
 | `<node>/registry/` manifests, tags, npm and Python indexes | write-then-rename; npm and Python indexes are read-modify-write under an in-process mutex | tags: last writer wins; **package indexes: lost update** |
 | `<node>/log/` transparency tiles and `tree.json` | `flock` on `append.lock`, state re-read under the lock | safe in the test (1,692 appends, tree rebuilt from its entries) |
@@ -158,11 +158,10 @@ preStop + `LAKE_DRAIN_SECONDS` (35) and the 45 s grace period after which the ku
 B never gives up on a predecessor that is stopping normally. Raising `LAKE_DRAIN_SECONDS` needs a
 longer grace period and owner wait to match.
 
-**Operator.** The design works with the operator as it is on `origin/main` (7b8ecb4): no
-operator change is required. Two of its documents describe the old behavior and should be updated
+**Operator.** The design works with the operator as it is: no operator change is required. Two of its documents describe the old behavior and should be updated
 there: `docs/lake/README.md` (Probes and drain: "lake stops its HTTP server at once on SIGTERM"
 and the readiness row "200 only when lake's control store answers a ping"; Pod replacement:
-"nothing yet proves that two processes can safely share it") and `DESIGN.md` decision 38. The
+"nothing yet proves that two processes can safely share it") and its design notes. The
 store-root state is visible in the `/readyz` body and the `store_owner` log events.
 
 **Verify.** `tests/test_shared_store.cpp` (`StoreOwner.*`; the binary cases need
@@ -271,3 +270,49 @@ repository; without the start-time creation it fails, on `fd4ea84` (before lake#
 The pre-open runs beside those requests, so the test waits for its `repositories_preopened` event
 for both workspaces before it stops the server; a stop that came first drained the pre-open, which
 then logged nothing or 0 (lake#614).
+
+### Custody: the passphrase file
+
+Since liquid v0.3.0 (liquid#402) a new identity's signing key is sealed under a wrapping key that
+is itself held by a **custody**, by default a passphrase on Linux. A pod has no terminal to ask for
+one, so a lake pod seals its identity with a **passphrase file** mounted from a Kubernetes Secret
+(lake#1352). The Orama operator renders, per `Lake`:
+
+- a Secret `lake-<name>-liquid-identity` with one key, `passphrase`: 32 or more random bytes,
+  base64 or hex encoded, generated **once** when the Secret does not exist and never rotated or
+  overwritten by a reconcile (a new passphrase cannot open an identity sealed under the old one);
+- the file where lake's user can read it and liquid accepts it. liquid refuses a passphrase file
+  with any group or other permission bit, or one owned by anyone but the effective user or root.
+  A Secret volume's files are owned by root (group `fsGroup` when the pod sets one, which also adds
+  group read), and lake runs as `10001`, so a Secret volume mounted straight into the lake
+  container is either unreadable (`0400`, root) or refused (group or other bits). The operator
+  therefore mounts the Secret (`defaultMode: 0440` with the pod's `fsGroup`, or `0444`) only into
+  an init container running as `10001` (the lake image serves), which copies it into an
+  `emptyDir` with `medium: Memory` with `install -m 0400 /secret/passphrase
+  /run/lake/liquid-identity/passphrase`, so the copy is owned by `10001` with mode `0400`; the lake
+  container mounts only that `emptyDir`, at `/run/lake/liquid-identity`;
+- `LIQUID_IDENTITY_KEY_CUSTODY=passphrase` and
+  `LIQUID_IDENTITY_PASSPHRASE_FILE=/run/lake/liquid-identity/passphrase` in the lake container's
+  environment.
+
+liquid follows a symbolic link and checks the file it reaches. Keep the Secret off the store volume
+and out of `LIQUID_HOME`: whoever holds both the identity directory and the passphrase can sign as
+the identity.
+
+`ApiServer::start` checks before liquid is asked: when `LIQUID_HOME` holds no identity and the
+custody is `passphrase` (named, or the Linux default), or holds a passphrase-sealed identity, and
+`LIQUID_IDENTITY_PASSPHRASE_FILE` is unset, lake exits at start with `lake cannot create (or open)
+its liquid identity in <dir>: it is sealed under a passphrase and LIQUID_IDENTITY_PASSPHRASE_FILE
+names no passphrase file ...`, naming both variables. A file liquid refuses (wrong owner or mode,
+empty) fails the start with liquid's reason. An identity already in `file` custody (every one created
+before liquid v0.3.0) needs neither variable and keeps loading, so a home that already holds one is
+not broken by the image. `lake manifest` lists both variables (optional) for the operator.
+
+Since each pod's home is new, each pod creates its own identity under the one passphrase; the
+passphrase does not identify the pod, it only seals the key at rest.
+
+`IdentityCustody.*` (`tests/test_identity_custody.cpp`) starts lake with an empty `LIQUID_HOME`:
+with a `0400` passphrase file it gets a `passphrase`-sealed identity and no clear `.wrapping.key`;
+with no file it refuses to start naming both variables and creates nothing; an existing
+`file`-custody identity starts with neither. The suite's `LIQUID_IDENTITY_KEY_CUSTODY=file` default
+(`tests/test_main.cpp`) is overridden only inside these tests.

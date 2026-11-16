@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Home → Dashboard (`/dashboard`): the whole platform at a glance, like rev-os's Command Center.
  * It was the home until Ask Orama took `/` (lake#600); an old `/?ws=` link opens it.
  *

@@ -1,4 +1,6 @@
-// A workspace's MCP connections (decision 60, lake#652, docs/api/mcp-connections.md): Lake as the
+// SPDX-License-Identifier: MIT
+
+// A workspace's MCP connections (lake#652, docs/api/mcp-connections.md): Lake as the
 // client of remote MCP servers. Each connection is a sealed `lake_mcp_connections` record in its
 // workspace Zetta; its credential is a workspace secret Lake reads server-side and never answers.
 // Lake runs the client, so every call is authorized by Lake's policy, audited in the workspace and
@@ -7,6 +9,7 @@
 // a person marked auto-approved for that tool.
 
 #include "lake/api/mcp_connections.hpp"
+#include "lake/api/agent_stream_triggers.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1599,6 +1602,13 @@ liquid::runtime::task<ApiResult> update_connection(const json& input, ApiContext
                                          "a topic name is letters, digits, '-', '_' and '.'",
                                          std::string("/") + field);
         }
+        // Lake's own streams are never a connection's topic (lake#996).
+        if (input.contains(field) && !input.at(field).is_null() &&
+            system_stream_name(input.at(field).get<std::string>())) {
+            co_return ApiResult::failure("invalid_input",
+                                         "that topic is one Lake writes itself; choose another name",
+                                         std::string("/") + field);
+        }
     }
     const std::string person = acting_person(context);
     bool rediscover = false;
@@ -2896,8 +2906,18 @@ liquid::runtime::task<json> call_exported_mcp_tool(const Registry& registry,
     if (context.store == nullptr || workspace_id.empty() || split == std::string::npos) {
         co_return refused("no such tool: " + name);
     }
+    // A caller with no Lake credential, or one who may not read this workspace, never reaches the
+    // workspace's connection records (lake#993): tools/call is held to what tools/list
+    // already requires.
+    if (!context.authorized) {
+        co_return refused("this call needs a Lake credential");
+    }
     const auto workspace = context.store->get_workspace(workspace_id);
     if (!workspace) {
+        co_return refused("no such tool: " + name);
+    }
+    if (auto denied = authorize_read(
+            json{{"customer_id", workspace->customer_id}, {"workspace_id", workspace_id}}, context)) {
         co_return refused("no such tool: " + name);
     }
     const std::string prefix = name.substr(0, split);

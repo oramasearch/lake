@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The app page's Change App split screen (lake#1241, docs/ui/apps.md#change-app-split-screen): the
  * conversation's share of the width, remembered in this browser, and when the running App's frame
  * reloads after a confirmed change. Pure, so `npm test` covers it (tests/change-app-split.test.ts). */

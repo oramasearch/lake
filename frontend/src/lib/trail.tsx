@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The top bar's breadcrumb. By default it is the rail group › the rail item › the page title; a
  * page that knows its entities replaces it with `useTrail([...])` (docs/ui/breadcrumb.md). Long
  * hex ids show their first 8 characters, with the whole value on hover. */

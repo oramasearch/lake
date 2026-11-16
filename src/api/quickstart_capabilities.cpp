@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The quickstart process (lake#1128, docs/api/quickstart.md): a new person drops a dataset and Lake
 // takes them to search and model answers on their own website. Four capabilities compose the ones
 // that already exist, so permissions, the balance gate, audit and usage metering apply unchanged:
@@ -2063,7 +2065,7 @@ std::string public_origin(const ApiContext& context) {
     if (!context.public_host.empty()) {
         return "https://" + context.public_host;
     }
-    return context.request_origin.empty() ? std::string("https://lake.live")
+    return context.request_origin.empty() ? std::string("https://lake.example.com")
                                           : context.request_origin;
 }
 

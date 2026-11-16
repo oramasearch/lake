@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "methodology_serving.hpp"
 #include "lake/api/capabilities.hpp"
 
@@ -21,6 +23,7 @@
 #include "agent_task_records_api.hpp"
 #include "feature_planning.hpp"
 #include "lake/api/agent_stream_triggers.hpp"
+#include "lake/api/billing.hpp"
 #include "lake/api/datasets.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/pipeline.hpp"
@@ -59,6 +62,15 @@ call_workspace(ApiContext& context,
                 std::unexpected(control::ZettaControlError{"invalid_input", std::move(problem)}));
         }
     }
+    // A dataset-confined credential (lake#1055): an engine call the workspace Zetta can check
+    // (sql, list_datasets, get_dataset) carries the work area wherever the engine enforces it,
+    // and sql runs nowhere else. Lake proves every other call it lets such a credential make
+    // (registry.cpp, work_area_refusal) and sends it as before, since the engine refuses a
+    // capability that does not declare its reads.
+    std::optional<std::vector<std::string>> dataset_scope;
+    if (control::engine_checks_dataset_scope(capability)) {
+        dataset_scope = control::dataset_work_area(context.scopes);
+    }
     const auto timing = context.workspace_call_timing;
     const std::size_t round = timing
         ? timing->completed_rounds.load(std::memory_order_relaxed) + 1 : 0;
@@ -75,7 +87,7 @@ call_workspace(ApiContext& context,
                     completed, round, std::memory_order_relaxed)) {
                 }
             }
-        }, context.cache_workspace_definitions);
+        }, context.cache_workspace_definitions, std::move(dataset_scope));
     if (!completed) {
         co_return std::unexpected(completed.error());
     }
@@ -853,6 +865,26 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
                 "unauthorized",
                 "this " + (library ? std::string(library->name) : agent_task->agent) +
                     " turn does not grant " + capability);
+        }
+        // lake#918: a launch's or a schedule's credential, which the agent's own code
+        // holds, runs only the engine actions a run calls directly (agent_run_direct_actions) and
+        // the actions its credential names: `workspace_act` alone opens nothing else, so the code
+        // never deletes or changes the workspace without a person. Every other change is a
+        // proposal a person confirms with their own credential.
+        const auto direct = [&](std::string_view name) {
+            return std::ranges::find(control::agent_run_direct_actions, name) !=
+                   control::agent_run_direct_actions.end();
+        };
+        if (!read &&
+            (context.credential_kind == "agent_launch" ||
+             context.credential_kind == "agent_schedule") &&
+            !direct(capability) && !direct(engine_capability_name(capability)) &&
+            !has_scope(context, capability) &&
+            !has_scope(context, engine_capability_name(capability))) {
+            co_return ApiResult::failure(
+                "unauthorized",
+                "an agent run's credential does not grant the workspace action " + capability +
+                    "; a person confirms changes with their own credential");
         }
         if (!read && agent_task && agent_task->agent == "agent-project" &&
             capability == "compile_intent") {
@@ -3217,13 +3249,56 @@ std::string read_only_statement_problem(std::string_view statement) {
                "with '" +
                first + "'";
     }
-    bool quoted = false;
-    for (const char character : text) {
-        if (character == '\'') {
-            quoted = !quoted;
-        } else if (character == ';' && !quoted) {
-            return "run one statement at a time";
+    // Read the text the way a SQL parser does, and refuse anything two parsers could split
+    // differently (lake#926): a comment (`--`, `/*`), a dollar quote, a backslash inside
+    // a string, or a string or quoted name left open. Only then is a `;` outside them a second
+    // statement, refused. The engine sees exactly the text checked here.
+    enum class State { plain, string, name };
+    State state = State::plain;
+    for (std::size_t index = 0; index < text.size(); ++index) {
+        const char character = text[index];
+        const char next = index + 1 < text.size() ? text[index + 1] : '\0';
+        switch (state) {
+        case State::plain:
+            if (character == '\'') {
+                state = State::string;
+            } else if (character == '"') {
+                state = State::name;
+            } else if ((character == '-' && next == '-') || (character == '/' && next == '*')) {
+                return "comments are not accepted here: send the query alone";
+            } else if (character == '$' &&
+                       (next == '$' || std::isalpha(static_cast<unsigned char>(next)) != 0 ||
+                        next == '_')) {
+                return "dollar-quoted text is not accepted here: use a single-quoted string";
+            } else if (character == ';') {
+                return "run one statement at a time";
+            }
+            break;
+        case State::string:
+            if (character == '\\') {
+                return "a backslash inside a string is not accepted here";
+            }
+            if (character == '\'') {
+                if (next == '\'') {
+                    ++index; // '' is a quote inside the string
+                } else {
+                    state = State::plain;
+                }
+            }
+            break;
+        case State::name:
+            if (character == '"') {
+                if (next == '"') {
+                    ++index;
+                } else {
+                    state = State::plain;
+                }
+            }
+            break;
         }
+    }
+    if (state != State::plain) {
+        return "a string or quoted name is not closed";
     }
     return {};
 }
@@ -3428,7 +3503,12 @@ json launch_json(const control::AgentLaunch& launch) {
             {"exit_code", launch.exit_code ? json(*launch.exit_code) : json(nullptr)},
             {"result", launch.result},
             {"created_at", launch.created_at},
-            {"created_by_taap_id", launch.created_by_taap_id}};
+            {"created_by_taap_id", launch.created_by_taap_id},
+            // Made before Lake confined runs to their dataset work area (lake#1055): its scopes
+            // may be broader than its agent allows until it is launched again.
+            {"recreate",
+             launch.desired == "present" && !control::records_work_area(launch.scopes) &&
+                 (launch.mode == "service" || !launch.exit_code)}};
 }
 
 // A background turn as callers see it (lake#269). A finished Project Agent proposal names the
@@ -3734,7 +3814,11 @@ json schedule_json(const control::AgentCronSchedule& schedule) {
             {"message", progress.message},
             {"last_schedule_at", schedule.last_schedule_at},
             {"created_at", schedule.created_at},
-            {"created_by_taap_id", schedule.created_by_taap_id}};
+            {"created_by_taap_id", schedule.created_by_taap_id},
+            // Made before Lake confined runs to their dataset work area (lake#1055): its runs may
+            // have broader scopes than its agent allows until the schedule is made again.
+            {"recreate",
+             schedule.desired == "present" && !control::records_work_area(schedule.scopes)}};
 }
 
 // Read on the customer, for the list_ capabilities, which authorize themselves.
@@ -3805,6 +3889,12 @@ std::string application_turn_kind(const json& input) {
 // app also needs `context.confirm_public`. Answers the proposal the turn carries.
 liquid::runtime::task<ApiResult>
 verified_confirmed_proposal(const json& input, ApiContext& context, std::string_view agent) {
+    // A confirmation is a person's (lake#989): an agent's credential can never confirm
+    // a proposal, however it got the proposal's id and digest.
+    if (context.credential_kind.starts_with("agent_")) {
+        co_return ApiResult::failure(
+            "unauthorized", "a proposal is confirmed by a person, not an agent", "/context");
+    }
     const bool experiments = agent == "agent-experiments";
     // An Application Agent proposal is confirmed by a turn of the kind that proposed it: app,
     // repair or change (lake#1207).
@@ -3885,6 +3975,20 @@ verified_confirmed_proposal(const json& input, ApiContext& context, std::string_
             "This app will be public. Tick the box to confirm that anyone with its address can "
             "open it.",
             "/context/confirm_public");
+    }
+    // The proposal's secret references are checked here, as the person confirming it, with their
+    // own get_secret_mount and read_secret (lake#891). The confirmed turn then needs no secret
+    // read: create_app accepts exactly these references from it after a server-side check that each
+    // mount still belongs to the workspace.
+    auto secrets = co_await check_proposed_app_secret_references(
+        app, input.at("workspace_id").get<std::string>(), context);
+    if (!secrets) {
+        co_return ApiResult::failure("store_error", secrets.error().message);
+    }
+    if (*secrets) {
+        ApiResult refused = std::move(**secrets);
+        refused.error.path = "/context/confirmed_proposal/app" + refused.error.path;
+        co_return refused;
     }
     co_return ApiResult::success(std::move(proposal));
 }
@@ -6583,6 +6687,63 @@ void register_conversation_capabilities(Registry& registry) {
         .async_handler = render_pipeline});
 }
 
+bool library_agent_may_read(const Capability& capability) {
+    // Reads only, including actions that only read (workspace_query).
+    if (capability.kind != CapabilityKind::Read && capability.action != "read") {
+        return false;
+    }
+    // Objects whose reads are credentials, secrets, sign-in or identity material: a person reads
+    // these themselves, never through an agent that reads for them.
+    static const std::set<std::string, std::less<>> withheld_objects{"agent_bus",
+                                                                     "agent_usage",
+                                                                     "application",
+                                                                     "authentication",
+                                                                     "certificate",
+                                                                     "clerk",
+                                                                     "lake_session",
+                                                                     "methodology_deployment",
+                                                                     "methodology_run",
+                                                                     "oauth",
+                                                                     "principal",
+                                                                     "secret",
+                                                                     "secret_mount",
+                                                                     "user"};
+    if (withheld_objects.contains(capability.object)) {
+        return false;
+    }
+    // Named, never a prefix (a prefix hides reads it should not): reads of other objects that
+    // still disclose secrets, keys, credentials or identity configuration.
+    static const std::set<std::string, std::less<>> withheld_names{"account_identity",
+                                                                   "decrypt",
+                                                                   "export_application_user",
+                                                                   "get_encryption_key",
+                                                                   "list_browser_keys",
+                                                                   "list_devices",
+                                                                   "list_encryption_keys",
+                                                                   "list_federation_issuers",
+                                                                   "list_grants",
+                                                                   "list_invitations",
+                                                                   "list_network_tunnel_grants",
+                                                                   "list_network_tunnel_sessions",
+                                                                   "list_offline_grants",
+                                                                   "list_recovery_notifications",
+                                                                   "list_secret_mounts",
+                                                                   "list_secrets",
+                                                                   "list_sessions",
+                                                                   "list_sso_providers",
+                                                                   "list_sso_provisioning_logs",
+                                                                   "mcp_setup",
+                                                                   "read_secret",
+                                                                   "repository_recovery_status",
+                                                                   "scim_get_group",
+                                                                   "scim_get_user",
+                                                                   "scim_list_groups",
+                                                                   "scim_list_users",
+                                                                   "secret_metadata",
+                                                                   "tunnel_client_downloads"};
+    return !withheld_names.contains(capability.name);
+}
+
 void register_agent_run_capabilities(Registry& registry) {
     const auto customer_agent_schema = [](json properties, json required) {
         return customer_input_schema(std::move(properties), std::move(required));
@@ -7259,13 +7420,13 @@ void register_agent_run_capabilities(Registry& registry) {
                     co_return ApiResult::failure(prior.error().code, prior.error().message);
                 }
                 if (agent == "agent-ask-orama") {
-                    // Ask Orama reads everything the person may read and changes nothing itself:
-                    // its key carries every read capability and agent_turn, never an action.
+                    // Ask Orama reads the workspace's data the person may read and changes nothing
+                    // itself: its key carries agent_turn and the reads library agents may make
+                    // (lake#985), never an action, a secret, a credential or identity material,
+                    // and every one of them is confined to this task's workspace.
                     scopes = {"agent_turn", "workspace_openapi"};
                     for (const auto& capability : registry.list()) {
-                        // Every read, including actions that only read (workspace_query).
-                        if (capability->kind == CapabilityKind::Read ||
-                            capability->action == "read") {
+                        if (library_agent_may_read(*capability)) {
                             scopes.push_back(capability->name);
                         }
                     }
@@ -7389,7 +7550,9 @@ void register_agent_run_capabilities(Registry& registry) {
                         scopes.insert(scopes.end(), {"get_study", "get_study_analysis"});
                         const json confirmed =
                             body["context"].value("confirmed_promotion", json());
-                        if (confirmed.is_object() && confirmed.value("confirm", false) &&
+                        // Only a person's turn carries a promotion confirmation (lake#989).
+                        if (!context.credential_kind.starts_with("agent_") &&
+                            confirmed.is_object() && confirmed.value("confirm", false) &&
                             confirmed.value("promotion", json()).is_object()) {
                             scopes.push_back("workspace_act");
                             scopes.push_back("promote_trial");
@@ -7520,6 +7683,15 @@ void register_agent_run_capabilities(Registry& registry) {
                 if (asking) {
                     body["parent_task_id"] = asking->id;
                 }
+                // A turn an agent asks for never holds more than the asking agent does (lake#922):
+                // delegation attenuates. Its scopes are the ones the caller's own
+                // credential carries, plus reading its own task, which every turn needs.
+                if (context.credential_kind.starts_with("agent_")) {
+                    std::erase_if(scopes, [&](const std::string& scope) {
+                        return scope != "get_agent_task" &&
+                               std::ranges::find(context.scopes, scope) == context.scopes.end();
+                    });
+                }
                 control::AgentTask asked{.id = planned_task_id.empty() ? control::new_uuid_v4()
                                                                        : planned_task_id,
                                          .customer_id = customer_id,
@@ -7591,10 +7763,21 @@ void register_agent_run_capabilities(Registry& registry) {
             if (!launches) {
                 co_return ApiResult::failure(launches.error().code, launches.error().message);
             }
-            const auto live = std::ranges::find_if(*launches, [&](const control::AgentLaunch& l) {
+            auto live = std::ranges::find_if(*launches, [&](const control::AgentLaunch& l) {
                 return l.mode == "service" && l.desired == "present" &&
                        l.created_by_user_id == context.acting_user_id;
             });
+            // A service's scopes never change, so one whose scopes are not what the agent's record
+            // gives now is re-created (lake#1055): a service made before Lake confined runs to
+            // their dataset work area holds broader scopes than its agent allows.
+            std::vector<std::string> scopes = control::agent_launch_scopes_for(*record);
+            if (live != launches->end() && live->scopes != scopes) {
+                if (auto withdrawn = context.store->withdraw_agent_launch(live->id); !withdrawn) {
+                    co_return ApiResult::failure(withdrawn.error().code,
+                                                 withdrawn.error().message);
+                }
+                live = launches->end();
+            }
             if (live == launches->end()) {
                 auto started = context.store->create_agent_launch(
                     control::NewAgentLaunch{.customer_id = customer_id,
@@ -7602,7 +7785,7 @@ void register_agent_run_capabilities(Registry& registry) {
                                             .agent_name = record->value("name", std::string()),
                                             .mode = "service",
                                             .trigger = "conversation",
-                                            .scopes = control::agent_launch_scopes_for(*record),
+                                            .scopes = std::move(scopes),
                                             .created_by_user_id = context.acting_user_id,
                                             .created_by_taap_id = context.acting_identity,
                                             .workspace_id = input.at("workspace_id")});
@@ -7626,9 +7809,10 @@ void register_agent_run_capabilities(Registry& registry) {
                           (live->phase.empty() ? std::string("pending") : live->phase) +
                           "). Send your message again in a moment."}});
             }
+            // The launch's own token, never the Lake's (agent-runtime#14).
             auto reply = co_await context.agent_caller->turn(
                 live->endpoint,
-                config.agent_service_token,
+                control::agent_launch_service_token(config.agent_service_token, live->id),
                 {{"conversation_id", body["conversation_id"]}, {"message", message}});
             if (!reply) {
                 co_return ApiResult::failure("store_error", reply.error().message);
@@ -8375,6 +8559,19 @@ ApiResult not_agent_service() {
                               "only that library agent, with its own bus credential, may call this");
 }
 
+// False when the caller's bus credential is bound to a workspace (lake#871) and the task is in
+// another one.
+bool bus_reaches(const ApiContext& context, const std::string& workspace_id) {
+    return context.agent_service_workspace_id.empty() ||
+           context.agent_service_workspace_id == workspace_id;
+}
+
+ApiResult not_bound_workspace() {
+    return ApiResult::failure("forbidden",
+                              "this bus credential is bound to another workspace",
+                              "/task_id");
+}
+
 // Replaces every "{{credential}}" string in a task body.
 void fill_credential(json& value, const std::string& credential) {
     if (value.is_string() && value.get<std::string>() == "{{credential}}") {
@@ -8450,6 +8647,9 @@ void register_agent_bus_capabilities(Registry& registry) {
                     task->workspace_id != input.at("workspace_id").get<std::string>()) {
                     continue;
                 }
+                if (!bus_reaches(context, task->workspace_id)) {
+                    continue;
+                }
                 tasks.push_back({{"sequence", event.sequence},
                                  {"task_id", task->id},
                                  {"customer_id", task->customer_id},
@@ -8465,15 +8665,26 @@ void register_agent_bus_capabilities(Registry& registry) {
         .description =
             "A library agent takes one task it received: exactly one claim succeeds (another is "
             "a conflict). Answers the task's body with the task's own credential in it, handed "
-            "over this once; Lake keeps only its SHA-256. Only that agent may call it, with "
-            "its own bus credential.",
+            "over this once; Lake keeps only its SHA-256. With `credentials: by_reference` the "
+            "credential never leaves Lake: the agent calls Lake with its own bus credential and "
+            "the header X-Lake-Agent-Task: <task_id>, and Lake adds the task's credential to "
+            "each request while the task runs on this agent. A bus credential bound to a "
+            "workspace always claims by reference. Only that agent may call it, with its own bus "
+            "credential.",
         .input_schema = {{"type", "object"},
                          {"required", json::array({"task_id", "agent"})},
                          {"additionalProperties", false},
                          {"properties",
                           {{"task_id", {{"type", "string"}}},
                            {"workspace_id", {{"type", "string"}}},
-                           {"agent", {{"type", "string"}}}}}},
+                           {"agent", {{"type", "string"}}},
+                           {"credentials",
+                            {{"type", "string"},
+                             {"enum", json::array({"in_body", "by_reference"})},
+                             {"description",
+                              "in_body (the default) fills each {{credential}} with the task's "
+                              "credential; by_reference fills it with an empty string and keeps "
+                              "the credential in Lake (docs/api/agent-bus.md)"}}}}}},
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
         .requires_auth = false,
@@ -8496,6 +8707,14 @@ void register_agent_bus_capabilities(Registry& registry) {
                 co_return ApiResult::failure(
                     "conflict", "workspace_id does not match the task", "/workspace_id");
             }
+            if (current && !bus_reaches(context, current->workspace_id)) {
+                co_return not_bound_workspace();
+            }
+            // A credential bound to one workspace is new, so its agent knows to act by reference:
+            // it never receives a task credential at all (lake#871).
+            const bool by_reference =
+                !context.agent_service_workspace_id.empty() ||
+                input.value("credentials", std::string("in_body")) == "by_reference";
             // The request the agent receives is a record in the task's workspace (lake#374). It
             // is read before the claim, so a workspace that cannot answer leaves the task
             // waiting for another claim instead of claimed without its request. A task that is
@@ -8544,10 +8763,13 @@ void register_agent_bus_capabilities(Registry& registry) {
             }
             json body = std::move(request);
             body["workspace_id"] = task->workspace_id;
-            fill_credential(body, credential);
+            // By reference, the credential exists only as the digest the claim stored: the agent
+            // names the task instead (control/agent_task_proxy.hpp).
+            fill_credential(body, by_reference ? std::string() : credential);
             context.audit_customer_id = task->customer_id;
             context.audit_object = "agent_task/" + task->id;
             co_return ApiResult::success({{"task_id", task->id},
+                                          {"credentials", by_reference ? "by_reference" : "in_body"},
                                           {"workspace_id", task->workspace_id},
                                           {"customer_id", task->customer_id},
                                           {"agent", task->agent},
@@ -8604,6 +8826,9 @@ void register_agent_bus_capabilities(Registry& registry) {
                 task->workspace_id != input.at("workspace_id").get<std::string>()) {
                 co_return ApiResult::failure(
                     "conflict", "workspace_id does not match the task", "/workspace_id");
+            }
+            if (!bus_reaches(context, task->workspace_id)) {
+                co_return not_bound_workspace();
             }
             json event = input;
             WorkspaceApiBus bus(context, task->customer_id, task->workspace_id);
@@ -8759,8 +8984,14 @@ void register_agent_bus_capabilities(Registry& registry) {
 // destroyed; otherwise one store transaction deletes the workspace and what it holds, and
 // finish_workspace_deletion removes what lives outside PostgreSQL. A repeated call for a deleted
 // workspace resumes an unfinished deletion and answers the recorded one.
+//
+// Where billing is on, a live workspace is deleted only once its unbilled usage is retained
+// (lake#988, docs/api/billing.md#a-deleted-workspaces-usage): the asynchronous handler
+// runs retain_deleted_workspace_usage first and passes `usage_retained`; any other path is
+// refused, so no deletion can drop what an issued bill has not counted yet.
 static ApiResult delete_workspace_cascading(const json& input, ApiContext& context,
-                                            const control::Workspace& row) {
+                                            const control::Workspace& row,
+                                            bool usage_retained = false) {
     const bool dry_run = input.value("dry_run", false);
     const bool confirmed = input.contains("confirm") && input.at("confirm") == row.name;
     if (!confirmed && (!dry_run || input.contains("confirm"))) {
@@ -8787,6 +9018,11 @@ static ApiResult delete_workspace_cascading(const json& input, ApiContext& conte
         (*plan)["dry_run"] = true;
         context.audit_details["counts"] = plan->at("counts");
         return ApiResult::success(std::move(*plan));
+    }
+    if (row.desired != "deleted" && !usage_retained && billing_registered(context.registry)) {
+        return ApiResult::failure("conflict",
+                                  "the workspace's usage must be kept for its bill before it is "
+                                  "deleted; call delete_workspace through the API");
     }
     control::WorkspaceDeletionRequest request{.workspace_id = row.id,
                                               .requested_by = context.acting_identity};
@@ -8898,8 +9134,17 @@ void register_workspace_capabilities(Registry& registry) {
                     return ApiResult::success({{"workspaces", result}});
                 }
                 if (creating) {
-                    const auto row = context.store->create_workspace({input.at("customer_id"),
-                        input.at("name"), input.at("environment"), context.acting_identity});
+                    // lake#987: the account's workspace and service caps, counted by the store.
+                    control::NewWorkspace request{input.at("customer_id"),
+                                                  input.at("name"),
+                                                  input.at("environment"),
+                                                  context.acting_identity};
+                    if (context.workspaces != nullptr) {
+                        request.max_workspaces =
+                            context.workspaces->config().max_workspaces_per_customer;
+                        request.max_services = context.workspaces->config().max_per_customer;
+                    }
+                    const auto row = context.store->create_workspace(request);
                     return row ? ApiResult::success(control::workspace_json(*row, operator_view(context))) : store_failure(row.error());
                 }
                 const auto row = context.store->get_workspace(input.at("workspace_id"));
@@ -8924,6 +9169,36 @@ void register_workspace_capabilities(Registry& registry) {
                 }
                 const auto updated = context.store->update_workspace(row->id, patch);
                 return updated ? ApiResult::success(control::workspace_json(*updated, operator_view(context))) : store_failure(updated.error());
+            },
+            // delete_workspace reads the workspace's usage before the cascade (lake#988).
+            .async_handler = !deleting ? AsyncCapabilityHandler{}
+                                       : [](const json& input, ApiContext& context)
+                                             -> liquid::runtime::task<ApiResult> {
+                const auto row = context.store->get_workspace(input.at("workspace_id"));
+                if (!row || row->customer_id != input.at("customer_id").get<std::string>()) {
+                    co_return ApiResult::failure(
+                        "invalid_input", "workspace_id is not in this account", "/workspace_id");
+                }
+                const bool confirmed =
+                    input.contains("confirm") && input.at("confirm") == row->name;
+                bool retained = false;
+                if (row->desired != "deleted" && confirmed && !input.value("dry_run", false) &&
+                    billing_registered(context.registry)) {
+                    auto kept = co_await retain_deleted_workspace_usage(context, *row);
+                    if (!kept) {
+                        co_return ApiResult::failure("store_error", kept.error().message);
+                    }
+                    if (!*kept) {
+                        co_return std::move(kept->error());
+                    }
+                    retained = true;
+                }
+                // Read again: the workspace may have changed while its usage was read.
+                const auto current = context.store->get_workspace(row->id);
+                if (!current) {
+                    co_return store_failure(current.error());
+                }
+                co_return delete_workspace_cascading(input, context, *current, retained);
             }});
     }
     register_agent_run_capabilities(registry);

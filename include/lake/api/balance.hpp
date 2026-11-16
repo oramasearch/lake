@@ -1,6 +1,8 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
-// The prepaid account balance (lake#1114, liquid-bridge decision 67, docs/api/billing.md#balance):
+// The prepaid account balance (lake#1114, docs/api/billing.md#balance):
 // lake.live is prepaid. Each account (a person's or an organization's) has a balance in US dollars:
 // credits are paid top-ups (Stripe Checkout, or an auto top-up off a saved card), charges are its
 // usage at the published price list, refreshed every few minutes by the store root's owner. The
@@ -8,7 +10,7 @@
 // a warning on every API and MCP answer) and emails at each crossing; at the overdraft limit every
 // capability that starts paid work answers 402 payment_required. Billing on only (LAKE_BILLING):
 // with billing off none of this exists. The records live in lake's Postgres control plane as
-// billing (decision 56); usage stays in each workspace Zetta.
+// billing; usage stays in each workspace Zetta.
 
 #include <chrono>
 #include <cstdint>

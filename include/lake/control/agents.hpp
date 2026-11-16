@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <chrono>
@@ -25,10 +27,12 @@ struct MintRequest {
     std::string durable_agent_taap_id;
     std::string dispatcher_taap_id;
     std::vector<std::string> scopes;
+    // The repository the session acts for (lake#1346): its lake UUID, kept with the session, and
+    // the hex id liquid gave it, written as the delegation's `repository` (liquid#515).
+    std::string repository_id;
+    std::string liquid_repository_id;
+    // Every key expires (liquid#514's `not_after`); at most fifteen minutes.
     int lifetime_seconds = 900;
-    // lake#234: no expiry at all. Only when the customer and the instance allow it (checked by
-    // the capability); the key stays revocable.
-    bool never_expires = false;
 };
 
 struct MintedSession {
@@ -42,6 +46,7 @@ struct VerifiedDrip {
     std::string session_taap_id;
     std::vector<std::string> scopes;
     std::string expires_at;
+    std::string repository_id;
 };
 
 class Service {

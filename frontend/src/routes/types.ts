@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The route registry's types. One row per page: the router, the rail, the breadcrumbs and the
  * command palette all read it, so a page exists in one place. Each page group owns
  * `pages/<group>/routes.ts`; `routes.tsx` joins them. */

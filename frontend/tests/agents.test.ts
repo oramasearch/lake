@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Design → Agents and Train → Agents (lake#653, src/lib/agents.ts): Orama's agents are read-only
  * and the workspace's own editable, the "By Orama" / "Yours" filter, Duplicate (of one of Orama's

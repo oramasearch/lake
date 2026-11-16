@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 # lake — Linux/amd64 image.
 #
 # Builds the single `lake` binary from the local, fully-checked-out source (the HTTP stack is
@@ -30,7 +32,8 @@ FROM docker.io/oramasearch/zetta-tunnel-clients:v0.1.0@sha256:a9f609689ed5536d0d
 # ---------- web app ----------
 # The web app (frontend/, docs/ui/web-app.md) is built with Node 22 and embedded into the binary
 # by the build stage below.
-FROM node:22-bookworm-slim AS frontend
+# Pinned by digest (lake#1003); a new base is a reviewed change of this digest.
+FROM node:22-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS frontend
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -46,10 +49,13 @@ COPY src/api/datasets.cpp /src/api/datasets.cpp
 RUN npm run build
 
 # ---------- build stage ----------
-FROM ubuntu:24.04 AS build
+# Pinned by digest (lake#1003), the same digest as the runtime stage.
+FROM ubuntu:24.04@sha256:2198e4c65076e9cb0b3d695219df667c0e3b0072da64ca3c2648aca17dcecaf5 AS build
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Clang 17+ is required for C++26; install clang-19 from the official LLVM apt channel.
+# Clang 17+ is required for C++26; install clang-19 from the official LLVM apt channel. No script
+# is run from the network (lake#1003): the channel's signing key is trusted only when its
+# fingerprint is the one recorded here, and apt checks every package against it.
 # libstdc++-14 is the C++ standard library (Ubuntu 24.04 defaults to 13, which lacks <print>);
 # clang picks the newest libstdc++ installed. OpenSSL 3.6.3 supplies both Corosio TLS and the
 # Argon2id EVP_KDF used by password credentials.
@@ -57,7 +63,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates wget gnupg lsb-release software-properties-common \
       build-essential ninja-build git pkg-config libfuse3-dev fuse3 nodejs ccache \
       libstdc++-14-dev zlib1g-dev libssl-dev libpq-dev \
- && wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh && chmod +x /tmp/llvm.sh && /tmp/llvm.sh 19 \
+ && LLVM_KEY_FINGERPRINT=6084F3CF814B57C1CF12EFD515CF4D18AF4F7421 \
+ && wget -qO /etc/apt/keyrings/llvm.asc https://apt.llvm.org/llvm-snapshot.gpg.key \
+ && gpg --show-keys --with-colons /etc/apt/keyrings/llvm.asc | grep -q "^fpr:::::::::${LLVM_KEY_FINGERPRINT}:" \
+ && echo "deb [signed-by=/etc/apt/keyrings/llvm.asc] http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" \
+      > /etc/apt/sources.list.d/llvm.list \
+ && apt-get update && apt-get install -y --no-install-recommends clang-19 lldb-19 lld-19 clangd-19 \
  && rm -rf /var/lib/apt/lists/*
 
 ARG OPENSSL_VERSION=3.6.3
@@ -77,8 +88,12 @@ RUN wget -qO /tmp/openssl.tar.gz \
  && rm -rf /tmp/openssl.tar.gz "/tmp/openssl-${OPENSSL_VERSION}"
 
 # Ubuntu 24.04 ships CMake 3.28, which does NOT know cxx_std_26 for Clang 19. Use a newer CMake.
+# The installer is checked against the SHA-256 Kitware publishes (cmake-<v>-SHA-256.txt, lake#1003)
+# before it runs.
 ARG CMAKE_VERSION=3.31.5
+ARG CMAKE_SHA256=69118f4aafaf5f73e9897f2d39cf667a01d6fe8ef66f9a874e38996d7025e966
 RUN wget -qO /tmp/cmake.sh "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.sh" \
+ && echo "${CMAKE_SHA256}  /tmp/cmake.sh" | sha256sum -c - \
  && sh /tmp/cmake.sh --skip-license --prefix=/usr/local && rm -f /tmp/cmake.sh && cmake --version
 
 WORKDIR /src
@@ -116,7 +131,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=lake-ccache \
  && ./build/lake version
 
 # ---------- runtime stage ----------
-FROM ubuntu:24.04 AS runtime
+FROM ubuntu:24.04@sha256:2198e4c65076e9cb0b3d695219df667c0e3b0072da64ca3c2648aca17dcecaf5 AS runtime
 ARG LAKE_BUILD_REVISION=unknown
 ARG LAKE_BUILD_CREATED=unknown
 LABEL org.opencontainers.image.revision="${LAKE_BUILD_REVISION}" \

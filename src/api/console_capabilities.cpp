@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/capabilities.hpp"
 
 #include <algorithm>
@@ -241,7 +243,7 @@ ApiResult viewer(const json& input, ApiContext& context, const std::string& vers
          lake_pool_password_sign_in(context.clerk_publishable_key) &&
              context.sign_in_sso_provider.empty()},
         // The terms and privacy policy sign-up and sign-in link to (LAKE_TERMS_URL,
-        // LAKE_PRIVACY_URL; liquid-bridge#15); empty when the instance shows no link. A custom
+        // LAKE_PRIVACY_URL); empty when the instance shows no link. A custom
         // brand's own links (LAKE_BRAND_TERMS_URL, LAKE_BRAND_PRIVACY_URL; lake#1135) win, so a
         // white-labelled sign-up links its customer's terms.
         {"legal",

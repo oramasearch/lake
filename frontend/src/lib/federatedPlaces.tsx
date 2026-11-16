@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Federated search's places (lake#633): each place's read, the hook that runs them side by side,
  * and how a hit is drawn and opened. Data → Search (`pages/search/SearchPage.tsx`) and the top bar's
  * search (`components/CommandPalette.tsx`) both use it, so they find the same things. The plain

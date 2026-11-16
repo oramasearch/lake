@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT */
+
 /* Design and Workspaces pages (lake#561). Overlays are portalled outside `main`, so look.css's
  * `main form.stack .field > label { display: block }` does not reach a form in a Modal or Drawer
  * and lake.css's `form.stack label { display: grid }` puts a label's words, its code and its

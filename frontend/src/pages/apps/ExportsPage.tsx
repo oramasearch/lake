@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Repository Export (web_ui.cpp web_ui_exports; serve_exports_page). The download stays the
  * server's `/exports/download` route, which answers the archive as an attachment. */
 import { Navigate, useSearchParams } from "react-router-dom";

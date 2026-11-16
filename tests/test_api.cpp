@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "../src/api/store_repository.hpp"
 #include "audit_test_support.hpp"
 #include "personal_customer_test_support.hpp"
@@ -42,12 +44,15 @@
 #include <openssl/hmac.h>
 
 #include <liquid/liquid.hpp>
+#include <liquid/version.hpp>
 
 #include "objects/records.hpp"  // from LAKE_LIQUID_SOURCE_DIR/src (see tests/CMakeLists.txt)
 
+#include "api/repository_people.hpp"
 #include "api/workspace_records_api.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/forge.hpp"
+#include "lake/api/liquid_clients.hpp"
 #include "lake/api/markdown.hpp"
 #include "lake/api/mcp.hpp"
 #include "lake/api/registry.hpp"
@@ -139,6 +144,8 @@ struct RepositoryFixtureStore final : SyncStore {
     std::string commit_message;
     std::vector<RepositoryWriteOperation> committed_operations;
     std::optional<std::vector<RepositoryTreeEntry>> write_tree;
+    // The tree at a given revision, when a test needs one to differ from main's (lake#923).
+    std::map<std::string, std::vector<RepositoryTreeEntry>> trees_at;
     std::string conflict_path = "readme.md";
     std::string resolved_conflict;
     std::string conflict_resolution;
@@ -167,7 +174,10 @@ struct RepositoryFixtureStore final : SyncStore {
     }
 
     SyncStoreResult<std::vector<RepositoryTreeEntry>>
-    repository_tree(const std::string&, const std::string&, const std::string&) override {
+    repository_tree(const std::string&, const std::string&, const std::string& ref) override {
+        if (const auto at = trees_at.find(ref); at != trees_at.end()) {
+            return at->second;
+        }
         const std::string shared_path = shared_folder_moved ? "renamed" : "shared";
         return std::vector<RepositoryTreeEntry>{
             {"readme.md", "blob", "blob-1", 0644, "11111111111111111111111111111111"},
@@ -1390,6 +1400,31 @@ TEST(RegistryProtocols, OciClientPushesAndPullsTwoLayersByteIdentical) {
         EXPECT_EQ(response_header(completed, "Docker-Content-Digest"), digest);
         return digest;
     };
+
+    // lake#998: an upload started in one repository cannot be continued in another.
+    {
+        const std::string started = http_request(server.port(),
+                                                 "POST",
+                                                 "/v2/lake-fixture/blobs/uploads/",
+                                                 "",
+                                                 "application/octet-stream",
+                                                 {},
+                                                 authorization);
+        const std::string location = response_header(started, "Location");
+        const std::string upload = location.substr(location.rfind('/') + 1);
+        const std::string contents = "elsewhere";
+        const std::string digest = "sha256:" + lake::control::identity_crypto::sha256_hex(contents);
+        const std::string crossed = http_request(server.port(),
+                                                 "PUT",
+                                                 "/v2/other-fixture/blobs/uploads/" + upload +
+                                                     "?digest=" + digest,
+                                                 contents,
+                                                 "application/octet-stream",
+                                                 {},
+                                                 authorization);
+        EXPECT_NE(crossed.find(" 404 "), std::string::npos) << crossed;
+        EXPECT_NE(crossed.find("BLOB_UPLOAD_UNKNOWN"), std::string::npos) << crossed;
+    }
 
     const std::string config = R"({"architecture":"arm64","os":"darwin"})";
     const std::string first_layer("lake layer one\0with binary", 26);
@@ -3123,6 +3158,50 @@ TEST(Registry, ServerInfoNeedsNoAuth) {
         events.push_back(std::string(event));
     }
     EXPECT_EQ(r.value["stripe_webhook_events"], events);
+    // lake#1324: what a liquid client checks, read from the code, never repeated here.
+    EXPECT_EQ(r.value["liquid"], lake::api::liquid_clients_json());
+    EXPECT_EQ(r.value["liquid"]["sync_protocol"], lake::api::liquid_sync_protocol_version);
+    EXPECT_EQ(r.value["liquid"]["forge_api"], lake::api::liquid_forge_api_version);
+    EXPECT_EQ(r.value["liquid"]["oldest_release"], lake::api::oldest_supported_liquid);
+    EXPECT_EQ(r.value["liquid"]["newest_release"], liquid::version_string());
+}
+
+// lake#1324: the supported range is [oldest_supported_liquid, the linked libliquid].
+TEST(LiquidClients, TheRangeRunsFromTheFirstReleaseToTheLinkedLiquid) {
+    using lake::api::LiquidRelease;
+    using lake::api::parse_liquid_release;
+    const auto oldest = parse_liquid_release(lake::api::oldest_supported_liquid);
+    ASSERT_TRUE(oldest);
+    const LiquidRelease newest = lake::api::newest_supported_liquid();
+    EXPECT_EQ(lake::api::to_string(newest), liquid::version_string());
+    EXPECT_LE(*oldest, newest);
+    // The content type the sync routes speak is the one published.
+    EXPECT_EQ(lake::api::liquid_sync_media_type,
+              "application/vnd.liquid.sync-v" +
+                  std::to_string(lake::api::liquid_sync_protocol_version));
+
+    EXPECT_EQ(lake::api::liquid_client_refusal(lake::api::to_string(*oldest)), "");
+    EXPECT_EQ(lake::api::liquid_client_refusal(lake::api::to_string(newest)), "");
+    EXPECT_EQ(lake::api::liquid_client_refusal("v" + lake::api::to_string(newest)), "");
+    EXPECT_EQ(lake::api::liquid_client_refusal(lake::api::to_string(newest) + "-rc.1"), "");
+
+    const LiquidRelease too_new{newest.major, newest.minor, newest.patch + 1};
+    const std::string newer = lake::api::liquid_client_refusal(lake::api::to_string(too_new));
+    EXPECT_NE(newer.find("newer than this Lake supports"), std::string::npos) << newer;
+    EXPECT_NE(newer.find(lake::api::to_string(newest)), std::string::npos) << newer;
+    if (oldest->patch > 0 || oldest->minor > 0 || oldest->major > 0) {
+        const LiquidRelease too_old{0, 0, 0};
+        const std::string older = lake::api::liquid_client_refusal(lake::api::to_string(too_old));
+        EXPECT_NE(older.find("older than this Lake supports"), std::string::npos) << older;
+        EXPECT_NE(older.find("upgrade liquid"), std::string::npos) << older;
+    }
+    for (const std::string_view bad : {"", "1", "1.2", "1.2.x", "01.2.3", "1.2.3-", "1.2.3.4"}) {
+        const std::string refused = lake::api::liquid_client_refusal(bad);
+        EXPECT_NE(refused.find("is not a liquid release"), std::string::npos) << bad;
+    }
+    EXPECT_TRUE(lake::api::liquid_version_exempt("/v1/server_info"));
+    EXPECT_FALSE(lake::api::liquid_version_exempt("/v1/viewer"));
+    EXPECT_NE(lake::api::find_error_code("unsupported_client_version"), nullptr);
 }
 
 TEST(Telemetry, PrometheusCounterAndHistogram) {
@@ -3203,6 +3282,46 @@ TEST(TelemetryHttp, MetricsRequireExistingAuthAndUsePrometheusContentType) {
     server.stop();
 }
 
+// A method HTTP does not define is counted as `other` (lake#1315): a client that sends a new
+// made-up method on every request must not add a new metric series each time.
+TEST(TelemetryHttp, UnknownMethodsAreCountedAsOtherNotByTheirText) {
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "test-node";
+    options.admin_token = "test-token";
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    // A target that is not a URL is refused before any route (`bad_url`), which counts and logs
+    // the request with its method.
+    const std::vector<std::string> made_up = {"XMADEUP1", "XMADEUP2", "XMADEUP3", "get"};
+    for (const std::string& method : made_up) {
+        const std::string answered = http_request(server.port(), method, "/%zz", "", "text/plain");
+        EXPECT_NE(answered.find(" 400 "), std::string::npos) << method << "\n" << answered;
+    }
+
+    const std::string served = http_get(server.port(), "/metrics", "Bearer test-token");
+    ASSERT_NE(served.find(" 200 "), std::string::npos) << served;
+    for (const std::string& method : made_up) {
+        const std::string label = "method=\"" + method + "\"";
+        EXPECT_EQ(served.find(label), std::string::npos) << served;
+    }
+    std::size_t other_series = 0;
+    std::size_t at = 0;
+    const std::string other_counter = "lake_http_requests_total{method=\"other\"";
+    while ((at = served.find(other_counter, at)) != std::string::npos) {
+        ++other_series;
+        at += other_counter.size();
+    }
+    ASSERT_EQ(other_series, 1U) << served;
+    const std::size_t line_start = served.find(other_counter);
+    const std::size_t line_end = served.find('\n', line_start);
+    const std::string line = served.substr(line_start, line_end - line_start);
+    EXPECT_EQ(line, other_counter + ",route=\"bad_url\",status=\"400\"} 4");
+    server.stop();
+}
+
 // The browser session is the API's: password sign-up through /v1 sets the HttpOnly lake_session
 // cookie, which then reads sessions and enrolls MFA. The former server pages are the web app's, so
 // a request that is not a browser's gets the 404 (lake#561).
@@ -3266,7 +3385,7 @@ TEST(IdentityHttp, ApiSignUpIssuesAndResolvesHttpOnlySessions) {
     server.stop();
 }
 
-// lake#912 (LSR-001): a session of an identity application's pool carries no Lake grants, even
+// lake#912: a session of an identity application's pool carries no Lake grants, even
 // when its user's TAAP identity is a Lake account's. `pool_session` mints a session in `pool_id`
 // for a user with `taap_id` (the Lake account `user_id` carries it) the way each store can.
 void expect_application_sessions_carry_no_lake_grants(
@@ -4615,12 +4734,12 @@ TEST(Repositories, BelongToOneWorkspaceOfTheirSpace) {
                                     {{"customer_id", ada},
                                      {"workspace_id", foreign->id},
                                      {"name", "example"},
-                                     {"git_directory", "/recorded/example.git"},
+                                     {"git_directory", "example.git"},
                                      {"recording", json::object()}});
     EXPECT_EQ(github.error.code, "invalid_input");
     EXPECT_EQ(github.error.path, "/customer_id");
 
-    // Deleting a workspace deletes its repositories with it (lake#514, decision 54 S12): the
+    // Deleting a workspace deletes its repositories with it (lake#514): the
     // live one is tombstoned with its retention ended, and the workspace takes no new one.
     const ApiResult removed = s.call(
         "delete_workspace",
@@ -4647,7 +4766,8 @@ TEST(ApiErrors, DatabaseDiagnosticsStayOutOfErrorMessages) {
 
 TEST(Forge, PersistsIssueLifecycleAndMapsReviewCommentAnchors) {
     Surface surface;
-    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    const ApiResult user =
+        surface.call("create_user", {{"display_name", "Ada"}, {"taap_id", "taap:1:ed25519:ada"}});
     ASSERT_TRUE(user.ok) << user.error.message;
     const ApiResult customer = surface.call(
         "create_customer",
@@ -4711,6 +4831,161 @@ TEST(Forge, PersistsIssueLifecycleAndMapsReviewCommentAnchors) {
     EXPECT_EQ(mapped.value["items"][0]["value"]["anchor"]["change"], "change-2");
     EXPECT_EQ(mapped.value["items"][0]["value"]["anchor"]["line"], 10);
     EXPECT_EQ(mapped.value["items"][0]["value"]["anchor"]["disposition"], "shifted");
+
+    // Reviewers and comment authors read by name and handle (lake#1326); an unknown one is absent.
+    const json ada = {{"kind", "user"}, {"name", "Ada"}, {"handle", "ada"}};
+    const ApiResult reviews = surface.call("list_reviews", {{"repository_id", repository_id}});
+    ASSERT_TRUE(reviews.ok) << reviews.error.message;
+    EXPECT_EQ(reviews.value["people"]["taap:1:ed25519:ada"], ada);
+    const ApiResult comments =
+        surface.call("list_review_comments", {{"repository_id", repository_id}});
+    ASSERT_TRUE(comments.ok) << comments.error.message;
+    EXPECT_TRUE(comments.value.contains("people"));
+    // Issues are unchanged.
+    EXPECT_FALSE(
+        surface.call("list_issues", {{"repository_id", repository_id}}).value.contains("people"));
+}
+
+// lake#1326: the identities a forge record names, in either author shape.
+TEST(Forge, ARecordsSignersAreItsOpenerReviewersApproverAndAuthor) {
+    std::vector<std::string> signers;
+    lake::api::forge_record_signers({{"opened_by", "taap:1:ed25519:opener"},
+                                     {"reviewers", json::array({"taap:1:ed25519:r", 7, ""})},
+                                     {"approval", {{"by", "taap:1:ed25519:approver"}}}},
+                                    signers);
+    lake::api::forge_record_signers(
+        {{"author", {{"taap_id", "taap:1:ed25519:actor"}, {"algorithm", "ed25519"}}}}, signers);
+    lake::api::forge_record_signers({{"author", "taap:1:ed25519:plain"}}, signers);
+    lake::api::forge_record_signers(json::array(), signers);
+    EXPECT_EQ(signers,
+              (std::vector<std::string>{"taap:1:ed25519:opener",
+                                        "taap:1:ed25519:r",
+                                        "taap:1:ed25519:approver",
+                                        "taap:1:ed25519:actor",
+                                        "taap:1:ed25519:plain"}));
+}
+
+// lake#1326: an identity no account acts for is absent from `people`, and a repository's access
+// list names its principals.
+TEST(Repositories, PeopleNameKnownAccountsOnlyAndTheAccessList) {
+    Surface s;
+    EXPECT_EQ(lake::api::signer_people(s.ctx, {"taap:1:ed25519:nobody"}), json::object());
+    const ApiResult user = s.call("create_user",
+                                  {{"display_name", "Grace"},
+                                   {"taap_id", "taap:1:ed25519:grace"},
+                                   {"email", "grace@example.test"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer =
+        s.call("create_customer",
+               {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "grace"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    EXPECT_EQ(lake::api::signer_people(s.ctx, {"taap:1:ed25519:grace", "taap:1:ed25519:nobody"}),
+              json({{"taap:1:ed25519:grace",
+                     {{"kind", "user"}, {"name", "Grace"}, {"handle", "grace"}}}}));
+    const ApiResult repository =
+        s.call("create_repository",
+               {{"customer_id", customer.value["id"]},
+                {"workspace_id", lake::test::repository_workspace(s.store, customer.value["id"])},
+                {"name", "access"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const auto object = s.store.find_policy_object("repository", repository.value["id"]);
+    ASSERT_TRUE(object) << object.error().message;
+    ASSERT_TRUE(s.store.create_grant({"taap:1:ed25519:grace",
+                                      object->id,
+                                      "write",
+                                      "people-attestation",
+                                      "admin",
+                                      "people-access"}));
+    const ApiResult access = s.call(
+        "entity_effective_access", {{"object_type", "repository"}, {"id", repository.value["id"]}});
+    ASSERT_TRUE(access.ok) << access.error.message;
+    ASSERT_TRUE(access.value.contains("people"));
+    EXPECT_TRUE(std::ranges::any_of(access.value["items"], [](const json& entry) {
+        return entry.value("principal_taap_id", "") == "taap:1:ed25519:grace";
+    })) << access.value.dump();
+    EXPECT_EQ(access.value["people"]["taap:1:ed25519:grace"],
+              json({{"kind", "user"}, {"name", "Grace"}, {"handle", "grace"}}));
+    EXPECT_EQ(access.value.dump().find("grace@example.test"), std::string::npos);
+}
+
+// lake#1328: the web app's "liquid and liquify" token preset (frontend/src/pages/developer/
+// logic.ts, offered on Developer → API and Account → Tokens) names real capabilities, and a token
+// scoped to exactly it reaches the review capabilities liquify calls and nothing else.
+TEST(Forge, TheLiquidAndLiquifyTokenPresetCanReview) {
+    std::ifstream file(std::filesystem::path(LAKE_TEST_SOURCE_DIR) /
+                       "frontend/src/pages/developer/logic.ts");
+    const std::string source((std::istreambuf_iterator<char>(file)), {});
+    std::vector<std::string> preset;
+    for (const char* list : {"LIQUID_SYNC_SCOPES", "LIQUID_REVIEW_SCOPES"}) {
+        const std::regex array("export const " + std::string(list) + R"re( = \[([^\]]*)\])re");
+        std::smatch found;
+        ASSERT_TRUE(std::regex_search(source, found, array)) << list;
+        const std::string body = found[1].str();
+        const std::regex name(R"re("([a-z_]+)")re");
+        for (auto match = std::sregex_iterator(body.begin(), body.end(), name);
+             match != std::sregex_iterator();
+             ++match) {
+            preset.push_back((*match)[1].str());
+        }
+    }
+    for (const char* needed : {"refs",
+                               "find_missing",
+                               "push",
+                               "pull",
+                               "upload_chunks",
+                               "read_chunk",
+                               "list_reviews",
+                               "create_review",
+                               "update_review",
+                               "list_review_comments",
+                               "create_review_comment",
+                               "map_review_anchors"}) {
+        EXPECT_NE(std::ranges::find(preset, needed), preset.end()) << needed;
+    }
+
+    Surface surface;
+    for (const std::string& name : preset) {
+        EXPECT_TRUE(surface.registry.find(name)) << name << " is not a capability";
+    }
+    const ApiResult user =
+        surface.call("create_user", {{"display_name", "Ada"}, {"taap_id", "taap:1:ed25519:ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository = surface.call(
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", surface.workspace(customer.value["id"])},
+         {"name", "preset"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const std::string repository_id = repository.value["id"];
+
+    // A session credential carrying exactly the preset.
+    surface.ctx.session_credential = true;
+    surface.ctx.scopes = preset;
+    const ApiResult review = surface.call(
+        "create_review", {{"repository_id", repository_id}, {"change_id", "change-1"}});
+    ASSERT_TRUE(review.ok) << review.error.message;
+    const ApiResult comment = surface.call(
+        "create_review_comment",
+        {{"repository_id", repository_id},
+         {"review_id", review.value["id"]},
+         {"body", "Looks right."},
+         {"anchor", {{"change", "change-1"}, {"path", "src/lib.cpp"}, {"line", 1}, {"column", 0}}}});
+    EXPECT_TRUE(comment.ok) << comment.error.message;
+    EXPECT_TRUE(surface.call("list_reviews", {{"repository_id", repository_id}}).ok);
+    EXPECT_TRUE(surface.call("list_review_comments", {{"repository_id", repository_id}}).ok);
+    const ApiResult updated = surface.call(
+        "update_review",
+        {{"repository_id", repository_id}, {"review_id", review.value["id"]}, {"state", "closed"}});
+    EXPECT_NE(updated.error.message, "credential does not grant update_review");
+    // Outside the preset, the token is refused.
+    const ApiResult refused =
+        surface.call("delete_repository", {{"id", repository_id}});
+    EXPECT_EQ(refused.error.code, "unauthorized");
+    EXPECT_EQ(refused.error.message, "credential does not grant delete_repository");
 }
 
 TEST(Export, ManifestSignerMustBeNamedAfterItsSigningKey) {
@@ -4786,7 +5061,7 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
             .create_grant(
                 {"taap:1:ed25519:reader", object->id, "read", "grant-proof", "admin", "test"})
             .has_value());
-    // An approved review travels as history, without its approval (LSR-077).
+    // An approved review travels as history, without its approval.
     const ApiResult review = source.call(
         "create_review", {{"repository_id", repository.value["id"]}, {"change_id", "change-1"}});
     ASSERT_TRUE(review.ok) << review.error.message;
@@ -5014,7 +5289,7 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
 }
 
 // A webhook's signing secret never leaves lake in an archive, and only a repository administrator's
-// archive names who holds access (LSR-024, lake#933). An imported webhook signs with a new secret.
+// archive names who holds access (lake#933). An imported webhook signs with a new secret.
 TEST(Export, AnArchiveCarriesNoWebhookSecretAndGrantsOnlyForAnAdministrator) {
     Surface source;
     RepositoryFixtureStore source_store;
@@ -5146,14 +5421,21 @@ TEST(GitHubImport, MapsRecordedIssuesReviewsAndWorkflowReport) {
                         "github-import-recording.json");
     ASSERT_TRUE(input.good());
     const json recording = json::parse(input);
+    // The checkout is read from the customer's own folder of the staging root (lake#925).
+    const std::filesystem::path root = std::filesystem::temp_directory_path() /
+                                       ("lake-import-" + lake::control::new_uuid_v4());
+    const std::string customer_id = customer.value["id"];
+    std::filesystem::create_directories(root / customer_id / "example.git");
+    surface.ctx.git_import_root = root.string();
     const ApiResult imported = surface.call(
         "import_github_repository",
         {{"customer_id", customer.value["id"]},
          {"workspace_id", surface.workspace(customer.value["id"])},
          {"name", "example"},
-         {"git_directory", "/recorded/example.git"},
+         {"git_directory", "example.git"},
          {"recording", recording}});
     ASSERT_TRUE(imported.ok) << imported.error.message;
+    std::filesystem::remove_all(root);
     EXPECT_EQ(imported.value["fidelity"]["format"], "github_import_fidelity/1");
     EXPECT_EQ(imported.value["fidelity"]["workflows"][0]["wrap_replacements"][0]["replacement"],
               "liquid wrap");
@@ -5165,6 +5447,53 @@ TEST(GitHubImport, MapsRecordedIssuesReviewsAndWorkflowReport) {
                   .value["items"]
                   .size(),
               1);
+}
+
+// import_github_repository reads only a checkout in the caller's own folder of the staging root:
+// never a server path the caller chose, another customer's folder, or a link out (lake#925).
+TEST(GitHubImport, ReadsOnlyTheCallersStagingFolder) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const std::string customer_id = customer.value["id"];
+    const auto import_from = [&](const std::string& directory) {
+        return surface.call("import_github_repository",
+                            {{"customer_id", customer_id},
+                             {"workspace_id", surface.workspace(customer_id)},
+                             {"name", "example-" + lake::control::new_uuid_v4().substr(0, 8)},
+                             {"git_directory", directory},
+                             {"recording", json::object()}});
+    };
+    // No staging root: the import is not offered (`not_supported`, 501, which a caller does not
+    // retry).
+    EXPECT_EQ(import_from("example.git").error.code, "not_supported");
+
+    const std::filesystem::path root = std::filesystem::temp_directory_path() /
+                                       ("lake-import-" + lake::control::new_uuid_v4());
+    std::filesystem::create_directories(root / customer_id / "example.git");
+    std::filesystem::create_directories(root / "someone-else" / "theirs.git");
+    std::filesystem::create_symlink(root / "someone-else", root / customer_id / "link");
+    surface.ctx.git_import_root = root.string();
+    for (const std::string refused : {std::string("/tmp/lake-export-1"),
+                                      (root / customer_id / "example.git").string(),
+                                      std::string("../someone-else/theirs.git"),
+                                      std::string("example.git/../../someone-else/theirs.git"),
+                                      std::string("./example.git"),
+                                      std::string("a//b"),
+                                      std::string("link/theirs.git"),
+                                      std::string("missing.git")}) {
+        const ApiResult result = import_from(refused);
+        EXPECT_EQ(result.error.code, "invalid_input") << refused;
+        EXPECT_EQ(result.error.path, "/git_directory") << refused;
+    }
+    EXPECT_TRUE(import_from("example.git").ok);
+    std::filesystem::remove_all(root);
 }
 
 TEST(Forge, ReleaseRetainsVerifiedArtifactAttestations) {
@@ -5422,7 +5751,7 @@ TEST(Forge, BranchProtectionRequiresAnApprovedReview) {
     const ApiResult review = surface.call(
         "create_review", {{"repository_id", repository_id}, {"change_id", "change-1"}});
     ASSERT_TRUE(review.ok) << review.error.message;
-    // Someone other than the pusher, with review on the repository, approves (LSR-077).
+    // Someone other than the pusher, with review on the repository, approves.
     const auto object = surface.store.find_policy_object("repository", repository_id);
     ASSERT_TRUE(object);
     ASSERT_TRUE(surface.store.create_grant({"taap:1:ed25519:reviewer",
@@ -5447,7 +5776,7 @@ TEST(Forge, BranchProtectionRequiresAnApprovedReview) {
     EXPECT_TRUE(approved.releases.empty()) << "no rule asks for verification";
 }
 
-// LSR-077: a required review is satisfied only by someone other than the pusher who holds `review`
+// A required review is satisfied only by someone other than the pusher who holds `review`
 // when the push is evaluated, and never by the person who opened the review.
 TEST(Forge, ARequiredReviewNeedsASecondPersonWithReview) {
     Surface surface;
@@ -5664,8 +5993,12 @@ TEST(Repositories, PublicRepositoryContentCapabilitiesUseTheRepositoryStore) {
     Surface s;
     RepositoryFixtureStore repository_store;
     s.ctx.sync_store = &repository_store;
-    const ApiResult user = s.call("create_user", {{"display_name", "Ada"}});
-    ASSERT_TRUE(user.ok);
+    // The fixture's changes are signed by this identity (lake#1326).
+    const ApiResult user = s.call("create_user",
+                                  {{"display_name", "Ada"},
+                                   {"taap_id", "taap:1:ed25519:author"},
+                                   {"email", "ada@example.test"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
     const ApiResult customer =
         s.call("create_customer",
                {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
@@ -5713,10 +6046,16 @@ TEST(Repositories, PublicRepositoryContentCapabilitiesUseTheRepositoryStore) {
     EXPECT_EQ(resolved.value["revision"], "main");
     EXPECT_EQ(s.call("resolve_model", {{"namespace", "ada"}, {"name", "missing"}}).error.code,
               "not_found");
-    EXPECT_EQ(s.call("list_changes", {{"id", repository_id}}).value["items"].size(), 1u);
-    EXPECT_EQ(
-        s.call("get_change", {{"id", repository_id}, {"change_id", "change-1"}}).value["message"],
-        "initial");
+    const ApiResult changes = s.call("list_changes", {{"id", repository_id}});
+    EXPECT_EQ(changes.value["items"].size(), 1u);
+    // A visitor reads the author by name and handle, never the email (lake#1326).
+    const json ada = {{"kind", "user"}, {"name", "Ada"}, {"handle", "ada"}};
+    EXPECT_EQ(changes.value["people"], json({{"taap:1:ed25519:author", ada}}));
+    EXPECT_EQ(changes.value.dump().find("ada@example.test"), std::string::npos);
+    const ApiResult change =
+        s.call("get_change", {{"id", repository_id}, {"change_id", "change-1"}});
+    EXPECT_EQ(change.value["message"], "initial");
+    EXPECT_EQ(change.value["people"], json({{"taap:1:ed25519:author", ada}}));
     const ApiResult difference =
         s.call("change_diff", {{"id", repository_id}, {"change_id", "change-1"}});
     ASSERT_TRUE(difference.ok) << difference.error.message;
@@ -5740,7 +6079,7 @@ TEST(Repositories, PublicRepositoryContentCapabilitiesUseTheRepositoryStore) {
     EXPECT_EQ(artifact.value["trace"]["id"], "trace-1");
 }
 
-// lake#913 (LSR-002): a policy object counts only inside its own account. One account cannot
+// lake#913: a policy object counts only inside its own account. One account cannot
 // create objects carrying another account's resource identifiers (a folder, an environment, the
 // account's secret mounts), and objects already in the store that carry them, made before the
 // fix, are never adopted: the account the identifiers name keeps its resources.
@@ -6154,6 +6493,91 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
     }
 }
 
+// lake#1319: a share link's expiry is an RFC 3339 UTC time with a real date and time; any other
+// text was compared as text and could make a bearer link that never expires.
+TEST(Drive, ShareLinkExpiryIsAnRfc3339UtcTime) {
+    Surface surface;
+    DriveWorkspaces workspaces(surface);
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const ApiResult owner = surface.call(
+        "create_user", {{"taap_id", "taap:1:ed25519:owner"}, {"display_name", "Owner"}});
+    ASSERT_TRUE(owner.ok) << owner.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", owner.value["id"]}, {"name", "owner"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository = surface.call(
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"name", "drive"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const auto repository_object =
+        surface.store.find_policy_object("repository", repository.value["id"]);
+    ASSERT_TRUE(repository_object);
+    ASSERT_TRUE(surface.store.create_grant({"taap:1:ed25519:owner",
+                                            repository_object->id,
+                                            "admin",
+                                            "attestation-owner",
+                                            "admin",
+                                            "request-owner"}));
+    const std::string workspace = workspaces.create(customer.value["id"], "home");
+    surface.ctx.operator_credential = false;
+    surface.ctx.acting_identity = "taap:1:ed25519:owner";
+    const auto create = [&](const std::string& expires_at) {
+        return surface.call("create_drive_share_link",
+                            {{"repository_id", repository.value["id"]},
+                             {"workspace_id", workspace},
+                             {"ref", "main"},
+                             {"path", "shared"},
+                             {"role", "read"},
+                             {"expires_at", expires_at}});
+    };
+
+    for (const std::string refused : {"never",
+                                      "9",
+                                      "",
+                                      "2999-01-01",
+                                      "2999-01-01T00:00:00",
+                                      "2999-01-01T00:00:00+14:00",
+                                      "2999-01-01T00:00:00-02:00",
+                                      "2999-01-01T00:00:00z",
+                                      "2999-01-01 00:00:00Z",
+                                      "2999-02-30T00:00:00Z",
+                                      "2999-13-01T00:00:00Z",
+                                      "2999-01-01T24:00:00Z",
+                                      "2999-01-01T00:60:00Z",
+                                      "2999-01-01T00:00:60Z",
+                                      "2999-01-01T00:00:00.Z",
+                                      "2999-01-01T00:00:00.1234567890Z",
+                                      "2999-01-01T00:00:00,5Z",
+                                      "+999-01-01T00:00:00Z",
+                                      "2020-01-01T00:00:00Z"}) {
+        const ApiResult result = create(refused);
+        EXPECT_FALSE(result.ok) << refused;
+        EXPECT_EQ(result.error.code, "invalid_input") << refused;
+        EXPECT_EQ(result.error.path, "/expires_at") << refused;
+    }
+
+    const auto soon = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()) +
+                      std::chrono::hours(1);
+    for (const std::string accepted : {std::format("{:%Y-%m-%dT%H:%M:%SZ}", soon),
+                                       std::string("2999-01-01T00:00:00Z"),
+                                       std::string("2999-02-28T23:59:59.5Z"),
+                                       std::string("2996-02-29T12:00:00.123456789Z")}) {
+        const ApiResult result = create(accepted);
+        ASSERT_TRUE(result.ok) << accepted << ": " << result.error.message;
+        surface.ctx.authorized = false;
+        surface.ctx.acting_identity.clear();
+        const ApiResult opened = surface.call("resolve_drive_share_link",
+                                              {{"token", result.value["token"]}, {"ref", "main"}});
+        EXPECT_TRUE(opened.ok) << accepted << ": " << opened.error.message;
+        surface.ctx.authorized = true;
+        surface.ctx.acting_identity = "taap:1:ed25519:owner";
+    }
+}
+
 // lake#585: a person shares a folder with someone by email or handle, from the space's people;
 // lake writes and signs the grant's attestation, and a digest a caller makes up is refused.
 TEST(Drive, SharingByEmailOrHandleIsAttestedByLake) {
@@ -6280,7 +6704,7 @@ TEST(Drive, SharingByEmailOrHandleIsAttestedByLake) {
     EXPECT_EQ(with({{"role", "read"}}).error.code, "invalid_input");
 }
 
-// LSR-089: sharing must attenuate authority for both live grants and bearer links.
+// Sharing must attenuate authority for both live grants and bearer links.
 TEST(Drive, SharingCannotGrantActionsTheCallerDoesNotHold) {
     Surface surface;
     DriveWorkspaces workspaces(surface);
@@ -6422,6 +6846,261 @@ TEST(Drive, SharingCannotGrantActionsTheCallerDoesNotHold) {
 
     surface.ctx.acting_identity = "taap:1:ed25519:owner";
     EXPECT_TRUE(share({{"principal_taap_id", "taap:1:ed25519:outsider"}, {"role", "write"}}).ok);
+}
+
+// lake#923: a diff or restore reads revisions other than the ref its object came from,
+// and the node a path names can differ between them. A restricted folder renamed away, a shared
+// one made under its old name: the old revision is the restricted folder's, and stays unreadable.
+TEST(Drive, HistoryAuthorizesTheNodeAtEveryRevisionItReads) {
+    Surface surface;
+    RepositoryFixtureStore repositories;
+    surface.ctx.sync_store = &repositories;
+    const auto owner = surface.call(
+        "create_user", {{"taap_id", "taap:1:ed25519:history-owner"}, {"display_name", "Owner"}});
+    ASSERT_TRUE(owner.ok);
+    const auto customer = surface.call("create_customer",
+                                       {{"customer_type", "individual"},
+                                        {"user_id", owner.value["id"]},
+                                        {"name", "history-nodes"}});
+    ASSERT_TRUE(customer.ok);
+    const auto repository = surface.call("create_repository",
+                                         {{"customer_id", customer.value["id"]},
+                                          {"workspace_id", surface.workspace(customer.value["id"])},
+                                          {"name", "drive"}});
+    ASSERT_TRUE(repository.ok);
+    const std::string repository_id = repository.value["id"];
+    const auto object = surface.store.find_policy_object("repository", repository_id);
+    ASSERT_TRUE(object);
+    // Today's `shared` folder is shared with Bob; at change-old the same path was another node,
+    // a restricted folder of its own.
+    const auto shared_folder = surface.store.create_policy_object(
+        {"path", repository_id + ":22222222222222222222222222222222", object->id, "admin", "test", false});
+    const auto restricted_folder = surface.store.create_policy_object(
+        {"path", repository_id + ":restricted-old", object->id, "admin", "test", false});
+    ASSERT_TRUE(shared_folder && restricted_folder);
+    ASSERT_TRUE(surface.store.create_grant(
+        {"taap:1:ed25519:bob", shared_folder->id, "read", "test", "admin", "test"}));
+    auto old_tree = *repositories.repository_tree("", "", "main");
+    for (auto& entry : old_tree) {
+        if (entry.path == "shared") {
+            entry.node_id = "restricted-old";
+        }
+        if (entry.path == "shared/readme.md") {
+            entry.node_id = "restricted-old-readme";
+        }
+    }
+    repositories.trees_at["change-old"] = old_tree;
+    surface.ctx.operator_credential = false;
+    surface.ctx.acting_identity = "taap:1:ed25519:bob";
+    const json diff{{"repository_id", repository_id},
+                    {"ref", "main"},
+                    {"path", "shared/readme.md"},
+                    {"left", "change-old"},
+                    {"right", "main"}};
+    EXPECT_EQ(surface.call("diff_drive_versions", diff).error.code, "unauthorized");
+    json swapped = diff;
+    swapped["left"] = "main";
+    swapped["right"] = "change-old";
+    EXPECT_EQ(surface.call("diff_drive_versions", swapped).error.code, "unauthorized");
+    json restore{{"repository_id", repository_id},
+                 {"ref", "main"},
+                 {"path", "shared/readme.md"},
+                 {"change_id", "change-old"}};
+    EXPECT_EQ(surface.call("restore_drive_version", restore).error.code, "unauthorized");
+    EXPECT_FALSE(repositories.restored);
+    json same = diff;
+    same["left"] = "main";
+    EXPECT_NE(surface.call("diff_drive_versions", same).error.code, "unauthorized")
+        << "both sides are the shared folder Bob may read";
+}
+
+// lake#975: a path object that does not inherit cuts its folder off from the
+// repository's grants for every read of repository content, as it does for Drive. A repository
+// reader without a grant on the cut neither reads the folder's files nor sees them in the tree,
+// and cannot read the repository whole; a grant there gives both back.
+TEST(Drive, RepositoryReadsHonourRestrictedFolders) {
+    Surface surface;
+    RepositoryFixtureStore repositories;
+    surface.ctx.sync_store = &repositories;
+    const auto owner = surface.call(
+        "create_user", {{"taap_id", "taap:1:ed25519:cut-owner"}, {"display_name", "Owner"}});
+    ASSERT_TRUE(owner.ok);
+    const auto customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", owner.value["id"]}, {"name", "cut-reads"}});
+    ASSERT_TRUE(customer.ok);
+    const auto repository = surface.call("create_repository",
+                                         {{"customer_id", customer.value["id"]},
+                                          {"workspace_id", surface.workspace(customer.value["id"])},
+                                          {"name", "drive"}});
+    ASSERT_TRUE(repository.ok);
+    const std::string repository_id = repository.value["id"];
+    const auto object = surface.store.find_policy_object("repository", repository_id);
+    ASSERT_TRUE(object);
+    // The fixture's `shared` folder is restricted: its object does not inherit.
+    const auto restricted =
+        surface.store.create_policy_object({"path",
+                                            repository_id + ":22222222222222222222222222222222",
+                                            object->id,
+                                            "admin",
+                                            "test",
+                                            false});
+    ASSERT_TRUE(restricted);
+    const std::string reader = "taap:1:ed25519:cut-reader";
+    ASSERT_TRUE(surface.store.create_grant({reader, object->id, "read", "test", "admin", "test"}));
+    surface.ctx.operator_credential = false;
+    surface.ctx.acting_identity = reader;
+
+    const json restricted_file{
+        {"id", repository_id}, {"ref", "main"}, {"path", "shared/readme.md"}};
+    EXPECT_EQ(surface.call("repository_file", restricted_file).error.code, "unauthorized");
+    EXPECT_TRUE(surface
+                    .call("repository_file",
+                          {{"id", repository_id}, {"ref", "main"}, {"path", "readme.md"}})
+                    .ok);
+    // A path the tree does not hold cannot be ruled out of the cut.
+    EXPECT_EQ(surface
+                  .call("repository_file",
+                        {{"id", repository_id}, {"ref", "main"}, {"path", "./shared/readme.md"}})
+                  .error.code,
+              "unauthorized");
+    const auto paths_of = [&] {
+        std::set<std::string> paths;
+        const auto tree = surface.call("repository_tree", {{"id", repository_id}, {"ref", "main"}});
+        EXPECT_TRUE(tree.ok) << tree.error.message;
+        for (const auto& item : tree.value["items"]) {
+            paths.insert(item["path"].get<std::string>());
+        }
+        return paths;
+    };
+    auto listed = paths_of();
+    EXPECT_TRUE(listed.contains("readme.md"));
+    EXPECT_FALSE(listed.contains("shared"));
+    EXPECT_FALSE(listed.contains("shared/readme.md"));
+    EXPECT_EQ(surface.call("export_repository", {{"repository_id", repository_id}}).error.code,
+              "unauthorized");
+
+    // A grant on the restricted folder gives it back.
+    ASSERT_TRUE(
+        surface.store.create_grant({reader, restricted->id, "read", "test", "admin", "test"}));
+    surface.ctx.authorization_cache = {};
+    EXPECT_TRUE(surface.call("repository_file", restricted_file).ok);
+    listed = paths_of();
+    EXPECT_TRUE(listed.contains("shared"));
+    EXPECT_TRUE(listed.contains("shared/readme.md"));
+}
+
+// lake#924: a Drive write advances its branch, so the branch's rules apply to it as to a
+// push. main allows only another person to push: an otherwise authorized writer's upload, restore
+// and conflict resolution are refused and nothing is committed.
+TEST(Drive, WritesFollowTheBranchRules) {
+    Surface surface;
+    RepositoryFixtureStore repositories;
+    surface.ctx.sync_store = &repositories;
+    const auto owner = surface.call(
+        "create_user", {{"taap_id", "taap:1:ed25519:rules-writer"}, {"display_name", "Writer"}});
+    ASSERT_TRUE(owner.ok);
+    const auto customer = surface.call("create_customer",
+                                       {{"customer_type", "individual"},
+                                        {"user_id", owner.value["id"]},
+                                        {"name", "branch-rules"}});
+    ASSERT_TRUE(customer.ok);
+    const auto repository = surface.call("create_repository",
+                                         {{"customer_id", customer.value["id"]},
+                                          {"workspace_id", surface.workspace(customer.value["id"])},
+                                          {"name", "drive"}});
+    ASSERT_TRUE(repository.ok);
+    const auto object = surface.store.find_policy_object("repository", repository.value["id"]);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(surface.store.create_grant(
+        {"taap:1:ed25519:rules-writer", object->id, "write", "test", "admin", "test"}));
+    ASSERT_TRUE(surface
+                    .call("set_branch_protection",
+                          {{"repository_id", repository.value["id"]},
+                           {"ref", "main"},
+                           {"allowed_pushers", json::array({"taap:1:ed25519:someone-else"})}})
+                    .ok);
+    surface.ctx.operator_credential = false;
+    surface.ctx.acting_identity = "taap:1:ed25519:rules-writer";
+    json upload{{"repository_id", repository.value["id"]}, {"ref", "main"}, {"path", "shared"}};
+    upload["files"] = json::array({{{"name", "notes.md"}, {"content", "bmV3"}}});
+    const auto refused = surface.call("upload_drive_files", upload);
+    EXPECT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "unauthorized") << refused.error.message;
+    EXPECT_TRUE(repositories.committed_operations.empty()) << "main is unchanged";
+    const auto restore = surface.call("restore_drive_version",
+                                      {{"repository_id", repository.value["id"]},
+                                       {"ref", "main"},
+                                       {"path", "shared/readme.md"},
+                                       {"change_id", "change-1"}});
+    EXPECT_FALSE(restore.ok);
+    EXPECT_FALSE(repositories.restored);
+}
+
+// lake#1030: a folder's administrator creates path objects only for what lies in that folder.
+// The node an object names must be in the repository's tree, and its parent must be the object of
+// the nearest folder above the node that has one: a sibling, a file above the folder, a node
+// deeper than its own folder object, a branch rule or an unknown node is refused.
+TEST(Drive, CreateObjectPlacesAPathObjectByTheTree) {
+    Surface surface;
+    RepositoryFixtureStore repositories;
+    surface.ctx.sync_store = &repositories;
+    const auto owner = surface.call(
+        "create_user", {{"taap_id", "taap:1:ed25519:tree-owner"}, {"display_name", "Owner"}});
+    ASSERT_TRUE(owner.ok);
+    const auto customer = surface.call("create_customer",
+                                       {{"customer_type", "individual"},
+                                        {"user_id", owner.value["id"]},
+                                        {"name", "tree-objects"}});
+    ASSERT_TRUE(customer.ok);
+    const auto repository = surface.call("create_repository",
+                                         {{"customer_id", customer.value["id"]},
+                                          {"workspace_id", surface.workspace(customer.value["id"])},
+                                          {"name", "drive"}});
+    ASSERT_TRUE(repository.ok);
+    const std::string repository_id = repository.value["id"];
+    const auto object = surface.store.find_policy_object("repository", repository_id);
+    ASSERT_TRUE(object);
+    // The fixture's tree: readme.md (1111…), shared/ (2222…), shared/readme.md (3333…).
+    const std::string top_file = repository_id + ":11111111111111111111111111111111";
+    const std::string folder_node = repository_id + ":22222222222222222222222222222222";
+    const std::string inner_file = repository_id + ":33333333333333333333333333333333";
+    const auto folder = surface.store.create_policy_object(
+        {"path", folder_node, object->id, "admin", "test", true});
+    ASSERT_TRUE(folder);
+    const std::string folder_admin = "taap:1:ed25519:folder-admin";
+    ASSERT_TRUE(
+        surface.store.create_grant({folder_admin, folder->id, "admin", "test", "admin", "test"}));
+    const std::string repository_admin = "taap:1:ed25519:repository-admin";
+    ASSERT_TRUE(surface.store.create_grant(
+        {repository_admin, object->id, "admin", "test", "admin", "test"}));
+    surface.ctx.operator_credential = false;
+    const auto create =
+        [&](const std::string& who, const std::string& id, const std::string& parent) {
+            surface.ctx.acting_identity = who;
+            surface.ctx.authorization_cache = {};
+            return surface.call("create_object",
+                                {{"object_type", "path"},
+                                 {"external_id", id},
+                                 {"parent_id", parent},
+                                 {"inherit", false}});
+        };
+    // The folder administrator cannot claim a file beside the folder under it.
+    EXPECT_EQ(create(folder_admin, top_file, folder->id).error.code, "invalid_input");
+    // Nor a node that is not in the tree, nor a branch rule's id.
+    EXPECT_EQ(create(folder_admin, repository_id + ":not-a-node", folder->id).error.code,
+              "invalid_input");
+    EXPECT_EQ(create(repository_admin, repository_id + ":refs/heads/main", object->id).error.code,
+              "invalid_input");
+    // The repository's administrator places the file inside the folder only under the folder.
+    EXPECT_EQ(create(repository_admin, inner_file, object->id).error.code, "invalid_input");
+    EXPECT_EQ(surface.store.find_policy_object("path", top_file).error().code, "not_found");
+    // What lies in the folder is the folder administrator's to protect.
+    const auto inner = create(folder_admin, inner_file, folder->id);
+    EXPECT_TRUE(inner.ok) << inner.error.message;
+    // The repository's administrator protects the file at the top, under the repository.
+    const auto top = create(repository_admin, top_file, object->id);
+    EXPECT_TRUE(top.ok) << top.error.message;
 }
 
 TEST(Drive, MutationChecksTheLockedTreeAndRestoreChecksMain) {
@@ -7303,7 +7982,7 @@ TEST(ModelProvenance, SignedDatasetChainVerifiesAndTamperingIsRefused) {
         .at = at,
         .subject_kind = liquid::attestation_subject_kind::artifact,
         .slsa_provenance = liquid::slsa_provenance_v1{
-            .build_definition = {.build_type = "https://lake.orama.com/training/v1",
+            .build_definition = {.build_type = "https://lake.example.com/training/v1",
                                  .external_parameters = {{"train", "--epochs", "3"},
                                                          "/workspace",
                                                          {{"CUDA", "12.8"}}},
@@ -7377,6 +8056,200 @@ TEST(ModelProvenance, SignedDatasetChainVerifiesAndTamperingIsRefused) {
                                              {},
                                              "Bearer provenance-admin");
     EXPECT_NE(refused.find(" 400 "), std::string::npos) << refused;
+    server.stop();
+}
+
+// A person's key in a LIQUID_HOME of its own, so Lake's process identity store never holds it.
+struct ForeignSigner {
+    liquid::signer signer;
+    std::string document; // base64url canonical CBOR, as `liquid identity show --document` prints
+};
+
+ForeignSigner foreign_signer_at(const std::filesystem::path& home) {
+    const char* previous = std::getenv("LIQUID_HOME");
+    const std::optional<std::string> saved =
+        previous == nullptr ? std::nullopt : std::optional<std::string>{previous};
+    setenv("LIQUID_HOME", home.c_str(), 1);
+    auto signer = liquid::runtime::block_on(liquid::identity_detail::local_signer());
+    if (saved) {
+        setenv("LIQUID_HOME", saved->c_str(), 1);
+    } else {
+        unsetenv("LIQUID_HOME");
+    }
+    EXPECT_TRUE(signer) << (signer ? "" : signer.error().message);
+    const auto document = signer->document();
+    EXPECT_TRUE(document);
+    const auto encoded = liquid::encode_identity_document(*document);
+    EXPECT_TRUE(encoded);
+    const std::string raw(reinterpret_cast<const char*>(encoded->data()), encoded->size());
+    return ForeignSigner{std::move(*signer), lake::control::identity_crypto::base64url_encode(raw)};
+}
+
+liquid::attestation sign_attestation_as(liquid::signer& signer, liquid::attestation value) {
+    value.issuer = signer.identity();
+    auto body = liquid::objects::encode_attestation_body(value);
+    EXPECT_TRUE(body) << body.error().message;
+    auto signed_value = liquid::runtime::block_on(signer.sign("attestation", *body));
+    EXPECT_TRUE(signed_value) << signed_value.error().message;
+    auto signature = liquid::encode_attestation_signature(*signed_value);
+    EXPECT_TRUE(signature) << signature.error().message;
+    value.signature = std::move(*signature);
+    return value;
+}
+
+// lake#1020: a provenance chain a registered person signed verifies through the identity document
+// they registered with Lake (`identity_documents`), which Lake passes to liquid as the issuer's
+// chain; the same chain signed by an identity no account registered is refused as an unknown
+// signer.
+TEST(ModelProvenance, ARegisteredIssuerVerifiesThroughTheirDocumentAndAnUnknownOneDoesNot) {
+    TemporarySyncRoot temporary;
+    auto control = std::make_shared<lake::control::InMemoryStore>();
+    ForeignSigner trainer = foreign_signer_at(temporary.path() / "trainer-home");
+    ForeignSigner stranger = foreign_signer_at(temporary.path() / "stranger-home");
+
+    lake::control::NewPasswordUser sign_up;
+    sign_up.pool_id = "lake";
+    sign_up.email = "registered-trainer@example.test";
+    sign_up.password = "correct horse battery staple";
+    sign_up.display_name = "Trainer";
+    sign_up.device_name = "laptop";
+    sign_up.identity_document = trainer.document;
+    const auto session = control->sign_up_password(sign_up);
+    ASSERT_TRUE(session) << session.error().message;
+    const auto customer = lake::test::personal_customer(*control, session->session.user_id);
+    ASSERT_TRUE(customer) << customer.error().message;
+
+    // The store answers the registered document, and nothing for the stranger.
+    const auto registered =
+        control->registered_identity_document(trainer.signer.identity().taap_id);
+    ASSERT_TRUE(registered) << registered.error().message;
+    EXPECT_EQ(*registered, trainer.document);
+    const auto unknown = control->registered_identity_document(stranger.signer.identity().taap_id);
+    ASSERT_FALSE(unknown);
+    EXPECT_EQ(unknown.error().code, "not_found");
+
+    const auto dataset =
+        control->create_repository({customer->id,
+                                    "registered-dataset",
+                                    "",
+                                    "private",
+                                    lake::test::repository_workspace(*control, customer->id)});
+    const auto model =
+        control->create_repository({customer->id,
+                                    "registered-model",
+                                    "",
+                                    "private",
+                                    lake::test::repository_workspace(*control, customer->id)});
+    ASSERT_TRUE(dataset);
+    ASSERT_TRUE(model);
+    auto dataset_source =
+        liquid::runtime::block_on(liquid::repository::create(temporary.path() / "dataset"));
+    auto model_source =
+        liquid::runtime::block_on(liquid::repository::create(temporary.path() / "model"));
+    ASSERT_TRUE(dataset_source);
+    ASSERT_TRUE(model_source);
+    ASSERT_TRUE(liquid::runtime::block_on(
+        dataset_source->write("training.jsonl", bytes("{\"example\":1}\n"))));
+    const auto dataset_change = liquid::runtime::block_on(dataset_source->cut("dataset"));
+    ASSERT_TRUE(dataset_change);
+    ASSERT_TRUE(
+        liquid::runtime::block_on(model_source->write("weights.bin", bytes("trained weights"))));
+    const auto model_change = liquid::runtime::block_on(model_source->cut("model"));
+    ASSERT_TRUE(model_change);
+
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "issuer-chain-test";
+    options.admin_token = "issuer-chain-admin";
+    options.instance_kek = "issuer-chain-test-instance-kek";
+    options.store_root = (temporary.path() / "lake").string();
+    options.store = control;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string origin = "http://127.0.0.1:" + std::to_string(server.port());
+    liquid::sync_endpoint dataset_endpoint(
+        origin + "/v1/repositories/" + dataset->id,
+        liquid::sync_endpoint_options{.bearer_token = "issuer-chain-admin"});
+    liquid::sync_endpoint model_endpoint(
+        origin + "/v1/repositories/" + model->id,
+        liquid::sync_endpoint_options{.bearer_token = "issuer-chain-admin"});
+    ASSERT_TRUE(liquid::runtime::block_on(dataset_endpoint.push(*dataset_source)));
+    ASSERT_TRUE(liquid::runtime::block_on(model_endpoint.push(*model_source)));
+
+    const auto at = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    const auto chain_signed_by = [&](liquid::signer& signer) {
+        liquid::attestation model_statement{
+            .subject = model_change->value,
+            .profile = "model_provenance/1",
+            .at = at,
+            .subject_kind = liquid::attestation_subject_kind::model,
+            .attributes = {{"training_dataset", liquid::to_string(dataset_change->value)},
+                           {"training_code", liquid::to_string(dataset_change->value)}}};
+        const liquid::slsa_resource_descriptor resource{
+            "liquid:training",
+            {{"blake3", liquid::to_string(dataset_change->value)}},
+            std::nullopt};
+        liquid::attestation run_statement{
+            .subject = model_change->value,
+            .profile = "slsa_provenance/1",
+            .at = at,
+            .subject_kind = liquid::attestation_subject_kind::artifact,
+            .slsa_provenance = liquid::slsa_provenance_v1{
+                .build_definition = {.build_type = "https://lake.orama.com/training/v1",
+                                     .external_parameters = {{"train", "--epochs", "3"},
+                                                             "/workspace",
+                                                             {{"CUDA", "12.8"}}},
+                                     .internal_parameters = {.toolchain = resource,
+                                                             .sandbox = resource,
+                                                             .platform = {{"os", "linux"}}},
+                                     .resolved_dependencies = {resource}},
+                .run_details = {
+                    .builder = {signer.identity().taap_id},
+                    .metadata = {"run-1020", "2026-11-14T00:00:00Z", "2026-11-14T00:01:00Z"},
+                    .byproducts = {resource}}}};
+        const auto model_encoded =
+            liquid::encode_attestation(sign_attestation_as(signer, std::move(model_statement)));
+        const auto run_encoded =
+            liquid::encode_attestation(sign_attestation_as(signer, std::move(run_statement)));
+        EXPECT_TRUE(model_encoded);
+        EXPECT_TRUE(run_encoded);
+        return nlohmann::json{{"id", model->id},
+                              {"revision", "main"},
+                              {"dataset_repository_id", dataset->id},
+                              {"dataset_revision", "main"},
+                              {"model_attestation", base64_bytes(*model_encoded)},
+                              {"run_attestation", base64_bytes(*run_encoded)}};
+    };
+
+    const std::string strange = http_request(server.port(),
+                                             "POST",
+                                             "/v1/attach_model_provenance",
+                                             chain_signed_by(stranger.signer).dump(),
+                                             "application/json",
+                                             {},
+                                             "Bearer issuer-chain-admin");
+    EXPECT_NE(strange.find(" 400 "), std::string::npos) << strange;
+    EXPECT_NE(strange.find("unknown signer"), std::string::npos) << strange;
+
+    const std::string attached = http_request(server.port(),
+                                              "POST",
+                                              "/v1/attach_model_provenance",
+                                              chain_signed_by(trainer.signer).dump(),
+                                              "application/json",
+                                              {},
+                                              "Bearer issuer-chain-admin");
+    EXPECT_NE(attached.find(" 200 "), std::string::npos) << attached;
+    EXPECT_TRUE(response_json(attached)["value"]["verified"]) << attached;
+    const std::string verified =
+        http_request(server.port(),
+                     "POST",
+                     "/v1/verify_model_provenance",
+                     nlohmann::json({{"id", model->id}, {"revision", "main"}}).dump(),
+                     "application/json",
+                     {},
+                     "Bearer issuer-chain-admin");
+    EXPECT_NE(verified.find(" 200 "), std::string::npos) << verified;
+    EXPECT_TRUE(response_json(verified)["value"]["verified"]) << verified;
     server.stop();
 }
 
@@ -7688,6 +8561,61 @@ TEST(Repositories, LifecycleUsesPolicyAndAuditRegistry) {
     EXPECT_EQ(
         surface.call("rename_repository", {{"id", repository_id}, {"name", "denied"}}).error.code,
         "unauthorized");
+}
+
+// lake#1310: publishing a repository is an administrator's decision. A writer can push but is
+// refused when it tries to change who may read, and the repository stays private.
+TEST(Repositories, OnlyAnAdministratorChangesVisibility) {
+    Surface surface;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult created =
+        surface.call("create_repository",
+                     {{"customer_id", customer.value["id"]},
+                      {"workspace_id", surface.workspace(customer.value["id"])},
+                      {"name", "private-work"}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string repository_id = created.value["id"];
+    ASSERT_EQ(created.value["visibility"], "private");
+
+    const auto object = surface.store.find_policy_object("repository", repository_id);
+    ASSERT_TRUE(object);
+    const std::string writer = "taap:1:ed25519:writer";
+    const std::string administrator = "taap:1:ed25519:repository-admin";
+    ASSERT_TRUE(surface.store.create_grant(
+        {writer, object->id, "write", "attestation-writer", "admin", "request-writer"}));
+    ASSERT_TRUE(surface.store.create_grant({administrator,
+                                            object->id,
+                                            "admin",
+                                            "attestation-repository-admin",
+                                            "admin",
+                                            "request-repository-admin"}));
+    surface.ctx.operator_credential = false;
+
+    surface.ctx.acting_identity = writer;
+    // The write grant is real: the writer may rename the repository.
+    ASSERT_TRUE(
+        surface.call("rename_repository", {{"id", repository_id}, {"name", "still-private"}}).ok);
+    const ApiResult refused = surface.call("set_repository_visibility",
+                                           {{"id", repository_id}, {"visibility", "public"}});
+    EXPECT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "unauthorized");
+    const auto unchanged = surface.store.get_repository(repository_id);
+    ASSERT_TRUE(unchanged);
+    EXPECT_EQ(unchanged->visibility, "private");
+
+    surface.ctx.acting_identity = administrator;
+    const ApiResult published = surface.call("set_repository_visibility",
+                                             {{"id", repository_id}, {"visibility", "public"}});
+    ASSERT_TRUE(published.ok) << published.error.message;
+    EXPECT_EQ(published.value["visibility"], "public");
+    const auto changed = surface.store.get_repository(repository_id);
+    ASSERT_TRUE(changed);
+    EXPECT_EQ(changed->visibility, "public");
 }
 
 TEST(ModelSync, MultiGigabyteRevisionsDeduplicateAndResumePull) {
@@ -8272,7 +9200,7 @@ TEST(StorelessStartup, LakeWithNoControlStoreServesAndStopsCleanly) {
     EXPECT_EQ(startup->at("store"), "none");
 }
 
-// lake#915 (LSR-004): the replication credential never defaults to the admin token, and a peer list
+// lake#915: the replication credential never defaults to the admin token, and a peer list
 // that is not a list of origins stops startup.
 TEST(ReplicationStartup,TheReplicationCredentialNeverDefaultsToTheAdminToken) {
     TemporarySyncRoot temporary;
@@ -8725,7 +9653,7 @@ TEST(PostgresSync, PushAndPullUsePostgresControlPlane) {
     ASSERT_TRUE(contents) << contents.error().message;
     EXPECT_EQ(*contents, sync_bytes("postgres-backed sync"));
 
-    // Decision 52: a push and a pull are the repository's data, so their events are in the
+    // A push and a pull are the repository's data, so their events are in the
     // audit of the repository's workspace, written by the server's flush (here, its stop), and
     // not in the central log.
     const auto events = lake::test::audit_events(*control, {.limit = 100});
@@ -8800,7 +9728,7 @@ TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
     lake::test::RecordWorkspaces workspaces(control, database_uri);
     workspaces.ready(repository->workspace_id);
     options.workspaces = workspaces.service;
-    // Branch protection decisions go to the repository's workspace audit (decision 52); each
+    // Branch protection decisions go to the repository's workspace audit; each
     // drain() below writes what the pushes queued.
     options.audit_flush_interval = std::chrono::milliseconds(0);
     ApiServer server(options);
@@ -8853,7 +9781,7 @@ TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
     EXPECT_EQ(review_refusal->reason,
               "branch protection rejects main: an approved review is required");
 
-    // An approval lake recorded, by a reviewer who is not the pusher (LSR-077).
+    // An approval lake recorded, by a reviewer who is not the pusher.
     const auto repository_object = control->find_policy_object("repository", repository->id);
     ASSERT_TRUE(repository_object) << repository_object.error().message;
     const std::string reviewer = "taap:1:ed25519:branch-reviewer-" + suffix;
@@ -9772,7 +10700,7 @@ TEST(Identity, ClerkTurnsOffLakePoolPasswordSignUpAndSignIn) {
     ASSERT_TRUE(signed_up.ok) << signed_up.error.message;
     ASSERT_TRUE(s.call("sign_in_password", ada).ok);
 
-    s.ctx.clerk_publishable_key = "pk_test_YWJvdmUtc2VhaG9yc2UtNzUzNS5jbGVyay5hY2NvdW50cy5kZXYk";
+    s.ctx.clerk_publishable_key = "pk_test_ZXhhbXBsZS0xMjMuY2xlcmsuYWNjb3VudHMuZGV2JA==";
     EXPECT_EQ(s.call("viewer").value["password_sign_up"], false);
     const auto refused = [&](const std::string& capability, json input) {
         const ApiResult result = s.call(capability, std::move(input));
@@ -9806,7 +10734,7 @@ TEST(Identity, ClerkTurnsOffLakePoolPasswordSignUpAndSignIn) {
     EXPECT_EQ(s.call("sign_in_password", outsider).error.code, "unauthenticated");
 }
 
-// Sign-up and sign-in link to the instance's terms and privacy policy (liquid-bridge#15): viewer
+// Sign-up and sign-in link to the instance's terms and privacy policy: viewer
 // reports them to anyone, signed in or not, and an empty URL means no link.
 TEST(WebApp, ViewerReportsTheTermsAndPrivacyLinks) {
     Surface s;
@@ -9829,9 +10757,10 @@ TEST(WebApp, ViewerReportsTheTermsAndPrivacyLinks) {
 
 TEST(WebApp, LegalUrlSettingsKeepTheDefaultTurnOffOrRefuse) {
     using lake::api::legal_url_setting;
-    const std::string_view fallback = lake::api::default_terms_url;
-    EXPECT_EQ(fallback, "https://www.orama.com/legal/terms");
-    EXPECT_EQ(lake::api::default_privacy_url, "https://www.orama.com/legal/privacy");
+    // No legal link of lake's own: an install names its own pages, or shows none.
+    EXPECT_EQ(lake::api::default_terms_url, "");
+    EXPECT_EQ(lake::api::default_privacy_url, "");
+    const std::string_view fallback = "https://example.com/legal/terms";
     EXPECT_EQ(legal_url_setting("LAKE_TERMS_URL", nullptr, fallback).value(), fallback);
     EXPECT_EQ(legal_url_setting("LAKE_TERMS_URL", "", fallback).value(), fallback);
     EXPECT_EQ(legal_url_setting("LAKE_TERMS_URL", "off", fallback).value(), "");
@@ -9839,7 +10768,7 @@ TEST(WebApp, LegalUrlSettingsKeepTheDefaultTurnOffOrRefuse) {
               "https://acme.example/legal/terms?v=2#top");
     EXPECT_EQ(legal_url_setting("LAKE_PRIVACY_URL", "http://localhost:3000/privacy", fallback).value(),
               "http://localhost:3000/privacy");
-    for (const char* bad : {"javascript:alert(1)", "/legal/terms", "www.orama.com/legal/terms", "https://",
+    for (const char* bad : {"javascript:alert(1)", "/legal/terms", "www.example.com/legal/terms", "https://",
                             "https://a.example/x y", "https://a.example/\"x", "https://a.example/<b>",
                             "ftp://a.example/terms"}) {
         const auto refused = legal_url_setting("LAKE_TERMS_URL", bad, fallback);
@@ -9852,7 +10781,7 @@ TEST(WebApp, LegalUrlSettingsKeepTheDefaultTurnOffOrRefuse) {
 
 TEST(WebApp, ViewerNamesClerkAndAnOrganizationNamesItsSpace) {
     Surface s;
-    s.ctx.clerk_publishable_key = "pk_test_YWJvdmUtc2VhaG9yc2UtNzUzNS5jbGVyay5hY2NvdW50cy5kZXYk";
+    s.ctx.clerk_publishable_key = "pk_test_ZXhhbXBsZS0xMjMuY2xlcmsuYWNjb3VudHMuZGV2JA==";
     s.ctx.authorized = false;
     s.ctx.acting_identity.clear();
     s.ctx.operator_credential = false;
@@ -9860,7 +10789,7 @@ TEST(WebApp, ViewerNamesClerkAndAnOrganizationNamesItsSpace) {
     ASSERT_TRUE(visitor.ok) << visitor.error.message;
     EXPECT_EQ(visitor.value["signed_in"], false);
     EXPECT_EQ(visitor.value["clerk"]["enabled"], true);
-    EXPECT_EQ(visitor.value["clerk"]["frontend_api"], "above-seahorse-7535.clerk.accounts.dev");
+    EXPECT_EQ(visitor.value["clerk"]["frontend_api"], "example-123.clerk.accounts.dev");
     EXPECT_EQ(visitor.value["password_sign_up"], false);
     EXPECT_EQ(visitor.value["version"], "0.0.1");
 

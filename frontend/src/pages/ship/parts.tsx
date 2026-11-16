@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Pieces the Ship pages share: an inline copy button beside an identifier or address, and the
  * origin outside callers use. */
 import { useState } from "react";
@@ -42,7 +44,7 @@ export function CopyMono({ value, short, label }: { value: string; short?: numbe
 }
 
 /** The origin outside callers use: lake's configured external origin, its public host, else this
- * page's origin (the server page fell back to lake.oramadev.net). */
+ * page's origin (the server page fell back to a fixed host). */
 export function useOrigin(): string {
   const { viewer } = useSession();
   if (viewer.external_origin) return viewer.external_origin;

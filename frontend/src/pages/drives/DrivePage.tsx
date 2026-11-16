@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** One drive (`/w/<id>/drives/drive?id=<drive>&folder=<key>[&focus=<item>]`, lake#561,
  * docs/ui/drives.md): a file manager over the drive's `DriveStorage`, whatever keeps its files.
  * The folder's path, a toolbar (search, sort), the folder's items with their actions, and:

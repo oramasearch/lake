@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <atomic>
@@ -27,7 +29,7 @@ struct PendingWorkspaceEvent {
     audit::PendingEvent event;
 };
 
-// The workspace audit's writer (lake#317, decision 52, docs/api/audit.md#workspace-audit). A
+// The workspace audit's writer (lake#317, docs/api/audit.md#workspace-audit). A
 // capability call about a workspace's data only queues its event here, with the id and instant
 // fixed when the call finished; `flush`, run by the server's owner loop every second (and at once
 // when the queue is half full) and once more when the server drains, signs each workspace's

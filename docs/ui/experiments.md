@@ -31,8 +31,8 @@ directly.
 ## Words: Experiment, Trial and Run (lake#561)
 
 The pages speak as an AI experiment tracker does (Weights & Biases, MLflow): a person runs an
-**experiment**, never a "study" (Steve, 2026-10-10: *there is no such thing as a study… it's an
-experiment… like an AI model training experiment*). The Zetta engine's name for the same record is
+**experiment**, never a "study" (as in an AI model training
+experiment). The Zetta engine's name for the same record is
 *study*; lake's capabilities translate it ([API names](../api/experiments.md#names)), so the pages
 never see the engine's word except in its own field names.
 
@@ -223,7 +223,7 @@ change; check the charts in both themes after it.
 Deployment acceptance must separately start a real experiment on the live site, observe real trial
 curves, compare two real runs with smoothing and log scale, and exercise promotion confirmation.
 
-Experiment deletion is deferred to [Zetta #1158](https://github.com/oramasearch/zetta/issues/1158),
+Experiment deletion is deferred to Zetta #1158,
 as agreed for lake#303. The engine contract has no deletion operation, so the pages have no delete
 control, not even a disabled one, and lake has no local-only hiding. Add the registered REST/MCP
 operation and its UI control together once the engine contract exists.
@@ -241,9 +241,9 @@ source paths remained unchanged. Builds used `cmake --build build -j 6` and
 The full suites ran sequentially with fresh local connection databases:
 
 ```sh
-LAKE_TEST_DB_URI=postgresql://stevesperandeo@127.0.0.1:5432/lake_issue303_static_20260928_final \
+LAKE_TEST_DB_URI=postgresql://lake@127.0.0.1:5432/lake_issue303_static_20260928_final \
   ctest --test-dir build --output-on-failure
-LAKE_TEST_DB_URI=postgresql://stevesperandeo@127.0.0.1:5432/lake_issue303_shared_20260928_final \
+LAKE_TEST_DB_URI=postgresql://lake@127.0.0.1:5432/lake_issue303_shared_20260928_final \
   ctest --test-dir build-shared --output-on-failure
 tools/ui/test-token-gates.sh
 ```

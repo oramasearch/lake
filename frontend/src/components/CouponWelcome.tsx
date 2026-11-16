@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The welcome for a coupon code carried through sign-up (lake#1156, docs/ui/balance.md#coupon-codes):
  * on the first signed-in page after a `?code=` link (main.tsx keeps the code), redeems it once for
  * the person's own account through `redeem_coupon` and says what it gave ("You have $50.00 of

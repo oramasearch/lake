@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <optional>
@@ -30,6 +32,15 @@ void register_metering_capabilities(Registry& registry);
 // Usage over time (lake#564, docs/api/metering.md#usage-over-time): usage_over_time,
 // usage_limits, set_usage_limit and record_model_usage.
 void register_usage_capabilities(Registry& registry);
+// Before delete_workspace removes a workspace's records (lake#988,
+// docs/api/billing.md#a-deleted-workspaces-usage): flushes the usage recorder, reads every usage
+// dimension of the workspace from the first day no issued invoice covers (the month after the
+// account's latest invoice that is not void, else the workspace's creation, at most 400 days, the
+// series' retention) through today, a point a day, and writes it as the workspace's retained
+// usage in one store transaction. A repeated call replaces it. It fails, and the deletion must not
+// go ahead, when the workspace's usage cannot be read in full or cannot be written.
+liquid::runtime::task<std::expected<void, ApiResult>>
+retain_deleted_workspace_usage(ApiContext& context, const control::Workspace& workspace);
 // Queues every build result of the space's repositories that finished in or after the UTC hour
 // `since_hour` ("YYYY-MM-DDTHH:00:00Z") for its repository's workspace records, as a
 // metering_usage read does (docs/api/metering.md#build-records); a result already recorded is
@@ -78,6 +89,13 @@ void register_application_capabilities(Registry& registry);
 void register_agent_capabilities(Registry& registry);
 void register_platform_capabilities(Registry& registry);
 void register_web_app_capabilities(Registry& registry);
+// The secret references in a proposed app's `env` (lake#891, docs/api/web-apps.md#secret-
+// environment), checked with the caller's own credential as create_app checks them: each mount
+// readable and in `workspace_id`, each secret live with its field. agent_turn runs it as the person
+// confirming an Application Agent proposal, so the confirmed turn needs no secret read of its own.
+// Answers the refusal, or nothing.
+liquid::runtime::task<std::optional<ApiResult>> check_proposed_app_secret_references(
+    const nlohmann::json& app, const std::string& workspace_id, ApiContext& context);
 // When a resource fails (lake#1207, docs/api/notifications.md): list_notifications,
 // dismiss_notification, get_auto_fix and set_auto_fix, general over the resource kind (`app` now,
 // `agent` with lake#1209), and repair_app and change_app, which start Application Agent turns of
@@ -223,6 +241,12 @@ void register_workspace_store_capabilities(Registry& registry);
 // stop_agent_launch, schedule_agent, list_agent_schedules, unschedule_agent, agent_turn. Registered
 // by register_workspace_capabilities.
 void register_agent_run_capabilities(Registry& registry);
+// Whether a library agent's task credential that reads for a person (Ask Orama) may carry this
+// capability (lake#985): a read of the workspace's data, never an action, a secret, a
+// credential, a sign-in or recovery ceremony, or identity material such as SSO and SCIM settings.
+// The task's scopes are generated from this list, and every call is still confined to the task's
+// own account and workspace (docs/api/agent-bus.md#a-task-credential-is-confined-to-its-workspace).
+bool library_agent_may_read(const Capability& capability);
 
 // The Zetta capabilities a lake caller may reach on a workspace: reads through GET, actions
 // through POST (docs/api/workspaces.md). The agent path /workspaces/<customer>/zetta/v1/ and

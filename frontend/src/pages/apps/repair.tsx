@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** When an app fails (lake#1207, docs/ui/apps.md#when-an-app-fails): the notifications Lake keeps
  * in the workspace (`list_notifications`, general over the resource kind), *Fix with the
  * Application Agent* (`repair_app`), *Change This App* (`change_app`, a conversation since lake#1240:

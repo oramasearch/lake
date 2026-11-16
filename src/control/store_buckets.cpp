@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // A customer's own bucket browsed as a drive (docs/api/storage.md#browsing-a-bucket, lake#664):
 // one BucketContents over a small object protocol, with two implementations written here — S3
 // (SigV4: Cloudflare R2, AWS S3, Backblaze B2, Google Cloud Storage's XML API) and Azure Blob

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** How a drive keeps its files, behind one interface (lake#561, docs/ui/drives.md): the Drives
  * pages browse, upload, move, rename and delete through a `DriveStorage` and never ask which kind
  * it is, except for what it can do (`can`). Three implementations:

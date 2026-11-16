@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The model gateway (lake#248, docs/api/model-gateway.md): every model call an agent makes for a
 // workspace goes through lake's `model_completion`, which counts the tokens the provider reports as
 // the workspace's `model_tokens`, refuses calls past the account's monthly limit, and keeps the
@@ -359,7 +361,7 @@ TEST(ModelCompletion, BillingRequiresBothPositiveExactModelPricesBeforeDispatch)
     EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-5.5/output"}}), 300);
 }
 
-// The default gateway models' token prices the schema seeds (migration 0095, Steve 2026-10-23):
+// The default gateway models' token prices the schema seeds (migration 0095):
 // OpenAI's published standard price, https://developers.openai.com/api/docs/pricing read
 // 2026-10-23, plus 30%, in millionths of a dollar per million tokens (docs/api/billing.md#rates).
 struct SeededModelPrice {
@@ -367,7 +369,7 @@ struct SeededModelPrice {
     std::uint64_t input;
     std::uint64_t output;
 };
-// The gpt-6.x models follow from migration 0105 (Steve 2026-10-26, the same page read 2026-10-26).
+// The gpt-6.x models follow from migration 0105 (the same page read 2026-10-26).
 constexpr SeededModelPrice seeded_model_prices[] = {
     {"gpt-6.1-sol", 2'600'000, 13'000'000},      // $2.00 / $10.00
     {"gpt-6.1-terra", 1'300'000, 6'500'000},     // $1.00 / $5.00

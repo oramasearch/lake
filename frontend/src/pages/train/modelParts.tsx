@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What the Train and Ship model pages share on screen (lake#599): the workspace's models grouped
  * into versions, a held-out score as a person reads it, and the links between the two pages for
  * the same model. The logic is in `models.ts`. */

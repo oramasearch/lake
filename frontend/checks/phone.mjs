@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Phone checks for lake's web app at 390×844, an iPhone user agent, touch and DPR 3
 // (docs/ui/mobile-web.md → How to Check It). Run against `npx vite --port 5174`; every /v1 call is
 // answered by the mocks below, so no lake is needed. Playwright is not a dependency of the app:
@@ -26,11 +28,11 @@ const viewer = visitor
   : {
       signed_in: true,
       administrator: false,
-      display_name: "Steve Sperandeo",
-      email: "steve@example.com",
+      display_name: "Ada Lovelace",
+      email: "ada@example.com",
       customer_id: "c1",
       workspace_id: "ws1",
-      spaces: [{ id: "c1", name: "steve", label: "Steve", personal: true, workspaces: [{ id: "ws1", name: "Main workspace with a long name", customer_id: "c1", status: "ready" }] }],
+      spaces: [{ id: "c1", name: "ada", label: "Ada", personal: true, workspaces: [{ id: "ws1", name: "Main workspace with a long name", customer_id: "c1", status: "ready" }] }],
       clerk: { enabled: false },
       password_sign_up: false,
       version: "dev",
@@ -38,8 +40,8 @@ const viewer = visitor
 
 const text = Array.from({ length: 40 }, (_, i) => `Speaker ${i % 2 ? "B" : "A"}: line ${i + 1} about https://lake.example.com/w/0a1b2c3d4e5f60718293a4b5c6d7e8f9/design/project?name=a-very-long-project-name-without-spaces and the pipeline.`).join("\n");
 const rows = [
-  { id: "t1", title: "Weekly sync with the design team about the pipeline", excerpt: "Speaker A: we talked about the pipeline and the next release of the app, which ships on Friday.", source: "recording", seconds: 1832, created_at: "2026-10-09T17:05:00Z", created_by: "steve@example.com" },
-  { id: "t2", title: "call_2026-10-08", excerpt: "A call recorded on the phone.", source: "upload", seconds: 312, created_at: "2026-10-08T10:00:00Z", created_by: "steve@example.com" },
+  { id: "t1", title: "Weekly sync with the design team about the pipeline", excerpt: "Speaker A: we talked about the pipeline and the next release of the app, which ships on Friday.", source: "recording", seconds: 1832, created_at: "2026-10-09T17:05:00Z", created_by: "ada@example.com" },
+  { id: "t2", title: "call_2026-10-08", excerpt: "A call recorded on the phone.", source: "upload", seconds: 312, created_at: "2026-10-08T10:00:00Z", created_by: "ada@example.com" },
   { id: "t3", title: "Notes pasted from a meeting", excerpt: "averyveryverylongwordwithoutanyspacesthatcouldwidenthepageifnotwrappedproperly-0123456789", source: "text", seconds: null, created_at: "2026-10-01T10:00:00Z" },
 ];
 
@@ -187,7 +189,7 @@ if (!visitor && !only) {
   report.phoneHelp = await page.evaluate(() => [...document.querySelectorAll("section[aria-label='From your phone'] button")].map((b) => `${b.textContent || b.getAttribute("aria-label")} ${Math.round(b.getBoundingClientRect().height)}`));
   await page.click("[role=dialog] button:has-text(\"Type, paste or dictate\")");
   await page.waitForTimeout(200);
-  await page.fill("#transcript-text", "Kickoff with Acme\nSteve: hello there.");
+  await page.fill("#transcript-text", "Kickoff with Acme\nAda: hello there.");
   await page.focus("#transcript-text");
   await page.evaluate(() => {
     Object.defineProperty(window.visualViewport, "height", { configurable: true, get: () => 508 });

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Screenshots of a standalone model (lake#654, docs/ui/train.md#a-standalone-model) at 1440 and 390
 // wide: Train → Models with New model, the New Model choice, Train one and Bring one, a trained
 // standalone model's page (what it trains on, Retrain, New version, Move into a project, Delete), a
@@ -23,12 +25,12 @@ const BASE = process.env.BASE ?? "http://localhost:5174";
 const viewer = {
   signed_in: true,
   administrator: false,
-  display_name: "Steve Sperandeo",
-  email: "steve@example.com",
+  display_name: "Ada Lovelace",
+  email: "ada@example.com",
   taap_id: "taap:me",
   customer_id: "me",
   workspace_id: "me-0",
-  spaces: [{ id: "me", name: "steve-x7f2", label: "Your workspaces", personal: true, kind: "individual", workspaces: [{ id: "me-0", name: "steve", customer_id: "me", status: "ready" }] }],
+  spaces: [{ id: "me", name: "ada-x7f2", label: "Your workspaces", personal: true, kind: "individual", workspaces: [{ id: "me-0", name: "ada", customer_id: "me", status: "ready" }] }],
   clerk: { enabled: false },
   password_sign_up: false,
   version: "dev",

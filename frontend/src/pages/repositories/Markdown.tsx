@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The forge renders README and issue Markdown as an article. */
 import { Markdown as Base, markdownAnchor } from "@/lib/markdown";
 

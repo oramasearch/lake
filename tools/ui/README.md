@@ -28,7 +28,7 @@ page. See [`docs/ui/catalogue-icons.md`](../../docs/ui/catalogue-icons.md).
 [`docs/design/ui/mocks/`](../../docs/design/ui/mocks/README.md) at 1440×900 with the pinned
 Puppeteer Chromium image (`screenshot_driver.mjs` runs inside it). It takes no arguments.
 Screenshots of the running app come from the browser walkthrough
-([`docs/deployment/browser-testing.md`](../../docs/deployment/browser-testing.md)).
+([`../e2e/README.md`](../e2e/README.md)).
 
 lake#561 removed the tools that served the server-rendered pages: `lake-ui-fixture`
 (`fixture_server.cpp`), its `test-fixture-pages.sh` check (ctest `lake-ui-fixture-pages`), and

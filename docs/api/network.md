@@ -1,6 +1,6 @@
 # Network Capabilities
 
-Lake issue [#728](https://github.com/oramasearch/lake/issues/728) exposes the secure-networking
+Lake issue #728 exposes the secure-networking
 control plane through the capability registry. The same definitions produce REST operations in
 OpenAPI and MCP tools, so validation, authorization, audit and response shapes do not vary by
 transport. The desired and observed rows are defined by
@@ -21,7 +21,7 @@ inputs.
 | `remove_network_connection` | action | Sets one connection to `desired: absent`. |
 | `create_network_egress_rule` | action | Declares CIDR or DNS egress for one workload or the workspace. |
 | `list_network_egress_rules` | read | Returns present and withdrawn egress history. |
-| `grant_network_tunnel` | action | Grants one account member access to one target port until `expires_at`. |
+| `grant_network_tunnel` | action | Grants one account member access to one target port until `expires_at`; `quota_exceeded` past the active grant caps ([tunnel-grants.md](tunnel-grants.md#how-many-grants-lake983-lsr-116)). |
 | `issue_network_tunnel_certificate` | action | Signs the recipient's CSR for a live grant; returns client certificate, chain, relay endpoint and relay CA. |
 | `list_network_tunnel_grants` | read | Returns active, expired and revoked grant history. |
 | `revoke_network_tunnel` | action | Sets `revoked_at` on an active grant. |
@@ -94,8 +94,8 @@ revoked.
 
 Decision D1 keeps tunnel sessions and network activity in the workspace Zetta, not in the
 `0084_network` tables. The producing and reading interface is tracked by
-[zetta#1281](https://github.com/oramasearch/zetta/issues/1281), and the live grant/connect/revoke
-flow by [lake#730](https://github.com/oramasearch/lake/issues/730). Until that provider is
+zetta#1281, and the live grant/connect/revoke
+flow by lake#730. Until that provider is
 available, `list_network_tunnel_sessions` and `network_activity` authorize normally and return
 empty `sessions`/`events` arrays with `available: false` and `pending: "zetta#1281"`. Their
 scoped provider interface does not invent a second source of network history. See

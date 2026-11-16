@@ -1,4 +1,6 @@
-// Stripe, lake's payment provider (decision 57, lake#620, docs/api/billing.md#stripe): lake's own
+// SPDX-License-Identifier: MIT
+
+// Stripe, lake's payment provider (lake#620, docs/api/billing.md#stripe): lake's own
 // REST client against a fake Stripe, the webhook signature and its tolerance window, notices
 // applied once per event id, other apps' and other Lakes' events ignored in a shared account
 // (lake#855), a kept customer Stripe no longer has replaced (lake#856), the keys read from the
@@ -376,6 +378,27 @@ std::shared_ptr<lake::api::PaymentProviders> stripe_providers(FakeStripe& stripe
                                            "https://stripe.test"));
 }
 
+// lake#1002: notices that do not authenticate are anyone's requests. However many arrive,
+// they add at most one denied audit event a minute, never one each.
+TEST(StripeNotices, UnauthenticatedNoticesDoNotEachAppendAnAuditEvent) {
+    FakeStripe stripe;
+    StripeRig rig(stripe_providers(stripe));
+    const std::string body = event("evt_unsigned", "invoice.paid", "in_1");
+    for (int i = 0; i < 20; ++i) {
+        const auto outcome = rig.notice(body, "t=1,v1=00");
+        EXPECT_EQ(outcome.status, 400);
+    }
+    const auto events = lake::test::audit_events(*rig.store, {.limit = 500});
+    ASSERT_TRUE(events) << events.error().message;
+    std::size_t denied = 0;
+    for (const auto& entry : *events) {
+        if (entry.draft.kind == "billing.payment.notice" && entry.draft.outcome == "denied") {
+            ++denied;
+        }
+    }
+    EXPECT_LE(denied, 1U);
+}
+
 TEST(StripeSignature, ChecksTheHmacAndTheToleranceWindow) {
     const std::string body = event("evt_1", "invoice.paid", "in_1");
     const auto now = std::chrono::system_clock::now();
@@ -443,6 +466,22 @@ TEST(StripeClient, FormsCentsAndEvents) {
     EXPECT_TRUE(other->state.empty() && other->provider_status.empty());
     EXPECT_FALSE(parse("not json"));
     EXPECT_FALSE(parse(R"({"type":"invoice.paid"})"));
+
+    // Marked paid in Stripe without a payment (lake#1033): the invoice stays due, recorded.
+    json out_of_band = json::parse(event("evt_5", "invoice.paid", "in_9"));
+    out_of_band["data"]["object"]["paid_out_of_band"] = true;
+    const auto marked = parse(out_of_band.dump());
+    ASSERT_TRUE(marked);
+    EXPECT_EQ(marked->state, "");
+    EXPECT_EQ(marked->provider_status, "paid_out_of_band");
+    // Nor does it activate an order.
+    json order = out_of_band;
+    order["data"]["object"]["subscription_details"] = {{"metadata", {{"lake_order_id", "o-1"}}}};
+    order["data"]["object"]["subscription"] = "sub_1";
+    const auto order_notice = parse(order.dump());
+    ASSERT_TRUE(order_notice);
+    EXPECT_FALSE(order_notice->order_subscription.has_value());
+    EXPECT_EQ(order_notice->provider_status, "paid_out_of_band");
 }
 
 // Whose invoice an event is about, in a Stripe account shared with Cloud v1 and other Lakes
@@ -1139,7 +1178,9 @@ TEST(StripeBilling, WebhooksMoveTheInvoiceOncePerEvent) {
     EXPECT_EQ(unknown.status, 200);
     EXPECT_EQ(unknown.body["matched"], false);
 
-    // Every notice that moved an invoice, and every refusal, is in the central audit.
+    // Every notice that moved an invoice is in the central audit. The three notices that did not
+    // authenticate are counted, not audited one by one (lake#1002): at most one denied
+    // summary a minute for the whole process, so none here if another test summarized first.
     const auto events = lake::test::audit_events(*rig.store, {.limit = 500});
     ASSERT_TRUE(events) << events.error().message;
     int paid_events = 0;
@@ -1159,7 +1200,7 @@ TEST(StripeBilling, WebhooksMoveTheInvoiceOncePerEvent) {
         }
     }
     EXPECT_EQ(paid_events, 1);
-    EXPECT_EQ(denied, 3);
+    EXPECT_LE(denied, 1);
 }
 
 // One Stripe account, several apps (lake#855): every endpoint receives every event of its types,

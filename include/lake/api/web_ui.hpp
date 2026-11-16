@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <cstdint>
@@ -22,8 +24,8 @@ namespace lake::api {
 
 std::string web_ui_escape(std::string_view text);
 // A space's label for people: the viewer's own individual space reads "Your workspaces", never its
-// generated handle (lake#452) or "personal space", which the product does not say (Steve,
-// 2026-10-10); every other space keeps its name. The `viewer` capability labels spaces this way
+// generated handle (lake#452) or "personal space", which the product does not
+// say; every other space keeps its name. The `viewer` capability labels spaces this way
 // (lake#561).
 std::string web_ui_space_label(const control::Customer& customer, std::string_view user_id);
 // The syntax units of a source file, as the File page shades them (lake#561): an array of
@@ -115,6 +117,11 @@ std::string web_ui_order_status(const OrderSheet& sheet,
                                 const Regions& regions,
                                 const control::CloudOrder& order,
                                 std::string_view checkout);
+// The order form's confirmation link opened (lake#1000): one button that posts `token` back to
+// /orders/<id>/confirm, so following the link alone confirms nothing.
+std::string web_ui_order_confirm(const control::CloudOrder& order, std::string_view token);
+// After the contact email is confirmed: the order went to support, and its status link.
+std::string web_ui_order_confirmed(const control::CloudOrder& order, std::string_view status_url);
 // A short page on the apex that says one thing (an order not found, too many orders).
 std::string web_ui_order_message(std::string_view title, std::string_view message);
 // The published price list the shared option links to: the list in force, or a sentence when none

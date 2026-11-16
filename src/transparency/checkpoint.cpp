@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/transparency/checkpoint.hpp"
 
 #include <algorithm>

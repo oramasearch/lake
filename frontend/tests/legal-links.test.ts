@@ -1,5 +1,7 @@
+// SPDX-License-Identifier: MIT
+
 /**
- * Terms of service and privacy policy on sign-up and sign-in (liquid-bridge#15): every form, Clerk's
+ * Terms of service and privacy policy on sign-up and sign-in: every form, Clerk's
  * and lake's own, carries the sentence with the links `viewer.legal` reports, and none when the
  * instance links to neither. `npm test`.
  */
@@ -10,8 +12,8 @@ import {test} from "node:test";
 import {legalNotice, PRIVACY_LABEL, safeLegalUrl, TERMS_LABEL} from "../src/lib/legalLinks.ts";
 
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
-const TERMS = "https://www.orama.com/legal/terms";
-const PRIVACY = "https://www.orama.com/legal/privacy";
+const TERMS = "https://example.com/legal/terms";
+const PRIVACY = "https://example.com/legal/privacy";
 const textOf = (parts: ReturnType<typeof legalNotice>) =>
     (parts ?? []).map((part) => ("href" in part ? `[${part.label}](${part.href})` : part.text)).join("");
 

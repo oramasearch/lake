@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // lake#1195: a workspace scan survives leaving the page. Opens Design → Opportunities with no
 // `?task=` while the workspace's scan runs (list_opportunities answers `last_scan` running), checks
 // the page says "Scanning… started …" and the Scan button says it is running, then lets the scan
@@ -21,11 +23,11 @@ const BASE = process.env.BASE ?? "http://localhost:5174";
 const viewer = {
   signed_in: true,
   administrator: false,
-  display_name: "Steve Sperandeo",
-  email: "steve@example.com",
+  display_name: "Ada Lovelace",
+  email: "ada@example.com",
   customer_id: "c1",
   workspace_id: "ws1",
-  spaces: [{ id: "c1", name: "steve", label: "Steve", personal: true, workspaces: [{ id: "ws1", name: "Main", customer_id: "c1", status: "ready" }] }],
+  spaces: [{ id: "c1", name: "ada", label: "Ada", personal: true, workspaces: [{ id: "ws1", name: "Main", customer_id: "c1", status: "ready" }] }],
   clerk: { enabled: false },
   password_sign_up: false,
   version: "dev",

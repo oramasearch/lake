@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Member settings (`/member?id=&confirm_removal=yes`): one membership, its role and its removal
  * behind a confirmation (web_ui_member, serve_member_page, serve_member_role,
  * serve_member_remove). `confirm_removal=yes` opens the confirmation at once. */

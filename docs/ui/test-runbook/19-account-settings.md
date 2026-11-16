@@ -241,7 +241,9 @@ As: owner
 
 Expect:
 - Breadcrumb Account › Tokens. Eyebrow "Account", title "API Tokens", sub "Create named, scoped
-  sessions and revoke them here." and the primary **New token**.
+  tokens and revoke them here. The keys Developer → API and MCP make are API tokens too, and are
+  listed here." (**API** and **MCP** link to `/developer/api` and `/developer/mcp`) and the primary
+  **New token**.
 - With tokens: stats "Tokens", "Active" and "Never expire" ("no expiry"); a search "Search
   tokens…" and chips "Any state", "Active <n>", "Revoked <n>"; the table "Token" (name and kind),
   "Scopes", "Expires", "Status", **Revoke**.
@@ -257,13 +259,13 @@ As: owner
 
 Expect:
 - Step 1: a drawer "New Token", "Its secret is shown once, after it is created.", fields **Name** *
-  (focused), **Capability scopes, comma separated** * with the help "For Liquid push and pull, use
-  `refs,find_missing,push,pull,upload_chunks,read_chunk` Use these. The token keeps your existing
-  repository permissions.", **Expiry in seconds** (help "Leave empty for as long as this session
+  (focused), **Capability scopes, comma separated** * with the help "For liquid and liquify (clone,
+  push, pull and reviews), use `refs,find_missing,push,pull,upload_chunks,read_chunk,list_reviews,create_review,update_review,list_review_comments,create_review_comment,map_review_anchors,list_branch_protections` Use these. The token keeps your existing repository
+  permissions.", **Expiry in seconds** (help "Leave empty for as long as this session
   allows, at most 30 days."), the checkboxes "Static exception" and "Never expires (survives
   sign-out; needs your workspace's opt-in, a reason and named scopes)", **Reason for a static or
   never-expiring token**, and **Cancel** / **Create token**.
-- Step 2: the scopes box holds `refs,find_missing,push,pull,upload_chunks,read_chunk`.
+- Step 2: the scopes box holds `refs,find_missing,push,pull,upload_chunks,read_chunk,list_reviews,create_review,update_review,list_review_comments,create_review_comment,map_review_anchors,list_branch_protections`.
 - Step 3: the drawer closes and nothing is made.
 
 #### ACCT-018 · New token refuses bad input · P1

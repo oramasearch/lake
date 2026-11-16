@@ -1,4 +1,6 @@
-// Lake as an MCP client (decision 60, lake#652, docs/api/mcp-connections.md#the-client): the pure
+// SPDX-License-Identifier: MIT
+
+// Lake as an MCP client (lake#652, docs/api/mcp-connections.md#the-client): the pure
 // protocol pieces, then the client against a local test MCP server over the server's own outbound
 // transport, honest and hostile.
 
@@ -292,6 +294,27 @@ TEST(McpClient, OnlyPublicAddressesAreReachable) {
     EXPECT_TRUE(lake::api::mcp_public_address(mapped));
     bytes nat64{0x00, 0x64, 0xFF, 0x9B, 0, 0, 0, 0, 0, 0, 0, 0, 169, 254, 169, 254};
     EXPECT_FALSE(lake::api::mcp_public_address(nat64)) << "the metadata address through NAT64";
+    // lake#1008: every transition and site-local form that hides a private address.
+    bytes compatible(16, 0);
+    compatible[12] = 10;
+    EXPECT_FALSE(lake::api::mcp_public_address(compatible)) << "IPv4-compatible ::10.0.0.0";
+    bytes local_nat64{0x00, 0x64, 0xFF, 0x9B, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 8, 8, 8, 8};
+    EXPECT_FALSE(lake::api::mcp_public_address(local_nat64)) << "local-use NAT64 64:ff9b:1::/48";
+    bytes six_to_four{0x20, 0x02, 10, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    EXPECT_FALSE(lake::api::mcp_public_address(six_to_four)) << "6to4 of 10.0.0.1";
+    six_to_four[2] = 8;
+    six_to_four[3] = 8;
+    six_to_four[4] = 8;
+    six_to_four[5] = 8;
+    EXPECT_TRUE(lake::api::mcp_public_address(six_to_four)) << "6to4 of 8.8.8.8";
+    bytes teredo{0x20, 0x01, 0x00, 0x00, 1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 1};
+    EXPECT_FALSE(lake::api::mcp_public_address(teredo)) << "Teredo";
+    bytes site_local(16, 0);
+    site_local[0] = 0xFE;
+    site_local[1] = 0xC0;
+    EXPECT_FALSE(lake::api::mcp_public_address(site_local)) << "site-local fec0::/10";
+    bytes global{0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    EXPECT_TRUE(lake::api::mcp_public_address(global)) << "2606:4700::1";
     bytes unique(16, 0);
     unique[0] = 0xFD;
     EXPECT_FALSE(lake::api::mcp_public_address(unique));

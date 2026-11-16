@@ -1,7 +1,9 @@
+// SPDX-License-Identifier: MIT
+
 /** One MCP connection (`/w/<id>/mcp-connection?id=<id>`, lake#652, docs/ui/mcp-connections.md): its
  * server and status, its tools (allow each, say whether it changes something, try it, auto-approve
  * a change for one agent), the switch that exposes its allowed tools through Lake's own MCP (with
- * what that means, decision 60), its agent and streams, its recent calls from the audit, and what
+ * what that means), its agent and streams, its recent calls from the audit, and what
  * the server also offers. A server Lake runs here (lake#659) also shows its App: its state, Start,
  * Stop and Restart, and its logs; its tools are discovered once the App is ready. Refresh asks the
  * server again; Delete names what goes. */

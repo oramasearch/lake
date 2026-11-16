@@ -31,9 +31,10 @@ Expect:
 - A strip "Base URL" with `<origin>/v1`, a **Copy** button and chips "REST · JSON", "OpenAPI 3.1",
   "{ok, value, duration_ms}", "Authorization: Bearer <key>".
 - Tabs "Keys" (current), "Quick start", "Operations".
-- On Keys: a card "Create an API Key" with the form, a card "Your Keys", the line "A key works for
-  both the REST API and MCP. Sign-in sessions and devices are on Sessions; every token is also on
-  Tokens." and a card "The Rules a Key Lives By" with "Your permissions, nothing more", "Read-only
+- On Keys: a card "Create an API Key" with the form, a card "Your Keys", the line "A key is an API
+  token: the same credential Account → Tokens makes and lists, and every key made here is listed
+  there too. It works for the REST API, MCP, liquid and liquify. Sign-in sessions and devices are
+  on Sessions." and a card "The Rules a Key Lives By" with "Your permissions, nothing more", "Read-only
   keys", "Expiry and revocation", "Every call is audited", "One envelope", "No secrets come back".
 
 #### DEV-002 · The header actions · P1
@@ -114,8 +115,8 @@ Expect:
 #### DEV-007 · A key for named capabilities · P2
 As: owner
 
-1. Name it `qa-<MMDD>-api-named`, choose **Named capabilities**, press the
-   `refs,find_missing,push,pull,upload_chunks,read_chunk` link in the help, and create it.
+1. Name it `qa-<MMDD>-api-named`, choose **Named capabilities**, press the *liquid and liquify*
+   `refs,find_missing,push,pull,upload_chunks,read_chunk,list_reviews,create_review,update_review,list_review_comments,create_review_comment,map_review_anchors,list_branch_protections` link in the help, and create it.
 2. Press **I've stored it**.
 
 Expect:

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import jsonschema"
   RESULT_VARIABLE LAKE_JSONSCHEMA_RESULT)
@@ -32,6 +34,7 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_web_app.cpp test_ma
   test_quickstart.cpp
   test_quickstart_columns.cpp
   test_browser_keys.cpp
+  test_domain_claims.cpp
   test_methodologies.cpp
   test_drives.cpp
   test_store_providers.cpp
@@ -91,10 +94,12 @@ target_sources(lake-tests PRIVATE test_oidc_discovery.cpp)
 target_sources(lake-tests PRIVATE test_orders.cpp)
 # Proving you hold an identity document's key before it becomes an account's identity (lake#931).
 target_sources(lake-tests PRIVATE test_identity_proof.cpp)
-# The version and its release page (root CLAUDE.md, *Cutting a release*).
+# The version and its release page (CONTRIBUTING.md, *Cutting a release*).
 target_sources(lake-tests PRIVATE test_release_version.cpp)
 # `lake manifest`: the schema, Stripe events and environment the operator reads (lake#1119).
 target_sources(lake-tests PRIVATE test_manifest.cpp)
+# A lake pod's liquid identity custody: a passphrase file, or a start that names it (lake#1352).
+target_sources(lake-tests PRIVATE test_identity_custody.cpp)
 # A white-labelled Lake's brand on every page, email and agent surface (lake#1135, lake#1137).
 target_sources(lake-tests PRIVATE test_brand.cpp)
 target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx OpenSSL::Crypto

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The Apps page counts a Degraded (crash-looping) app as needing attention (lake#1208). `npm test`;
  * the build runs it. */
 import { test } from "node:test";

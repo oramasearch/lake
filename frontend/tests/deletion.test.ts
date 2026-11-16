@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What each delete and revoke dialog lists from its `dry_run: true` answer, and what the person
  * types to confirm (docs/ui/deletion.md, lake#645). `npm test`; the build runs it. */
 import { test } from "node:test";

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Billing (`/billing`, lake#564, lake#635): this month's usage per dimension × its rate = cost, the
  * running total, the invoices and how they are paid. Lake is priced by usage only: every account is
  * billed at the one price list, with no plan to choose, no monthly fee and nothing included. The

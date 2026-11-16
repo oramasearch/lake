@@ -1,4 +1,6 @@
-// lake#383 phase B (decision 54 S5): a tenant image's blobs live in its workspace's liquid store.
+// SPDX-License-Identifier: MIT
+
+// lake#383 phase B: a tenant image's blobs live in its workspace's liquid store.
 //
 // A real lake server runs with workspace stores on FakeZettaObjects (Zetta's object routes, as
 // tests/zetta_object_fixture.hpp specifies them) and workspace records on RecordWorkspaces. Each
@@ -596,6 +598,104 @@ TEST(RegistryStore, AMultiLayerImageLivesInItsWorkspaceStoreAndPullsByteIdentica
 
 // A chunked upload (PATCH ranges, then an empty PUT) lands in the workspace store; bytes that do
 // not match the digest are refused and nothing is recorded.
+// lake#909: a build's push token writes only its own target and its cache, even to an image already
+// routed to the build's workspace. Code a build runs can read the token; it must not overwrite the
+// workspace's other images.
+TEST(RegistryStore, ABuildPushTokenWritesOnlyItsOwnTargetAndCache) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    rig.route(rig.one, rig.alpha, "app");
+    const std::string config = "{\"architecture\":\"amd64\"}";
+    rig.push_image("tenant-one/app", "v1", config, {"app layer"});
+
+    // A build names its source repository by id, one of the build's own account.
+    const auto source =
+        rig.store->create_repository({rig.one, "service-source", "", "private", rig.alpha});
+    ASSERT_TRUE(source) << source.error().message;
+    const auto build =
+        rig.store->create_build({.customer_id = rig.one,
+                                 .workspace_id = rig.alpha,
+                                 .repository = source->id,
+                                 .revision = "main",
+                                 .target = "lake.example.test/tenant-one/service:b1"});
+    ASSERT_TRUE(build) << build.error().message;
+    ASSERT_TRUE(rig.store->set_build_status(
+        build->id,
+        {.phase = "Running",
+         .message = "running",
+         .token_hashes = {{"push", lake::control::identity_crypto::sha256_hex("build-push-909")}}}));
+    const std::string token = "Basic bGFrZTpidWlsZC1wdXNoLTkwOQ=="; // lake:build-push-909
+
+    const auto upload = [&](const std::string& repository) {
+        return exchange(rig.port(), "POST", "/v2/" + repository + "/blobs/uploads/", {}, {}, token);
+    };
+    Reply other = upload("tenant-one/app");
+    EXPECT_EQ(other.status, 403U) << other.body;
+    Reply other_manifest = exchange(rig.port(),
+                                    "PUT",
+                                    "/v2/tenant-one/app/manifests/v1",
+                                    RegistryRig::manifest(config, {}).dump(),
+                                    {{"Content-Type", "application/vnd.oci.image.manifest.v1+json"}},
+                                    token);
+    EXPECT_EQ(other_manifest.status, 403U) << other_manifest.body;
+    EXPECT_EQ(upload("tenant-one/service").status, 202U);
+    EXPECT_EQ(upload("tenant-one/cache/service").status, 202U);
+}
+
+// lake#952: a methodology run's credential pulls the run's build image only when the build is the
+// run's own workspace's, not merely its customer's.
+TEST(RegistryStore, AMethodologyRunPullsOnlyABuildOfItsOwnWorkspace) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    rig.route(rig.one, rig.beta, "model");
+    const std::string config = "{\"architecture\":\"amd64\"}";
+    rig.push_image("tenant-one/model", "b1", config, {"model layer"});
+    const auto source =
+        rig.store->create_repository({rig.one, "model-source", "", "private", rig.beta});
+    ASSERT_TRUE(source) << source.error().message;
+    const auto build = rig.store->create_build({.customer_id = rig.one,
+                                                .workspace_id = rig.beta,
+                                                .repository = source->id,
+                                                .revision = "main",
+                                                .target = "lake.example.test/tenant-one/model:b1"});
+    ASSERT_TRUE(build) << build.error().message;
+    const auto basic = [](const std::string& user, const std::string& secret) {
+        const std::string pair = user + ":" + secret;
+        std::string encoded(((pair.size() + 2) / 3) * 4, '\0');
+        const int size = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(encoded.data()),
+                                         reinterpret_cast<const unsigned char*>(pair.data()),
+                                         static_cast<int>(pair.size()));
+        encoded.resize(static_cast<std::size_t>(size));
+        return "Basic " + encoded;
+    };
+    const auto run_in = [&](const std::string& workspace) {
+        const auto run = rig.store->create_methodology_run({.customer_id = rig.one,
+                                                            .workspace_id = workspace,
+                                                            .methodology_id = "m-952",
+                                                            .mode = "train",
+                                                            .build_id = build->id,
+                                                            .runtime_image = "runtime:1",
+                                                            .cpu_millis = 100,
+                                                            .memory_bytes = 1 << 20,
+                                                            .timeout_seconds = 60});
+        EXPECT_TRUE(run) << run.error().message;
+        // A run credential's secret is at least 32 characters (parse_agent_credential).
+        const std::string credential = "lmr." + run->id + ".secret-952-" + std::string(32, 's');
+        EXPECT_TRUE(rig.store->put_methodology_run_status(
+            run->id,
+            {.phase = "Running",
+             .credential_sha256 = lake::control::identity_crypto::sha256_hex(credential)}));
+        return basic("methodology-run", credential);
+    };
+    const std::string elsewhere = run_in(rig.alpha);
+    const std::string own = run_in(rig.beta);
+    Reply refused =
+        exchange(rig.port(), "GET", "/v2/tenant-one/model/manifests/b1", {}, {}, elsewhere);
+    EXPECT_NE(refused.status, 200U) << refused.body;
+    Reply pulled = exchange(rig.port(), "GET", "/v2/tenant-one/model/manifests/b1", {}, {}, own);
+    EXPECT_EQ(pulled.status, 200U) << pulled.body;
+}
+
 TEST(RegistryStore, AChunkedUploadLandsInTheStoreAndAWrongDigestIsRefused) {
     RegistryRig rig;
     ASSERT_NO_FATAL_FAILURE(rig.SetUp());

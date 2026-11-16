@@ -1,8 +1,8 @@
 # Deployment
 
-- **[Edge certificates for app hosts](edge-certificates.md) (human action, Steve, open):** Advanced Certificate
-  Manager on `lake.live` and `oramadev.net` and the two zone tokens' permissions, so `<app>.<lake host>` gets an edge
-  certificate and the `lake.live` zone settings apply (lake#798, a production degradation).
+- **[Release images](release-images.md) (human action, open):** a release tag is written once,
+  only from an approved, tagged source (`tools/release/publish-release-image.py`); Docker Hub tag
+  immutability for `v*` is the image owner's to turn on (lake#994).
 - [White-label sign-in](white-label-sign-in.md): sign-in on a Lake that serves a customer's own
   domain, through a Clerk instance for that domain or the customer's IdP alone (lake#1136).
 - [Sign-in](sign-in.md): Clerk instances, social-provider setup, production Microsoft ownership,
@@ -16,9 +16,12 @@
   exit codes (lake#1119, orama-operator#936).
 - [Client addresses](client-addresses.md): which address per-client limits count, and the
   trusted proxies (`LAKE_TRUSTED_PROXY_CIDRS`).
+- [Private instance clone and push](private-install.md): the external origin customers see, and a
+  native local instance to clone from and push to.
 - [Client addresses](client-addresses.md): which address per-client limits count, the proxy
   listener (`LAKE_PROXY_PORT`) and the trusted proxies (`LAKE_TRUSTED_PROXY_CIDRS`), and the rollout
   order with the operator.
-- [Stripe](stripe.md) and [Resend](resend.md): payment and transactional email setup.
+- [Store volume](store-volume.md): the store root on a persistent volume, its lock, and handing it
+  from one lake process to the next.
 
-The [documentation index](../README.md) lists the remaining deployment records and runbooks.
+Every setting lake reads is listed in [`../serving/configuration.md`](../serving/configuration.md).

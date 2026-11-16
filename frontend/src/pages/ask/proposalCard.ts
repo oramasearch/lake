@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The exact call an Ask Orama proposal's Confirm runs (lake#942), laid out so every value can be
  * read before confirming (lake#1192). Each argument is three rows: its name, its value, then the
  * schema's description. The value has the card's full width and wraps at any character, so a UUID

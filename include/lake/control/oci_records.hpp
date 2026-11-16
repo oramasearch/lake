@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <cstdint>
@@ -12,7 +14,7 @@
 
 namespace lake::control {
 
-// A tenant image's manifests and tags (lake#383 phase A, decision 54 S4-S6,
+// A tenant image's manifests and tags (lake#383 phase A,
 // docs/api/registry.md#where-a-tenant-image-lives), kept in the workspace Zetta of the
 // repository's route (oci_repository_routes) as sealed records
 // (docs/architecture/workspace-records.md). Since phase B a blob's bytes are an object in the
@@ -34,7 +36,7 @@ namespace lake::control {
 // index of its digest and written `if_absent` when an upload into one of the workspace's
 // repositories completes, or by a copy. A manifest pushed into the workspace may reference only
 // blobs recorded here, so a space never publishes another space's (or another workspace's) layer
-// by knowing its digest. Since phase B (decision 54 S5) the record also maps the OCI digest to the
+// by knowing its digest. Since phase B the record also maps the OCI digest to the
 // blob's identity in the workspace's liquid store (`object`, a liquid digest): the store is
 // encrypted and liquid addresses an object by its own hash, so the SHA-256 a client sends finds it
 // only through this record. A record without `object` was written before phase B, or while the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The length of a recording, read from its container (lake#658, docs/api/transcripts.md#how-long-
 // a-recording-is): speech-to-text is billed by the minute, and gpt-4o-transcribe reports tokens,
 // not seconds, so lake measures the audio it sends. Pure functions over the bytes; every read is
@@ -60,10 +62,19 @@ std::optional<double> wav_seconds(Bytes data) {
         }
         if (id == "fmt ") {
             byte_rate = le(data, at + 16, 4).value_or(0);
+            // The rate the samples imply: a header may overstate byte_rate to shorten the
+            // recording it bills (lake#979), so the smaller of the two is used.
+            const auto channels = le(data, at + 10, 2).value_or(0);
+            const auto sample_rate = le(data, at + 12, 4).value_or(0);
+            const auto bits = le(data, at + 22, 2).value_or(0);
+            const std::uint64_t implied = channels * sample_rate * ((bits + 7) / 8);
+            if (implied > 0 && (byte_rate == 0 || implied < byte_rate)) {
+                byte_rate = implied;
+            }
         } else if (id == "data") {
-            // A streamed WAV may say 0 or 0xFFFFFFFF: then the rest of the file is the data.
-            const std::uint64_t rest = data.size() - at - 8;
-            data_bytes = (*size == 0 || *size > rest) ? rest : *size;
+            // Every byte after the data header is sent to the model, whatever the header says:
+            // a size that understates them does not shorten what is billed (lake#979).
+            data_bytes = data.size() - at - 8;
             break;
         }
         at += 8 + *size + (*size & 1);

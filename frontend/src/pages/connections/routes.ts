@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Data → Connections (lake#651, docs/ui/connections.md): workspace pages, served under `/w/<id>/`.
  * The list is `/connections`; one connection is `/connections/connection?name=<name>`, the address
  * style of lake's other detail pages. */

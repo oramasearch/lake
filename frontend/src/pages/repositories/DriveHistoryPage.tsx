@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /drive/history?repository_id=&ref=&path= (web_ui_drive_history): every change that touched a
  * Drive path. Two text versions can be compared (pick "from" and "to"); a version can be restored,
  * which writes a new change and rewrites nothing. */

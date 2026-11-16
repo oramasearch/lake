@@ -25,9 +25,9 @@ tick.
 |---|---|
 | `GET /llms.txt`, `/llms-full.txt`, `/skills/lake/SKILL.md` or `/developer/mcp/skill` whose `Host` is `LAKE_APEX_HOST` | the same document naming every region of `LAKE_REGIONS` with its MCP server, guides and skill, instead of the picker (`text/plain` or `text/markdown`, [`../api/regions.md`](../api/regions.md#the-apexs-agent-documents-lake1110), lake#1110) |
 | any other request whose `Host` is `LAKE_APEX_HOST`, apart from the stylesheet, fonts and probes | the region picker, before every other route, inside the order sheet (lake#831); `POST` with `region` sets the `lake_region` preference cookie and redirects to the region's host with the same path and query ([`../api/regions.md`](../api/regions.md#the-apex-picker), lake#757) |
-| any request whose `Host` is one of `LAKE_HOST_ALIASES` | after the region picker: a browser page (what the web app would answer) is redirected (302, `no-store`) to the same path and query on `LAKE_PUBLIC_HOST`; anything else has its `Host` rewritten to `LAKE_PUBLIC_HOST` and is served as there, so the alias is never taken for an application's custom domain ([`../deployment/white-label-sign-in.md`](../deployment/white-label-sign-in.md), lake#1136) |
+| any request whose `Host` is one of `LAKE_HOST_ALIASES` | after the region picker: a browser page (what the web app would answer) is redirected (302, `no-store`) to the same path and query on `LAKE_PUBLIC_HOST`; anything else has its `Host` rewritten to `LAKE_PUBLIC_HOST` and is served as there, so the alias is never taken for an application's custom domain ([`../api/clerk.md`](../api/clerk.md), lake#1136) |
 | on `LAKE_APEX_HOST`: `GET /order/<offer>`, `GET /order/price-list`, `POST /order`, `GET /orders/<id>?token=…` | the order sheet's forms, the published price list, an order (recorded, then Stripe Checkout or the confirmation; 32 KiB, rate limited, honeypot), and an order's status by its signed link ([`../api/orders.md`](../api/orders.md#routes), lake#831) |
-| a browser's `GET` or `HEAD` of any other path (`Accept: text/html`) | the web app's `index.html` (`no-cache`, `Content-Security-Policy: frame-ancestors 'self'; img-src 'self' data:`, [images](#images)): `/`, `/repositories`, `/w/<workspace_id>/design/projects` and every other page are the app's ([`../ui/web-app.md`](../ui/web-app.md)); the same path asked for by anything else is the 404 |
+| a browser's `GET` or `HEAD` of any other path (`Accept: text/html`) | the web app's `index.html` (`no-cache`, the [web app's script policy](#the-web-apps-script-policy), [images](#images)): `/`, `/repositories`, `/w/<workspace_id>/design/projects` and every other page are the app's ([`../ui/web-app.md`](../ui/web-app.md)); the same path asked for by anything else is the 404 |
 | `GET /ui/<file>` | the app's content-hashed files (`public, max-age=31536000, immutable`) |
 | `GET /style-<hash>.css`, `GET /fonts/<IBM Plex face>-<hash>.woff2` | content-hashed design-system assets (`public, max-age=31536000, immutable`) linked by the hosted application pages |
 | `GET /style.css`, `GET /fonts/<IBM Plex face>.woff2` | compatibility aliases for direct and older links (`no-cache`) |
@@ -227,7 +227,7 @@ handlers. Lake therefore sets that parser ceiling to the larger of 64 MiB and
 | Forms and other string bodies | 64 MiB. The common string reader counts bytes while receiving them. |
 | Liquid sync, model and dataset publication, drive uploads, packages, debug artifacts, SCIM and other specialized adapters | 64 MiB or a smaller route-specific bound. Their bounded buffers and parsers remain in force. |
 
-JSON admission (lake#944, LSR-083) resolves the bearer or browser session before reading input.
+JSON admission (lake#944) resolves the bearer or browser session before reading input.
 Credentials are resolved again after transfer so a revocation or expiry during the upload is
 still enforced by the final registry gate.
 Protected REST calls without an accepted credential answer 401 and `WWW-Authenticate` before
@@ -323,7 +323,7 @@ are recorded in [`../build/dependencies.md`](../build/dependencies.md).
 
 ## Statuses Behind Cloudflare
 
-lake on `lake.oramadev.net` is reached through Cloudflare. Cloudflare answers an origin's `502` or
+lake on `lake.example.com` is reached through Cloudflare. Cloudflare answers an origin's `502` or
 `504` with its own HTML page (*"Error 502: Bad gateway … The origin web server returned an invalid
 or incomplete response"*) and drops lake's body; it passes `500`, `501` and `503` and every 4xx
 through unchanged (Cloudflare's *Custom Errors* and *Error 502/504* pages). Until lake#572 lake
@@ -356,8 +356,9 @@ runs is logged as one JSON line on stdout:
 {"ts":"…","level":"error","event":"handler_exception","method":"GET","route":"/ship/packages","request_id":"…","error":"…"}
 ```
 
-Like the request log line, it names the route pattern and never the raw path (decision 54 S9,
-lake#384, [telemetry.md](telemetry.md#request-logs)).
+Like the request log line, it names the route pattern and never the raw path
+(lake#384, [telemetry.md](telemetry.md#request-logs)), and the method by its standard name or
+`other` (lake#1315, [telemetry.md](telemetry.md#the-method-label)).
 
 The request id is the caller's `X-Request-Id`, or a new UUID. The request is then answered `500`
 with `Cache-Control: no-store` and `X-Request-Id`: a standalone HTML error page
@@ -412,13 +413,15 @@ path;
 
 ## Images
 
-Every HTML page lake answers (the web app, the hosted application pages, the region picker) carries
-`Content-Security-Policy: frame-ancestors 'self'; img-src 'self' data:` (`send_text`). Only lake
-frames its pages, and the browser loads images only from lake's own origin and `data:` URLs (the
-Drive image previews). With Clerk on, the web app's pages add `https://img.clerk.com`, the host
-Clerk's sign-in form shows its logos and provider icons from.
+Every HTML page lake answers (the hosted application pages, the region picker, the order sheet)
+carries `Content-Security-Policy: frame-ancestors 'self'; img-src 'self' data:` (`send_text`), and
+the web app's pages carry the stricter [script policy](#the-web-apps-script-policy) below, which
+has the same frame and image rules. Only lake frames its pages, and the browser loads images only
+from lake's own origin and `data:` URLs (the Drive image previews). With Clerk on, the web app's
+pages add `https://img.clerk.com`, the host Clerk's sign-in form shows its logos and provider icons
+from.
 
-Why (lake#943, LSR-082): an agent's reply is Markdown, and an agent may have read untrusted content
+Why (lake#943): an agent's reply is Markdown, and an agent may have read untrusted content
 (a document, a dataset row, an MCP tool's result) that tells it to name an image at an address
 carrying workspace data. A browser that loaded that image would send the data to the address's
 server without anyone clicking. The console's Markdown never loads an image at all; it shows
@@ -434,6 +437,65 @@ Change it here and in the tests together. An image host is added only for a page
 never for every page; a host that fetches arbitrary addresses for its callers (an image proxy)
 reopens the leak, so any such host is a known weakness to record here. `img.clerk.com` is Clerk's
 image service and is allowed only where Clerk's sign-in is mounted.
+
+## The web app's script policy
+
+Every page of the web app (`index.html`, whatever path it answers) carries a policy that limits
+what a script injected into it could do (lake#991), from
+`web_app_content_security_policy` (`include/lake/api/web_app.hpp`), computed from the page as sent:
+
+```
+default-src 'self'; script-src 'self' 'sha256-<each inline script>'; style-src 'self' 'unsafe-inline';
+img-src 'self' data:; font-src 'self'; connect-src 'self'; media-src 'self' blob:;
+worker-src 'self' blob:; frame-src 'self' https:; frame-ancestors 'self'; base-uri 'none';
+object-src 'none'; form-action 'self'
+```
+
+- **Scripts** come only from lake's own files (`/ui/`) and the inline scripts the page itself
+  carries, each allowed by its SHA-256: today the theme script of `frontend/index.html`. The
+  `lake-viewer` block lake writes into the first paint is `type="application/json"`, data a browser
+  never runs, so it is not listed. No `'unsafe-inline'` and no `'unsafe-eval'` for scripts: a
+  `<script>` or an `onerror=` an injection adds does not run.
+- **Requests** (`fetch`, `XMLHttpRequest`, `EventSource`) reach lake alone: the app calls only
+  `/v1` ([web app](../ui/web-app.md)). An injected script cannot send what it reads elsewhere.
+- **Styles** allow inline: the white-label brand's colours are an inline `<style>`
+  ([brand](brand.md)) and Clerk's components inject theirs. Styles run no code.
+- **Media and workers** allow `blob:` for a recording's preview (transcripts) and Clerk's worker.
+- **Frames** may show an `https` page: the App preview beside Change App is the App's own host.
+- **No plugins, no `<base>`**, and forms post only to lake (`/session`, `/logout`,
+  `/identity/clerk-session`, `/exports/download`).
+
+With Clerk on, `script-src` and `connect-src` add the instance's Frontend API host
+(`https://<frontend_api>`, where clerk-js loads from and talks to), `script-src` adds
+`https://challenges.cloudflare.com` (the challenge Clerk's bot protection loads), and `img-src`
+adds `https://img.clerk.com`.
+
+A new inline script in `frontend/index.html` needs nothing else: its hash is computed when the page
+is served. A script loaded from another origin, or a request to one, needs its origin added here
+first, with the reason.
+
+Because the policy is computed per page, the route that answers the page is itself a coroutine
+that keeps the policy until the answer is sent: `send_text` is a lazy coroutine that holds only a
+view of the policy, so handing it a local string from a plain function left it pointing at freed
+memory, and the page failed with `handler_exception` "bad field value" (lake#1344). Any other
+header value computed per request and passed to `send_text` must live in the caller's coroutine
+frame the same way.
+
+**`X-Content-Type-Options: nosniff`** is on every answer lake gives (lake#991): the first router
+middleware sets it after clearing the pooled response, and `send_text` and `send_bytes` set it
+again, so a JSON error, a repository file's bytes (`/file/raw`), a registry manifest or a stream
+is read only as the type lake names. The download routes keep their `Content-Disposition` and
+sandboxing policies (the route table above).
+
+HSTS is the edge's: lake serves HTTP behind the ingress and Cloudflare, which terminate TLS, so
+lake sets no `Strict-Transport-Security` itself.
+
+**Verify.** `WebApp.ContentSecurityPolicyAllowsOnlyTheInlineScriptsThePageCarries`,
+`WebApp.ContentSecurityPolicyUnderClerkNamesOnlyItsFrontendApi` and
+`WebApp.TheBuiltIndexRunsUnderItsPolicy` (`tests/test_web_app.cpp`); the page and 404 checks in
+`tests/test_http_server.cpp`. By hand: `curl -si -H 'Accept: text/html' http://127.0.0.1:4900/ |
+grep -i -e content-security -e nosniff`, then open the console in a browser and check its
+developer console names no refused script or request.
 
 ## Cross-site requests
 
@@ -453,6 +515,15 @@ browser session."}}` when:
   its `Content-Type` is not `application/json` (parameters such as `charset` are allowed). The
   binary repository sync routes under `/v1/repositories/` are not JSON and are not checked for it.
 
+**Routes that issue a session are checked with or without one** (lake#977). A cross-site
+`POST` carries no `SameSite=Lax` cookie, so the rule above alone would never see a request that
+*creates* a session: a page elsewhere could post the attacker's own credential and sign the
+visitor's browser in as the attacker (login CSRF). `POST /session`, `POST /identity/clerk-session`,
+the App sign-in forms (`/apps/<id>/identity/...`) and the sign-in capabilities (`/v1/sign_up_password`,
+`sign_in_password`, `verify_mfa`, `sign_in_passkey`, `recover_with_code`, `complete_recovery`) are
+refused with `403` `"Cross-site requests cannot sign in."` on the same origin rules whenever no bearer
+is sent, and the `/v1` ones also when their `Content-Type` is not `application/json`.
+
 A missing `Origin` and a missing `Sec-Fetch-Site` pass: a non-browser client sends neither, and a
 browser sends `Origin` on every cross-origin unsafe request. Bearer-authenticated calls are not
 affected, from any origin, with one exception: a **browser key** (`lbk.…`, lake#1152,
@@ -467,8 +538,8 @@ Consumer Service, `POST /v1/saml/<provider id>/acs`: the identity provider's for
 by design, and the route never reads the session a cookie carries; it verifies the signed response
 and replaces the session (lake#836).
 
-**Why.** Ship apps are hosted one label below the platform's zone (`<name>.oramadev.net` beside
-`lake.oramadev.net`), so customer app code is *same-site* with lake and a browser sends
+**Why.** Ship apps are hosted one label below the platform's zone (`<name>.example.com` beside
+`lake.example.com`), so customer app code is *same-site* with lake and a browser sends
 `lake_session` with its requests whatever the cookie's `SameSite`. Before this, an app page could
 make a signed-in person's browser run any action as a "simple" `text/plain` request or a form post
 (inventory §4.4). Requiring JSON forces a CORS preflight, which lake's wildcard CORS cannot satisfy
@@ -492,7 +563,7 @@ browser must post to from another origin is a bearer route, never an exemption h
 Two routes take a link instead of a credential, for clients that cannot hold a session: the Hub's
 basic-LFS upload `href` (`PUT /api/lfs/<repository>/<oid>`, [models](../api/models.md)) and a
 tunnel client download (`GET /tunnel-clients/<platform>`, lake#745). Both sign their fields with
-HMAC-SHA-256 under `LAKE_INSTANCE_KEK`, base64url without padding, carry `expires` (Unix seconds,
+HMAC-SHA-256 under a key derived from `LAKE_INSTANCE_KEK` for this purpose alone (HMAC-SHA-256 of `lake signed link v1`; the instance key itself never signs a link), base64url without padding, carry `expires` (Unix seconds,
 15 minutes ahead) and `signature` in the query, and are checked in constant time
 (`signed_link_signature` and `signed_link_matches`, `src/api/tunnel_clients.cpp`). No new key and no
 new primitive: a new kind of link names itself on its payload's first line, as the tunnel client's

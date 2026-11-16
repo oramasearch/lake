@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Screenshots of Data → Drives → Storage (lake#664, docs/ui/drives.md#storage) at 1440 and 390
 // wide: the table with a volume, your own bucket and a store Lake keeps, New storage for each kind
 // of provider, and the delete warnings. Run against `npx vite --port 5175`; every /v1 call is
@@ -17,9 +19,9 @@ mkdirSync(OUT, { recursive: true });
 const BASE = process.env.BASE ?? "http://localhost:5175";
 
 const viewer = {
-  signed_in: true, administrator: false, display_name: "Steve Sperandeo", email: "steve@example.com", user_id: "user-1",
+  signed_in: true, administrator: false, display_name: "Ada Lovelace", email: "ada@example.com", user_id: "user-1",
   customer_id: "me", workspace_id: "ws-1",
-  spaces: [{ id: "me", name: "steve-x7f2", label: "Your workspaces", personal: true, kind: "individual", workspaces: [{ id: "ws-1", name: "Support", customer_id: "me", status: "ready" }] }],
+  spaces: [{ id: "me", name: "ada-x7f2", label: "Your workspaces", personal: true, kind: "individual", workspaces: [{ id: "ws-1", name: "Support", customer_id: "me", status: "ready" }] }],
   clerk: { enabled: false }, password_sign_up: false, version: "dev",
 };
 const providers = [

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What Design → Agents and Train → Agents decide about an agent (lake#653). Pure, so `npm test`
  * runs it (tests/agents.test.ts).
  *

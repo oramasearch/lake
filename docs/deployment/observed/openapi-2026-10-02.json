@@ -1,5 +1,5 @@
 {
- "source": "https://lake.oramadev.net/v1/openapi.json",
+ "source": "a deployed Lake's /v1/openapi.json",
  "observed_on": "2026-10-02",
  "revision": "36679e1da9c02b79c74d468afc46ad53658617a6",
  "capabilities": [

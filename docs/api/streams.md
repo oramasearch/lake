@@ -48,7 +48,10 @@ The list contains only exposed topics. `agent-events`, `app-events.<app-id>` and
 `build-events.<build-id>` are topics on the selected workspace Zetta. The bus holds only
 `agent-tasks.<agent>` dispatch topics. The list never invents an `agent-turn.<task-id>` row.
 An optional task filter on workspace `agent-events` is checked against that task's persisted
-workspace ID. Unfiltered workspace browse needs no cross-account task filtering. Agent task
+workspace ID. **A member reads the events of their own turns only** (lake#986): a turn's
+events carry its answer, which is the requester's. Browsing drops every event whose task another
+person requested, and selecting such a task is `not_found`. The operator credential reads all of
+them. Agent task
 queues filter their payload's `customer_id`. Shared subscriptions and aggregate held counts are
 hidden. Sequence numbers remain those of the source topic, so gaps are normal. The allocator
 high-water mark is not a count of a filtered view's messages. Up to 32 source pages are scanned

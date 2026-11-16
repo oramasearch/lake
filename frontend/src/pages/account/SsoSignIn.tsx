@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Sign in on a Lake whose only way in is the customer's identity provider (lake#1136,
  * `viewer.sign_in_sso`). One button: SAML goes to Lake's sign-on URL, OIDC through `start_sso_oidc`.
  * Lake's own password, passkey and social sign-in are refused by the server in that mode; the page

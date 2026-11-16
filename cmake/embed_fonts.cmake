@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 if(NOT DEFINED INPUT_DIR OR NOT DEFINED OUTPUT_FILE)
   message(FATAL_ERROR "INPUT_DIR and OUTPUT_FILE are required")
 endif()

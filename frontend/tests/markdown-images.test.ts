@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Markdown never makes the browser fetch an image (src/lib/markdownImages.ts, lake#943): an
  * assistant reply that names a remote image renders as text, so rendering it requests nothing. */
 import { test } from "node:test";

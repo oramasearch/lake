@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The Design pages' rules, as pure functions: what lake's renderers (web_ui.cpp) and form
  * handlers (http_server.cpp) computed on the server, ported so the pages compute the same. No
  * imports, so `npm test` runs them directly. */

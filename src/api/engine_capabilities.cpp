@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The workspace engine's capabilities as named Lake capabilities (lake#650,
 // docs/api/engine-capabilities.md). Every name in the workspace_reads and workspace_actions
 // allow-lists is reached by name: through a Lake capability that already covers it, or through one

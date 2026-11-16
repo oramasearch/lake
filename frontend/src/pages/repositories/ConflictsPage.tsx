@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /conflicts?repository_id= (web_ui_repository_conflicts): unresolved conflict values, each
  * explained, with its preserved values and the choice of which to keep (on `main`, as the page
  * always resolved). Reached from Drive's Conflicts link; no repository tab is current. */

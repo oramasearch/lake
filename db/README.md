@@ -3,8 +3,60 @@
 `schema.sql` is compiled into the lake binary (`cmake/embed_schema.cmake`), and `lake migrate`
 applies it to `LAKE_CONTROL_DB_URI` in one transaction under an advisory lock, as the operator's
 `PostgresSchema` Job does; `lake manifest` reports its latest migration and guard tables
-(lake#1119, [operator-interface.md](../docs/deployment/operator-interface.md)). Once
+(lake#1119, [../docs/control-plane/schema.md](../docs/control-plane/schema.md)). Once
 orama-operator#936 consumes them, a new migration needs no operator vendoring.
+Migration `0106_domain_claims` (lake#949) adds `domain_claims`: one row per custom-domain host
+across every account (the primary key), the environment holding it, the TXT token that proves
+control and whether it is `verified`. Only a verified claim's domain row reaches the operator, and
+the operator acts only on a domain whose claim is verified. Additive; guard `domain_claims_guard`.
+See [platform](../docs/api/platform.md#custom-domains) and
+[schema.md](../docs/control-plane/schema.md#domain-claims-migration-0106_domain_claims).
+Migration `0107_order_email_confirmation` (lake#1000) adds the nullable
+`cloud_orders.contact_email_confirmed_at` (when the person who sent an order form followed its
+confirmation link), marks order forms mailed before it as confirmed (once), and adds the indexes
+`cloud_orders_contact_email_idx` and `cloud_orders_contact_domain_idx` for the per-recipient limits;
+guard `order_email_confirmation_guard`. Additive; numbered after the open `0106` (lake#949). Apply
+before the new binary, which reads the column. See [orders](../docs/api/orders.md#email) and
+[schema.md](../docs/control-plane/schema.md).
+Migration `0108_retained_usage` (lake#988) adds `retained_usage_sets` and `retained_usage`:
+the usage a deleted workspace consumed that no issued invoice billed, as content-free quantities by
+dimension, `kind`/`class`/`model` and day (`rollup`, written by `delete_workspace` before the cascade)
+or hour (`late`, what the usage recorder still held), and the guard `retained_usage_guard`. Additive;
+numbered after the open `0106` (lake#1295) and `0107`. Apply before the new binary: with billing on, a
+Lake without the tables refuses every workspace deletion. See
+[billing](../docs/api/billing.md#a-deleted-workspaces-usage) and
+Migration `0110_taap_chain_heads` (lake#1024) adds `taap_chain_heads`: per TAAP identifier that
+signs in (a registered identity or a linked own identity), the head of its newest verified rotation
+chain (SHA-256 of the newest document's canonical CBOR) and the chain's length, with the guard
+`taap_chain_heads_guard`. `sign_in_taap` records a longer chain's head and refuses a chain that does
+not pass through it, so a replaced key stops signing in. Additive; numbered after the open `0106` to
+`0109`. Apply before the new binary: the operator vendors the schema, selects the guard, and grants
+Lake's runtime role `SELECT, INSERT, UPDATE` on the table. See
+[identity](../docs/api/identity.md#signing-in-with-a-taap-key-the-key-must-be-the-identitys) and
+Migration `0111_service_workspace_routing` (lake#1301, orama-operator#781) adds the triggers
+`service_workspace_routing` (a service's `workspace_id` is NULL or a workspace of its own customer)
+and `workspace_service_routing` (a workspace's `zetta_service_id` is NULL or a service of its own
+customer, and a workspace cannot move to another customer while its services name it), so no write
+can route one account's service into another account's workspace. Rows that already disagree are
+reported as warnings, not changed. No table changes; guard `service_workspace_routing_guard`.
+Numbered after the open `0106` (lake#1295), `0107` to `0109` (lake#1296) and `0110` (lake#1300).
+The operator vendors the schema and selects the guard before the image rolls. See
+[services](../docs/control-plane/services.md#workspace-routing) and
+Migration `0112_app_token_generation` (lake#1070) adds `apps.token_generation` (Lake's desired token
+generation, which rotation increments) and the nullable `apps.token_hashes_generation` (the
+operator's acknowledged one), with the guard `app_token_generation_guard`. Additive. Numbered after
+the open `0106` to `0111` (lake#1295, #1296, #1300, #1302). Apply before the new binary: the
+operator vendors the schema and selects the guard. Lake is safe with an operator that does not
+write the new column yet (it clears the hashes as before). See
+[web-apps.md](../docs/control-plane/web-apps.md#token-rotation) and
+[schema.md](../docs/control-plane/schema.md).
+Migration `0113_agent_session_repositories` (lake#1346) adds the nullable
+`agent_sessions.repository_id` (the repository an agent session's `delegation/1` names, as liquid
+v0.3.0 requires; NULL for a key minted before it, which no longer verifies), with the guard
+`agent_session_repositories_guard`. Additive. Numbered after `0112`; `0121` is taken by the open
+lake#1338. Apply before the new binary: the operator vendors the schema and selects the guard. See
+[agents](../docs/api/agents.md#delegation-and-transparency) and
+[schema.md](../docs/control-plane/schema.md).
 Migration `0105_agent_model_prices` (lake#1230) seeds the `model_tokens` rates of the gpt-6.x models
 the gateway now serves and the long-context classes `<model>@long/input` and `<model>@long/output`
 (also for gpt-5.5), OpenAI's standard price plus 30% read 2026-10-26, by `0095`'s rules (once; a new
@@ -39,7 +91,7 @@ new binary, and have the operator vendor the schema and select the guard. `0100`
 lake#1155's and lake#1156's. See [browser-keys.md](../docs/api/browser-keys.md) and
 [schema.md](../docs/control-plane/schema.md#browser-keys-migration-0102_browser_keys).
 
-Migration `0099_account_balances` (lake#1114, liquid-bridge decision 67) adds the prepaid balance:
+Migration `0099_account_balances` (lake#1114) adds the prepaid balance:
 `account_balances` (each account's settings, last refresh, email marks and auto top-up, with a
 compare-and-swap `version`), `account_balance_credits` (paid top-ups, unique per provider reference)
 and `account_balance_charges` (each month's usage charge, frozen by its invoice), and the guard
@@ -47,26 +99,26 @@ and `account_balance_charges` (each month's usage charge, frozen by its invoice)
 schema and select the guard. See [billing.md](../docs/api/billing.md#balance) and
 [schema.md](../docs/control-plane/schema.md#account-balances-migration-0099_account_balances).
 
-Migration `0095_model_token_prices` (LSR-095, lake#961) permits exact `<model>/input` and
+Migration `0095_model_token_prices` (lake#961) permits exact `<model>/input` and
 `<model>/output` classes for `model_tokens` prices and frozen invoice lines. Existing GPU-style
 classes retain their constraints. It seeds the default gateway models' input and output prices
 once (OpenAI's published price plus 30%) as a new publication for the current month, on a fresh and
 an existing instance. The operator must vendor this schema and select
 `model_token_prices_guard` before the new binary is deployed; the operator is not changed here.
 See [model-gateway.md](../docs/api/model-gateway.md#configuration).
-Migration `0094_clerk_revocation` (lake#948, LSR-085) adds `clerk_user_states` (ordered upstream
+Migration `0094_clerk_revocation` (lake#948) adds `clerk_user_states` (ordered upstream
 account state and an independent revocation watermark), `users.clerk_suspended`, and the guard
 `clerk_revocation_guard`. It revokes Clerk-linked accounts' existing sessions, tokens and devices
 once and rejects pre-migration template JWTs, requiring a fresh sign-in. Reapplication preserves
 credentials issued afterward. The operator must vendor the schema and select this guard before
 rollout, inject `LAKE_CLERK_SECRET_KEY`, and subscribe to Clerk session end/revocation events. See
 [Clerk](../docs/api/clerk.md#webhooks) and [schema.md](../docs/control-plane/schema.md).
-Migration `0097_cloud_order_entitlements` (lake#972, LSR-105) adds subscription status,
+Migration `0097_cloud_order_entitlements` (lake#972) adds subscription status,
 paid-through/access deadlines, event ordering and grace to cloud orders. A unique index binds each
 subscription to one order; `cloud_order_desired_state` evaluates entitlement at read time.
 Apply before the new binary. The operator must vendor the schema, select
 `cloud_order_entitlements_guard`, register the new events and implement suspension before order
-provisioning is enabled. See [orders](../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
+provisioning is enabled. See [orders](../docs/api/orders.md#recurring-entitlement-lake972).
 
 Migration `0091_account_deletion` (lake#810) adds `users.deleted_at`, set by `delete_account` when
 an account is deleted (its email and display name are erased in the same statement), and the guard
@@ -333,7 +385,7 @@ rows, and records the owner of each task with content in `workspace_assignments`
 `needs_selection` while the task names no workspace, or `workspace_deleted`. Nothing is dropped.
 The latest guard is `agent_task_workspaces_guard`; the operator must vendor this schema and update
 its guard before rollout. See [agent-bus.md](../docs/api/agent-bus.md#where-a-task-lives-lake374-lake375).
-Migration `0063_audit_workspaces` splits the audit by subject (decision 52, lake#317, lake#318):
+Migration `0063_audit_workspaces` splits the audit by subject (lake#317, lake#318):
 `audit_events` keeps control-plane and identity events, and events about a workspace's data go to
 that workspace's own chain in its Zetta. It records, in `workspace_assignments`, the workspace of
 each central event about a workspace's data (`event_workspace`, or `workspace_deleted`, which stays
@@ -341,7 +393,7 @@ central) for `copy_workspace_records`; every other event stays central and is co
 dropped; `audit_events` stays append-only and `audit_retention` governs it. The latest guard is
 `audit_workspaces_guard`; the operator must vendor this schema and update its guard before rollout.
 See [audit.md](../docs/api/audit.md#moving-the-central-events-of-workspaces-migration-0063).
-Migration `0064_repository_records` makes the repository row routing only (decision 54). It drops
+Migration `0064_repository_records` makes the repository row routing only. It drops
 `repository_refs` (lake#319), a copy of liquid's refs that nothing read; its `CREATE` (from `0006`)
 is removed from this file, so rerunning the file never recreates it. It also records, in
 `workspace_assignments` under `object_table = 'repository_descriptions'`, the owner of each
@@ -352,8 +404,7 @@ column, and `copy_workspace_records` (collection `repositories`) copies it; a la
 the column. The latest guard is `repository_records_guard`; the operator must vendor this schema,
 update its guard, and drop `repository_refs` from its vendored-schema test before rollout. See
 [repositories.md](../docs/api/repositories.md#where-the-description-lives-lake315-part-2).
-Migration `0065_workspace_deletions` makes deleting a workspace cascade (decision 54 S12,
-lake#514). The transaction that sets a workspace's desired state to `deleted` also tombstones its
+Migration `0065_workspace_deletions` makes deleting a workspace cascade (lake#514). The transaction that sets a workspace's desired state to `deleted` also tombstones its
 repositories still live or inside retention with their retention ended (which frees their names),
 deletes its apps, cancels its unfinished builds, and records what it destroyed in
 `workspace_deletions`. Lake then removes the tenant image tags and search segments and records the
@@ -371,7 +422,7 @@ left alone and reported by a warning. The `repository_workspace_routing` trigger
 `0066_assign_unrouted_repositories`, which the block sets and clears around its updates. The latest
 guard is `assign_unrouted_repositories_guard`; the operator must vendor this schema and update its
 guard before rollout. See [repositories.md](../docs/api/repositories.md#the-owning-workspace).
-Migration `0068_oci_repository_routes` splits the registry (decision 54 S4-S6, lake#383 phase A).
+Migration `0068_oci_repository_routes` splits the registry (lake#383 phase A).
 `oci_repository_routes` is the content-free route from a tenant image repository (the space's
 customer id and the name below it, `<image>` or `cache/<image>`) to the workspace whose Zetta holds
 its manifests and tags (`lake_oci_manifests`, `lake_oci_tags`); it holds no manifest, digest or tag.
@@ -386,7 +437,7 @@ blobs stay in the instance registry until phase B. `0067` is held by the open la
 latest guard is `oci_repository_routes_guard`; the operator must vendor this schema and update its
 guard before rollout (it never reads the table). See
 [registry.md](../docs/api/registry.md#where-a-tenant-image-lives).
-Migration `0069_workspace_volumes` gives the operator its volumes (decision 54 S13, operator#259,
+Migration `0069_workspace_volumes` gives the operator its volumes (operator#259,
 operator#260). `workspaces.storage_gi` (default 5, 1 to 32767) is the desired size of each of the
 workspace Zetta's volumes in GiB; `enforce_workspace_storage_growth` refuses a decrease, and the
 operator reports `storage_gi_observed`, `storage_phase` and `storage_message` on the same row.
@@ -436,7 +487,7 @@ compared with stays in each workspace Zetta; no price, plan or bill is stored. N
 idempotent. Its guard is `usage_limits_guard`. See
 [schema.md](../docs/control-plane/schema.md#usage-limits-migration).
 
-Migration `0073_billing` (lake#564, decision 56) adds billing records as multitenancy:
+Migration `0073_billing` (lake#564) adds billing records as multitenancy:
 `billing_plans` and `billing_plan_prices` (the price list, a price per usage dimension; since
 lake#635 one row per publication of the usage-only list), `billing_subscriptions` (an account's
 plan from the first of a month; unused since lake#635), `billing_invoices` (one
@@ -446,7 +497,7 @@ Zetta; no workspace content is kept. Nothing is dropped; idempotent. The latest 
 `billing_guard`; the operator must vendor this schema and select that guard before rollout. See
 [schema.md](../docs/control-plane/schema.md#billing-migration).
 
-Migration `0074_payment_provider` (lake#620, decision 57) adds Stripe's records:
+Migration `0074_payment_provider` (lake#620) adds Stripe's records:
 `billing_accounts` (an account's customer id at a payment provider, kept once),
 `billing_invoices.payment_url` and `provider_status`, an index on the provider's invoice id, and
 `billing_payment_events` (each provider event applied, by event id, so none is applied twice). Ids,
@@ -523,7 +574,7 @@ Every `workload_resources` kind check (the table's own and those of `0077`, `007
 every kind, so applying the schema again over rows of a later kind (`methodology_run`,
 `methodology_deployment`) does not fail at an earlier migration's check.
 
-Migration `0096_email_recovery_limits` (lake#968, LSR-102) adds `cancelled` recovery state and
+Migration `0096_email_recovery_limits` (lake#968) adds `cancelled` recovery state and
 `offline_recovery_budgets` for atomic hourly client/global admission. The operator must vendor
 this schema and select `email_recovery_limits_guard` before rollout. See
 [recovery.md](../docs/api/recovery.md#email-recovery-budgets).

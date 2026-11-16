@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /repository?id= (web_ui_repository): the repository home, as a code host draws it. A header with
  * the name, visibility and actions (Clone, Build image); the repository's tabs; figures; then the
  * files at the default ref, recent changes and the README on the left, and clone and push, About,
@@ -24,6 +26,7 @@ import {
   Identifier,
   itemsOf,
   pending,
+  SignerName,
   ToRepositories,
   useForgeRead,
   Visibility,
@@ -34,6 +37,7 @@ import {
   type Ref,
   type Repository,
   type TreeEntry,
+  type WithPeople,
 } from "./forge";
 
 type Customer = { id: string; name: string; user_id: string | null };
@@ -60,13 +64,13 @@ function RepositoryHome({ id }: { id: string }) {
   const customerId = repository.data?.customer_id;
   const owner = useForgeRead<Customer>(signedIn && customerId ? "get_customer" : null, { customer_id: customerId }, { retry: false });
   const refs = useForgeRead<Items<Ref>>("repository_refs", { id });
-  const changes = useForgeRead<Items<Change>>("list_changes", { id });
+  const changes = useForgeRead<Items<Change> & WithPeople>("list_changes", { id });
   const refList = itemsOf(refs.data);
   const defaultRef = refList[0]?.name ?? "main";
   const hasRefs = refs.data !== undefined && refList.length > 0;
   const tree = useForgeRead<Items<TreeEntry>>(hasRefs ? "repository_tree" : null, { id, ref: defaultRef });
   const readme = useForgeRead<RepositoryFile>(hasRefs ? "repository_file" : null, { id, ref: defaultRef, path: "README.md" }, { retry: false });
-  const access = useForgeRead<Items<AccessEntry>>(signedIn ? "entity_effective_access" : null, { object_type: "repository", id }, { retry: false });
+  const access = useForgeRead<Items<AccessEntry> & WithPeople>(signedIn ? "entity_effective_access" : null, { object_type: "repository", id }, { retry: false });
   const releases = useForgeRead<Items<ForgeRecord>>("list_releases", { repository_id: id }, { retry: false });
   const workspaceId = repository.data?.workspace_id;
   const workspace = useForgeRead<Workspace>(signedIn && customerId && workspaceId ? "get_workspace" : null, { customer_id: customerId, workspace_id: workspaceId }, { retry: false });
@@ -104,11 +108,15 @@ function RepositoryHome({ id }: { id: string }) {
       ) : (
         <div className="space-y-3">
           <p className="muted m-0 text-[12.5px]">
-            Create an account token on this instance under <Link to="/tokens">Tokens</Link> and export it as <code>LIQUID_TOKEN</code> in your terminal. Use a token issued by this
-            instance only.
+            Create an API token on this instance under Account → <Link to="/tokens">Tokens</Link> with the <em>liquid and liquify</em> scopes, and export it as{" "}
+            <code>LIQUID_TOKEN</code> in your terminal. Use a token issued by this instance only.
           </p>
           <CopyBlock label="First checkout into a new directory" value={`liquid clone ${url} ${directory}\ncd ${directory}`} multiline />
           <CopyBlock label="From that checkout, after capturing and naming your changes" value={`liquid push ${url}`} />
+          <p className="muted m-0 text-[12.5px]">
+            To work on it in an editor, open the checkout in <strong>liquify</strong>, liquid&apos;s IDE (<code>liquify {directory}</code>), or clone it from liquify&apos;s start
+            screen with this repository&apos;s URL.
+          </p>
         </div>
       )}
     </>
@@ -254,7 +262,7 @@ function RepositoryHome({ id }: { id: string }) {
                 <ul className="detail-list">
                   {itemsOf(access.data).map((entry, index) => (
                     <li key={index}>
-                      <Identifier value={entry.principal_taap_id} />
+                      <SignerName id={entry.principal_taap_id} people={access.data?.people} viewer={viewer.taap_id} />
                       <ForgeStatus value={entry.role} />
                     </li>
                   ))}
@@ -323,7 +331,7 @@ function RepositoryHome({ id }: { id: string }) {
                       {change.message.split("\n")[0] || "Untitled change"}
                     </Link>
                     <div className="truncate text-[12px] text-ink-3">
-                      {change.author} · <span title={dateTime(change.occurred_at)}>{relative(change.occurred_at)}</span>
+                      <SignerName id={change.author} people={changes.data?.people} viewer={viewer.taap_id} /> · <span title={dateTime(change.occurred_at)}>{relative(change.occurred_at)}</span>
                     </div>
                   </div>
                   <Identifier value={change.id} />

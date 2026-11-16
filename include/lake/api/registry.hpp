@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 #include <atomic>
 #include <cstddef>
@@ -126,6 +128,11 @@ using WebhookSender = std::function<WebhookDeliveryResult(
     const std::string& url, const nlohmann::json& headers, const std::string& payload)>;
 using ReplicationRequester = std::function<std::expected<nlohmann::json, ApiError>(
     const std::string& source_url, std::uint64_t after_tree_size)>;
+// The TXT records of a DNS name (lake#949, verify_domain): a record per entry, an empty list when
+// the name has none, an error when no name server answered. It blocks, so a handler runs it with
+// run_blocking. Empty: control::lookup_txt, which asks the host's own name servers.
+using TxtResolver =
+    std::function<std::expected<std::vector<std::string>, std::string>(const std::string& name)>;
 
 // Speech-to-text (docs/api/transcripts.md, lake#561). The audio is held only while it is sent:
 // a transcriber never stores or logs it.
@@ -407,7 +414,12 @@ struct ApiContext {
     std::string instance_kek;
     // The only key mint_sealed_secret seals to, when set (LAKE_SEALING_PUBLIC_KEY, lake#625).
     std::string sealing_public_key;
+    // Where import_github_repository reads Git checkouts from, one folder per customer
+    // (LAKE_GIT_IMPORT_ROOT, lake#925). Empty: the import is not offered.
+    std::string git_import_root;
     WebhookSender webhook_sender;
+    // Reads a custom domain's TXT challenge for verify_domain (lake#949); tests substitute it.
+    TxtResolver txt_resolver;
     // Speech-to-text for transcribe and create_transcript (docs/api/transcripts.md); empty when
     // this lake has no OpenAI key.
     Transcriber transcriber;
@@ -450,6 +462,9 @@ struct ApiContext {
     nlohmann::json reauthorization_results = nlohmann::json::array();
     search::Service* search = nullptr;
     control::pki::Service* pki = nullptr;
+    // The body Lake fetched from http://<identifier>/.well-known/acme-challenge/<token> for the
+    // challenge being answered (lake#919); set only by the ACME transport.
+    std::optional<std::string> acme_http01_body;
     // Null selects the explicit pending zetta#1281 implementation.
     control::NetworkRecords* network_records = nullptr;
     control::callers::Service* callers = nullptr;
@@ -467,6 +482,8 @@ struct ApiContext {
     control::AgentTaskBus* agent_bus = nullptr;
     // Ship Apps configuration supplied by the Lake operator (docs/control-plane/web-apps.md).
     std::string apps_wildcard;
+    // This Lake's other names (LAKE_HOST_ALIASES): no tenant domain may be one (lake#949).
+    std::vector<std::string> host_aliases;
     std::string apps_runtime_image;
     // The methodology-runtime image a workspace methodology's image is built from and whose
     // stage and collect pods move its data (LAKE_METHODOLOGY_RUNTIME_IMAGE, lake#655).
@@ -482,11 +499,18 @@ struct ApiContext {
     std::string apps_reserved_names;
     std::size_t apps_per_customer = 0;
     std::size_t app_replicas_per_customer = 0;
+    // lake#983: the active tunnel grant caps grant_network_tunnel passes to the store.
+    std::size_t tunnel_grants_per_workspace = 0;
+    std::size_t tunnel_grants_per_customer = 0;
     // Lake's in-cluster Service URL. Build targets use its authority so pushes bypass the public
     // Ingress request-body limit.
     std::string internal_url;
     // The library agent whose bus credential authenticated the call (LAKE_AGENT_BUS_DIR), or empty.
     std::string agent_service;
+    // The workspace that bus credential is bound to (a file `<agent>.<workspace id>` in
+    // LAKE_AGENT_BUS_DIR, lake#871), or empty for the agent's shared credential. A bound
+    // credential reaches only that workspace's tasks.
+    std::string agent_service_workspace_id;
     // LAKE_ALLOW_NON_EXPIRING_CREDENTIALS: the instance-wide switch over every customer's opt-in
     // to keys and tokens that never expire (lake#234).
     bool non_expiring_credentials_allowed = true;
@@ -546,7 +570,7 @@ struct ApiContext {
     std::string audit_kind;
     std::string audit_object;
     nlohmann::json audit_details = nlohmann::json::object();
-    // The workspace a call acted on, for its audit event (decision 52, audit_routing.hpp): the
+    // The workspace a call acted on, for its audit event (audit_routing.hpp): the
     // input's `workspace_id` once Registry::call has validated it, or one a handler resolved.
     std::string audit_workspace_id;
     // The workspace Registry::call validated and its account, kept so the event's attribution
@@ -562,7 +586,7 @@ struct ApiContext {
     // calls, speech-to-text seconds and model tokens are added here, off the request path. Null:
     // nothing is recorded.
     UsageRecorder* usage_recorder = nullptr;
-    // Lake's MCP client transport (decision 60, docs/api/mcp-connections.md): the server's outbound
+    // Lake's MCP client transport (docs/api/mcp-connections.md): the server's outbound
     // transport, or a test's. Null: a workspace's MCP connections cannot reach their servers.
     std::shared_ptr<McpHttp> mcp_http;
     // OpenID Connect discovery for generic OAuth and enterprise OIDC providers (lake#837): the

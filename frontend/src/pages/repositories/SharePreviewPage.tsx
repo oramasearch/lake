@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /share/:token/preview?ref=&path= (web_ui_drive_link_preview): a file opened through a bearer
  * link, previewed by lake's format registry, with no sign-in. */
 import { useParams, useSearchParams } from "react-router-dom";

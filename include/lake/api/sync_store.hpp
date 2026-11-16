@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <cstddef>
@@ -609,7 +611,7 @@ public:
                                                                                const std::string&) {
         return std::unexpected(SyncStoreError{"unsupported", "workspace stores are unavailable"});
     }
-    // lake#383 phase B (decision 54 S5): a tenant image's blob in its workspace's liquid store.
+    // lake#383 phase B: a tenant image's blob in its workspace's liquid store.
     // Streams the file at `source` into the store of a switched workspace and answers the object's
     // liquid identity and size. The space's storage quota is checked first (`busy`, rule
     // `storage_quota`), unless `known_object`, the object the workspace already records for the

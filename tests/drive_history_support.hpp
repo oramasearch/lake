@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // Drive exercises shared by the memory, Postgres and workspace-store suites. Every step goes

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/clerk_webhooks.hpp"
 
 #include <chrono>
@@ -51,7 +53,7 @@ std::int64_t now_seconds() {
 }
 
 // The primary email when Clerk has verified it; empty otherwise, so an unverified address never
-// links to an existing account or claims one (decision 44 trusts only Clerk's verification).
+// links to an existing account or claims one (lake trusts only Clerk's verification).
 std::string verified_primary_email(const nlohmann::json& data) {
     const std::string primary = data.value("primary_email_address_id", "");
     if (!data.contains("email_addresses") || !data.at("email_addresses").is_array()) {
@@ -307,11 +309,13 @@ Outcome receive(ApiContext& context,
         }
         details["user_id"] = provisioned->user_id;
         details["created"] = provisioned->created;
-        details["linked"] = provisioned->linked;
-        return done(provisioned->taap_id,
-                    {{"user_id", provisioned->user_id},
-                     {"created", provisioned->created},
-                     {"linked", provisioned->linked}});
+        nlohmann::json body{{"user_id", provisioned->user_id}, {"created", provisioned->created}};
+        if (!provisioned->email_taken_from.empty()) {
+            // The verified address moved here from another account (lake#920).
+            details["email_taken_from"] = provisioned->email_taken_from;
+            body["email_taken_from"] = provisioned->email_taken_from;
+        }
+        return done(provisioned->taap_id, std::move(body));
     }
     if (type == "user.updated") {
         const auto updated = context.store->update_clerk_user(

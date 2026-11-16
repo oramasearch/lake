@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Toasts: a short confirmation after a write ("Repository created"), or a failure that has no
  * field to sit under. Lake's .toast style; several stack from the bottom right. */
 import { createContext, type ReactNode, useCallback, useContext, useState } from "react";

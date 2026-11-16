@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 #include <chrono>
 #include <map>
@@ -45,9 +47,11 @@ public:
     Result<NetworkEgressRule> get_network_egress_rule(const NetworkScope&,
                                                       const std::string& id) override;
     Result<std::vector<NetworkEgressRule>> list_network_egress_rules(const NetworkScope&) override;
-    Result<NetworkTunnelGrant> create_network_tunnel_grant(const NetworkScope&,
-                                                           const NetworkTunnelGrantSpec&,
-                                                           const NetworkActor&) override;
+    Result<NetworkTunnelGrant>
+    create_network_tunnel_grant(const NetworkScope&,
+                                const NetworkTunnelGrantSpec&,
+                                const NetworkActor&,
+                                const NetworkTunnelGrantLimits&) override;
     Result<NetworkTunnelGrant> update_network_tunnel_grant(const NetworkScope&,
                                                            const std::string& id,
                                                            const NetworkTunnelGrantSpec&,
@@ -79,6 +83,8 @@ public:
     Result<User> get_user(const std::string& id) override;
     Result<std::map<std::string, std::string>>
     principal_names(const std::vector<std::string>& taap_ids) override;
+    Result<std::map<std::string, SignerName>>
+    signer_names(const std::vector<std::string>& taap_ids) override;
     Result<Organization> create_organization(const NewOrganization&) override;
     Result<std::vector<Organization>> list_organizations(int limit) override;
     Result<Organization> get_organization(const std::string& id) override;
@@ -243,7 +249,12 @@ public:
     Result<WebApp> create_web_app(const NewWebApp&) override;
     Result<WebApp> update_web_app(const std::string& id, const WebAppPatch&) override;
     Result<void> purge_deleted_web_apps() override;
-    Result<void> set_web_app_token_hashes(const std::string& id, nlohmann::json hashes);
+    // What the operator writes for an app's tokens (lake#1070): the hashes and, from an operator
+    // that acknowledges rotation, the token generation they are. nullopt keeps the generation as
+    // it is, which is what an operator from before migration 0112 does.
+    Result<void> set_web_app_token_hashes(const std::string& id,
+                                          nlohmann::json hashes,
+                                          std::optional<std::int64_t> generation = std::nullopt);
     // What the operator writes back after reconciling a desired row. Tests and local demos call
     // this directly; the production operator updates the same columns in Postgres.
     Result<void> set_web_app_status(const std::string& id,
@@ -401,6 +412,14 @@ public:
     mcp_exported_dispatch(const std::string& workspace_id) override;
     Result<std::vector<AppTransfer>> app_transfer(const std::string& since_hour) override;
     Result<void> add_app_transfer(const AppTransfer& row) override;
+    Result<void> retain_workspace_usage(const RetainedUsageSet& set,
+                                        const std::vector<RetainedUsagePoint>& points) override;
+    Result<void> add_retained_usage(const RetainedUsagePoint& point) override;
+    Result<std::vector<RetainedUsagePoint>> retained_usage(const std::string& customer_id,
+                                                           std::int64_t from_ms,
+                                                           std::int64_t to_ms) override;
+    Result<std::vector<RetainedUsageSet>>
+    retained_usage_sets(const std::string& customer_id) override;
     Result<BillingPlan> put_billing_plan(const BillingPlan& plan) override;
     Result<Invoice> create_invoice(const Invoice& invoice) override;
     Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) override;
@@ -464,6 +483,10 @@ public:
     apply_cloud_order_subscription(const CloudOrderSubscriptionEvent& event) override;
     Result<std::vector<CloudOrder>> claim_cloud_order_emails(int limit, int lease_seconds) override;
     Result<void> record_cloud_order_email(const CloudOrderEmailOutcome& outcome) override;
+    Result<CloudOrder> confirm_cloud_order_email(const std::string& id,
+                                                 int max_age_seconds) override;
+    Result<CloudOrderRecipientCounts>
+    count_cloud_order_recipients(const std::string& email) override;
     Result<std::vector<CloudOrderEvent>> unaudited_cloud_order_events(int limit) override;
     Result<void> mark_cloud_order_events_audited(const std::vector<std::int64_t>& ids) override;
     Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
@@ -578,6 +601,12 @@ public:
                                       const std::string& subject) override;
     // provision_clerk_user under the lock.
     Result<ClerkUserProvisioned> clerk_user_locked(const ClerkIdentity&);
+    // Clears a Clerk-verified address from any other account holding it (lake#920); answers
+    // that account's id, or empty.
+    std::string take_verified_email_locked(const std::string& email,
+                                           const std::string& keep_user_id);
+    // Whether a user (any pool) or organization already has this principal id (lake#872).
+    bool principal_id_taken_locked(const std::string& taap_id) const;
     Result<AccountIdentity> account_identity(const std::string& user_id) override;
     Result<ManagedKey> managed_key(const std::string& user_id) override;
     Result<void> create_identity_link_challenge(const IdentityLinkChallenge&) override;
@@ -586,6 +615,7 @@ public:
                                     const std::string& challenge) override;
     Result<AccountIdentity> link_own_identity(const IdentityLink&) override;
     Result<std::string> account_for_identity(const std::string& taap_id) override;
+    Result<std::string> registered_identity_document(const std::string& taap_id) override;
     Result<void> register_oauth_provider(const OAuthProvider&) override;
     Result<OAuthProvider> get_oauth_provider(const std::string& pool_id,
                                              const std::string& provider) override;
@@ -603,6 +633,15 @@ public:
                                           const std::string& id,
                                           const std::string& revoked_by_taap_id) override;
     Result<BrowserKeyAdmission> admit_browser_key_call(const std::string& id) override;
+    Result<DomainClaim> claim_domain(const NewDomainClaim&) override;
+    Result<DomainClaim> get_domain_claim(const std::string& host) override;
+    Result<DomainClaim> verify_domain_claim(const std::string& host,
+                                            const std::string& repository_id,
+                                            const std::string& environment,
+                                            const std::string& token) override;
+    Result<void> release_domain_claim(const std::string& host,
+                                      const std::string& repository_id,
+                                      const std::string& environment) override;
     Result<std::vector<Session>> list_sessions(const std::string& user_id,
                                                const std::string& pool_id) override;
     Result<void> revoke_session(const std::string& user_id, const std::string& session_id) override;
@@ -678,13 +717,15 @@ private:
     Result<void> check_network_target_locked(const NetworkScope&,
                                              const std::string& kind,
                                              const std::string& id) const;
+    // `grant_limits` applies to a tunnel grant's create only (lake#983).
     template <class Row>
     Result<Row> change_network(const NetworkScope&,
                                const std::string& id,
                                const nlohmann::json& spec,
                                const NetworkActor&,
                                const std::string& operation,
-                               std::vector<Row>& rows);
+                               std::vector<Row>& rows,
+                               const NetworkTunnelGrantLimits* grant_limits = nullptr);
     template <class Row>
     Result<Row>
     get_network(const NetworkScope&, const std::string& id, const std::vector<Row>& rows);
@@ -736,6 +777,8 @@ private:
     // By (workspace, connection).
     std::map<std::pair<std::string, std::string>, McpConnectionDispatch> mcp_connection_dispatch_;
     std::map<std::pair<std::string, std::string>, AppTransfer> app_transfer_; // (hour, app)
+    std::map<std::string, RetainedUsageSet> retained_usage_sets_;             // by workspace
+    std::vector<RetainedUsagePoint> retained_usage_;
     std::vector<Invoice> invoices_;
     std::map<std::pair<std::string, std::string>, std::string> billing_provider_customers_;
     std::set<std::pair<std::string, std::string>> payment_events_;
@@ -755,6 +798,8 @@ private:
     std::vector<CloudOrder> cloud_orders_;
     std::vector<CloudOrderEvent> cloud_order_events_;
     std::map<std::string, std::chrono::system_clock::time_point> cloud_order_email_due_;
+    // When each order was created, for its confirmation expiry and the recipient limits.
+    std::map<std::string, std::chrono::system_clock::time_point> cloud_order_created_;
     void cloud_order_event_locked(const std::string& id,
                                   const std::string& from,
                                   const std::string& to,
@@ -841,6 +886,9 @@ private:
     };
     std::vector<PasswordCredential> passwords_;
     std::set<std::string> taap_assertions_;
+    // Each rotated TAAP identifier's recorded chain head: its hash and the chain's length
+    // (lake#1024, the PostgreSQL store's taap_chain_heads).
+    std::map<std::string, std::pair<std::string, std::size_t>> taap_chain_heads_;
     std::vector<PasskeyCredential> passkeys_;
     std::vector<OAuthCredential> oauth_credentials_;
     // user id -> the TAAP identity lake minted for a Clerk sign-in (custodial_identities).
@@ -862,6 +910,9 @@ private:
     std::vector<IdentityLinkChallengeRecord> identity_link_challenges_;
     // user id -> its own identity, linked as the managed key's successor.
     std::map<std::string, IdentityLink> identity_links_;
+    // The initial identity document each documented sign-up registered, by its TAAP identifier
+    // (PostgreSQL's identity_documents, lake#1020).
+    std::map<std::string, std::string> identity_documents_;
     std::map<std::string, std::string> identity_linked_at_;
     std::vector<WebAuthnChallengeRecord> webauthn_challenges_;
     std::vector<OAuthProvider> oauth_providers_;
@@ -891,6 +942,8 @@ private:
         int window_calls = 0;
     };
     std::vector<StoredBrowserKey> browser_keys_;
+    // Custom-domain claims by host (lake#949), as `domain_claims` keeps them.
+    std::map<std::string, DomainClaim> domain_claims_;
     std::vector<std::pair<std::string, std::string>> session_secrets_;
     std::vector<OfflineGrant> offline_grants_;
     struct RecoveryRecord {

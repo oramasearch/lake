@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The one translation unit that names libpqxx. Each call opens (or reuses) one
 // connection and runs one transaction, inline on the caller's thread; SQL
 // errors map to the store's error codes.
@@ -650,7 +652,9 @@ bool identity_document_is_self_certifying(const liquid::identity_document& docum
 }
 
 std::expected<liquid::actor, std::string>
-bound_taap_key(std::string_view identity_document, std::span<const std::string> identity_chain) {
+bound_taap_key(std::string_view identity_document,
+               std::span<const std::string> identity_chain,
+               std::vector<std::string>* chain_hashes) {
     // The documents, oldest first: the chain when one is given (it must end with the presented
     // document), else the presented document alone.
     std::vector<std::string_view> encoded_documents;
@@ -670,6 +674,8 @@ bound_taap_key(std::string_view identity_document, std::span<const std::string> 
     }
     std::vector<liquid::identity_document> documents;
     documents.reserve(encoded_documents.size());
+    std::vector<std::string> hashes;
+    hashes.reserve(encoded_documents.size());
     for (const std::string_view encoded : encoded_documents) {
         const std::vector<unsigned char> bytes = from_base64url(encoded);
         if (bytes.empty()) {
@@ -684,8 +690,16 @@ bound_taap_key(std::string_view identity_document, std::span<const std::string> 
         if (!canonical || *canonical != canonical_input) {
             return std::unexpected("TAAP identity document does not verify canonically");
         }
+        // Hashed over the canonical bytes, so two encodings of one document are one document.
+        hashes.push_back(sha256_hex(std::string_view(reinterpret_cast<const char*>(bytes.data()),
+                                                     bytes.size())));
         documents.push_back(std::move(*document));
     }
+    const auto keep_hashes = [&] {
+        if (chain_hashes) {
+            *chain_hashes = std::move(hashes);
+        }
+    };
     const liquid::identity_document& root = documents.front();
     const auto verified_root = liquid::verify_document(root);
     if (!verified_root || !*verified_root) {
@@ -699,6 +713,7 @@ bound_taap_key(std::string_view identity_document, std::span<const std::string> 
                 : "TAAP identity document's key is not the key its identifier was derived from");
     }
     if (documents.size() == 1) {
+        keep_hashes();
         return root.subject;
     }
     const auto chain = liquid::verify_chain(documents);
@@ -718,6 +733,7 @@ bound_taap_key(std::string_view identity_document, std::span<const std::string> 
             return std::unexpected("TAAP identity rotation is not signed by the key it replaces");
         }
     }
+    keep_hashes();
     return chain->subject;
 }
 
@@ -730,6 +746,18 @@ std::string claimed_taap_id(std::string_view identity_document) {
     return document ? document->subject.taap_id : std::string{};
 }
 
+std::optional<liquid::identity_document> decode_document(std::string_view identity_document) {
+    const std::vector<unsigned char> bytes = from_base64url(identity_document);
+    if (bytes.empty()) {
+        return std::nullopt;
+    }
+    auto document = liquid::decode_identity_document(as_bytes_of(bytes));
+    if (!document) {
+        return std::nullopt;
+    }
+    return std::move(*document);
+}
+
 std::expected<VerifiedTaapSignIn, std::string>
 verify_taap_sign_in(std::string_view identity_document,
                     std::string_view pool_id,
@@ -740,6 +768,15 @@ verify_taap_sign_in(std::string_view identity_document,
                     std::span<const std::string> identity_chain) {
     if (pool_id.empty() || nonce.size() < 16 || !signature.is_object()) {
         return std::unexpected("TAAP sign-in fields are incomplete");
+    }
+    // Only the members the verification reads (lake#1004): an extra member can no longer
+    // make a captured assertion look new.
+    for (const auto& [member, value] : signature.items()) {
+        if (member != "algorithm" && member != "signing_key_identifier" &&
+            member != "signing_key_label" && member != "signature_purpose" &&
+            member != "signed_at" && member != "bytes") {
+            return std::unexpected("TAAP sign-in signature has an unknown member: " + member);
+        }
     }
     if (now_unix == 0) {
         now_unix = std::chrono::duration_cast<std::chrono::seconds>(
@@ -756,7 +793,8 @@ verify_taap_sign_in(std::string_view identity_document,
     // lake#917: the key the assertion must be signed with is the one bound to the identifier: an
     // initial document's own key, or the current key of a chain from that document whose every
     // rotation the replaced key signed.
-    const auto key = bound_taap_key(identity_document, identity_chain);
+    std::vector<std::string> chain_hashes;
+    const auto key = bound_taap_key(identity_document, identity_chain, &chain_hashes);
     if (!key) {
         return std::unexpected(key.error());
     }
@@ -783,9 +821,11 @@ verify_taap_sign_in(std::string_view identity_document,
     if (!verified || !*verified) {
         return std::unexpected("TAAP sign-in signature does not verify");
     }
+    // The replay key is what the signature authenticates: the identity, the pool, the nonce and
+    // the time, never the transport form of the request (lake#1004). One signed assertion
+    // is one sign-in, however its signature object or identity document is spelled.
     return VerifiedTaapSignIn{
-        key->taap_id,
-        sha256_hex(std::string(identity_document) + "\n" + body + "\n" + signature.dump())};
+        key->taap_id, sha256_hex(key->taap_id + "\n" + body), std::move(chain_hashes)};
 }
 
 std::optional<OidcClaims> verify_oidc_id_token(std::string_view token,
@@ -1512,6 +1552,55 @@ Repository repository_of(const pqxx::row& r) {
                       r[10].as<std::string>()};
 }
 
+// lake#1024: a TAAP sign-in's chain must pass through the head recorded for its identifier (a
+// replaced key, or a fork of the chain, is refused), and a longer chain becomes the new head. The
+// row is locked for the rest of the sign-in, so two sign-ins never record two heads.
+Result<void> advance_taap_chain_head(pqxx::work& tx,
+                                     const std::string& taap_id,
+                                     const std::string& user_id,
+                                     const std::vector<std::string>& chain_hashes) {
+    const auto recorded = [&] {
+        return tx.exec_params("SELECT head_hash, chain_length FROM taap_chain_heads "
+                              "WHERE taap_id = $1 FOR UPDATE",
+                              taap_id);
+    };
+    pqxx::result head = recorded();
+    if (head.empty()) {
+        if (chain_hashes.size() < 2) {
+            return {}; // never rotated: the first document's own key signs in
+        }
+        const pqxx::result inserted = tx.exec_params(
+            "INSERT INTO taap_chain_heads (taap_id, user_id, head_hash, chain_length) "
+            "VALUES ($1, $2::uuid, $3, $4) ON CONFLICT (taap_id) DO NOTHING RETURNING 1",
+            taap_id,
+            user_id,
+            chain_hashes.back(),
+            static_cast<int>(chain_hashes.size()));
+        if (!inserted.empty()) {
+            return {};
+        }
+        head = recorded(); // another sign-in recorded it first: check against that one
+        if (head.empty()) {
+            return std::unexpected(StoreError{"store_error", "TAAP chain head is unavailable"});
+        }
+    }
+    const std::string head_hash = head[0][0].as<std::string>();
+    const auto length = static_cast<std::size_t>(head[0][1].as<int>());
+    if (length == 0 || chain_hashes.size() < length || chain_hashes[length - 1] != head_hash) {
+        return std::unexpected(StoreError{
+            "unauthorized",
+            "TAAP identity was rotated: sign in with its current key and identity_chain"});
+    }
+    if (chain_hashes.size() > length) {
+        tx.exec_params("UPDATE taap_chain_heads SET head_hash = $2, chain_length = $3, "
+                       "updated_at = now() WHERE taap_id = $1",
+                       taap_id,
+                       chain_hashes.back(),
+                       static_cast<int>(chain_hashes.size()));
+    }
+    return {};
+}
+
 Result<void> require_live_repository(pqxx::work& tx, const std::string& repository_id) {
     const pqxx::result rows = tx.exec_params(
         "SELECT deleted_at FROM repositories WHERE id = $1::uuid FOR UPDATE", repository_id);
@@ -1714,6 +1803,29 @@ BrowserKey browser_key_of(const pqxx::row& r) {
     return key;
 }
 
+// A custom domain's claim (lake#949, migration 0106_domain_claims); timestamps as RFC 3339 UTC
+// seconds.
+constexpr const char* domain_claim_columns =
+    "host, customer_id::text, workspace_id::text, repository_id::text, environment, tls, token, "
+    "state, "
+    "coalesce(to_char(verified_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), "
+    "to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')";
+
+DomainClaim domain_claim_of(const pqxx::row& r) {
+    DomainClaim claim;
+    claim.host = r[0].as<std::string>();
+    claim.customer_id = r[1].as<std::string>();
+    claim.workspace_id = r[2].as<std::string>();
+    claim.repository_id = r[3].as<std::string>();
+    claim.environment = r[4].as<std::string>();
+    claim.tls = r[5].as<std::string>();
+    claim.token = r[6].as<std::string>();
+    claim.state = r[7].as<std::string>();
+    claim.verified_at = r[8].as<std::string>();
+    claim.created_at = r[9].as<std::string>();
+    return claim;
+}
+
 // ls1.<public UUID>.<256-bit random secret>; reject malformed input before opening a transaction.
 std::optional<std::string> session_lookup_id(std::string_view bearer) {
     if (bearer.size() != 105 || !bearer.starts_with("ls1.") || bearer[40] != '.') {
@@ -1737,7 +1849,7 @@ std::optional<std::string> session_lookup_id(std::string_view bearer) {
 
 // The session itself and every ancestor up to the first sign-in session (browser or TAAP) must
 // be live. A sign-in ancestor ends the walk without being checked: signing out never ends a key
-// made from that sign-in (lake#1163, Steve: "don't revoke api keys on signout"); it still must
+// made from that sign-in (lake#1163: signing out never revokes an API key); it still must
 // belong to the same user and pool. Revoking a key still ends that key's own descendants.
 bool active_session_lineage(pqxx::work& tx,
                             const std::string& session_id,
@@ -1859,7 +1971,8 @@ AgentSession agent_session_of(const pqxx::row& row) {
         row[10].as<std::int64_t>(),
         row[11].as<std::string>(),
         row[12].as<std::string>(),
-        row.size() > 13 ? row[13].as<std::string>() : std::string()};
+        row.size() > 13 ? row[13].as<std::string>() : std::string(),
+        row.size() > 14 ? row[14].as<std::string>() : std::string()};
 }
 
 // The agent_sessions columns agent_session_of reads. A never-expiring key is stored with
@@ -1872,7 +1985,8 @@ constexpr const char* agent_session_columns =
     "to_char(issued_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
     "CASE WHEN expires_at = 'infinity' THEN 'never' ELSE "
     "to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') END, "
-    "coalesce(to_char(revoked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '')";
+    "coalesce(to_char(revoked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), "
+    "coalesce(repository_id::text, '')";
 
 constexpr const char* device_columns =
     "devices.id::text, devices.user_id::text, devices.name, "
@@ -1981,11 +2095,53 @@ public:
         return {};
     }
 
+    // A principal id belongs to one person or organization (lake#872): a new account or
+    // organization may not take an identity any user, in any pool, or organization already has,
+    // or it would inherit that principal's grants and name.
+    static bool principal_id_taken(pqxx::work& tx, const std::string& taap_id) {
+        return !taap_id.empty() &&
+               !tx.exec_params("SELECT 1 FROM users WHERE taap_id = $1 UNION ALL "
+                               "SELECT 1 FROM organizations WHERE taap_id = $1 LIMIT 1",
+                               taap_id)
+                    .empty();
+    }
+    static StoreError principal_id_conflict() {
+        return StoreError{"conflict", "that identity belongs to another account"};
+    }
+    // The identity a new SSO or SCIM account takes: the managed key Lake minted for it, or, with
+    // none (a direct store caller), the given id. Recorded as a managed key when minted.
+    static Result<std::string> new_account_identity(const std::string& custodial_taap_id,
+                                                    const std::string& taap_id) {
+        const std::string chosen = custodial_taap_id.empty() ? taap_id : custodial_taap_id;
+        if (auto checked = check_principal_id(chosen, "taap_id"); !checked) {
+            return std::unexpected(checked.error());
+        }
+        return chosen;
+    }
+    void record_custodial_identity(pqxx::work& tx,
+                                   const std::string& user_id,
+                                   const std::string& taap_id,
+                                   const std::string& public_key,
+                                   const std::string& wrapped_seed) {
+        if (public_key.empty() || wrapped_seed.empty()) {
+            return;
+        }
+        tx.exec_params("INSERT INTO custodial_identities (user_id, taap_id, public_key, "
+                       "wrapped_seed) VALUES ($1::uuid, $2, $3, $4)",
+                       user_id,
+                       taap_id,
+                       public_key,
+                       wrapped_seed);
+    }
+
     Result<User> create_user(const NewUser& in) override {
         if (auto checked = check_principal_id(in.taap_id, "taap_id"); !checked) {
             return std::unexpected(checked.error());
         }
         return with_tx<User>([&](pqxx::work& tx) -> Result<User> {
+            if (principal_id_taken(tx, in.taap_id)) {
+                return std::unexpected(principal_id_conflict());
+            }
             const pqxx::result rows = tx.exec_params(
                 std::string("INSERT INTO users (taap_id, email, display_name) VALUES "
                             "($1, $2, $3) RETURNING ") +
@@ -2046,6 +2202,44 @@ public:
             });
     }
 
+    Result<std::map<std::string, SignerName>>
+    signer_names(const std::vector<std::string>& taap_ids) override {
+        if (taap_ids.empty()) {
+            return std::map<std::string, SignerName>{};
+        }
+        return with_tx<std::map<std::string, SignerName>>(
+            [&](pqxx::work& tx) -> Result<std::map<std::string, SignerName>> {
+                // A linked own identity acts for its account (lake#762), as account_for_identity.
+                const pqxx::result rows = tx.exec_params(
+                    "WITH wanted AS (SELECT DISTINCT jsonb_array_elements_text($1::jsonb) AS "
+                    "taap_id), resolved AS (SELECT wanted.taap_id, "
+                    "COALESCE(identity_links.account_taap_id, wanted.taap_id) AS account "
+                    "FROM wanted LEFT JOIN identity_links "
+                    "ON identity_links.own_taap_id = wanted.taap_id) "
+                    "SELECT resolved.taap_id, 'user', users.display_name, "
+                    "COALESCE(customers.name, '') FROM resolved "
+                    "JOIN users ON users.taap_id = resolved.account AND users.deleted_at IS NULL "
+                    "LEFT JOIN customers ON customers.user_id = users.id "
+                    "AND customers.customer_type = 'individual' AND customers.deleted_at IS NULL "
+                    "UNION ALL SELECT resolved.taap_id, 'organization', "
+                    "organizations.display_name, COALESCE(customers.name, '') FROM resolved "
+                    "JOIN organizations ON organizations.taap_id = resolved.account "
+                    "AND organizations.deleted_at IS NULL "
+                    "LEFT JOIN customers ON customers.organization_id = organizations.id "
+                    "AND customers.customer_type = 'organization' "
+                    "AND customers.deleted_at IS NULL",
+                    nlohmann::json(taap_ids).dump());
+                std::map<std::string, SignerName> names;
+                for (const pqxx::row& row : rows) {
+                    names[row[0].as<std::string>()] =
+                        SignerName{row[1].as<std::string>(),
+                                   row[2].is_null() ? std::string() : row[2].as<std::string>(),
+                                   row[3].as<std::string>()};
+                }
+                return names;
+            });
+    }
+
     Result<Organization> create_organization(const NewOrganization& in) override {
         if (auto checked = check_principal_id(in.taap_id, "taap_id"); !checked) {
             return std::unexpected(checked.error());
@@ -2062,6 +2256,9 @@ public:
                         "invalid_input", "customer_id does not reference a policy object"});
                 }
                 parent_id = parents[0][0].as<std::string>();
+            }
+            if (principal_id_taken(tx, in.taap_id)) {
+                return std::unexpected(principal_id_conflict());
             }
             const pqxx::result rows =
                 tx.exec_params(std::string("INSERT INTO organizations (taap_id, display_name) "
@@ -3868,6 +4065,32 @@ public:
             if (!existing.empty()) {
                 return std::unexpected(StoreError{"conflict", "a workspace with this name already exists"});
             }
+            // lake#987: counted under the customer's row lock taken above, so two
+            // concurrent creates cannot both pass.
+            if (input.max_workspaces != 0) {
+                const auto live = tx.exec_params(
+                    "SELECT count(*) FROM workspaces WHERE customer_id = $1::uuid AND desired <> "
+                    "'deleted'",
+                    input.customer_id);
+                if (live[0][0].as<std::size_t>() >= input.max_workspaces) {
+                    return std::unexpected(StoreError{"quota_exceeded",
+                                                      "this account already has " +
+                                                          std::to_string(input.max_workspaces) +
+                                                          " workspaces, the most it may have"});
+                }
+            }
+            if (input.max_services != 0) {
+                const auto live = tx.exec_params(
+                    "SELECT count(*) FROM services WHERE customer_id = $1::uuid AND desired = "
+                    "'present'",
+                    input.customer_id);
+                if (live[0][0].as<std::size_t>() >= input.max_services) {
+                    return std::unexpected(StoreError{
+                        "quota_exceeded",
+                        "this account already runs " + std::to_string(input.max_services) +
+                            " services, and a workspace's Zetta is one"});
+                }
+            }
             const std::string id = new_uuid_v4();
             const std::string service_id = new_uuid_v4();
             tx.exec_params("INSERT INTO workspaces (id, customer_id, name, environment) "
@@ -4524,12 +4747,14 @@ public:
         return {};
     }
 
+    // `grant_limits` applies to a tunnel grant's create only (lake#983).
     template <class Row>
     Result<Row> change_network(const NetworkScope& scope,
                                const std::string& supplied_id,
                                const nlohmann::json& spec,
                                const NetworkActor& actor,
-                               const std::string& operation) {
+                               const std::string& operation,
+                               const NetworkTunnelGrantLimits* grant_limits = nullptr) {
         if (auto checked = network_detail::validate_scope(scope); !checked) {
             return std::unexpected(checked.error());
         }
@@ -4578,6 +4803,25 @@ public:
                                                    spec.at("user_id").get<std::string>())
                                         .empty()) {
                     return std::unexpected(StoreError{"invalid_input", "no tunnel user"});
+                }
+                // lake#983: the account's row lock serializes its grant creates, so two
+                // concurrent creates cannot both pass the count.
+                if (table.tunnel && create && grant_limits != nullptr &&
+                    (grant_limits->per_workspace != 0 || grant_limits->per_customer != 0)) {
+                    tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid FOR UPDATE",
+                                   scope.customer_id);
+                    const auto active = tx.exec_params(
+                        "SELECT count(*) FILTER (WHERE workspace_id = $2::uuid), count(*) "
+                        "FROM network_tunnel_grants WHERE customer_id = $1::uuid "
+                        "AND revoked_at IS NULL AND expires_at > now()",
+                        scope.customer_id,
+                        scope.workspace_id);
+                    if (auto refused = network_detail::tunnel_grant_limit_refusal(
+                            *grant_limits,
+                            active[0][0].as<std::size_t>(),
+                            active[0][1].as<std::size_t>())) {
+                        return std::unexpected(*refused);
+                    }
                 }
                 write_network_spec(tx, table, scope, id, spec, actor, create);
             } else {
@@ -4677,11 +4921,13 @@ public:
         return list_network<NetworkEgressRule>(scope);
     }
 
-    Result<NetworkTunnelGrant> create_network_tunnel_grant(const NetworkScope& scope,
-                                                           const NetworkTunnelGrantSpec& spec,
-                                                           const NetworkActor& actor) override {
+    Result<NetworkTunnelGrant>
+    create_network_tunnel_grant(const NetworkScope& scope,
+                                const NetworkTunnelGrantSpec& spec,
+                                const NetworkActor& actor,
+                                const NetworkTunnelGrantLimits& limits) override {
         return change_network<NetworkTunnelGrant>(
-            scope, "", network_detail::encode(spec), actor, "create");
+            scope, "", network_detail::encode(spec), actor, "create", &limits);
     }
 
     Result<NetworkTunnelGrant> update_network_tunnel_grant(const NetworkScope& scope,
@@ -4805,7 +5051,7 @@ public:
             const std::string id = new_uuid_v4();
             std::string slug = managed_service_slug("svc", id);
             if (in.is_default) {
-                // The first workspace keeps decision 45's name so the operator adopts its
+                // The first workspace keeps its original name so the operator adopts its
                 // cluster; a slug is never reused, so a later one gets a service slug.
                 const std::string workspace = managed_service_slug("ws", in.customer_id);
                 const pqxx::result taken =
@@ -5007,9 +5253,9 @@ public:
         "a.generation, a.phase, a.url, a.ready, a.message, a.observed_generation, "
         "to_char(a.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "a.source_entrypoint, a.token_hashes_json::text, COALESCE(a.workspace_id::text, ''), "
-        "a.restart_generation";
+        "a.restart_generation, a.token_generation, a.token_hashes_generation";
     // The number of web_app_columns: a query that selects more after them reads its own from here.
-    static constexpr int web_app_column_count = 28;
+    static constexpr int web_app_column_count = 30;
 
     static WebApp web_app_from(const pqxx::row& row) {
         WebApp app;
@@ -5041,6 +5287,10 @@ public:
         app.token_hashes = nlohmann::json::parse(row[25].as<std::string>());
         app.workspace_id = row[26].as<std::string>();
         app.restart_generation = row[27].as<std::int64_t>();
+        app.token_generation = row[28].as<std::int64_t>();
+        if (!row[29].is_null()) {
+            app.token_hashes_generation = row[29].as<std::int64_t>();
+        }
         return app;
     }
 
@@ -5345,8 +5595,19 @@ public:
                 current->auth,
                 patch.restart);
             if (patch.rotate_tokens) {
-                tx.exec_params(
-                    "UPDATE apps SET token_hashes_json = '{}'::jsonb WHERE id = $1::uuid", id);
+                // Rotation is desired state (lake#1070): Lake asks for the next generation, and
+                // every token stops verifying until the operator writes hashes for it. Only an
+                // operator that has never reported a generation still needs Lake to clear the
+                // hashes, which is the one write Lake makes to the operator's column, and it
+                // stops as soon as that operator is upgraded.
+                const pqxx::result rotated = tx.exec_params(
+                    "UPDATE apps SET token_generation = token_generation + 1 WHERE id = $1::uuid "
+                    "RETURNING token_hashes_generation IS NULL",
+                    id);
+                if (!rotated.empty() && rotated[0][0].as<bool>()) {
+                    tx.exec_params(
+                        "UPDATE apps SET token_hashes_json = '{}'::jsonb WHERE id = $1::uuid", id);
+                }
             }
             // The stores it mounts (lake#666): replaced when asked, and none once deleted.
             if (desired == "deleted") {
@@ -7404,6 +7665,150 @@ public:
         return {};
     }
 
+    // Migration 0108 (lake#988): a deleted workspace's unbilled usage, content-free.
+    static std::map<std::string, std::string> retained_labels(const std::string& text) {
+        std::map<std::string, std::string> labels;
+        const nlohmann::json parsed = nlohmann::json::parse(text, nullptr, false);
+        if (parsed.is_object()) {
+            for (const auto& [name, value] : parsed.items()) {
+                if (value.is_string()) {
+                    labels[name] = value.get<std::string>();
+                }
+            }
+        }
+        return labels;
+    }
+
+    Result<void> retain_workspace_usage(const RetainedUsageSet& set,
+                                        const std::vector<RetainedUsagePoint>& points) override {
+        for (const RetainedUsagePoint& point : points) {
+            if (point.source != "rollup" || point.workspace_id != set.workspace_id) {
+                return std::unexpected(StoreError{"invalid_input", "not a rollup point"});
+            }
+        }
+        auto written = with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            const pqxx::result found =
+                tx.exec_params("SELECT 1 FROM workspaces WHERE id = $1::uuid AND customer_id = "
+                               "$2::uuid FOR UPDATE",
+                               set.workspace_id,
+                               set.customer_id);
+            if (found.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no such workspace in this account"});
+            }
+            tx.exec_params(
+                "INSERT INTO retained_usage_sets (workspace_id, customer_id, from_at, to_at) "
+                "VALUES ($1::uuid, $2::uuid, to_timestamp($3::double precision / 1000), "
+                "to_timestamp($4::double precision / 1000)) ON CONFLICT (workspace_id) DO UPDATE "
+                "SET from_at = EXCLUDED.from_at, to_at = EXCLUDED.to_at, retained_at = now()",
+                set.workspace_id,
+                set.customer_id,
+                set.from_ms,
+                set.to_ms);
+            tx.exec_params(
+                "DELETE FROM retained_usage WHERE workspace_id = $1::uuid AND source = 'rollup'",
+                set.workspace_id);
+            for (const RetainedUsagePoint& point : points) {
+                tx.exec_params(
+                    "INSERT INTO retained_usage (workspace_id, customer_id, source, dimension, "
+                    "labels, at, value, gauge) VALUES ($1::uuid, $2::uuid, 'rollup', $3, $4, "
+                    "to_timestamp($5::double precision / 1000), $6, $7) ON CONFLICT (workspace_id, "
+                    "source, dimension, labels, at) DO UPDATE SET value = EXCLUDED.value",
+                    set.workspace_id,
+                    set.customer_id,
+                    point.dimension,
+                    nlohmann::json(point.labels).dump(),
+                    point.at_ms,
+                    point.value,
+                    point.gauge);
+            }
+            return true;
+        });
+        if (!written) {
+            return std::unexpected(written.error());
+        }
+        return {};
+    }
+
+    Result<void> add_retained_usage(const RetainedUsagePoint& point) override {
+        if (point.source != "late" || point.gauge) {
+            return std::unexpected(StoreError{"invalid_input", "not a late counter value"});
+        }
+        auto written = with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            const pqxx::result added = tx.exec_params(
+                "INSERT INTO retained_usage (workspace_id, customer_id, source, dimension, labels, "
+                "at, value, gauge) SELECT s.workspace_id, s.customer_id, 'late', $2, $3, "
+                "to_timestamp($4::double precision / 1000), $5, false FROM retained_usage_sets s "
+                "WHERE s.workspace_id = $1::uuid ON CONFLICT (workspace_id, source, dimension, "
+                "labels, at) DO UPDATE SET value = retained_usage.value + EXCLUDED.value",
+                point.workspace_id,
+                point.dimension,
+                nlohmann::json(point.labels).dump(),
+                point.at_ms,
+                point.value);
+            if (added.affected_rows() == 0) {
+                return std::unexpected(
+                    StoreError{"not_found", "the workspace has no retained usage"});
+            }
+            return true;
+        });
+        if (!written) {
+            return std::unexpected(written.error());
+        }
+        return {};
+    }
+
+    Result<std::vector<RetainedUsagePoint>> retained_usage(const std::string& customer_id,
+                                                           std::int64_t from_ms,
+                                                           std::int64_t to_ms) override {
+        return with_tx<std::vector<RetainedUsagePoint>>(
+            [&](pqxx::work& tx) -> Result<std::vector<RetainedUsagePoint>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT workspace_id::text, source, dimension, labels, "
+                    "(extract(epoch FROM at) * 1000)::bigint, value, gauge FROM retained_usage "
+                    "WHERE customer_id = $1::uuid AND at >= to_timestamp($2::double precision / "
+                    "1000) AND at < to_timestamp($3::double precision / 1000) ORDER BY "
+                    "workspace_id, at",
+                    customer_id,
+                    from_ms,
+                    to_ms);
+                std::vector<RetainedUsagePoint> out;
+                for (const auto& row : rows) {
+                    out.push_back({.workspace_id = row[0].as<std::string>(),
+                                   .source = row[1].as<std::string>(),
+                                   .dimension = row[2].as<std::string>(),
+                                   .labels = retained_labels(row[3].as<std::string>()),
+                                   .at_ms = row[4].as<std::int64_t>(),
+                                   .value = row[5].as<double>(),
+                                   .gauge = row[6].as<bool>()});
+                }
+                return out;
+            });
+    }
+
+    Result<std::vector<RetainedUsageSet>>
+    retained_usage_sets(const std::string& customer_id) override {
+        return with_tx<std::vector<RetainedUsageSet>>(
+            [&](pqxx::work& tx) -> Result<std::vector<RetainedUsageSet>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT workspace_id::text, customer_id::text, (extract(epoch FROM from_at) * "
+                    "1000)::bigint, (extract(epoch FROM to_at) * 1000)::bigint, " +
+                        utc_column("retained_at") +
+                        " FROM retained_usage_sets WHERE customer_id = $1::uuid ORDER BY "
+                        "workspace_id",
+                    customer_id);
+                std::vector<RetainedUsageSet> out;
+                for (const auto& row : rows) {
+                    out.push_back({row[0].as<std::string>(),
+                                   row[1].as<std::string>(),
+                                   row[2].as<std::int64_t>(),
+                                   row[3].as<std::int64_t>(),
+                                   row[4].as<std::string>()});
+                }
+                return out;
+            });
+    }
+
     static std::string invoice_columns() {
         return "id::text, number, customer_id::text, period, plan_id, plan_name, currency, "
                "total_micros, state, provider, provider_reference, instructions, note, " +
@@ -8575,7 +8980,9 @@ public:
         "coalesce(customer_emailed_state, ''), email_attempts, email_error, "
         "coalesce(to_char(email_retry_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "''), subscription_status, paid_through, entitlement_access_until, "
-        "subscription_event_created, entitlement_grace_seconds, entitlement_retry_invoice_id";
+        "subscription_event_created, entitlement_grace_seconds, entitlement_retry_invoice_id, "
+        "coalesce(to_char(contact_email_confirmed_at AT TIME ZONE 'UTC', "
+        "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '')";
 
     static CloudOrder cloud_order_row(const pqxx::row& row) {
         CloudOrder order;
@@ -8616,6 +9023,7 @@ public:
         order.entitlement.event_created = row[column++].as<std::int64_t>();
         order.entitlement.grace_seconds = row[column++].as<int>();
         order.entitlement.retry_invoice_id = text();
+        order.contact_email_confirmed_at = text();
         return order;
     }
 
@@ -8922,10 +9330,15 @@ public:
                 const pqxx::result rows = tx.exec_params(
                     std::string("UPDATE cloud_orders SET email_retry_at = now() + make_interval("
                                 "secs => $2) WHERE id IN (SELECT id FROM cloud_orders WHERE "
-                                "((state IN ('submitted', 'paid', 'failed') AND "
+                                // lake#1000: mail other than the confirmation goes only once the
+                                // address is confirmed (cloud_order_contact_confirmed).
+                                "(((path = 'checkout' OR contact_email_confirmed_at IS NOT NULL) "
+                                "AND ((state IN ('submitted', 'paid', 'failed') AND "
                                 "support_emailed_state IS DISTINCT FROM state) OR (state IN "
                                 "('submitted', 'paid', 'ready', 'failed') AND "
-                                "customer_emailed_state IS DISTINCT FROM state)) AND "
+                                "customer_emailed_state IS DISTINCT FROM state))) OR (path = "
+                                "'order_form' AND contact_email_confirmed_at IS NULL AND state = "
+                                "'submitted' AND coalesce(customer_emailed_state, '') = '')) AND "
                                 "(email_retry_at IS NULL OR email_retry_at <= now()) ORDER BY "
                                 "updated_at LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING ") +
                         cloud_order_columns,
@@ -8965,6 +9378,51 @@ public:
             }
             return {};
         });
+    }
+
+    Result<CloudOrder> confirm_cloud_order_email(const std::string& id,
+                                                 int max_age_seconds) override {
+        if (!uuid_text(id)) {
+            return std::unexpected(StoreError{"not_found", "no order " + id});
+        }
+        return with_tx<CloudOrder>([&](pqxx::work& tx) -> Result<CloudOrder> {
+            auto before = cloud_order_in(tx, id, true);
+            if (!before || !before->contact_email_confirmed_at.empty()) {
+                return before;
+            }
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE cloud_orders SET contact_email_confirmed_at = now() WHERE id = $1::uuid "
+                "AND contact_email_confirmed_at IS NULL AND created_at > now() - "
+                "make_interval(secs => $2) RETURNING id",
+                id,
+                std::max(max_age_seconds, 0));
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"expired", "the confirmation link has expired"});
+            }
+            cloud_order_event(
+                tx, id, before->state, before->state, "lake", "contact email confirmed");
+            return cloud_order_in(tx, id);
+        });
+    }
+
+    Result<CloudOrderRecipientCounts>
+    count_cloud_order_recipients(const std::string& email) override {
+        return with_tx<CloudOrderRecipientCounts>(
+            [&](pqxx::work& tx) -> Result<CloudOrderRecipientCounts> {
+                // The expressions are the indexes' (0107): the address without case, and the part
+                // after its last @.
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT (SELECT count(*) FROM cloud_orders WHERE lower(contact_email) = "
+                    "lower($1) AND created_at > now() - interval '24 hours'), (SELECT count(*) "
+                    "FROM cloud_orders WHERE substring(lower(contact_email) FROM '@([^@]*)$') = "
+                    "substring(lower($1) FROM '@([^@]*)$') AND created_at > now() - interval '1 "
+                    "hour')",
+                    email);
+                CloudOrderRecipientCounts counts;
+                counts.email_last_day = rows[0][0].as<int>();
+                counts.domain_last_hour = rows[0][1].as<int>();
+                return counts;
+            });
     }
 
     Result<std::vector<CloudOrderEvent>> unaudited_cloud_order_events(int limit) override {
@@ -9012,7 +9470,7 @@ public:
             return std::unexpected(StoreError{
                 "invalid_input", "pool, email, and a password of 12 characters are required"});
         }
-        // Lake's own sign-up no longer needs a document (lake#762, decision 65): without one,
+        // Lake's own sign-up no longer needs a document (lake#762): without one,
         // the caller minted a managed key, which this account signs with until the person uses
         // their own identity. Application pools still register the person's document.
         const bool managed = in.identity_document.empty() && !in.custodial_taap_id.empty();
@@ -9281,6 +9739,11 @@ public:
                     StoreError{"unauthorized", "TAAP identity is not registered"});
             }
             const std::string user_id = users[0][0].as<std::string>();
+            // A rotated identity signs in only with a chain through its recorded head (lake#1024).
+            if (auto head = advance_taap_chain_head(tx, input.taap_id, user_id, input.chain_hashes);
+                !head) {
+                return std::unexpected(head.error());
+            }
             try {
                 tx.exec_params("INSERT INTO identity_taap_assertions "
                                "(assertion_id, user_id, pool_id) VALUES ($1, $2::uuid, $3)",
@@ -9673,6 +10136,35 @@ public:
             return issued;
         });
     }
+    // A Clerk-verified address belongs to the Clerk subject presenting it (lake#920). Any other
+    // Lake-pool account holding it loses it and the password named by it; its other
+    // credentials, sessions and grants stay its own and never reach the Clerk person. Answers
+    // the id of the account it was taken from, or empty.
+    std::string
+    take_verified_email(pqxx::work& tx, const std::string& email, const std::string& keep_user_id) {
+        if (email.empty()) {
+            return "";
+        }
+        const pqxx::result holders =
+            tx.exec_params("SELECT id::text FROM users WHERE pool_id = 'lake' "
+                           "AND lower(email) = lower($1) AND ($2 = '' OR id <> $2::uuid) "
+                           "FOR UPDATE",
+                           email,
+                           keep_user_id);
+        if (holders.empty()) {
+            return "";
+        }
+        const std::string holder = holders[0][0].as<std::string>();
+        tx.exec_params("UPDATE users SET email = NULL WHERE id = $1::uuid", holder);
+        // A password signs in by its address, so one named by the taken address goes with it:
+        // neither the password nor email recovery to that address reaches the old account.
+        tx.exec_params("UPDATE credentials SET revoked_at = coalesce(revoked_at, now()) "
+                       "WHERE user_id = $1::uuid AND pool_id = 'lake' AND kind = 'password' "
+                       "AND subject = lower($2)",
+                       holder,
+                       email);
+        return holder;
+    }
     Result<ClerkUserProvisioned> clerk_user_tx(pqxx::work& tx, const ClerkIdentity& in) {
         if (in.subject.empty()) {
             return std::unexpected(StoreError{"invalid_input", "a Clerk subject is required"});
@@ -9691,40 +10183,35 @@ public:
         if (!rows.empty()) {
             result.user_id = rows[0][0].as<std::string>();
         } else {
-            // Clerk verified this address, so an existing lake account with it is the same
-            // person: link it rather than create a second account.
-            if (!in.email.empty()) {
-                rows = tx.exec_params("SELECT id::text FROM users WHERE pool_id = 'lake' "
-                                      "AND lower(email) = lower($1)",
-                                      in.email);
+            // A new Clerk subject always gets a new account (lake#920). It is never
+            // linked to an existing account by email: that account's address was proven by no
+            // one (password sign-up, SSO or SCIM provisioning, an operator) or belongs to another
+            // Clerk subject, and linking would hand its holder's password, sessions, keys and
+            // grants the verified person's account. Clerk verified this address, so it moves to
+            // the new account and the old holder keeps everything else.
+            if (in.custodial_taap_id.empty() || in.custodial_public_key.empty() ||
+                in.custodial_wrapped_seed.empty()) {
+                return std::unexpected(StoreError{
+                    "invalid_input", "a custodial identity is required to create a user"});
             }
-            if (!rows.empty()) {
-                result.user_id = rows[0][0].as<std::string>();
-                result.linked = true;
-            } else {
-                if (in.custodial_taap_id.empty() || in.custodial_public_key.empty() ||
-                    in.custodial_wrapped_seed.empty()) {
-                    return std::unexpected(StoreError{
-                        "invalid_input", "a custodial identity is required to create a user"});
-                }
-                rows = tx.exec_params("INSERT INTO users (taap_id, email, display_name, "
-                                      "pool_id) VALUES ($1, $2, $3, 'lake') RETURNING id::text",
-                                      in.custodial_taap_id,
-                                      nullable(in.email),
-                                      in.display_name);
-                result.user_id = rows[0][0].as<std::string>();
-                result.created = true;
-                tx.exec_params("INSERT INTO custodial_identities (user_id, taap_id, "
-                               "public_key, wrapped_seed) VALUES ($1::uuid, $2, $3, $4)",
-                               result.user_id,
-                               in.custodial_taap_id,
-                               in.custodial_public_key,
-                               in.custodial_wrapped_seed);
-                const auto customer =
-                    provision_personal_customer(tx, result.user_id, in.custodial_taap_id, subject);
-                if (!customer) {
-                    return std::unexpected(customer.error());
-                }
+            result.email_taken_from = take_verified_email(tx, in.email, "");
+            rows = tx.exec_params("INSERT INTO users (taap_id, email, display_name, "
+                                  "pool_id) VALUES ($1, $2, $3, 'lake') RETURNING id::text",
+                                  in.custodial_taap_id,
+                                  nullable(in.email),
+                                  in.display_name);
+            result.user_id = rows[0][0].as<std::string>();
+            result.created = true;
+            tx.exec_params("INSERT INTO custodial_identities (user_id, taap_id, "
+                           "public_key, wrapped_seed) VALUES ($1::uuid, $2, $3, $4)",
+                           result.user_id,
+                           in.custodial_taap_id,
+                           in.custodial_public_key,
+                           in.custodial_wrapped_seed);
+            const auto customer =
+                provision_personal_customer(tx, result.user_id, in.custodial_taap_id, subject);
+            if (!customer) {
+                return std::unexpected(customer.error());
             }
             tx.exec_params("INSERT INTO credentials (user_id, pool_id, kind, subject) "
                            "VALUES ($1::uuid, 'lake', 'oauth', $2)",
@@ -9914,14 +10401,9 @@ public:
                 return std::unexpected(
                     StoreError{"not_found", "no Lake account is linked to this user"});
             }
-            if (!in.email.empty() &&
-                !tx.exec_params("SELECT 1 FROM users WHERE lower(email) = lower($1) "
-                                "AND id <> $2::uuid",
-                                in.email,
-                                *user_id)
-                     .empty()) {
-                return std::unexpected(StoreError{"conflict", "another account has this email"});
-            }
+            // Clerk verified the new address, so it moves here from any other Lake-pool account
+            // that holds it, as at provisioning (lake#920).
+            take_verified_email(tx, in.email, *user_id);
             tx.exec_params("UPDATE users SET email = COALESCE(NULLIF($2, ''), email), "
                            "display_name = $3 WHERE id = $1::uuid",
                            *user_id,
@@ -10127,6 +10609,20 @@ public:
             if (rows.empty()) {
                 return std::unexpected(
                     StoreError{"not_found", "no account acts for this identity"});
+            }
+            return rows[0][0].as<std::string>();
+        });
+    }
+    Result<std::string> registered_identity_document(const std::string& taap_id) override {
+        return with_tx<std::string>([&](pqxx::work& tx) -> Result<std::string> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT d.document #>> '{}' FROM identity_documents d JOIN users u "
+                "ON u.id = d.user_id WHERE u.taap_id = $1 "
+                "UNION ALL SELECT own_document FROM identity_links WHERE own_taap_id = $1 LIMIT 1",
+                taap_id);
+            if (rows.empty() || rows[0][0].is_null()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no account registered this identity"});
             }
             return rows[0][0].as<std::string>();
         });
@@ -10438,6 +10934,92 @@ public:
                 return BrowserKeyAdmission{false, rows[0][2].as<int>()};
             }
             return BrowserKeyAdmission{true, 0};
+        });
+    }
+    Result<DomainClaim> claim_domain(const NewDomainClaim& in) override {
+        if (in.host.empty() || !uuid_text(in.customer_id) || !uuid_text(in.workspace_id) ||
+            !uuid_text(in.repository_id) || in.environment.empty() || in.token.empty() ||
+            (in.tls != "acme" && in.tls != "provided")) {
+            return std::unexpected(StoreError{
+                "invalid_input",
+                "a domain claim names its host, account, workspace, repository, environment, "
+                "tls and token"});
+        }
+        // One statement, so two environments claiming one host at once cannot both win: the
+        // insert takes a free host; on a taken one the update applies only to the same
+        // environment's claim, and no row back means another environment holds it.
+        return with_tx<DomainClaim>([&](pqxx::work& tx) -> Result<DomainClaim> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("INSERT INTO domain_claims (host, customer_id, workspace_id, "
+                            "repository_id, environment, tls, token) VALUES ($1, $2::uuid, "
+                            "$3::uuid, $4::uuid, $5, $6, $7) ON CONFLICT (host) DO UPDATE SET "
+                            "tls = EXCLUDED.tls WHERE domain_claims.repository_id = "
+                            "EXCLUDED.repository_id AND domain_claims.environment = "
+                            "EXCLUDED.environment RETURNING ") +
+                    domain_claim_columns,
+                in.host,
+                in.customer_id,
+                in.workspace_id,
+                in.repository_id,
+                in.environment,
+                in.tls,
+                in.token);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"conflict", in.host + " is already claimed by another environment"});
+            }
+            return domain_claim_of(rows[0]);
+        });
+    }
+    Result<DomainClaim> get_domain_claim(const std::string& host) override {
+        return with_tx<DomainClaim>([&](pqxx::work& tx) -> Result<DomainClaim> {
+            const pqxx::result rows = tx.exec_params(std::string("SELECT ") + domain_claim_columns +
+                                                         " FROM domain_claims WHERE host = $1",
+                                                     host);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no claim of " + host});
+            }
+            return domain_claim_of(rows[0]);
+        });
+    }
+    Result<DomainClaim> verify_domain_claim(const std::string& host,
+                                            const std::string& repository_id,
+                                            const std::string& environment,
+                                            const std::string& token) override {
+        if (!uuid_text(repository_id)) {
+            return std::unexpected(
+                StoreError{"not_found", "no claim of " + host + " for this environment"});
+        }
+        return with_tx<DomainClaim>([&](pqxx::work& tx) -> Result<DomainClaim> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("UPDATE domain_claims SET state = 'verified', verified_at = "
+                            "coalesce(verified_at, now()) WHERE host = $1 AND repository_id = "
+                            "$2::uuid AND environment = $3 AND token = $4 RETURNING ") +
+                    domain_claim_columns,
+                host,
+                repository_id,
+                environment,
+                token);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no claim of " + host + " for this environment"});
+            }
+            return domain_claim_of(rows[0]);
+        });
+    }
+    Result<void> release_domain_claim(const std::string& host,
+                                      const std::string& repository_id,
+                                      const std::string& environment) override {
+        if (!uuid_text(repository_id)) {
+            return {};
+        }
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec_params("DELETE FROM domain_claims WHERE host = $1 AND repository_id = "
+                           "$2::uuid AND environment = $3",
+                           host,
+                           repository_id,
+                           environment);
+            return {};
         });
     }
     Result<std::vector<Session>> list_sessions(const std::string& user_id,
@@ -10971,6 +11553,10 @@ public:
         if (auto checked = check_principal_id(input.taap_id, "taap_id"); !checked) {
             return std::unexpected(checked.error());
         }
+        const auto identity = new_account_identity(input.custodial_taap_id, input.taap_id);
+        if (!identity) {
+            return std::unexpected(identity.error());
+        }
         if (input.provider_id.empty() || input.issuer.empty() || input.subject.empty() ||
             !input.claims.is_object()) {
             return std::unexpected(StoreError{"invalid_input", "SSO assertion is incomplete"});
@@ -11014,17 +11600,25 @@ public:
                 }
                 user_id = mapped[0][0].as<std::string>();
             } else {
-                if (!provider.jit_provisioning || input.taap_id.empty()) {
+                if (!provider.jit_provisioning || identity->empty()) {
                     return std::unexpected(
                         StoreError{"unauthorized", "SSO user is not provisioned"});
+                }
+                if (principal_id_taken(tx, *identity)) {
+                    return std::unexpected(principal_id_conflict());
                 }
                 const pqxx::result created =
                     tx.exec_params("INSERT INTO users (taap_id, email, display_name) VALUES ($1, "
                                    "$2, $3) RETURNING id::text",
-                                   input.taap_id,
+                                   *identity,
                                    nullable(input.email),
                                    input.display_name);
                 user_id = created[0][0].as<std::string>();
+                record_custodial_identity(tx,
+                                          user_id,
+                                          *identity,
+                                          input.custodial_public_key,
+                                          input.custodial_wrapped_seed);
                 tx.exec_params(
                     "INSERT INTO scim_users (provider_id, external_id, user_id, attributes) "
                     "VALUES ($1::uuid, $2, $3::uuid, $4::jsonb)",
@@ -11092,7 +11686,11 @@ public:
         if (auto checked = check_principal_id(input.taap_id, "taap_id"); !checked) {
             return std::unexpected(checked.error());
         }
-        if (input.provider_id.empty() || input.external_id.empty() || input.taap_id.empty()) {
+        const auto identity = new_account_identity(input.custodial_taap_id, input.taap_id);
+        if (!identity) {
+            return std::unexpected(identity.error());
+        }
+        if (input.provider_id.empty() || input.external_id.empty() || identity->empty()) {
             return std::unexpected(StoreError{
                 "invalid_input", "provider, external id, and TAAP identity are required"});
         }
@@ -11111,13 +11709,21 @@ public:
             std::string user_id;
             std::string operation = "create";
             if (existing.empty()) {
+                if (principal_id_taken(tx, *identity)) {
+                    return std::unexpected(principal_id_conflict());
+                }
                 const pqxx::result created =
                     tx.exec_params("INSERT INTO users (taap_id, email, display_name) VALUES ($1, "
                                    "$2, $3) RETURNING id::text",
-                                   input.taap_id,
+                                   *identity,
                                    nullable(input.email),
                                    input.display_name);
                 user_id = created[0][0].as<std::string>();
+                record_custodial_identity(tx,
+                                          user_id,
+                                          *identity,
+                                          input.custodial_public_key,
+                                          input.custodial_wrapped_seed);
                 tx.exec_params("INSERT INTO scim_users (provider_id, external_id, user_id, active, "
                                "attributes) "
                                "VALUES ($1::uuid, $2, $3::uuid, $4, $5::jsonb)",
@@ -11670,9 +12276,9 @@ public:
     Result<AgentSession> create_agent_session(const NewAgentSession& input) override {
         if (input.id.empty() || input.customer_id.empty() || input.durable_agent_taap_id.empty() ||
             input.dispatcher_taap_id.empty() || input.session_taap_id.empty() ||
-            input.public_key.empty() || input.scopes.empty() || input.attestation.empty() ||
-            input.transparency_root.empty() || input.issued_at.empty() ||
-            input.expires_at.empty() ||
+            input.repository_id.empty() || input.public_key.empty() || input.scopes.empty() ||
+            input.attestation.empty() || input.transparency_root.empty() ||
+            input.issued_at.empty() || input.expires_at.empty() ||
             (input.expires_at == "never" ? input.expires_unix != 0 : input.expires_unix <= 0)) {
             return std::unexpected(StoreError{"invalid_input", "agent session record is invalid"});
         }
@@ -11681,10 +12287,11 @@ public:
                 std::string("INSERT INTO agent_sessions "
                             "(id, customer_id, durable_agent_taap_id, dispatcher_taap_id, "
                             "session_taap_id, public_key, scopes, attestation, "
-                            "transparency_index, transparency_root, issued_at, expires_at) VALUES "
+                            "transparency_index, transparency_root, issued_at, expires_at, "
+                            "repository_id) VALUES "
                             "($1::uuid, $2::uuid, $3, $4, $5, $6, "
                             "ARRAY(SELECT jsonb_array_elements_text($7::jsonb)), $8, $9, $10, "
-                            "$11::timestamptz, $12::timestamptz) RETURNING ") +
+                            "$11::timestamptz, $12::timestamptz, $13::uuid) RETURNING ") +
                     agent_session_columns,
                 input.id,
                 input.customer_id,
@@ -11697,7 +12304,8 @@ public:
                 input.transparency_index,
                 input.transparency_root,
                 input.issued_at,
-                input.expires_at == "never" ? std::string("infinity") : input.expires_at);
+                input.expires_at == "never" ? std::string("infinity") : input.expires_at,
+                input.repository_id);
             return agent_session_of(rows[0]);
         });
     }

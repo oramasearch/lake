@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT */
+
 /* Lake on a phone: rev-os's mobile-web rules (lake#561, docs/ui/mobile-web.md). Layered after
    look.css, so on a narrow screen these win over the desktop look they adjust. Lake tokens only. */
 

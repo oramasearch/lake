@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "postgres_fixture.hpp"
 #include <gtest/gtest.h>
 

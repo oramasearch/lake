@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A full-screen sheet on a phone, as plain logic, ported from rev-os (lake#561). No React and no
  * real DOM, so `npm test` covers it. The hooks in `lib/phoneSheet.ts` apply it to Ask Orama and to
  * every `Modal sheet`; docs/ui/mobile-web.md explains why.

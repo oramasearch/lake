@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /change?repository_id=&id= (web_ui_change): a change under review. The header names it, its
  * author, its review state and the diff layout; figures (files, lines, checks); the description and
  * the files changed beside its details, reviews and checks; then every file's diff in a unified or
@@ -7,15 +9,18 @@ import { useSearchParams } from "react-router-dom";
 import { Check, Copy, FileDiff, ShieldCheck } from "lucide-react";
 import { Button, Card, Empty, KeyValue, Split, Stat, StatRow } from "@/lib/ui";
 import { dateTime, relative } from "@/lib/format";
+import { useSession } from "@/lib/session";
 import { Markdown } from "./Markdown";
+import { authorOf } from "./signers";
 import {
   ForgePage,
   ForgeStatus,
   Identifier,
-  IdentifierList,
   itemsOf,
   octal,
   pending,
+  SignerList,
+  SignerName,
   slug,
   ToRepositories,
   useForgeRead,
@@ -26,6 +31,7 @@ import {
   type ForgeRecord,
   type Items,
   type Repository,
+  type WithPeople,
 } from "./forge";
 
 /** `hidden_reformatting_entry`: a modification whose line diff is empty (a reformat). */
@@ -43,12 +49,13 @@ export default function ChangePage() {
 
 function ChangeReview({ id, changeId }: { id: string; changeId: string }) {
   const repository = useForgeRead<Repository>("get_repository", { id });
-  const change = useForgeRead<Change>("get_change", { id, change_id: changeId });
+  const change = useForgeRead<Change & WithPeople>("get_change", { id, change_id: changeId });
+  const { viewer } = useSession();
   const diff = useForgeRead<Items<DiffEntry>>("change_diff", { id, change_id: changeId });
   // Reviews and their comments are forge records in the repository's workspace Zetta (lake#341);
   // the diff does not wait for them, and the page says why they are missing.
-  const reviews = useForgeRead<Items<ForgeRecord>>("list_reviews", { repository_id: id, limit: 100 }, { retry: false });
-  const comments = useForgeRead<Items<ForgeRecord>>(reviews.isSuccess ? "list_review_comments" : null, { repository_id: id, limit: 1000 }, { retry: false });
+  const reviews = useForgeRead<Items<ForgeRecord> & WithPeople>("list_reviews", { repository_id: id, limit: 100 }, { retry: false });
+  const comments = useForgeRead<Items<ForgeRecord> & WithPeople>(reviews.isSuccess ? "list_review_comments" : null, { repository_id: id, limit: 1000 }, { retry: false });
   const checks = useForgeRead<Items<Artifact>>("list_artifacts", { id, limit: 100 });
   const [view, setView] = useState<"unified" | "split">("unified");
   const [copied, setCopied] = useState(false);
@@ -97,7 +104,7 @@ function ChangeReview({ id, changeId }: { id: string; changeId: string }) {
         <span className="inline-flex flex-wrap items-center gap-2">
           <Identifier value={c.id} />
           <span>
-            by <code>{c.author}</code> · <span title={dateTime(c.occurred_at)}>{relative(c.occurred_at)}</span>
+            by <SignerName id={c.author} people={c.people} viewer={viewer.taap_id} /> · <span title={dateTime(c.occurred_at)}>{relative(c.occurred_at)}</span>
           </span>
           {reviewState && <ForgeStatus value={reviewState} />}
         </span>
@@ -130,7 +137,7 @@ function ChangeReview({ id, changeId }: { id: string; changeId: string }) {
             <Card label="Details">
               <KeyValue
                 rows={[
-                  ["Author", <Identifier value={c.author} />],
+                  ["Author", <SignerName id={c.author} people={c.people} viewer={viewer.taap_id} />],
                   ["Created", dateTime(c.occurred_at)],
                   ["Parents", <Identifier value={c.parents.join(", ")} />],
                   ["Identifier", <Identifier value={c.id} />],
@@ -150,7 +157,7 @@ function ChangeReview({ id, changeId }: { id: string; changeId: string }) {
                         <strong>{review.value.state ?? "open"}</strong> <ForgeStatus value={review.value.state ?? "open"} />
                       </div>
                       <p className="sub m-0">
-                        Reviewers: <IdentifierList values={review.value.reviewers} />
+                        Reviewers: <SignerList values={review.value.reviewers} people={reviews.data?.people} viewer={viewer.taap_id} />
                       </p>
                     </li>
                   ))}
@@ -315,6 +322,11 @@ function ChangeReview({ id, changeId }: { id: string; changeId: string }) {
                         return (
                           <article key={comment.id} className="review-comment">
                             <p className="sub">
+                              {authorOf(comment.value.author) && (
+                                <>
+                                  <SignerName id={authorOf(comment.value.author)} people={comments.data?.people} viewer={viewer.taap_id} /> ·{" "}
+                                </>
+                              )}
                               <Identifier value={comment.id} /> · <a href={`#${key}-new-${line}`}>line {line}</a>
                             </p>
                             <Markdown>{String(comment.value.body ?? "")}</Markdown>

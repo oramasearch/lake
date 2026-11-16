@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The drive picker (lake#682, docs/ui/drives.md#the-picker): a dialog that browses a drive's
  * folders, through the drive's `DriveStorage`, to pick a folder (Move) or an item (a shortcut to an
  * item of another drive; a model file to bring). With `drives` it starts from every drive of the

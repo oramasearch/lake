@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT */
+
 /* Usage (lake#564): the stacked uPlot chart in lake's tokens, as Train → Experiments styles its
  * charts. Scoped to `.usage-chart`. */
 .usage-chart .uplot {

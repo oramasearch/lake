@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Network (lake#729, docs/ui/network.md): a workspace's connections, developer access, private
  * networks, egress and DNS, the effective policy and its activity. Workspace pages, served under
  * `/w/<id>/`; `/network` opens the overview. */

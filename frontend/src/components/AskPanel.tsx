@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Ask Orama beside every page, replacing the server-rendered dock and its iframe: a header, the
  * conversation, and the message box at the bottom. `from` is the page it was opened from (path and
  * query), which every turn is told about. The conversation is the one the Ask Orama home (`/`)

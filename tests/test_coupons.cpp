@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Coupon codes for ads (lake#1156, docs/api/billing.md#coupon-codes): only the operator or the
 // instance administrator creates, lists and disables codes; a person redeems one for an account
 // they administer, and the redemption is an ordinary grant from Orama (lake#1134) with the
@@ -260,18 +262,18 @@ TEST(Coupon, CreatingChecksItsInputGeneratesUnguessableCodesAndAnswersTheAdLink)
     lake::api::Regions regions;
     regions.name = "swedencentral";
     regions.label = "Europe";
-    regions.apex_host = "lake.live";
-    regions.list = {{"swedencentral", "Europe", "eu.lake.live", 59.3, 18.0},
-                    {"eastus", "United States", "us.lake.live", 37.4, -79.0}};
+    regions.apex_host = "lake.example.com";
+    regions.list = {{"swedencentral", "Europe", "eu.lake.example.com", 59.3, 18.0},
+                    {"eastus", "United States", "us.lake.example.com", 37.4, -79.0}};
     auto context = rig.operator_context();
     context.regions = &regions;
     const auto regional =
         rig.call("create_coupon", {{"code", "EU50"}, {"amount_micros", 50 * dollar}}, context);
     ASSERT_TRUE(regional.ok) << regional.error.message;
-    EXPECT_EQ(regional.value["link"], "https://lake.live/?code=EU50");
+    EXPECT_EQ(regional.value["link"], "https://lake.example.com/?code=EU50");
     EXPECT_EQ(regional.value["region"]["name"], "swedencentral");
     ASSERT_EQ(regional.value["other_regions"].size(), 1U);
-    EXPECT_EQ(regional.value["other_regions"][0]["host"], "us.lake.live");
+    EXPECT_EQ(regional.value["other_regions"][0]["host"], "us.lake.example.com");
 
     const auto created_events = audit_of(*rig.store, "billing.coupon.created");
     ASSERT_FALSE(created_events.empty());

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
 
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
@@ -215,6 +216,12 @@ function compile() {
   return `${lines.join("\n")}\n`;
 }
 
+// The frontend file is a source file, so it carries the licence line tools/spdx-headers.py checks;
+// the server form is a C++ string literal and stays the bare stylesheet.
+function cssForFrontend(css) {
+  return `/* SPDX-License-Identifier: MIT */\n\n${css}`;
+}
+
 function wrapForServer(css) {
   return `R"lake_tokens(\n${css})lake_tokens"`;
 }
@@ -223,12 +230,12 @@ const arguments_ = parseArguments(process.argv.slice(2));
 const css = compile();
 const outputs = [
   [OUTPUT_PATH, wrapForServer(css)],
-  [CSS_OUTPUT_PATH, css],
+  [CSS_OUTPUT_PATH, cssForFrontend(css)],
 ];
 if (arguments_.check) {
   // --check-file compares one file (the server form, or the CSS form for a .css path).
   const checked = arguments_.checkFile
-    ? [[arguments_.checkFile, arguments_.checkFile.endsWith(".css") ? css : wrapForServer(css)]]
+    ? [[arguments_.checkFile, arguments_.checkFile.endsWith(".css") ? cssForFrontend(css) : wrapForServer(css)]]
     : outputs;
   for (const [path, generated] of checked) {
     if (!existsSync(path) || readFileSync(path, "utf8") !== generated) {

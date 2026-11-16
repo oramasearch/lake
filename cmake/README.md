@@ -8,7 +8,7 @@ the stylesheet. The source files, licensing, update procedure, and HTTP contract
 
 `embed_schema.cmake` embeds `db/schema.sql` as one raw string (`lake::control::embedded_schema_sql`),
 which `lake migrate` applies and `lake manifest` describes (lake#1119,
-[`docs/deployment/operator-interface.md`](../docs/deployment/operator-interface.md)).
+[`../docs/control-plane/schema.md`](../docs/control-plane/schema.md)).
 
 `embed_guide.cmake` embeds the Docs guides (`docs/guide/*.md`) in reading order; the `list_docs`
 and `get_doc` capabilities read them, and the web app renders them.

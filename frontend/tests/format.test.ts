@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Formatting tests — run under a negative-offset time zone (Pacific), where a
  * date-only value read as UTC would show the day before and a typed

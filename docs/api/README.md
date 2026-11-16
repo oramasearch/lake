@@ -11,7 +11,7 @@ lake#1152: [browser-keys.md](browser-keys.md) documents browser keys, `create_br
 from the origins it lists (checked against `Origin`, CORS answered to those origins alone), rate
 limited per key, lasting until revoked whatever happens to its maker's sign-in, and makeable by an
 API token or MCP client with write on the account. Its hash and binding are the control-plane table
-`browser_keys` (migration `0102_browser_keys`, decision 53). `quickstart_snippets` makes one when
+`browser_keys` (migration `0102_browser_keys`). `quickstart_snippets` makes one when
 sent `origins`.
 
 lake#1128: [quickstart.md](quickstart.md) documents the quickstart process, `start_quickstart`,
@@ -28,7 +28,7 @@ lake#1163: a [Clerk session event](clerk.md#webhooks) (signing out) ends only th
 [Agent streams](agent-launches.md#stream-triggers) and [MCP streams](mcp-connections.md#a-connections-agent-and-streams)
 reject missing/disabled people immediately and retain workspace cleanup for the next worker pass.
 [models.md](models.md) specifies authenticated customer reads for workspace dataset and model
-metadata, while public repository revisions remain readable anonymously (lake#970, LSR-104).
+metadata, while public repository revisions remain readable anonymously (lake#970).
 [PKI identities](pki.md#certificate-identities) defines strict ACME DNS and X.509 SPIFFE input
 validation and the single typed SAN each certificate receives (lake#946).
 Pipeline processing (lake#967) has shared step, edge and edit budgets and runs on the bounded
@@ -41,7 +41,7 @@ Capability request bodies use registered byte limits and the credential gate bef
 [Secrets](secrets.md#dynamic-leases) and [transparency](transparency.md) document digest-only
 publication of successful dynamic-secret events (lake#953); denied and failed events stay private.
 
-Clerk and OIDC key fetching use a shared single-flight cache with a refresh cooldown; Clerk exchanges also enforce a per-client attempt limit keyed on the ingress-reported address ([contract](clerk.md#bounded-key-refresh-lake956-lsr-090), lake#956).
+Clerk and OIDC key fetching use a shared single-flight cache with a refresh cooldown; Clerk exchanges also enforce a per-client attempt limit keyed on the ingress-reported address ([contract](clerk.md#bounded-key-refresh-lake956), lake#956).
 
 lake#728/#730/#731: [network.md](network.md) documents the fourteen secure-networking capabilities
 for connections, scoped credential rotation, egress rules, tunnel grants, peers, effective rules,
@@ -86,18 +86,17 @@ billed for the whole answer, and an answer without usage is counted by estimate 
 The gateway permits only text and caller-executed function tools: endpoint and nested schemas
 refuse unmetered provider features, storage and references before forwarding (lake#960).
 
-lake#564 (decision 56, migration `0073_billing`): [billing.md](billing.md) documents billing, on only
+lake#564 (migration `0073_billing`): [billing.md](billing.md) documents billing, on only
 where `LAKE_BILLING` is (Orama Cloud): `price_list`, `set_price_list`, `billing_account`,
 `bill_preview`, `issue_invoice`, `resend_invoice`, `list_invoices`, `get_invoice`,
 `record_invoice_payment` and `void_invoice`, the `PaymentProvider` interface with its manual
 implementation, and the switch that leaves them absent on an enterprise install. lake#620
-(decision 57, migration `0074_payment_provider`): Stripe is the payment provider, with its keys in
+(migration `0074_payment_provider`): Stripe is the payment provider, with its keys in
 lake's own secret store and its webhook at `POST /billing/stripe/webhook`
 ([billing.md#stripe](billing.md#stripe)).
-lake#623, lake#635, lake#637: [billing.md](billing.md#price-list) carries Orama Cloud's price list,
-usage only (one rate per dimension, no plans, no fee, nothing included; Metis is priced by sales),
-time per minute, each rate with its reference rate, date and margin, worked bills, how a change of
-rates mid-month is billed, and when to revisit it.
+lake#623, lake#635, lake#637: [billing.md](billing.md#price-list) describes the price list,
+usage only (one rate per dimension, no plans, no fee, nothing included), time per minute, how an
+instance publishes its rates, and how a change of rates mid-month is billed.
 lake#1156 (migration `0101_coupons`): [billing.md#coupon-codes](billing.md#coupon-codes) documents
 coupon codes for ads, `create_coupon`, `list_coupons`, `disable_coupon` and `redeem_coupon`; a
 redemption is an ordinary credit from Orama.
@@ -117,7 +116,7 @@ workspaces and the organizations it alone owns, never leaving an organization wi
 lake#561: [drives.md](drives.md) documents drives (repository, workspace files, virtual) and workspace files in the workspace Zetta. [transcripts.md](transcripts.md) documents speech-to-text (`transcribe`) and the
 workspace transcripts kept in the workspace Zetta (`create_transcript`, `list_transcripts`,
 `get_transcript`, `update_transcript`, `delete_transcript`), the audio never kept.
-lake#652 (decision 60): [mcp-connections.md](mcp-connections.md) documents a workspace as the client
+lake#652: [mcp-connections.md](mcp-connections.md) documents a workspace as the client
 of remote MCP servers: Lake's own client and its bounds, the connection record and its secret, the
 fifteen capabilities (`create_mcp_connection`, `list_mcp_connections`, `get_mcp_connection`,
 `update_mcp_connection`, `delete_mcp_connection`, `refresh_mcp_connection`, `test_mcp_connection`,
@@ -152,7 +151,7 @@ use the browser session.
 
 Remote [MCP connections](mcp-connections.md#the-client) reject response JSON deeper than 64
 containers before copies or serialization, including SSE notifications and OAuth responses
-(lake#958, LSR-092).
+(lake#958).
 
 lake#452: [services.md](services.md) documents `list_services`' shared `status` and
 `status_reason`; [web-apps.md](web-apps.md) the public acknowledgement `create_app` requires;
@@ -223,7 +222,7 @@ those routes and media types. MCP omits them because its tool arguments are JSON
 
 **Envelope decision (REST and MCP).** The advertised success schema describes the complete
 JSON response: `{ "ok": true, "value": <capability value>, "duration_ms": <number> }`.
-The registry owns both `ApiResult::envelope()` and `success_envelope_schema()`. Each capability
+The registry owns both `ApiResult::envelope` and `success_envelope_schema`. Each capability
 continues to declare its value schema once; the registry nests that schema under `value`, with
 `ok`, `value`, and `duration_ms` required. OpenAPI's JSON `200` response schema and MCP's
 `outputSchema` use this same generated schema. MCP returns that complete envelope as
@@ -231,7 +230,7 @@ continues to declare its value schema once; the registry nests that schema under
 
 Failures use `{ "ok": false, "error": { "code", "message", "path" }, "duration_ms" }`,
 also serialized and described by the registry. [`errors.md`](errors.md) lists every code a caller
-can receive with its REST status (`error_codes()` is the one table; `invalid_input` 400,
+can receive with its REST status (`error_codes` is the one table; `invalid_input` 400,
 `unauthenticated` 401 with `reason` and `help`, `unauthorized` 403, `not_found` 404, `conflict`
 409, `store_unavailable` 503, …); any other code is answered as `store_error`. `path` is set
 whenever the input is at fault. [`naming.md`](naming.md) gives the one name each concept has across
@@ -245,7 +244,7 @@ JSON pointer, such as repository-name conflicts at `/name`; REST and MCP therefo
 same actionable error without schema names, SQL text or tenant identifiers from the database.
 A message, from the API layer or from the stores, transparency, audit and search code beneath it,
 calls the product **Lake** and never says `space`: it says the account, the workspace or the
-organization, whichever is true (decision 59, lake#647). Field names (`customer_id`), key-derivation
+organization, whichever is true (lake#647). Field names (`customer_id`), key-derivation
 and AEAD labels (`lake data key/…`), attestation types, pool ids and the `lake:v1` prefix keep
 their form. These pages follow the same rule in their own prose (lake#669): an account is you or
 an organization, and its id is `customer_id`. Capability, parameter and field names keep their
@@ -268,7 +267,7 @@ send its session cookie or redirect through another request, including a new cli
 Repository reads are the deliberate public-read exception: anonymous calls return only a public
 repository and its content; all other repository visibility levels remain protected.
 
-LSR-088 (lake#954): portable imports bind the source name to its embedded key, mark imported
+lake#954: portable imports bind the source name to its embedded key, mark imported
 forge and artifact claims untrusted, and recreate grants as the importer with local evidence.
 [`export.md`](export.md) defines the signed `lake_export/1` portable repository archive and its
 import validation.
@@ -283,7 +282,7 @@ without a workspace is `conflict` at `/repository_id`, and an environment's poli
 in PostgreSQL, so a refused caller reaches no workspace
 ([platform.md](platform.md#where-environments-live-lake358-lake359)).
 
-[`audit.md`](audit.md) defines the signed audit stream. Since decision 52 (lake#317, lake#318)
+[`audit.md`](audit.md) defines the signed audit stream. Since lake#317 and lake#318
 it is two kinds of log: the central chain in PostgreSQL for control-plane and identity events, and
 each workspace's own chain, in its Zetta, for events about its data, written off the request path;
 the audit capabilities read both ([audit.md](audit.md#which-log)). An account's administrator
@@ -348,7 +347,8 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 
 | Capability | Kind | Input | Value | Page |
 |---|---|---|---|---|
-| `server_info` | read, **no auth** | — | `{name, node, version, revision, api, store, deployments, billing, payment_provider, online_payment, region, regions, order_sheet_url, stripe_webhook_events}`; `revision` is the embedded full source commit or `unknown`; `deployments` says whether the platform mirror is configured ([platform.md](platform.md#a-lake-without-the-platform-mirror), lake#605); `region` (`{name, label}` or `null`) and `regions` (`[{name, label, host}]` or `[]`) are this Lake's region and the deployment's regions ([regions.md](regions.md), lake#757); `order_sheet_url` is where the apex order sheet is, or `null` ([orders.md](orders.md), lake#831); `stripe_webhook_events` is the sorted list of Stripe events this version handles, the one `lake manifest` prints, which the operator subscribes the Lake's endpoint to ([operator-interface.md](../deployment/operator-interface.md), lake#1119) | [../deployment/production-2026-09-08.md](../deployment/production-2026-09-08.md) |
+| `server_info` | read, **no auth** | — | `{name, node, version, revision, api, store, deployments, billing, payment_provider, online_payment, region, regions, order_sheet_url, stripe_webhook_events}`; `revision` is the embedded full source commit or `unknown`; `deployments` says whether the platform mirror is configured ([platform.md](platform.md#a-lake-without-the-platform-mirror), lake#605); `region` (`{name, label}` or `null`) and `regions` (`[{name, label, host}]` or `[]`) are this Lake's region and the deployment's regions ([regions.md](regions.md), lake#757); `order_sheet_url` is where the apex order sheet is, or `null` ([orders.md](orders.md), lake#831); `stripe_webhook_events` is the sorted list of Stripe events this version handles, the one `lake manifest` prints, which the operator subscribes the Lake's endpoint to ([../control-plane/schema.md](../control-plane/schema.md), lake#1119) | [../control-plane/schema.md](../control-plane/schema.md) |
+| `server_info` | read, **no auth** | — | `{name, node, version, revision, api, store, deployments, billing, payment_provider, online_payment, region, regions, order_sheet_url, stripe_webhook_events, liquid}`; `revision` is the embedded full source commit or `unknown`; `deployments` says whether the platform mirror is configured ([platform.md](platform.md#a-lake-without-the-platform-mirror), lake#605); `region` (`{name, label}` or `null`) and `regions` (`[{name, label, host}]` or `[]`) are this Lake's region and the deployment's regions ([regions.md](regions.md), lake#757); `order_sheet_url` is where the apex order sheet is, or `null` ([orders.md](orders.md), lake#831); `stripe_webhook_events` is the sorted list of Stripe events this version handles, the one `lake manifest` prints, which the operator subscribes the Lake's endpoint to ([operator-interface.md](../deployment/operator-interface.md), lake#1119); `liquid` is `{sync_protocol, sync_media_type, forge_api, oldest_release, newest_release, version_header}`, what liquid and liquify check before they sync; a request whose `Liquid-Version` header is outside that range is refused with `unsupported_client_version` ([liquid-clients.md](liquid-clients.md), lake#1324) | [../deployment/production-2026-09-08.md](../deployment/production-2026-09-08.md) |
 | `viewer` | read, **no auth** | `workspace_id?`, `customer_id?` | who is signed in, their accounts and current workspace, Clerk, sign-up, origin, agent models, version | [web-app.md](web-app.md) |
 | `my_permissions`, `list_packages`, `list_docs`, `get_doc`, `mcp_setup`, `resolve_model` | read (`list_docs`, `get_doc` and a public `resolve_model` need no credential) | see the page | permission flags, the Packages catalog, the Docs guides, Developer → MCP, a model's repository by name | [web-app.md](web-app.md) |
 | `latest_agent_task`, `render_pipeline` / `compile_pipeline` | read / action | `customer_id`, `workspace_id`, then `subject`, or `project` and `graph`, or `project` and `intent` (and `create_project` for a new project, lake#1193) | a project's background task, a pipeline drawn as SVG, a pipeline compiled from a description | [web-app.md](web-app.md) |
@@ -386,9 +386,9 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `get_repository` | read | `id` | repository | [repositories.md](repositories.md) |
 | `list_environments`, `get_environment`, `list_deployments`, `environment_logs` | read | repository id, optional environment, paging and log cursor fields | mirrored platform state or Loki-compatible log page | [platform.md](platform.md) |
 | `set_environment_env`, `unset_environment_env` | action (`write`) | repository, environment, key and plain value where setting | appended control-plane row | [platform.md](platform.md) |
-| `create_domain`, `delete_domain` | action (`deploy`) | repository, environment, host and TLS mode where creating | pending operator request | [platform.md](platform.md) |
+| `create_domain`, `verify_domain`, `delete_domain` | action (`deploy`) | repository, environment, host and TLS mode where creating | the host's claim and its TXT record; verified, the pending operator request | [platform.md](platform.md#custom-domains) |
 | `repository_refs`, `repository_tree`, `repository_file` | read | repository id plus ref or path where required | published refs, tree entries, or one file/blob | [repositories.md](repositories.md) |
-| `list_changes`, `get_change`, `change_diff`, `list_conflicts` | read | repository id plus change id where required | change metadata, per-path diffs with text hunks, or conflicts with kind, region, explanation, proposal, and reasons | [repositories.md](repositories.md) |
+| `list_changes`, `get_change`, `change_diff`, `list_conflicts` | read | repository id plus change id where required | change metadata with `people` naming each author's account, per-path diffs with text hunks, or conflicts with kind, region, explanation, proposal, and reasons | [repositories.md](repositories.md), [signers by name](repositories.md#signers-by-name) |
 | `resolve_conflict` | action (`write`) | repository id, ref, path, conflict id, resolution kind, and optional base64 blob | conflict/value resolution record and new change | [repositories.md](repositories.md) |
 | `list_artifacts`, `get_artifact` | read | repository id; optional action/output/content filters, cursor and limit; or result id | a result page, or one result with outputs, timing, cache state, verified attestations and trace | [repositories.md](repositories.md) |
 | `reindex_artifacts` | action (`write`) | repository id | registry-derived artifact-member index counts | [registry.md](registry.md) |
@@ -413,20 +413,20 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `refs` | read | `repository_id` | `{items: [repository ref]}` | [sync.md](sync.md) |
 | `find_missing`, `push`, `pull`, `upload_chunks`, `read_chunk` | binary read/action | repository id plus liquid sync body, digest, or range | binary liquid response; push reports every reference outcome and refusal reason | [sync.md](sync.md) |
 | `create_issue`, `update_issue`, `list_issues`, `create_issue_comment`, `list_issue_comments`, `issue_assignees` | read/action | repository id, issue fields, state, or issue id | durable Markdown issue and discussion records with their author; the people an issue can be assigned to | [forge.md](forge.md) |
-| `create_review`, `update_review`, `list_reviews`, `create_review_comment`, `list_review_comments`, `map_review_anchors` | read/action | repository id, liquid change, review state, anchor, or text hunks | change review and cursor-compatible anchored discussion records | [forge.md](forge.md) |
+| `create_review`, `update_review`, `list_reviews`, `create_review_comment`, `list_review_comments`, `map_review_anchors` | read/action | repository id, liquid change, review state, anchor, or text hunks | change review and cursor-compatible anchored discussion records; the two lists add `people`, naming each opener, reviewer, approver and comment author ([signers by name](repositories.md#signers-by-name)) | [forge.md](forge.md) |
 | `create_release`, `list_releases` | read/action | repository id, tag, change, and build-result IDs | tag release retaining attestation evidence and source-binding status; protected pushes reverify every result | [forge.md](forge.md) |
 | `create_webhook`, `list_webhooks`, `deliver_webhook`, `retry_webhook_delivery`, `list_webhook_deliveries` | read/action | repository id, subscription, endpoint, event, payload, or delivery ID | signed delivery attempts and retained retry log | [forge.md](forge.md) |
 | `set_branch_protection`, `list_branch_protections` | read/action | repository id, ref pattern, review/verification/fast-forward requirements, and allowed pushers | ref policy records and policy-object binding; enforcement waits on liquid #177 | [forge.md](forge.md) |
 | `export_repository`, `import_repository`, `list_exports` | read/action | repository or destination customer and workspace, archive, and optional Git projection | signed portable archive, recreated repository, or prior export records | [export.md](export.md) |
-| `import_github_repository` | action | destination customer and workspace, local Git directory, and recorded GitHub responses | imported repository and durable fidelity report | [github-import.md](github-import.md) |
+| `import_github_repository` | action | destination customer and workspace, a Git checkout in the customer's staging folder, and recorded GitHub responses | imported repository and durable fidelity report | [github-import.md](github-import.md) |
 | `list_teams`, `get_team`, `create_team` | read/action | organization or team identifiers and fields | team(s) | [organizations.md](organizations.md) |
-| `list_memberships`, `get_membership`, `create_membership`, `set_member_role`, `remove_member` | read/action | scope (omit for your own), membership id, principal, role; lake signs the evidence (lake#602) | membership(s) or removal confirmation; owner changes require an organization owner or operator (LSR-099) | [organizations.md](organizations.md) |
+| `list_memberships`, `get_membership`, `create_membership`, `set_member_role`, `remove_member` | read/action | scope (omit for your own), membership id, principal, role; lake signs the evidence (lake#602) | membership(s) or removal confirmation; owner changes require an organization owner or operator | [organizations.md](organizations.md) |
 | `list_invitations`, `create_invitation`, `accept_invitation` | read/action | scope (omit for your own), invitee, role, expiry or accepting principal | invitation or membership | [organizations.md](organizations.md) |
 | `create_organization_space`, `convert_personal_space`, `join_organization` | action | organization name and handle, your personal account, or an invitation addressed to you | organization account or membership | [organizations.md](organizations.md) |
-| `list_objects`, `get_object`, `create_object` | read/action | graph identifiers, type, parent, `inherit` | object(s) | [policy.md](policy.md) |
+| `list_objects`, `get_object`, `create_object` | read/action | graph identifiers, type, parent, `inherit`, `ref` | object(s) | [policy.md](policy.md) |
 | `list_grants`, `create_grant` | read/action | object, principal, role; lake signs the evidence (lake#602) | grant(s); a created one with `attestation` | [policy.md](policy.md) |
 | `effective_access` | read | `object_id` | `{items: [effective access]}` | [policy.md](policy.md) |
-| `entity_effective_access` | read | `object_type` (`repository`, `organization`, or `team`), `id` | `{object, items: [effective access]}` | [policy.md](policy.md) |
+| `entity_effective_access` | read | `object_type` (`repository`, `organization`, or `team`), `id` | `{object, items: [effective access], people}`, `people` naming each principal's account ([signers by name](repositories.md#signers-by-name)) | [policy.md](policy.md) |
 | `identity` | read, **no auth** | — | lake TAAP identity document | [audit.md](audit.md) |
 | `rotate_identity` | action | — | replacement lake identity document | [audit.md](audit.md) |
 | `audit` | read | `principal?`, `object?`, `outcome?`, `from?`, `to?`, `limit?`, `workspace_id?`, `customer_id?`, `log?` | `{items: [audit event with log], unread_workspaces}`, the central log and the workspaces' audits; an account's for its administrator | [audit.md](audit.md#who-may-read-it) |
@@ -450,14 +450,14 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `list_agent_revisions` | read | customer, workspace, agent, optional limit | every revision of an agent's definition, newest first: its number, who made it and when, `create` or `update`, and the definition it set (lake#653); restore one with `update_agent` | [train-agents.md](train-agents.md#definition-revisions) |
 | `list_datasets` | read | customer | The workspace dataset catalogue with stable `<database>/<name>` ids (the form `get_dataset` takes) and `kind` (`data` or engine `result`) | [workspaces.md](workspaces.md) |
 | `list_runs` | read | customer, optional project/solution and limit | newest matching runs with status, reached stage and final error line | [workspaces.md](workspaces.md) |
-| `launch_agent`, `list_agent_launches`, `stop_agent_launch`, `schedule_agent`, `list_agent_schedules`, `unschedule_agent` | action / read | customer, agent, mode, input, cron or trigger | run, follow and stop Python agents on agent-runtime, and give them cron schedules (each a CronJob) | [agent-launches.md](agent-launches.md) |
+| `launch_agent`, `list_agent_launches`, `stop_agent_launch`, `schedule_agent`, `list_agent_schedules`, `unschedule_agent` | action / read | customer, agent, mode, input, cron or trigger | run, follow and stop Python agents on agent-runtime, and give them cron schedules (each a CronJob); a run or schedule made before Lake confined runs to their dataset work area answers `recreate` (lake#1055) | [agent-launches.md](agent-launches.md) |
 | `set_agent_streams`, `list_agent_streams` | action / read | customer, workspace, agent, streams | the workspace streams whose new messages each start a job of a Python agent, as the person who set them (lake#677) | [agent-launches.md](agent-launches.md#stream-triggers) |
 | `agent_turn` | action | customer, agent, message, optional conversation/kind/context | one conversation turn with any agent: library, native or Python; a reused library-agent conversation includes its preceding same-agent, same-kind turn; Experiments Agent uses proposal, status and explanation kinds | [agent-launches.md](agent-launches.md) |
 | `receive_agent_tasks`, `claim_agent_task`, `publish_agent_event`, `receive_agent_events` | read / action | agent, task, sequence | renewable claims, bounded reclaim/retry, progress and first-terminal-write-wins results over workspace Zetta pub/sub; delegated turns reported on the asking turn | [agent-bus.md](agent-bus.md) |
-| `mint_agent_session_key` | action | customer, durable identity with an active customer agent certificate, dispatcher matching the authenticated caller, scopes, lifetime | response-only private seed plus logged delegation | [agents.md](agents.md) |
+| `mint_agent_session_key` | action | customer, durable identity with an active customer agent certificate, dispatcher matching the authenticated caller, a live repository of the customer, scopes, lifetime (at most 900 s; never-expiring refused) | response-only private seed plus a logged delegation in liquid v0.3.0's shape (lake#1346) | [agents.md](agents.md) |
 | `verify_agent_session_drip` | action | customer, session, canonical body and TAAP signature | verified durable attribution, scopes and log commitment | [agents.md](agents.md) |
 | `revoke_agent_session` | action | customer, agent session | the key with `revoked_at`; it never verifies again | [agents.md](agents.md) |
-| `set_customer_credential_policy` | action | customer, `allow_non_expiring_credentials` | the customer's opt-in to keys and tokens that never expire | [agents.md](agents.md) |
+| `set_customer_credential_policy` | action | customer, `allow_non_expiring_credentials` | the customer's opt-in to tokens that never expire (agent session keys always expire, lake#1346) | [agents.md](agents.md) |
 | `timestamp_checkpoint` | action | — | RFC 4998 evidence record for the current checkpoint signature | [transparency.md](transparency.md) |
 | `renew_timestamp_evidence` | action | checkpoint digest | evidence record with a new archive timestamp over its predecessor | [transparency.md](transparency.md) |
 | `timestamp_evidence` | read | checkpoint digest | verified evidence record, token summaries, and renewal deadline | [transparency.md](transparency.md) |
@@ -497,7 +497,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `usage_over_time` | read | `customer_id`, `workspace_ids?`, `dimensions?`, `from`, `to`, `granularity` (`hour`, `day`, `month`) | each dimension of usage over the period, added up across the chosen workspaces, with breakdowns by workspace and kind (and by agent, launch, model or object where they apply), read from each workspace's own Zetta (lake#564); what an engine holds on its own volume is `engine_storage`, detail, never billed (lake#663) | [metering.md](metering.md#usage-over-time) |
 | `usage_over_time` | read | `customer_id`, `workspace_ids?`, `dimensions?`, `from`, `to`, `granularity` (`hour`, `day`, `month`) | each dimension of usage over the period, added up across the chosen workspaces, with breakdowns by workspace and kind (and by agent, launch, model or object where they apply), read from each workspace's own Zetta (lake#564); app traffic through the ingress is `transfer` once its hour closes (lake#661) | [metering.md](metering.md#usage-over-time) |
 | `usage_limits`, `set_usage_limit` | read/action | `customer_id`; a `dimension`, `limit` and `warn_percent?` | the account's limits with this month's use and a state (ok, warning, over); storage's limit is the enforced quota (lake#564) | [metering.md](metering.md#limits) |
-| `price_list`, `set_price_list`, `billing_account`, `set_billing_contact`, `bill_preview`, `issue_invoice`, `resend_invoice`, `list_invoices`, `get_invoice`, `record_invoice_payment`, `void_invoice` | read/action | the price list's rates and `effective_from`; a `customer_id`, `period` (`YYYY-MM`) or `invoice_id` | Orama Cloud's billing, registered only where `LAKE_BILLING` is on (absent on enterprise installs): one price list with a rate per usage dimension that every account is billed at (lake#635; time per minute, lake#637), the month's bill from its usage, invoices and their payment state, and each account's billing contact, to which Stripe emails each invoice (lake#857), in PostgreSQL (decision 56, lake#564) | [billing.md](billing.md) |
+| `price_list`, `set_price_list`, `billing_account`, `set_billing_contact`, `bill_preview`, `issue_invoice`, `resend_invoice`, `list_invoices`, `get_invoice`, `record_invoice_payment`, `void_invoice` | read/action | the price list's rates and `effective_from`; a `customer_id`, `period` (`YYYY-MM`) or `invoice_id` | Orama Cloud's billing, registered only where `LAKE_BILLING` is on (absent on enterprise installs): one price list with a rate per usage dimension that every account is billed at (lake#635; time per minute, lake#637), the month's bill from its usage, invoices and their payment state, and each account's billing contact, to which Stripe emails each invoice (lake#857), in PostgreSQL (lake#564) | [billing.md](billing.md) |
 | `create_coupon`, `list_coupons`, `disable_coupon`, `redeem_coupon` | action/read | a code's amount, `credit_days`, expiry, cap, `new_accounts_only` and `campaign`; a `coupon_id` or `code`; a `customer_id` and `code` | coupon codes for ads (lake#1156), billing on only: the operator creates, reports on and disables codes; a person redeems one for an account they administer, and it becomes an ordinary credit from Orama, once per account and per verified email | [billing.md](billing.md#coupon-codes) |
 | `record_model_usage` | action | `model_name`, `input_tokens`, `output_tokens`, `task_id?` | an agent's own task, launch, schedule or bus credential reports the tokens of a model call made outside Lake; lake adds them to that workspace's usage (lake#564) | [metering.md](metering.md#model-tokens) |
 | `model_completion` | action | `endpoint` (`chat/completions`, `responses`, `embeddings`), `request` (the OpenAI body) | the model gateway: an agent's task, launch or schedule credential calls the model provider through Lake with Orama's key; the provider's answer, its tokens counted as the run's workspace's `model_tokens`, refused past the monthly limit; also served OpenAI-compatible at `POST /openai/v1/<endpoint>` (lake#248) | [model-gateway.md](model-gateway.md) |
@@ -516,6 +516,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `issue_client_certificate`, `issue_device_certificate` | action | customer, subject, optional lifetime | short-lived client or device X.509 certificate, private key, and chain | [pki.md](pki.md) |
 | `issue_agent_certificate`, `rotate_agent_certificate`, `revoke_agent_certificate`, `check_agent_certificate` | action/read | customer and TAAP key; then certificate id and optional replacement key | short-lived public-key certificate or enforced status | [pki.md](pki.md) |
 | `issue_ssh_user_certificate`, `issue_ssh_host_certificate` | action | customer, Ed25519 public key, key ID, principals, optional lifetime | short-lived OpenSSH certificate and CA public key | [pki.md](pki.md) |
+| `create_acme_external_account_binding` | action | `customer_id` (customer `admin`) | `key_id`, `hmac_key` and the directory path: the External Account Binding an ACME client needs to enroll (lake#919) | [pki.md](pki.md#acme) |
 | `acme_new_account`, `acme_new_order`, `acme_order`, `acme_authorization`, `acme_http01_challenge`, `acme_finalize_order`, `acme_certificate`, `acme_http01_response` | ACME transport | RFC 8555 JWS, account, order, authorization, challenge and CSR fields | customer-scoped ACME state and certificate chain | [pki.md](pki.md) |
 | `begin_root_recovery`, `claim_root_recovery_share`, `complete_root_recovery` | action | customer, threshold and distinct participants; then ceremony; then the caller's own share | ceremony and participants (no share); the caller's own share, once; progress toward the quorum | [break-glass.md](break-glass.md) |
 | `exchange_kubernetes_attestation` | action, public entry | customer, organization, projected token, workload TAAP ID, audiences | durable caller ID and short-lived workload credential | [callers.md](callers.md) |
@@ -571,8 +572,7 @@ and audit recording remain inside the registry path.
    them complete, with every required field.
 
 **Verify.** `ctest --test-dir build`, then
-`./build/lake --listen 127.0.0.1:4901 --memory-store --admin-token t` and `curl` the routes
-(see [`../deployment/aks.md`](../deployment/aks.md) for the production checks).
+`./build/lake --listen 127.0.0.1:4901 --memory-store --admin-token t` and `curl` the routes.
 
 ## Schema conformance proof
 
@@ -604,26 +604,29 @@ limits non-admin recipients to the account's people; see [sharing.md](sharing.md
 
 
 Repository mutations check every destination and affected descendant under the store mutation
-lock (lake#962, LSR-096), including uploads, recursive move/delete, restore, compatible commits and
-repository-backed stores. See [drive.md](drive.md#nested-mutation-permissions-lake962-lsr-096).
-Model entitlement and model/direction billing (LSR-095, lake#961) are documented in
+lock (lake#962), including uploads, recursive move/delete, restore, compatible commits and
+repository-backed stores. See [drive.md](drive.md#nested-mutation-permissions-lake962).
+Model entitlement and model/direction billing (lake#961) are documented in
 [`model-gateway.md`](model-gateway.md). The configured exact model/provider allowlist applies before dispatch on every transport;
 billing additionally requires positive model input and output rates. `model_tokens` classes
 preserve raw counts and bill each direction separately. `test_model_gateway.cpp` and
 `test_billing.cpp` cover provider-call refusal and invoice amounts, including a missing price.
 [Replication](replication.md) requires trusted signed checkpoints covering every batch head;
-[transparency](transparency.md) refuses legacy full-event identity scans (lake#974, LSR-107).
+[transparency](transparency.md) refuses legacy full-event identity scans (lake#974).
 [audit.md](audit.md#workspace-audit) documents per-customer and per-workspace queue limits,
-signed delivery failure evidence and `audit_queue_full` with the original operation result (LSR-098).
+signed delivery failure evidence and `audit_queue_full` with the original operation result.
 Password, MFA and recovery entry points share bounded authentication work and account/client
 attempt budgets (lake#969); new recovery codes use a selector, and legacy codes require
 regeneration. See [authentication attempt limits](identity.md#authentication-attempt-limits).
 Storage quota overrides require the operator credential or instance administrator through both
-`set_storage_quota` and the `storage` dimension of `set_usage_limit` (lake#976, LSR-109).
+`set_storage_quota` and the `storage` dimension of `set_usage_limit` (lake#976).
 See [metering.md](metering.md#quota-behavior) for authorization and focused proof.
-LSR-102 (lake#968): [recovery.md](recovery.md#email-recovery-budgets) documents uniform accepted
+lake#968: [recovery.md](recovery.md#email-recovery-budgets) documents uniform accepted
 responses, durable client/global limits, account attempt reuse and owner-only `cancel_recovery`,
 linked in device notices. Migration `0096_email_recovery_limits` awaits operator vendoring.
-Recurring order entitlement (lake#972, LSR-105): [orders.md](orders.md#recurring-entitlement-lsr-105-lake972) describes signed renewal/end events, deadline-based grace and the required operator suspension contract.
+Recurring order entitlement (lake#972): [orders.md](orders.md#recurring-entitlement-lake972) describes signed renewal/end events, deadline-based grace and the required operator suspension contract.
 
 Password, MFA and recovery entry points share [authentication attempt limits](identity.md#authentication-attempt-limits) across REST, hosted forms and MCP (lake#966).
+
+Repository visibility (lake#1310): `set_repository_visibility` needs `admin` on the repository or
+its account; a writer is refused. See [repositories.md](repositories.md#public-repositories).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // The last-resort answer for a route handler that throws (lake#440).
@@ -27,13 +29,14 @@
 
 #include "lake/api/web_ui.hpp"
 #include "lake/control/store.hpp"
+#include "request_log.hpp"
 
 namespace lake::api {
 
 struct RouteFailure {
     std::string route;      // the registered route pattern
     std::string method;
-    std::string path;       // for the handler's caller; never logged (decision 54 S9)
+    std::string path;       // for the handler's caller; never logged
     std::string request_id; // the caller's X-Request-Id, or a new one
     std::string message;    // what the exception said; logged, never sent to the client
 };
@@ -55,7 +58,7 @@ inline RouteFailure route_failure(const boost::http::route_params& route,
                                   std::string message) {
     RouteFailure failure;
     failure.route = std::string(pattern);
-    failure.method = std::string(route.req.method_text());
+    failure.method = std::string(request_method_label(route.req.method_text()));
     failure.path = std::string(route.url.path());
     failure.request_id = route.req.count("x-request-id") == 0
                              ? control::new_uuid_v4()

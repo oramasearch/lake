@@ -1,5 +1,9 @@
+// SPDX-License-Identifier: MIT
+
 // The tunnel client downloads (lake#745, docs/api/tunnel-clients.md): the clients directory,
 // tunnel_client_downloads' signed short-lived links, and GET /tunnel-clients/<platform>.
+#include <openssl/hmac.h>
+#include <openssl/evp.h>
 #include <gtest/gtest.h>
 
 #include <array>
@@ -155,6 +159,20 @@ TEST(TunnelClients, ALinkIsBoundToItsPlatformVersionExpiryAndKey) {
     EXPECT_TRUE(signed_link_matches(kek, tunnel_client_link_payload("linux-amd64", "0.0.1", expires),
                                     signature));
     EXPECT_TRUE(signed_link_signature({}, "anything").empty());
+    // lake#1009: the instance key itself never signs a link.
+    {
+        const std::string payload = "liquid-hub-upload\nexample";
+        std::array<unsigned char, EVP_MAX_MD_SIZE> raw{};
+        unsigned int size = 0;
+        ASSERT_NE(HMAC(EVP_sha256(), kek.data(), static_cast<int>(kek.size()),
+                       reinterpret_cast<const unsigned char*>(payload.data()), payload.size(),
+                       raw.data(), &size),
+                  nullptr);
+        const std::string under_kek = lake::control::identity_crypto::base64url_encode(
+            std::string_view(reinterpret_cast<const char*>(raw.data()), size));
+        EXPECT_NE(signed_link_signature(kek, payload), under_kek);
+        EXPECT_FALSE(signed_link_matches(kek, payload, under_kek));
+    }
 }
 
 namespace {

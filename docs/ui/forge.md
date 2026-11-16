@@ -36,9 +36,16 @@ use the full value.
 the panel explains the missing setting and shows no commands
 ([../serving/configuration.md](../serving/configuration.md)). The first block runs `liquid clone`
 into a new directory and enters it; the second runs `liquid push` from that checkout after changes
-have been captured and named. The panel tells the person to export an account token from
-**Tokens** as `LIQUID_TOKEN` before running either; the token is never in the URL
-([../api/sync.md](../api/sync.md)). URLs and directory names are shell-quoted.
+have been captured and named. The panel tells the person to create an API token under Account →
+**Tokens** with the *liquid and liquify* scopes and export it as `LIQUID_TOKEN` before running
+either; the token is never in the URL
+([../api/sync.md](../api/sync.md)). URLs and directory names are shell-quoted. A last line names
+liquify, liquid's IDE, as the place to open the repository: `liquify '<directory>'` on the checkout,
+or a clone from liquify's start screen with the repository URL (lake#1324). The named-lake
+form (`liquid lake add <name> <url>` once, then clone and push by name) waits for
+[liquid#525](https://github.com/oramasearch/liquid/issues/525); until liquid has that command the
+panel keeps the full-URL commands. The liquid releases this Lake supports are in `server_info`
+([../api/liquid-clients.md](../api/liquid-clients.md)).
 `tests/instance_origin.mjs` executes the two blocks copied from the page and is described in
 [../deployment/private-install.md](../deployment/private-install.md).
 
@@ -64,8 +71,9 @@ extension uses the same numbered layout with plain text.
 ## Change review
 
 `/change?repository_id=<id>&id=<change>` (`ChangePage.tsx`) makes the first message line the
-review title and renders the rest as Markdown. It shows compact change, author, parent and blob
-identities; review state and reviewers (`list_reviews`); per-file and total addition and removal
+review title and renders the rest as Markdown. It shows compact change, parent and blob
+identities; the author, each reviewer and each comment's author by name and `@handle`, with the key on
+hover ([signers](#signers-by-name)); review state and reviewers (`list_reviews`); per-file and total addition and removal
 counts; structural conflict values; line-addressable text hunks with their anchored comments
 (`list_review_comments`); and repository checks with output paths and verified attestation profiles
 (`list_artifacts`). Change lookup includes changes kept by named review references as well as the
@@ -234,3 +242,17 @@ protection page as the operator.
 Add the data to a capability's output first ([../api/web-app.md](../api/web-app.md#change)), then
 read it in the page. Shared presentation belongs in `styles/lake.css` and the kit; pages use lake's
 classes, not their own colours.
+
+## Signers by name
+
+The repository page's Recent changes and Effective access, the Change Log, a change's header,
+details, reviewers and comments, the File page's blame and the repository's Effective Access page
+show who signed a change or holds access by name and `@handle` (`SignerName` in `forge.tsx`), from
+the `people` member of the read that named them ([../api/repositories.md](../api/repositories.md#signers-by-name),
+lake#1326). The whole key is in the `title` (the hover) and `data-full-identifier`. An identity no
+account acts for reads **Unknown signer** and a short key (the key without `taap:1:ed25519:`, first 8
+and last 4 characters). A principal that is not a TAAP identity (an App, a build, a share link) reads
+as itself. The viewer's own identity adds "(you)". The Change Log's search and the access search
+match names and handles as well as keys. The labels are pure functions in `signers.ts`
+(`frontend/tests/signers.test.ts`).
+

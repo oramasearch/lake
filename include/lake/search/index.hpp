@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <cstddef>
@@ -62,6 +64,12 @@ struct Query {
     // empty, whose indexes on lake's volume it reads); nothing: every space (the operator). A
     // workspace outside them is never lent, opened or rebuilt for this query.
     std::optional<std::set<std::string>> spaces;
+    // An agent credential's confinement (lake#985): while `confined`, each hit's repository is
+    // authorized only inside the account `confined_customer` and, when set, the workspace
+    // `confined_workspace`, as control::AuthorizationConfinement decides.
+    bool confined = false;
+    std::string confined_customer;
+    std::string confined_workspace;
 };
 
 struct Hit {
@@ -110,7 +118,7 @@ struct QueryResult {
     std::vector<std::string> stale_workspaces;
 };
 
-// The objects of one workspace's search index (lake#381, decision 54 S8), kept beside the
+// The objects of one workspace's search index (lake#381), kept beside the
 // workspace's liquid store in its workspace Zetta. Names are plain names (`manifest.json`,
 // `runs/<id>.json`, ...).
 class IndexObjects {

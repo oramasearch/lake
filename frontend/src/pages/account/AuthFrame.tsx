@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The frame of a bare sign-in page: lake's brand (to Home) and the theme switch above the page,
  * with no rail, so a visitor signing in sees only the sign-in. */
 import { type ReactNode, useEffect } from "react";

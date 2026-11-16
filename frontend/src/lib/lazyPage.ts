@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Code-split pages that survive a deploy. A tab opened before a roll references the previous
  * build's chunk names; after the roll those files are gone and `import()` fails. The first such
  * failure reloads the page once (fetching the new index and its chunks); a second failure within a

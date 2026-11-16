@@ -104,16 +104,17 @@ The same reads are capabilities:
 Repositories are read and written with the `liquid` command line. The full set of commands is in
 [The liquid CLI](/docs/cli); this is the path from the web app to a working checkout.
 
-1. Make a token: open the account menu → **Tokens** → **New token**. For push and pull, give it
-   the scopes `refs,find_missing,push,pull,upload_chunks,read_chunk` (the drawer fills them in with
-   one click). Copy the secret; it is shown once.
+1. Make an API token: open the account menu → **Tokens** → **New token**. For liquid and liquify,
+   give it the *liquid and liquify* scopes (the drawer fills them in with one click):
+   `refs,find_missing,push,pull,upload_chunks,read_chunk,list_reviews,create_review,update_review,list_review_comments,create_review_comment,map_review_anchors,list_branch_protections`. They clone, pull and push, and let liquify list, open and comment on reviews. Copy the
+   secret; it is shown once.
 2. In your terminal, export it: `export LIQUID_TOKEN=<the token>`. liquid sends it as the bearer
    credential and never prints it; it never goes in the URL.
 3. On the repository's home page press **Clone** (or use the **Clone and push** card) and copy the
    first block. It looks like this:
 
 ```sh
-liquid clone https://lake.oramadev.net/v1/repositories/<repository id> analytics
+liquid clone https://lake.example.com/v1/repositories/<repository id> analytics
 cd analytics
 ```
 
@@ -122,7 +123,7 @@ cd analytics
 5. Copy the second block to publish:
 
 ```sh
-liquid push https://lake.oramadev.net/v1/repositories/<repository id>
+liquid push https://lake.example.com/v1/repositories/<repository id>
 ```
 
 `liquid pull <the same URL>` brings in what others pushed. The address is
@@ -141,6 +142,10 @@ There is no visibility control on the page; it is a capability.
 - REST: `POST /v1/set_repository_visibility` with
   `{"id": "<repository id>", "visibility": "public"}`.
 - MCP: `set_repository_visibility`.
+
+Changing visibility needs `admin` on the repository: an administrator of the repository or of
+the account that owns it. Someone with only `write` is refused with `unauthorized`, and the
+repository keeps its visibility (lake#1310).
 
 Making a repository public lets anyone read its files, changes, issues, reviews and releases
 without signing in. Webhooks, branch protection evidence and the Drive view still need a signed-in
@@ -202,7 +207,8 @@ Grants themselves are covered in [Grants and Effective Access](/docs/access).
 | Read a public repository | nothing; signed out works |
 | Read a private or organization repository | `read` on it (a grant, an organization role or ownership) |
 | Create a repository | `write` on the account that owns the workspace |
-| Push, rename, change visibility, delete | `write` on the repository |
+| Push, rename, delete | `write` on the repository |
+| Change visibility | `admin` on the repository or its account |
 | See effective access | `share` on the repository |
 
 A signed-out visitor who opens a private repository's address is sent to sign in, and is never told

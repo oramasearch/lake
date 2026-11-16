@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Ship → Models (lake#599): serving the workspace's models. Each model with the version that
  * answers outside calls, its calls, errors and latency over the last day (`model_traffic`, from the
  * workspace's own series), and Publish, Unpublish and Call. A row opens the model's serving page;

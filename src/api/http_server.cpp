@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // lake — the HTTP adapter. Beast2 (HTTP/1) on Capy + Corosio, the same stack
 // Zetta serves with (zetta/src/core/api/http_server.cpp). This is the ONE
 // translation unit that knows about beast2 / boost::http. It
@@ -13,6 +15,7 @@
 #include "lake/api/billing.hpp"
 #include "lake/api/clerk_webhooks.hpp"
 #include "lake/api/client_address.hpp"
+#include "lake/api/liquid_clients.hpp"
 #include "lake/api/mcp_client.hpp"
 #include "lake/api/mcp_connections.hpp"
 #include "lake/api/metering_recorder.hpp"
@@ -28,6 +31,7 @@
 #include "lake/control/agents.hpp"
 #include "lake/control/agent_library.hpp"
 #include "lake/control/agent_bus.hpp"
+#include "lake/control/agent_task_proxy.hpp"
 
 #include <algorithm>
 #include <array>
@@ -677,12 +681,10 @@ std::string server_timing_of(const boost::http::route_params& route) {
 // Every page lake answers: only lake frames it (the Ask Orama panel, lake#258), so no clickjacking,
 // and it shows images only from lake itself and `data:` URLs (lake#943), so no Markdown an agent or
 // another person wrote can make the browser send anything to another server by naming an image
-// (docs/serving/http.md#images).
+// (docs/serving/http.md#images). The web app's own pages get the stricter policy of
+// web_app_content_security_policy (lake#991), which also limits scripts and requests.
 constexpr std::string_view page_content_security_policy =
     "frame-ancestors 'self'; img-src 'self' data:";
-// The web app's pages with Clerk on, whose sign-in shows images from Clerk's image host.
-constexpr std::string_view clerk_page_content_security_policy =
-    "frame-ancestors 'self'; img-src 'self' data: https://img.clerk.com";
 
 boost::http::route_task
 send_text(boost::http::route_params& route,
@@ -695,6 +697,7 @@ send_text(boost::http::route_params& route,
     route.status(status);
     route.res.set(http::field::content_type, content_type);
     route.res.set(http::field::cache_control, cache_control);
+    route.res.set("X-Content-Type-Options", "nosniff");
     if (content_type.starts_with("text/html")) {
         route.res.set("Content-Security-Policy", content_security_policy);
     }
@@ -717,6 +720,7 @@ boost::http::route_task send_bytes(boost::http::route_params& route,
     route.status(status);
     route.res.set(http::field::content_type, content_type);
     route.res.set(http::field::cache_control, "no-store");
+    route.res.set("X-Content-Type-Options", "nosniff");
     route.res.erase(http::field::etag);
     route.res.erase(http::field::content_length);
     if (!etag.empty()) {
@@ -925,7 +929,11 @@ RegistryCredential registry_credential_of(const boost::http::route_params& route
         return {};
     }
     const std::string username = credential.substr(0, separator);
-    if (username != "lake" && username != "app") {
+    // A methodology run's and a served methodology model's pods pull with their own user name
+    // (orama-operator's methodologyPullUser and methodologyDeploymentPull); registry_access
+    // accepts each only with its own kind of credential.
+    if (username != "lake" && username != "app" && username != "methodology-run" &&
+        username != "methodology-deployment") {
         return {};
     }
     return {username, credential.substr(separator + 1)};
@@ -1241,11 +1249,33 @@ public:
             return std::unexpected("OCI repository name is invalid");
         }
         const std::string id = control::new_uuid_v4();
+        // The repository the upload was started for (lake#998): an append or a finish
+        // names it in its URL and is refused when it names another.
+        const auto owned =
+            write(upload_owner_path(id), std::as_bytes(std::span(repository.data(), repository.size())));
+        if (!owned) {
+            return std::unexpected(owned.error());
+        }
         const auto saved = write(upload_path(id), {});
         if (!saved) {
             return std::unexpected(saved.error());
         }
         return id;
+    }
+
+    // Whether upload `id` was started for `repository`. An upload without its owner record
+    // (started before lake#998) belongs to no repository.
+    bool upload_belongs_to(std::string_view id, std::string_view repository) const {
+        if (!safe_component(id)) {
+            return false;
+        }
+        std::unique_lock lock(mutex_);
+        std::ifstream input(upload_owner_path(id), std::ios::binary);
+        if (!input) {
+            return false;
+        }
+        const std::string owner((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        return !owner.empty() && owner == repository;
     }
 
     ArtifactResult<std::uint64_t> upload_size(std::string_view id) const {
@@ -1341,6 +1371,7 @@ public:
         if (error) {
             return std::unexpected("could not publish OCI blob: " + error.message());
         }
+        std::filesystem::remove(upload_owner_path(id), error);
         return *actual;
     }
 
@@ -1991,6 +2022,10 @@ private:
         return root_ / "uploads" / std::string(id);
     }
 
+    std::filesystem::path upload_owner_path(std::string_view id) const {
+        return root_ / "upload-owners" / std::string(id);
+    }
+
     std::filesystem::path blob_path(std::string_view digest) const {
         return root_ / "blobs" / std::string(digest.substr(7));
     }
@@ -2505,13 +2540,35 @@ oci_content_range(const boost::http::route_params& route) {
     return std::optional<OciContentRange>{{*start, *end}};
 }
 
-std::string browser_session_cookie(const boost::http::route_params& route,
-                                   std::string_view secret) {
-    std::string cookie = "lake_session=" + std::string(secret) + "; HttpOnly; SameSite=Lax; Path=/";
+// The console's session cookie (lake#982, lake#910). Over HTTPS it is
+// __Host-lake_session: Secure, Path=/ and no Domain, so a tenant app on a subdomain of the Lake can
+// neither set nor shadow it; only that name is read. Over plain HTTP (local development, tests) the
+// prefix is not allowed, and it stays lake_session.
+std::string session_cookie_name(const boost::http::route_params& route) {
+    return request_is_https(route) ? "__Host-lake_session" : "lake_session";
+}
+
+std::string session_cookie(const boost::http::route_params& route,
+                           std::string_view secret,
+                           std::string_view same_site = "Lax") {
+    std::string cookie = session_cookie_name(route) + "=" + std::string(secret) +
+                         "; HttpOnly; SameSite=" + std::string(same_site) + "; Path=/";
     if (request_is_https(route)) {
         cookie += "; Secure";
     }
     return cookie;
+}
+
+std::string session_cookie_of(const boost::http::route_params& route) {
+    return cookie_value(route, session_cookie_name(route));
+}
+
+// An app's session cookie is always Secure, so it always carries the __Host- prefix.
+constexpr std::string_view app_session_cookie = "__Host-lake_app_session";
+
+std::string browser_session_cookie(const boost::http::route_params& route,
+                                   std::string_view secret) {
+    return session_cookie(route, secret);
 }
 
 // Invalid JSON is discarded; structural budget failures are returned by read_json_body.
@@ -2624,6 +2681,15 @@ public:
     void configure_workspace_stores(WorkspaceStoreConfig config) {
         std::lock_guard maps(mutex_);
         workspace_config_ = std::move(config);
+    }
+
+    // lake#1020: the identity chain of an attestation's issuer, from the identity documents people
+    // registered with Lake (empty for an identifier no account registered). Set once by the server
+    // before it serves.
+    using IssuerChains =
+        std::function<std::vector<liquid::identity_document>(const std::string& taap_id)>;
+    void configure_issuer_chains(IssuerChains chains) {
+        issuer_chains_ = std::move(chains);
     }
 
     // The counters of an open workspace store, for tests and the latency measurement.
@@ -2859,7 +2925,7 @@ public:
         if (!state) {
             return std::unexpected(state.error());
         }
-        auto server = liquid::sync_server{*(*state)->subject, *(*state)->objects};
+        auto& server = sync_server_of(**state);
         return from_liquid(liquid::runtime::block_on(server.handle_find_missing(request)));
     }
 
@@ -2879,49 +2945,13 @@ public:
         if (storage_quota_bytes != 0 && *stored_bytes >= storage_quota_bytes) {
             return std::unexpected(quota_error(*stored_bytes, storage_quota_bytes));
         }
-        liquid::sync_server_options options;
-        options.authorize =
-            [authorize = std::move(authorize)](const liquid::sync_item& item,
-                                               std::span<const liquid::sync_ref_update> updates)
-            -> liquid::runtime::task<std::vector<liquid::sync_ref_verdict>> {
-            std::vector<BranchRefUpdate> reference_updates;
-            reference_updates.reserve(updates.size());
-            for (const liquid::sync_ref_update& update : updates) {
-                reference_updates.push_back(BranchRefUpdate{
-                    .name = update.name,
-                    .old_head = update.old_head
-                                    ? std::optional{liquid::to_string(update.old_head->value)}
-                                    : std::nullopt,
-                    .new_head = liquid::to_string(update.new_head.value),
-                    .fast_forward = update.fast_forward,
-                });
-            }
-            const SyncPushItem input{
-                .kind = item.kind == liquid::sync_item_kind::reference ? SyncPushItemKind::Reference
-                                                                       : SyncPushItemKind::Change,
-                .change_id = liquid::to_string(item.reference.value),
-                .author = item.author.taap_id,
-            };
-            auto result = authorize(input, reference_updates);
-            if (!result) {
-                co_return std::unexpected(liquid_error(result.error()));
-            }
-            std::vector<liquid::sync_ref_verdict> verdicts;
-            verdicts.reserve(result->size());
-            for (const SyncRefVerdict& verdict : *result) {
-                verdicts.push_back({
-                    .name = verdict.name,
-                    .verdict = verdict.verdict == SyncRefVerdictKind::Accepted
-                                   ? liquid::sync_ref_verdict_kind::accepted
-                                   : liquid::sync_ref_verdict_kind::refused,
-                    .reason = verdict.reason,
-                });
-            }
-            co_return verdicts;
-        };
-        auto server =
-            liquid::sync_server{*(*state)->subject, *(*state)->objects, std::move(options)};
+        // Set for this push only; the lane serializes the repository's pushes.
+        (*state)->push_authorizer = std::move(authorize);
+        auto& server = sync_server_of(**state);
         auto pushed = from_liquid(liquid::runtime::block_on(server.handle_push(request)));
+        (*state)->push_authorizer = nullptr;
+        // The push moved what it claimed into the store or discarded it.
+        (*state)->staged_bytes = 0;
         if (!pushed) {
             return pushed;
         }
@@ -2938,7 +2968,7 @@ public:
         if (!state) {
             return std::unexpected(state.error());
         }
-        auto server = liquid::sync_server{*(*state)->subject, *(*state)->objects};
+        auto& server = sync_server_of(**state);
         return from_liquid(liquid::runtime::block_on(server.handle_pull(request)));
     }
 
@@ -2958,14 +2988,22 @@ public:
         if (!incoming_bytes) {
             return std::unexpected(incoming_bytes.error());
         }
-        if (exceeds_quota(*stored_bytes, *incoming_bytes, storage_quota_bytes)) {
-            return std::unexpected(quota_error(*stored_bytes, storage_quota_bytes));
+        // Uploads are staged until their push (liquid#403), so the quota counts the bytes staged
+        // since the last push as stored.
+        const std::uint64_t staged = (*state)->staged_bytes;
+        const std::uint64_t pending =
+            *stored_bytes > std::numeric_limits<std::uint64_t>::max() - staged
+                ? std::numeric_limits<std::uint64_t>::max()
+                : *stored_bytes + staged;
+        if (exceeds_quota(pending, *incoming_bytes, storage_quota_bytes)) {
+            return std::unexpected(quota_error(pending, storage_quota_bytes));
         }
-        auto server = liquid::sync_server{*(*state)->subject, *(*state)->objects};
+        auto& server = sync_server_of(**state);
         auto stored = from_liquid(liquid::runtime::block_on(server.handle_chunks(request)));
         if (!stored) {
             return std::unexpected(stored.error());
         }
+        (*state)->staged_bytes = staged + *incoming_bytes;
         if (auto durable = entered_repository.durable.now(); !durable) {
             return std::unexpected(durable.error());
         }
@@ -2989,7 +3027,7 @@ public:
         if (!state) {
             return std::unexpected(state.error());
         }
-        auto server = liquid::sync_server{*(*state)->subject, *(*state)->objects};
+        auto& server = sync_server_of(**state);
         auto output = std::vector<std::byte>(static_cast<std::size_t>(length));
         auto read = liquid::runtime::block_on(server.handle_chunks(*digest, offset, output));
         if (!read) {
@@ -3916,15 +3954,21 @@ public:
                 if (refs->empty()) {
                     output.git["status"] = "empty";
                 } else {
-                    static std::atomic<unsigned long> export_number{0};
-                    const std::filesystem::path target =
-                        std::filesystem::temp_directory_path() /
-                        ("lake-export-" + repository_id + "-" + std::to_string(++export_number));
+                    // A private (0700), unpredictable folder per export: no other request can
+                    // name it, so it is never a source for another tenant's import (lake#925).
+                    std::string folder_template =
+                        (std::filesystem::temp_directory_path() / "lake-export-XXXXXX").string();
+                    if (::mkdtemp(folder_template.data()) == nullptr) {
+                        return std::unexpected(
+                            SyncStoreError{"store_unavailable", "cannot create the export folder", "export"});
+                    }
+                    const std::filesystem::path folder = folder_template;
+                    const std::filesystem::path target = folder / "git";
                     const auto exported = liquid::runtime::block_on(
                         liquid::export_git(*(*state)->subject, target, refs->front().name));
                     if (!exported) {
                         std::error_code ignored;
-                        std::filesystem::remove_all(target, ignored);
+                        std::filesystem::remove_all(folder, ignored);
                         return std::unexpected(error_of(exported.error()));
                     }
                     output.git = {{"requested", true},
@@ -3952,7 +3996,7 @@ public:
                              {"contents", base64_encode(contents)}});
                     }
                     std::error_code ignored;
-                    std::filesystem::remove_all(target, ignored);
+                    std::filesystem::remove_all(folder, ignored);
                 }
             }
         }
@@ -4115,7 +4159,79 @@ private:
         std::filesystem::path path;
         // The workspace whose own store holds it (lake#380); empty for the space's store.
         std::string workspace;
+        // The authorizer of the push this repository is serving, set only while its handle_push
+        // runs; the request holds the repository's lane, so one push runs at a time.
+        SyncPushAuthorizer push_authorizer;
+        // One sync server per open repository (liquid#403): liquid stages chunk uploads in the
+        // server's quarantine and moves them into the store only when a push that reaches them is
+        // authorized, so the uploads and their push must meet the same server. Declared after
+        // `subject`, so it is destroyed first.
+        std::unique_ptr<liquid::sync_server> sync;
+        // The unique bytes uploaded into the quarantine since the last push. The storage quota
+        // counts them as stored, because the push that claims them moves them into the store.
+        std::uint64_t staged_bytes{};
     };
+
+    // The repository's sync server, made on first use. Its authorizer calls the push's own
+    // (`push_authorizer`) and refuses outside a push. The caller holds the repository's lane.
+    liquid::sync_server& sync_server_of(RepositoryState& state) {
+        if (state.sync) {
+            return *state.sync;
+        }
+        liquid::sync_server_options options;
+        options.authorize = [&state](const liquid::sync_item& item,
+                                     std::span<const liquid::sync_ref_update> updates)
+            -> liquid::runtime::task<std::vector<liquid::sync_ref_verdict>> {
+            if (!state.push_authorizer) {
+                co_return std::unexpected(
+                    liquid::error{liquid::errc::unauthorized, "no push is being authorized", ""});
+            }
+            std::vector<BranchRefUpdate> reference_updates;
+            reference_updates.reserve(updates.size());
+            for (const liquid::sync_ref_update& update : updates) {
+                reference_updates.push_back(BranchRefUpdate{
+                    .name = update.name,
+                    .old_head = update.old_head
+                                    ? std::optional{liquid::to_string(update.old_head->value)}
+                                    : std::nullopt,
+                    .new_head = liquid::to_string(update.new_head.value),
+                    .fast_forward = update.fast_forward,
+                });
+            }
+            const SyncPushItem input{
+                .kind = item.kind == liquid::sync_item_kind::reference ? SyncPushItemKind::Reference
+                                                                       : SyncPushItemKind::Change,
+                .change_id = liquid::to_string(item.reference.value),
+                .author = item.author.taap_id,
+            };
+            auto result = state.push_authorizer(input, reference_updates);
+            if (!result) {
+                co_return std::unexpected(liquid_error(result.error()));
+            }
+            std::vector<liquid::sync_ref_verdict> verdicts;
+            verdicts.reserve(result->size());
+            for (const SyncRefVerdict& verdict : *result) {
+                verdicts.push_back({
+                    .name = verdict.name,
+                    .verdict = verdict.verdict == SyncRefVerdictKind::Accepted
+                                   ? liquid::sync_ref_verdict_kind::accepted
+                                   : liquid::sync_ref_verdict_kind::refused,
+                    .reason = verdict.reason,
+                });
+            }
+            co_return verdicts;
+        };
+        // The quarantine stays on lake's volume beside the stores, not in the pod's temporary
+        // directory.
+        if (!root_.empty()) {
+            options.staging_directory = std::filesystem::path(root_) / ".sync-staging";
+            std::error_code ignored;
+            std::filesystem::create_directories(options.staging_directory, ignored);
+        }
+        state.sync = std::make_unique<liquid::sync_server>(
+            *state.subject, *state.objects, std::move(options));
+        return *state.sync;
+    }
 
     // One workspace's liquid store in its workspace Zetta (lake#380), opened on first use.
     struct WorkspaceStore {
@@ -4659,10 +4775,22 @@ private:
                                          reason});
     }
 
-    static void append_verified_attestation(RepositoryArtifact& artifact,
-                                            const liquid::digest& id,
-                                            const liquid::attestation& statement) {
-        const auto verification = liquid::verify_attestation(statement);
+    // lake#1020: a statement a registered person issued verifies through the identity document
+    // they registered; any other issuer gets no chain, so liquid reads this process's identity
+    // store, which holds Lake's own chain only, and an unregistered person stays an unknown signer.
+    liquid::result<liquid::attestation_verification>
+    verify_issued(const liquid::attestation& statement) const {
+        liquid::attestation_verification_options options;
+        if (issuer_chains_ && !statement.issuer.taap_id.empty()) {
+            options.issuer_chain = issuer_chains_(statement.issuer.taap_id);
+        }
+        return liquid::verify_attestation(statement, options);
+    }
+
+    void append_verified_attestation(RepositoryArtifact& artifact,
+                                     const liquid::digest& id,
+                                     const liquid::attestation& statement) const {
+        const auto verification = verify_issued(statement);
         if (!verification) {
             append_attestation(artifact, id, statement, false, verification.error().message);
             return;
@@ -4670,9 +4798,9 @@ private:
         append_attestation(artifact, id, statement, verification->verified, verification->reason);
     }
 
-    static SyncStoreResult<void> append_result_attestations(liquid::repository& repository,
-                                                            const liquid::repository_result& record,
-                                                            RepositoryArtifact& artifact) {
+    SyncStoreResult<void> append_result_attestations(liquid::repository& repository,
+                                                     const liquid::repository_result& record,
+                                                     RepositoryArtifact& artifact) const {
         if (record.value.provenance) {
             const auto provenance =
                 liquid::runtime::block_on(liquid::build::verify_provenance(repository, record.id));
@@ -4772,9 +4900,9 @@ private:
         }
     }
 
-    static SyncStoreResult<RepositoryArtifact>
+    SyncStoreResult<RepositoryArtifact>
     artifact_record_with_evidence(liquid::repository& repository,
-                                  const liquid::repository_result& record) {
+                                  const liquid::repository_result& record) const {
         RepositoryArtifact output = artifact_record(record);
         const auto attestations = append_result_attestations(repository, record, output);
         if (!attestations) {
@@ -4977,9 +5105,9 @@ private:
         return text == nullptr ? std::string{} : *text;
     }
 
-    static SyncStoreResult<void> validate_model_attestations(const liquid::change_id& revision,
-                                                             const liquid::attestation& model,
-                                                             const liquid::attestation& run) {
+    SyncStoreResult<void> validate_model_attestations(const liquid::change_id& revision,
+                                                      const liquid::attestation& model,
+                                                      const liquid::attestation& run) const {
         if (model.profile != "model_provenance/1" ||
             model.subject_kind != liquid::attestation_subject_kind::model ||
             liquid::to_string(model.subject) != liquid::to_string(revision.value)) {
@@ -4992,8 +5120,8 @@ private:
             return std::unexpected(
                 SyncStoreError{"invalid_input", "the run attestation has the wrong subject"});
         }
-        const auto model_verification = liquid::verify_attestation(model);
-        const auto run_verification = liquid::verify_attestation(run);
+        const auto model_verification = verify_issued(model);
+        const auto run_verification = verify_issued(run);
         if (!model_verification || !run_verification) {
             return std::unexpected(
                 SyncStoreError{"invalid_input", "a provenance attestation could not be verified"});
@@ -5001,8 +5129,14 @@ private:
         if (!model_verification->verified || !run_verification->verified) {
             const std::string reason = !model_verification->verified ? model_verification->reason
                                                                      : run_verification->reason;
+            // The reason is liquid's verdict on the caller's own statement (for example an unknown
+            // signer), the same text verify_model_provenance answers as `reason`; the context
+            // field is not rendered, so the reason goes in the message.
             return std::unexpected(
-                SyncStoreError{"invalid_input", "a provenance attestation was refused", reason});
+                SyncStoreError{"invalid_input",
+                               reason.empty() ? std::string{"a provenance attestation was refused"}
+                                              : "a provenance attestation was refused: " + reason,
+                               reason});
         }
         const auto dataset = liquid::parse_digest(text_attribute(model, "training_dataset"));
         const auto code = liquid::parse_digest(text_attribute(model, "training_code"));
@@ -5013,12 +5147,12 @@ private:
         return {};
     }
 
-    static RepositoryModelProvenance provenance_record(const liquid::change_id& revision,
-                                                       const std::string& dataset_repository_id,
-                                                       const liquid::digest& model_id,
-                                                       const liquid::digest& run_id,
-                                                       const liquid::attestation& model,
-                                                       const liquid::attestation& run) {
+    RepositoryModelProvenance provenance_record(const liquid::change_id& revision,
+                                                const std::string& dataset_repository_id,
+                                                const liquid::digest& model_id,
+                                                const liquid::digest& run_id,
+                                                const liquid::attestation& model,
+                                                const liquid::attestation& run) const {
         RepositoryModelProvenance output;
         output.model_revision = liquid::to_string(revision.value);
         output.dataset_repository_id = dataset_repository_id;
@@ -5027,8 +5161,8 @@ private:
         output.model_attestation = liquid::to_string(model_id);
         output.run_attestation = liquid::to_string(run_id);
         output.runner = std::string(run.issuer.identifier());
-        const auto model_verification = liquid::verify_attestation(model);
-        const auto run_verification = liquid::verify_attestation(run);
+        const auto model_verification = verify_issued(model);
+        const auto run_verification = verify_issued(run);
         output.verified = model_verification && run_verification && model_verification->verified &&
                           run_verification->verified;
         if (!output.verified) {
@@ -5742,6 +5876,7 @@ private:
     std::string root_;
     std::chrono::milliseconds owner_wait_;
     bool replication_allow_private_ = false;
+    IssuerChains issuer_chains_;
     std::chrono::milliseconds replication_timeout_{std::chrono::minutes(10)};
     // Guards the maps below and nothing else (see Lane).
     std::mutex mutex_;
@@ -7004,6 +7139,9 @@ struct OutboundRequest {
     // connect time with mcp_public_address, as MCP connections are, so a webhook a tenant points at
     // a private, loopback or link-local address never reaches Lake's own network.
     bool public_only = false;
+    // Plain http to port 80 of a public address, for an ACME HTTP-01 check (lake#919): the one
+    // fetch RFC 8555 defines over http. Used only with public_only.
+    bool acme_http01 = false;
 };
 
 // An identity provider's discovery document, token endpoint and keys (lake#837) answer within this.
@@ -7022,7 +7160,10 @@ struct OutboundTarget {
     std::string path;
 };
 
-bool parse_outbound_url(std::string_view url, OutboundTarget& target, bool cluster_http = false) {
+bool parse_outbound_url(std::string_view url,
+                        OutboundTarget& target,
+                        bool cluster_http = false,
+                        bool acme_http01 = false) {
     if (url.starts_with("https://")) {
         url.remove_prefix(8);
         target.secure = true;
@@ -7066,7 +7207,9 @@ bool parse_outbound_url(std::string_view url, OutboundTarget& target, bool clust
     const bool loopback =
         target.host == "127.0.0.1" || target.host == "::1" || target.host == "localhost";
     const bool cluster = cluster_http && target.host.ends_with(".svc.cluster.local");
-    return !target.host.empty() && !target.port.empty() && (target.secure || loopback || cluster);
+    const bool http01 = acme_http01 && !target.secure && target.port == "80";
+    return !target.host.empty() && !target.port.empty() &&
+           (target.secure || loopback || cluster || http01);
 }
 
 std::string outbound_host_header(const OutboundTarget& target) {
@@ -7259,12 +7402,15 @@ private:
 
     boost::capy::task<> perform(std::shared_ptr<Pending> pending) {
         OutboundTarget target;
-        if (!parse_outbound_url(pending->request.url, target, pending->request.cluster_http)) {
+        if (!parse_outbound_url(pending->request.url,
+                                target,
+                                pending->request.cluster_http,
+                                pending->request.acme_http01 && pending->request.public_only)) {
             pending->response.error = "outbound URL must use HTTPS, except for loopback tests";
             finish(pending);
             co_return;
         }
-        if (pending->request.public_only && !target.secure) {
+        if (pending->request.public_only && !target.secure && !pending->request.acme_http01) {
             pending->response.error = "outbound URL must use HTTPS";
             finish(pending);
             co_return;
@@ -7360,7 +7506,7 @@ private:
     std::map<std::string, std::shared_ptr<const boost::corosio::tls_context>> tls_contexts_;
 };
 
-// The MCP connections' transport (decision 60, lake#652, docs/api/mcp-connections.md#the-client):
+// The MCP connections' transport (lake#652, docs/api/mcp-connections.md#the-client):
 // McpHttp over the same capy/corosio stack as OutboundHttpClient, on its own io thread so a slow
 // MCP server never holds up Stripe or speech-to-text. Every address a name resolves to must be
 // public unless the transport allows private addresses (tests, LAKE_MCP_ALLOW_PRIVATE_ADDRESSES),
@@ -7806,7 +7952,7 @@ struct ApiServer::Impl {
     std::unique_ptr<MeteringRecorder> metering_recorder;
     std::chrono::steady_clock::time_point next_metering_flush{};
     MeteringRecorder::Totals reported_metering;
-    // Events about a workspace's data on their way to its audit (decision 52); null without
+    // Events about a workspace's data on their way to its audit; null without
     // workspaces, when every event is central.
     std::unique_ptr<AuditRecorder> audit_recorder;
     std::chrono::steady_clock::time_point next_audit_flush{};
@@ -7997,6 +8143,58 @@ struct ApiServer::Impl {
         }
     }
 
+    // lake#980: the MCP connection streams, and the workspace-stream agents and resource
+    // repairs that share their pass, run on this thread of their own, so an outside MCP server
+    // answering slowly delays only that pass, never the maintenance thread's usage samples,
+    // deletions, orders or balances. A pass is asked for at most once while one is due.
+    std::mutex stream_pass_mutex;
+    std::condition_variable stream_pass_cv;
+    bool stream_pass_due = false;
+    bool stream_pass_stopping = false;
+    lake::Thread stream_pass_thread;
+
+    void schedule_stream_pass() {
+        std::lock_guard lock(stream_pass_mutex);
+        if (stream_pass_stopping || stream_pass_due) {
+            return;
+        }
+        stream_pass_due = true;
+        stream_pass_cv.notify_all();
+    }
+
+    void run_stream_passes() {
+        for (;;) {
+            {
+                std::unique_lock lock(stream_pass_mutex);
+                stream_pass_cv.wait(lock,
+                                    [this] { return stream_pass_stopping || stream_pass_due; });
+                if (stream_pass_stopping) {
+                    return;
+                }
+                stream_pass_due = false;
+            }
+            run_mcp_streams();
+        }
+    }
+
+    void pause_stream_passes() {
+        {
+            std::lock_guard lock(stream_pass_mutex);
+            stream_pass_stopping = true;
+            stream_pass_due = false;
+        }
+        stream_pass_cv.notify_all();
+    }
+
+    // A pass in progress finishes: it starts no connection past its budget, and each exchange is
+    // bounded (McpStreamLimits).
+    void stop_stream_passes() {
+        pause_stream_passes();
+        if (stream_pass_thread.joinable()) {
+            stream_pass_thread.join();
+        }
+    }
+
     // lake#381: search index rebuilds and their retries run on this thread of their own. A job is
     // named; one whose name is queued already is not queued again; a job may be due later.
     std::mutex search_jobs_mutex;
@@ -8089,6 +8287,7 @@ struct ApiServer::Impl {
             maintenance_queue.clear();
         }
         maintenance_cv.notify_all();
+        pause_stream_passes();
         if (options.search) {
             for (std::string& workspace : options.search->unsettled_workspaces()) {
                 stale.insert(std::move(workspace));
@@ -8107,6 +8306,7 @@ struct ApiServer::Impl {
         if (maintenance_thread.joinable()) {
             maintenance_thread.join();
         }
+        stop_stream_passes();
     }
 
     // lake#381: each space's search index on lake's volume drops what it holds of repositories now
@@ -8425,6 +8625,28 @@ struct ApiServer::Impl {
     std::mutex app_auth_audit_mutex;
     std::map<std::string, std::chrono::steady_clock::time_point> app_auth_denials;
 
+    // lake#1020: an attestation's issuer is attributed through the identity document its person
+    // registered with Lake. An identifier no account registered, or a store that cannot be read,
+    // gives no chain, so the attestation does not verify as that person's (fail closed).
+    void configure_issuer_chains() {
+        if (!options.store) {
+            return;
+        }
+        std::shared_ptr<control::Store> store = options.store;
+        sync_store.configure_issuer_chains(
+            [store](const std::string& taap_id) -> std::vector<liquid::identity_document> {
+                const auto stored = store->registered_identity_document(taap_id);
+                if (!stored) {
+                    return {};
+                }
+                auto document = control::identity_crypto::decode_document(*stored);
+                if (!document) {
+                    return {};
+                }
+                return {std::move(*document)};
+            });
+    }
+
     // lake#380: a switched workspace's repositories are served from its own store in its
     // workspace Zetta, reached with the workspace's mounted credential.
     void configure_workspace_stores() {
@@ -8742,6 +8964,7 @@ struct ApiServer::Impl {
         sync_store.configure_replication(options.replication_allow_private_addresses,
                                          options.replication_timeout);
         configure_workspace_stores();
+        configure_issuer_chains();
         lend_repositories_to_search();
         if (web_ui_stylesheet_url().empty()) {
             failure_reason = "could not calculate the stylesheet asset hash";
@@ -9114,7 +9337,7 @@ struct ApiServer::Impl {
                         std::chrono::steady_clock::time_point start) {
         const double duration_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-        const std::string method(route.req.method_text());
+        const std::string method(request_method_label(route.req.method_text()));
         const int status_code = route.res.status_int();
         const std::string status = std::to_string(status_code);
         const telemetry::Labels labels{
@@ -9141,7 +9364,7 @@ struct ApiServer::Impl {
                                 {{"kind", route_pattern.ends_with("/mcp") ? "mcp" : "api"}});
         }
 
-        // Route patterns and identifiers only, never the raw path (decision 54 S9).
+        // Route patterns and identifiers only, never the raw path.
         RequestLogEntry entry{.ts = log_timestamp(),
                               .method = method,
                               .route = std::string(route_pattern),
@@ -9389,19 +9612,49 @@ struct ApiServer::Impl {
         return "unmatched";
     }
 
-    // The library agent a bus credential belongs to, or empty. Every token is compared, so the
-    // time taken does not say which one was close.
-    std::string bus_agent_for(const std::string& bearer) const {
+    // The library agent a bus credential belongs to, and the workspace it is bound to (empty
+    // agent: none). Every token is compared, so the time taken does not say which one was close.
+    control::AgentBusKey bus_agent_for(const std::string& bearer) const {
         std::string found;
         if (bearer.empty() || !options.workspaces) {
-            return found;
+            return {};
         }
-        for (const auto& [agent, token] : options.workspaces->config().agent_bus_tokens) {
+        // LAKE_AGENT_BUS_DIR as it is now, re-read when it changed (lake#871): a workspace's
+        // credential the operator removed stops working on the next request.
+        const auto& config = options.workspaces->config();
+        const auto reloaded =
+            config.agent_bus_credentials ? config.agent_bus_credentials->current() : nullptr;
+        for (const auto& [name, token] : reloaded ? *reloaded : config.agent_bus_tokens) {
             if (constant_time_equal(bearer, token)) {
-                found = agent;
+                found = name;
             }
         }
-        return found;
+        return found.empty() ? control::AgentBusKey{} : control::agent_bus_key(found);
+    }
+
+    // A credential's principal onto the call's context.
+    static void apply_principal(ApiContext& ctx, const control::Principal& principal) {
+        ctx.authorized = true;
+        ctx.session_credential = true;
+        ctx.acting_user_id = principal.user_id;
+        ctx.acting_identity = principal.taap_id;
+        ctx.credential_device_id = principal.device_id;
+        ctx.credential_session_id = principal.session_id;
+        ctx.credential_kind = principal.kind;
+        ctx.credential_workload_id = principal.workload_id;
+        ctx.credential_customer_id = principal.workload_customer_id;
+        ctx.credential_repository_id = principal.workload_repository_id;
+        ctx.credential_revision = principal.workload_revision;
+        ctx.credential_token_hash = principal.workload_token_hash;
+        ctx.credential_expires_at_unix = principal.expires_at_unix;
+        ctx.pool_id = principal.pool_id;
+        ctx.scopes = principal.scopes;
+        // A browser key acts as no person and is no session (lake#1152): the registry admits it
+        // only to what it is bound to.
+        if (principal.browser_key) {
+            ctx.session_credential = false;
+            ctx.browser_key = principal.browser_key;
+        }
     }
 
     ApiContext context_for(const boost::http::route_params& route) const {
@@ -9411,7 +9664,7 @@ struct ApiServer::Impl {
             return *timing->context;
         }
         ApiContext ctx;
-        // Authentication budgets count the address the trusted ingress hop decided (LSR-103).
+        // Authentication budgets count the address the trusted ingress hop decided.
         ctx.client_address = order_client_address(route);
         // A capability that long-polls gives its HTTP worker back (lake#534).
         if (server) {
@@ -9440,6 +9693,7 @@ struct ApiServer::Impl {
         ctx.agent_caller = options.agent_caller.get();
         ctx.agent_bus = options.agent_bus.get();
         ctx.apps_wildcard = options.apps_wildcard;
+        ctx.host_aliases = options.host_aliases;
         ctx.apps_runtime_image = options.apps_runtime_image;
         ctx.methodology_runtime_image = options.methodology_runtime_image;
         ctx.mcp_runner_image = options.mcp_runner_image;
@@ -9450,6 +9704,8 @@ struct ApiServer::Impl {
         ctx.apps_reserved_names = options.apps_reserved_names;
         ctx.apps_per_customer = options.apps_per_customer;
         ctx.app_replicas_per_customer = options.app_replicas_per_customer;
+        ctx.tunnel_grants_per_workspace = options.tunnel_grants_per_workspace;
+        ctx.tunnel_grants_per_customer = options.tunnel_grants_per_customer;
         ctx.callers = callers.get();
         ctx.transparency = transparency.get();
         ctx.checkpoints = checkpoints.get();
@@ -9484,6 +9740,7 @@ struct ApiServer::Impl {
         ctx.privacy_url = options.privacy_url;
         ctx.sign_in_sso_provider = options.sign_in_sso_provider;
         ctx.sealing_public_key = options.sealing_public_key;
+        ctx.git_import_root = options.git_import_root;
         ctx.transcriber = transcriber;
         ctx.mcp_http = mcp_http;
         ctx.mcp_allow_private_addresses = options.mcp_allow_private_addresses;
@@ -9532,7 +9789,7 @@ struct ApiServer::Impl {
         if (!bearer.empty()) {
             ctx.authentication_method = "bearer";
         } else {
-            bearer = cookie_value(route, "lake_session");
+            bearer = session_cookie_of(route);
             if (!bearer.empty()) {
                 ctx.authentication_method = "session";
             }
@@ -9542,13 +9799,32 @@ struct ApiServer::Impl {
             ctx.authorized = true;
             ctx.acting_identity = "admin";
             ctx.operator_credential = true;
-        } else if (const std::string agent = bus_agent_for(bearer); !agent.empty()) {
+        } else if (const control::AgentBusKey bus = bus_agent_for(bearer);
+                   !bus.agent.empty() && route.req.count(control::agent_task_header) != 0) {
+            // A library agent acting for a task it is running, by reference (lake#871,
+            // docs/api/agent-bus.md#task-credentials-by-reference): Lake adds the task's
+            // credential to this request, so the agent never holds it. Anything but a task
+            // running on this agent (in its bound workspace) is refused as a wrong credential,
+            // never answered as the bus credential.
+            const std::string task_id(route.req.at(control::agent_task_header));
+            auto principal = options.store
+                                 ? control::agent_task_principal(*options.store, task_id, bus)
+                                 : control::Result<control::Principal>(std::unexpected(
+                                       control::StoreError{"not_found", "no store"}));
+            if (principal) {
+                apply_principal(ctx, *principal);
+                ctx.agent_service_workspace_id = bus.workspace_id;
+            } else {
+                ctx.credential_rejection = "invalid";
+            }
+        } else if (!bus.agent.empty()) {
             // A library agent on the agent bus (docs/api/agent-bus.md): it may only reach the
             // bus's capabilities, which check for this kind and this agent themselves.
             ctx.authorized = true;
-            ctx.acting_identity = "agent-service:" + agent;
+            ctx.acting_identity = "agent-service:" + bus.agent;
             ctx.credential_kind = "agent_service";
-            ctx.agent_service = agent;
+            ctx.agent_service = bus.agent;
+            ctx.agent_service_workspace_id = bus.workspace_id;
         } else if (!bearer.empty() && options.store) {
             auto principal = options.store->context_for(bearer);
             if (principal && principal->pool_id != "lake") {
@@ -9559,27 +9835,7 @@ struct ApiServer::Impl {
                 // on the user's own sign-in in its pool (Capability::serves_application_pools).
                 ctx.application_session = *principal;
             } else if (principal) {
-                ctx.authorized = true;
-                ctx.session_credential = true;
-                ctx.acting_user_id = principal->user_id;
-                ctx.acting_identity = principal->taap_id;
-                ctx.credential_device_id = principal->device_id;
-                ctx.credential_session_id = principal->session_id;
-                ctx.credential_kind = principal->kind;
-                ctx.credential_workload_id = principal->workload_id;
-                ctx.credential_customer_id = principal->workload_customer_id;
-                ctx.credential_repository_id = principal->workload_repository_id;
-                ctx.credential_revision = principal->workload_revision;
-                ctx.credential_token_hash = principal->workload_token_hash;
-                ctx.credential_expires_at_unix = principal->expires_at_unix;
-                ctx.pool_id = principal->pool_id;
-                ctx.scopes = principal->scopes;
-                // A browser key acts as no person and is no session (lake#1152): the registry
-                // admits it only to what it is bound to.
-                if (principal->browser_key) {
-                    ctx.session_credential = false;
-                    ctx.browser_key = principal->browser_key;
-                }
+                apply_principal(ctx, *principal);
             } else {
                 // Said apart so a caller knows to renew rather than fix its key (lake#450).
                 ctx.credential_rejection =
@@ -9702,7 +9958,7 @@ struct ApiServer::Impl {
                 route, http::status::unauthorized, "", "text/plain", "no-store");
         }
 
-        const std::string session = cookie_value(route, "lake_app_session");
+        const std::string session = cookie_value(route, app_session_cookie);
         if (!session.empty()) {
             const auto claims = control::verify_web_app_session(options.instance_kek, session);
             if (claims) {
@@ -9725,7 +9981,8 @@ struct ApiServer::Impl {
                                                                   authorization->app.workspace_id);
                 if (token) {
                     const std::string cookie =
-                        "lake_app_session=" + *token + "; Path=/; Secure; HttpOnly; SameSite=Lax";
+                        std::string(app_session_cookie) + "=" + *token +
+                        "; Path=/; Secure; HttpOnly; SameSite=Lax";
                     ApiContext context =
                         app_auth_audit_context(route, &authorization->app, authorization->user_id);
                     (void)record_direct_event(context,
@@ -9765,6 +10022,15 @@ struct ApiServer::Impl {
                                          "no-store");
         }
         const std::string return_path = app_authorize_path(app_id, redirect_url);
+        // Only a browser session hands an app its session (lake#1058): a bearer sent here
+        // is refused, so no script or tool carries a Lake credential to a tenant's app host.
+        if (!bearer_of(route).empty()) {
+            co_return co_await send_text(route,
+                                         http::status::forbidden,
+                                         "Sign in with the browser to open this app.",
+                                         "text/plain; charset=utf-8",
+                                         "no-store");
+        }
         const ApiContext context = context_for(route);
         if (!context.authorized) {
             const std::string sign_in = "/sign-in?return_to=" + oauth_url_encode(return_path);
@@ -9930,9 +10196,16 @@ struct ApiServer::Impl {
     boost::http::route_task acme_problem(boost::http::route_params& route,
                                          const control::pki::Error& error) {
         const bool bad_nonce = error.message.find("nonce") != std::string::npos;
-        const std::string problem = bad_nonce ? "badNonce" : "malformed";
+        const bool unbound = error.code == "unauthorized" || error.code == "external_account_required";
+        const bool incorrect = error.code == "incorrect_response";
+        const std::string problem = unbound     ? "externalAccountRequired"
+                                    : incorrect ? "incorrectResponse"
+                                    : bad_nonce ? "badNonce"
+                                                : "malformed";
         const boost::http::status status = error.code == "not_found"
                                                ? boost::http::status::not_found
+                                           : unbound || incorrect
+                                               ? boost::http::status::forbidden
                                                : boost::http::status::bad_request;
         return send_acme(route,
                          status,
@@ -9950,7 +10223,10 @@ struct ApiServer::Impl {
                          boost::http::status::ok,
                          nlohmann::json{{"newNonce", base + "/new-nonce"},
                                         {"newAccount", base + "/new-account"},
-                                        {"newOrder", base + "/new-order"}}
+                                        {"newOrder", base + "/new-order"},
+                                        // Enrollment needs a binding an administrator issued
+                                        // (lake#919).
+                                        {"meta", {{"externalAccountRequired", true}}}}
                              .dump(),
                          "application/json");
     }
@@ -9975,6 +10251,24 @@ struct ApiServer::Impl {
                          "no-store");
     }
 
+    // GET the HTTP-01 response a challenge names (lake#919): the injected fetch in tests, otherwise
+    // the outbound client, plain http to port 80 of a public address only, 10 s, 8 KiB.
+    std::optional<std::string> fetch_acme_http01(const std::string& url) {
+        if (options.acme_http01_fetch) {
+            return options.acme_http01_fetch(url);
+        }
+        OutboundRequest request{
+            "GET", url, "", {{"User-Agent", "lake-acme/1"}}, std::chrono::seconds(10)};
+        request.body_limit = 8 * 1024;
+        request.public_only = true;
+        request.acme_http01 = true;
+        OutboundResponse response = outbound_http->request(request);
+        if (response.status != 200 || !response.error.empty()) {
+            return std::nullopt;
+        }
+        return std::move(response.body);
+    }
+
     boost::http::route_task serve_acme_post(boost::http::route_params& route,
                                             std::string capability_name) {
         auto [read_error, body] = co_await read_string_body(route);
@@ -9996,6 +10290,15 @@ struct ApiServer::Impl {
         if (verified->jwk) {
             input["x"] = verified->jwk->x;
             input["y"] = verified->jwk->y;
+        }
+        if (new_account) {
+            // RFC 8555 §7.3.4: the binding an administrator of this customer issued (lake#919).
+            if (verified->payload.is_object() &&
+                verified->payload.contains("externalAccountBinding")) {
+                input["external_account_binding"] =
+                    verified->payload.at("externalAccountBinding").dump();
+            }
+            input["url"] = expected_url;
         }
         if (!verified->account_id.empty()) {
             input["account_id"] = verified->account_id;
@@ -10021,6 +10324,20 @@ struct ApiServer::Impl {
         }
         if (capability_name == "acme_finalize_order") {
             input["csr"] = verified->payload.value("csr", "");
+        }
+        if (capability_name == "acme_http01_challenge") {
+            // Proof of control (lake#919): fetch the challenge from the identifier itself, over
+            // plain http to port 80 of a public address, before the order can become ready.
+            const auto pending =
+                pki.acme_authorization(customer_id, verified->account_id, authorization_id);
+            if (pending && pending->status != "valid") {
+                const std::string url = "http://" + pending->identifier +
+                                        "/.well-known/acme-challenge/" + pending->token;
+                auto fetched = co_await run_blocking([this, url] { return fetch_acme_http01(url); });
+                if (fetched && *fetched) {
+                    context.acme_http01_body = std::move(**fetched);
+                }
+            }
         }
         const ApiResult result = registry.call(capability_name, input, context);
         if (!result.ok) {
@@ -10170,9 +10487,7 @@ struct ApiServer::Impl {
                 "application/json; charset=utf-8",
                 "no-store");
         }
-        std::string cookie = "lake_session=" + token + "; HttpOnly; SameSite=Strict; Path=/";
-        if (request_is_https(route))
-            cookie += "; Secure";
+        std::string cookie = session_cookie(route, token, "Strict");
         co_return co_await redirect(route, "/repositories", cookie);
     }
 
@@ -10210,9 +10525,14 @@ struct ApiServer::Impl {
         }
         // With Clerk, the browser also holds a Clerk session; the sign-in page ends it too, or the
         // next visit would sign the person straight back in.
+        // Static strings: redirect is a coroutine that may run after this function returns.
+        static const std::string cleared_https =
+            "__Host-lake_session=; HttpOnly; SameSite=Strict; Path=/; Secure; Max-Age=0";
+        static const std::string cleared_http =
+            "lake_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0";
         return redirect(route,
                         clerk ? "/sign-in?signed_out=1" : "/",
-                        "lake_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+                        request_is_https(route) ? cleared_https : cleared_http);
     }
 
     boost::http::route_task serve_page_error(boost::http::route_params& route,
@@ -10806,6 +11126,14 @@ struct ApiServer::Impl {
             if (claims && claims->issued_at <= 0) {
                 refusal = "no iat";
             }
+            // The token was issued for one of this Lake's own pages (lake#921): a
+            // template token minted for another product sharing the Clerk instance, or with no
+            // azp, is refused, so it cannot be exchanged here.
+            if (claims && claims->issued_at > 0 &&
+                !clerk_party_is_this_lake(route, summarize_token(token).authorized_party)) {
+                refusal = "azp is not one of this Lake's origins";
+                claims.reset();
+            }
         }
         ApiContext context = context_for(route);
         context.authentication_method = "clerk";
@@ -10969,11 +11297,7 @@ struct ApiServer::Impl {
                                  })) {
             co_return co_await back("Lake could not record the sign-in. Please try again.");
         }
-        std::string cookie = "lake_session=" + session_result.value.value("secret", "") +
-                             "; HttpOnly; SameSite=Lax; Path=/";
-        if (request_is_https(route)) {
-            cookie += "; Secure";
-        }
+        std::string cookie = session_cookie(route, session_result.value.value("secret", ""));
         // The page that sent the person here (`next`, lake#561), else the Ship app return.
         std::string destination = same_origin_next(form_field(body, "next"));
         if (destination.empty()) {
@@ -11125,19 +11449,24 @@ struct ApiServer::Impl {
             identity.email = claims->email;
             identity.display_name = claims->display_name;
         }
+        // A just-in-time enterprise account takes a managed key Lake mints, never the TAAP id the
+        // browser that started the flow named (lake#872).
+        control::SsoIdentity enterprise{provider_id,
+                                        provider->issuer,
+                                        identity.subject,
+                                        identity.email,
+                                        identity.display_name,
+                                        "",
+                                        flow->device_name,
+                                        identity.email.empty()
+                                            ? nlohmann::json::object()
+                                            : nlohmann::json{{"email", identity.email}}};
+        if (enterprise_provider) {
+            audit::give_managed_key(enterprise, *options.store, options.instance_kek);
+        }
         control::Result<control::IssuedSession> issued =
-            enterprise_provider
-                ? options.store->sign_in_sso({provider_id,
-                                              provider->issuer,
-                                              identity.subject,
-                                              identity.email,
-                                              identity.display_name,
-                                              flow->identity_document,
-                                              flow->device_name,
-                                              identity.email.empty()
-                                                  ? nlohmann::json::object()
-                                                  : nlohmann::json{{"email", identity.email}}})
-                : options.store->sign_in_oauth(identity);
+            enterprise_provider ? options.store->sign_in_sso(enterprise)
+                                : options.store->sign_in_oauth(identity);
         if (!issued) {
             co_return co_await oauth_error(
                 route, http::status::forbidden, "OAuth identity could not sign in");
@@ -11176,11 +11505,7 @@ struct ApiServer::Impl {
             co_return co_await oauth_error(
                 route, http::status::service_unavailable, "OAuth audit recording failed");
         }
-        std::string cookie = "lake_session=" + application_result.value.value("secret", "") +
-                             "; HttpOnly; SameSite=Lax; Path=/";
-        if (request_is_https(route)) {
-            cookie += "; Secure";
-        }
+        std::string cookie = session_cookie(route, application_result.value.value("secret", ""));
         std::string destination(account_landing);
         if (issued_pool != "lake") {
             // The redirect URI is the application's settings in its workspace (lake#351); when
@@ -11337,6 +11662,9 @@ struct ApiServer::Impl {
         if (!accepted) {
             co_return co_await saml_error(route, provider_id, accepted.error());
         }
+        // A just-in-time account takes a managed key Lake mints (lake#872).
+        accepted->identity.taap_id.clear();
+        audit::give_managed_key(accepted->identity, *options.store, options.instance_kek);
         control::Result<control::IssuedSession> issued =
             options.store->sign_in_sso(accepted->identity);
         if (!issued) {
@@ -11375,11 +11703,7 @@ struct ApiServer::Impl {
                                          "application/json; charset=utf-8",
                                          "no-store");
         }
-        std::string cookie = "lake_session=" + session_result.value.value("secret", "") +
-                             "; HttpOnly; SameSite=Lax; Path=/";
-        if (request_is_https(route)) {
-            cookie += "; Secure";
-        }
+        std::string cookie = session_cookie(route, session_result.value.value("secret", ""));
         std::string destination = same_origin_next(accepted->return_to);
         if (destination.empty()) {
             destination = std::string(account_landing);
@@ -11869,7 +12193,9 @@ struct ApiServer::Impl {
             const auto build = options.store->get_build(run->build_id);
             const std::string image =
                 build ? build_target_image(build->target, customer->name) : std::string();
-            if (!build || build->customer_id != customer->id || image.empty() ||
+            // The build is the run's own workspace's (lake#952), not only its customer's.
+            if (!build || build->customer_id != customer->id || run->workspace_id.empty() ||
+                build->workspace_id != run->workspace_id || image.empty() ||
                 repository != customer->name + "/" + image) {
                 return {RegistryAccess::Denied};
             }
@@ -11892,7 +12218,8 @@ struct ApiServer::Impl {
             const auto build = options.store->get_build(deployment->build_id);
             const std::string image =
                 build ? build_target_image(build->target, customer->name) : std::string();
-            if (!build || build->customer_id != customer->id || image.empty() ||
+            if (!build || build->customer_id != customer->id || deployment->workspace_id.empty() ||
+                build->workspace_id != deployment->workspace_id || image.empty() ||
                 repository != customer->name + "/" + image) {
                 return {RegistryAccess::Denied};
             }
@@ -11931,7 +12258,7 @@ struct ApiServer::Impl {
     }
 
     // Resolves a tenant repository to its workspace through oci_repository_routes, before any
-    // workspace is read (lake#383, decision 54 S6). A build's first push routes it from the
+    // workspace is read (lake#383). A build's first push routes it from the
     // build's workspace; anything else needs a route that exists (create_image_repository names
     // the workspace explicitly). A workload credential reaches only its own workspace's routes.
     std::expected<TenantImage, RegistryRefusal> tenant_image(const boost::http::route_params& route,
@@ -11976,6 +12303,15 @@ struct ApiServer::Impl {
         const bool own_target =
             !grant.build_image.empty() &&
             (tenant->name == grant.build_image || tenant->name == "cache/" + grant.build_image);
+        // A build's push token writes only its own target and cache, routed or not (lake#909):
+        // code a build runs can read the token, and must not overwrite the workspace's other
+        // images. Reads stay within the workspace, below.
+        if (write && !grant.build_image.empty() && !own_target) {
+            return std::unexpected(
+                RegistryRefusal{boost::http::status::forbidden,
+                                "a build writes only its own target image and its cache",
+                                "DENIED"});
+        }
         if (!routed && write && grant.may_route && own_target) {
             routed = options.store->create_oci_repository_route(
                 customer->id, tenant->name, grant.workspace_id);
@@ -12125,6 +12461,15 @@ struct ApiServer::Impl {
             co_return co_await registry_auth_error(route, authorized.error().access);
         }
         const std::string upload = route_value(route, "upload");
+        // An upload continues only in the repository it was started for (lake#998):
+        // push access to one repository is not access to another's upload.
+        if (!artifacts.upload_belongs_to(upload, repository)) {
+            co_return co_await registry_error(route,
+                                              boost::http::status::not_found,
+                                              "OCI upload is unknown in this repository",
+                                              true,
+                                              "BLOB_UPLOAD_UNKNOWN");
+        }
         const auto initial_size = artifacts.upload_size(upload);
         if (!initial_size) {
             co_return co_await registry_error(route,
@@ -12236,7 +12581,7 @@ struct ApiServer::Impl {
     // PATCH to the same upload can append to the bytes being checked and stored. Off the server
     // thread, those bytes are checked against the digest and streamed into the workspace's liquid
     // store, the stored object must have the size that was hashed, and the blob record maps the
-    // digest to the object (decision 54 S5). The claimed file is removed once the record is
+    // digest to the object. The claimed file is removed once the record is
     // written; if the record cannot be written it goes back under its upload id, so a retry of the
     // same completion works; a store that is unavailable or over quota removes it. A workspace
     // still served from its space's store keeps phase A: the bytes go into the instance registry
@@ -13662,6 +14007,10 @@ struct ApiServer::Impl {
                 (path == "/order/price-list" || !offer_from_slug(path.substr(7)).empty())) {
                 co_return co_await serve_order_page(route, std::string(path.substr(7)));
             }
+            if (path.starts_with("/orders/") && path.ends_with("/confirm") && path.size() > 16) {
+                co_return co_await serve_order_confirm(
+                    route, std::string(path.substr(8, path.size() - 16)), post);
+            }
             if (!post && path.starts_with("/orders/") && path.size() > 8) {
                 co_return co_await serve_order_status(route, std::string(path.substr(8)));
             }
@@ -13711,7 +14060,7 @@ struct ApiServer::Impl {
     }
 
     // The address an anonymous order and an authentication attempt are counted against (lake#838,
-    // LSR-103, lake#1083, lake#1132). From the proxy listener (LAKE_PROXY_PORT), whatever the peer,
+    // lake#1083, lake#1132). From the proxy listener (LAKE_PROXY_PORT), whatever the peer,
     // or from a trusted proxy on the main listener (LAKE_TRUSTED_PROXY_CIDRS): X-Real-IP, which the
     // ingress (ingress-nginx) always sets itself, overwriting any the sender sent; else the last
     // X-Forwarded-For hop, the one the nearest proxy appended; else the proxy's own address. From
@@ -13852,6 +14201,31 @@ struct ApiServer::Impl {
                                      "We have received many orders from here in the last hour. "
                                      "Please try again later."));
         }
+        // lake#1000: per-recipient limits, whoever sends. Each order form mails its contact email
+        // once (the confirmation), so these bound the mail anyone can make lake send to one
+        // address or domain. Counted in the control plane, so every replica sees the same.
+        if (order->path == "order_form") {
+            const auto counts = options.store->count_cloud_order_recipients(order->contact_email);
+            if (!counts) {
+                co_return co_await send_order_html(
+                    route,
+                    http::status::service_unavailable,
+                    web_ui_order_message("Not Recorded",
+                                         "We could not record your order just now. Please try "
+                                         "again in a minute."));
+            }
+            const bool email_full = counts->email_last_day >= sheet.orders_per_email_per_day;
+            if (email_full || counts->domain_last_hour >= sheet.orders_per_domain_per_hour) {
+                metrics.increment_counter("lake_cloud_orders_refused_total",
+                                          {{"reason", email_full ? "recipient" : "domain"}});
+                co_return co_await send_order_html(
+                    route,
+                    http::status::too_many_requests,
+                    web_ui_order_message("Too Many Orders",
+                                         "We have received many orders for this email address "
+                                         "lately. Please try again later, or write to us."));
+            }
+        }
         order->email_error = options.resend.unavailable_reason();
         auto created = options.store->create_cloud_order(*order);
         if (!created) {
@@ -13940,6 +14314,71 @@ struct ApiServer::Impl {
             route,
             http::status::ok,
             web_ui_order_received(sheet, options.regions, *created, order_status_url(*created)));
+    }
+
+    // The order form's confirmation link (lake#1000): https://<apex>/orders/<id>/confirm?token=.
+    std::string order_confirmation_url(const control::CloudOrder& order) const {
+        const std::string origin = order_origin();
+        if (origin.empty() || order_status_key.empty()) {
+            return {};
+        }
+        return origin + "/orders/" + order.id +
+               "/confirm?token=" + order_confirmation_token(order_status_key, order.id);
+    }
+
+    // GET /orders/<id>/confirm?token=: a page with one button, so a mail scanner that follows the
+    // link confirms nothing; POST /orders/<id>/confirm (token in the form): confirms the order
+    // form's contact email, after which its emails go to the customer and to support (lake#1000).
+    boost::http::route_task
+    serve_order_confirm(boost::http::route_params& route, std::string id, bool post) {
+        namespace http = boost::http;
+        std::string token = query_value(route, "token");
+        if (post) {
+            auto [read_error, body] = co_await read_string_body(route, std::size_t{4} * 1024);
+            if (read_error) {
+                co_return http::route_error(read_error);
+            }
+            token = form_field(body, "token");
+        }
+        const auto not_found = [&] {
+            return web_ui_order_message("Link Not Valid",
+                                        "This confirmation link is not valid. Use the link in the "
+                                        "email we sent you.");
+        };
+        if (order_status_key.empty() ||
+            !order_confirmation_token_matches(order_status_key, id, token)) {
+            co_return co_await send_order_html(route, http::status::not_found, not_found());
+        }
+        if (!post) {
+            const auto order = options.store->get_cloud_order(id);
+            if (!order) {
+                co_return co_await send_order_html(route, http::status::not_found, not_found());
+            }
+            co_return co_await send_order_html(
+                route, http::status::ok, web_ui_order_confirm(*order, token));
+        }
+        const auto confirmed =
+            options.store->confirm_cloud_order_email(id, order_confirmation_max_age_seconds);
+        if (!confirmed) {
+            const std::string& code = confirmed.error().code;
+            co_return co_await send_order_html(
+                route,
+                code == "not_found" ? http::status::not_found
+                : code == "expired" ? http::status::gone
+                                    : http::status::service_unavailable,
+                code == "not_found" ? not_found()
+                : code == "expired"
+                    ? web_ui_order_message("Link Expired",
+                                           "This confirmation link has expired, and the order was "
+                                           "not sent to our team. Send the order form again.")
+                    : web_ui_order_message("Try Again",
+                                           "We could not confirm your email just now."));
+        }
+        order_pass_requested.store(true);
+        co_return co_await send_order_html(
+            route,
+            http::status::ok,
+            web_ui_order_confirmed(*confirmed, order_status_url(*confirmed)));
     }
 
     // GET /orders/<id>?token=...: the order's status, for whoever holds its link.
@@ -14032,23 +14471,27 @@ struct ApiServer::Impl {
         }
         for (const control::CloudOrder& order : *orders) {
             for (const std::string& recipient : order_email_recipients_due(order)) {
-                const Email email =
-                    order_email(options.order_sheet,
-                                options.regions,
-                                options.resend,
-                                order,
-                                recipient,
-                                recipient == "customer" ? order_status_url(order) : "");
-                const auto sent = send_resend_email(options.resend,
-                                                    email,
-                                                    "lake-order-" + order.id + "-" + order.state +
-                                                        "-" + recipient,
-                                                    http,
-                                                    options.resend_api_base);
+                // `confirm` for an unconfirmed order form's address (lake#1000), whose one email
+                // carries the confirmation link instead of the status link.
+                const std::string told = order_email_state(order, recipient);
+                const Email email = order_email(options.order_sheet,
+                                                options.regions,
+                                                options.resend,
+                                                order,
+                                                recipient,
+                                                recipient != "customer" ? std::string()
+                                                : told == "confirm" ? order_confirmation_url(order)
+                                                                    : order_status_url(order));
+                const auto sent =
+                    send_resend_email(options.resend,
+                                      email,
+                                      "lake-order-" + order.id + "-" + told + "-" + recipient,
+                                      http,
+                                      options.resend_api_base);
                 static_cast<void>(store.record_cloud_order_email(
                     {order.id,
                      recipient,
-                     order.state,
+                     told,
                      sent.has_value(),
                      sent ? std::string() : sent.error(),
                      order_email_retry_seconds(order.email_attempts + 1)}));
@@ -14123,7 +14566,7 @@ struct ApiServer::Impl {
                                                 const std::string& path) {
         std::string html(web_app_index());
         if (html.empty()) {
-            return serve_web_app_file(route, "/index.html");
+            co_return co_await serve_web_app_file(route, "/index.html");
         }
         ApiContext context = context_for(route);
         nlohmann::json input = nlohmann::json::object();
@@ -14159,12 +14602,17 @@ struct ApiServer::Impl {
                 html.insert(head, brand.head_markup());
             }
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         std::move(html),
-                         "text/html; charset=utf-8",
-                         "private, no-store",
-                         clerk ? clerk_page_content_security_policy : page_content_security_policy);
+        // Computed from the page as sent: its inline scripts are allowed by hash, nothing else.
+        // send_text is a lazy coroutine holding a view of the policy, so this function is one too:
+        // the policy lives in this frame until the answer is sent.
+        const std::string policy =
+            web_app_content_security_policy(html, clerk ? clerk->frontend_api : "");
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     std::move(html),
+                                     "text/html; charset=utf-8",
+                                     "private, no-store",
+                                     policy);
     }
 
     boost::http::route_task serve_web_app_file(boost::http::route_params& route, std::string path) {
@@ -14378,7 +14826,7 @@ struct ApiServer::Impl {
     }
 
     // Appends the queued workspace events to their workspaces' audits, off the request path
-    // (decision 52), and reports what was written, kept or dropped as counters.
+    //, and reports what was written, kept or dropped as counters.
     void flush_audit() {
         if (!audit_recorder) {
             return;
@@ -14556,6 +15004,14 @@ struct ApiServer::Impl {
             metrics.increment_counter(
                 "lake_mcp_stream_problems_total", {}, static_cast<double>(done.problems.size()));
         }
+        // lake#980: connections left alone while they back off, and passes cut at their budget.
+        if (done.backing_off > 0) {
+            metrics.increment_counter(
+                "lake_mcp_stream_backoffs_total", {}, static_cast<double>(done.backing_off));
+        }
+        if (done.stopped_early) {
+            metrics.increment_counter("lake_mcp_stream_passes_stopped_early_total");
+        }
         // Agents started by a workspace stream (lake#677), on the same owner-only pass.
         const AgentStreamPass started = agent_streams.pass(context);
         metrics.increment_counter("lake_agent_stream_passes_total");
@@ -14684,7 +15140,7 @@ struct ApiServer::Impl {
     // The browser session authenticates this request: no bearer, and a lake_session cookie.
     // context_for resolves exactly this case to authentication_method "session".
     static bool session_cookie_request(const boost::http::route_params& route) {
-        return bearer_of(route).empty() && !cookie_value(route, "lake_session").empty();
+        return bearer_of(route).empty() && !session_cookie_of(route).empty();
     }
 
     static bool unsafe_method(const boost::http::route_params& route) {
@@ -14755,7 +15211,86 @@ struct ApiServer::Impl {
     // An unsafe request the browser session authenticates must come from lake's own origin, and a
     // /v1 or /mcp POST must be JSON, which no cross-site form or simple request can send.
     // Bearer-authenticated calls are not affected. Empty: the request may proceed.
+    // A route that issues a browser session (lake#977). A cross-site POST carries no
+    // SameSite=Lax cookie, so these are checked whether or not a session is present: otherwise a
+    // page elsewhere could post the attacker's own credential and sign the visitor's browser in
+    // as the attacker (login CSRF).
+    static bool session_issuing_request(const boost::http::route_params& route) {
+        const std::string path(route.url.path());
+        if (path == "/session" || path == "/identity/clerk-session") {
+            return true;
+        }
+        if (path.starts_with("/apps/") && path.find("/identity/") != std::string::npos) {
+            return true;
+        }
+        const std::string local =
+            workspace_path_id(path).empty() ? path : workspace_prefixed_local_path(path);
+        for (const std::string_view name : {"sign_up_password",
+                                            "sign_in_password",
+                                            "verify_mfa",
+                                            "sign_in_passkey",
+                                            "recover_with_code",
+                                            "complete_recovery"}) {
+            if (local == "/v1/" + std::string(name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Whether a Clerk token's `azp` (the origin it was issued to) is one of this Lake's: its
+    // external origin, https://<public host>, an alias, a region's host, the apex, or the origin
+    // this request reached (lake#921). Empty is never.
+    bool clerk_party_is_this_lake(const boost::http::route_params& route, std::string party) const {
+        const auto normal = [](std::string text) {
+            std::ranges::transform(text, text.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            while (text.ends_with('/')) {
+                text.pop_back();
+            }
+            return text;
+        };
+        party = normal(std::move(party));
+        if (party.empty()) {
+            return false;
+        }
+        std::vector<std::string> own;
+        if (!options.external_origin.empty()) {
+            own.push_back(normal(options.external_origin));
+        }
+        for (const std::string& host : options.host_aliases) {
+            own.push_back("https://" + normal(host));
+        }
+        if (!options.public_host.empty()) {
+            own.push_back("https://" + normal(options.public_host));
+        }
+        for (const auto& region : options.regions.list) {
+            if (!region.host.empty()) {
+                own.push_back("https://" + normal(region.host));
+            }
+        }
+        if (!options.regions.apex_host.empty()) {
+            own.push_back("https://" + normal(options.regions.apex_host));
+        }
+        if (route.req.count(boost::http::field::host) != 0) {
+            const std::string host = normal(std::string(route.req.at(boost::http::field::host)));
+            own.push_back("https://" + host);
+            own.push_back("http://" + host);
+        }
+        return std::ranges::find(own, party) != own.end();
+    }
+
     std::string cross_site_refusal(const boost::http::route_params& route) const {
+        if (unsafe_method(route) && bearer_of(route).empty() && session_issuing_request(route)) {
+            if (!from_own_origin(route)) {
+                return "Cross-site requests cannot sign in.";
+            }
+            const std::string path(route.url.path());
+            if (path.find("/v1/") != std::string::npos && !json_content_type(route)) {
+                return "Cross-site requests cannot sign in.";
+            }
+        }
         if (!unsafe_method(route) || !session_cookie_request(route)) {
             return {};
         }
@@ -14788,6 +15323,38 @@ struct ApiServer::Impl {
         co_return co_await send_text(route,
                                      boost::http::status::forbidden,
                                      error_body("unauthorized", refusal),
+                                     "application/json; charset=utf-8",
+                                     "no-store");
+    }
+
+    // A liquid client names its release in Liquid-Version (lake#1324, docs/api/liquid-clients.md).
+    // One outside the supported range is told so here, before any route, instead of failing
+    // part-way through the protocol. A sync path answers in the sync protocol's error body, every
+    // other path in the JSON envelope; `server_info` and the probes are always served.
+    boost::http::route_task refuse_liquid_version(boost::http::route_params& route) {
+        const std::string header(liquid_version_header);
+        if (route.req.count(header) == 0) {
+            co_return boost::http::route_next;
+        }
+        const std::string path(route.url.path());
+        if (liquid_version_exempt(path)) {
+            co_return boost::http::route_next;
+        }
+        const std::string refusal = liquid_client_refusal(route.req.at(header));
+        if (refusal.empty()) {
+            co_return boost::http::route_next;
+        }
+        if (path.find("/sync/") != std::string::npos) {
+            auto encoded = liquid::sync_server::encode_error(
+                liquid::error{liquid::errc::unsupported, refusal, "unsupported_client_version"});
+            const std::vector<std::byte> body =
+                encoded ? std::move(*encoded) : std::vector<std::byte>{};
+            co_return co_await send_bytes(
+                route, boost::http::status::bad_request, sync_error_content_type, body);
+        }
+        co_return co_await send_text(route,
+                                     boost::http::status::bad_request,
+                                     error_body("unsupported_client_version", refusal),
                                      "application/json; charset=utf-8",
                                      "no-store");
     }
@@ -15794,6 +16361,49 @@ void fix_malloc_mmap_threshold() {
 // home is empty, and its first uses run at once (the pre-open's workers, the first requests). Lake
 // therefore creates or loads it here, once, before anything opens a repository, under a file lock
 // that also orders lake processes sharing one home (lake#534 follow-up).
+//
+// Since liquid v0.3.0 (liquid#402) a new identity's wrapping key is sealed under a custody, by
+// default a passphrase on Linux (the Keychain on macOS). A pod has no terminal to ask for one, so
+// it names an owner-only passphrase file the operator mounts from a Secret
+// (`LIQUID_IDENTITY_PASSPHRASE_FILE`, lake#1352). Without one, the start fails here naming both
+// variables, before liquid is asked. An identity already in `file` custody (every one created
+// before liquid v0.3.0) needs neither and keeps loading.
+static std::optional<std::string>
+refuse_identity_without_custody(const std::filesystem::path& home) {
+    const auto status = liquid::local_identity_custody();
+    if (!status) {
+        return std::nullopt; // liquid reports an unreadable identity itself, below.
+    }
+    std::string custody = status->kind;
+    if (custody == "none") {
+        const char* chosen = std::getenv("LIQUID_IDENTITY_KEY_CUSTODY");
+        if (chosen != nullptr && *chosen != '\0') {
+            custody = chosen;
+        } else {
+#if defined(__APPLE__)
+            custody = "keychain";
+#else
+            custody = "passphrase";
+#endif
+        }
+        if (custody == "passphrase:") {
+            custody = "passphrase";
+        }
+    }
+    const char* file = std::getenv("LIQUID_IDENTITY_PASSPHRASE_FILE");
+    if (custody != "passphrase" || (file != nullptr && *file != '\0')) {
+        return std::nullopt;
+    }
+    return std::string(status->kind == "none" ? "lake cannot create its liquid identity in "
+                                              : "lake cannot open its liquid identity in ") +
+           (home / "identity").string() +
+           ": it is sealed under a passphrase and LIQUID_IDENTITY_PASSPHRASE_FILE names no "
+           "passphrase file. Set LIQUID_IDENTITY_PASSPHRASE_FILE to an owner-only file (mode "
+           "0400 or 0600) holding the passphrase, as the Orama operator mounts it from a Secret, "
+           "or choose another custody with LIQUID_IDENTITY_KEY_CUSTODY "
+           "(docs/serving/configuration.md, lake#1352)";
+}
+
 static std::expected<void, std::string> prepare_local_identity() {
     static std::mutex mutex;
     // The homes whose identity this process has loaded (one, outside tests).
@@ -15809,6 +16419,9 @@ static std::expected<void, std::string> prepare_local_identity() {
     }
     if (ready.contains(home)) {
         return {};
+    }
+    if (auto refused = refuse_identity_without_custody(home)) {
+        return std::unexpected(std::move(*refused));
     }
     std::error_code created;
     std::filesystem::create_directories(home / "identity", created);
@@ -15942,6 +16555,9 @@ bool ApiServer::start() {
         route.res.set_start_line(http::status::ok, route.req.version());
         // A draining server answers what it has accepted and closes each connection after it.
         route.res.set_keep_alive(route.req.keep_alive() && !impl.draining.load());
+        // Every answer is read as the type lake names, never sniffed into another (lake#991):
+        // a JSON error, a file's bytes or a stream cannot become a page or a script.
+        route.res.set("X-Content-Type-Options", "nosniff");
         const auto start = std::chrono::steady_clock::now();
         start_request_timing(route, start);
         auto result = co_await cors(route);
@@ -16004,6 +16620,17 @@ bool ApiServer::start() {
     // A cookie-authenticated unsafe request from another origin is refused before any route.
     router.use(guarded("cross_site", [&impl](http::route_params& route) -> http::route_task {
         auto result = co_await impl.refuse_cross_site(route);
+        if (result.what() != http::route_what::next) {
+            const auto timing = request_timing(route);
+            const auto start = timing ? timing->started : std::chrono::steady_clock::now();
+            const RequestTimingScope timing_scope(route, start);
+            impl.record_request(route, impl.route_pattern_for(route), start);
+        }
+        co_return result;
+    }));
+    // A liquid client outside the supported range is refused before any route (lake#1324).
+    router.use(guarded("liquid_version", [&impl](http::route_params& route) -> http::route_task {
+        auto result = co_await impl.refuse_liquid_version(route);
         if (result.what() != http::route_what::next) {
             const auto timing = request_timing(route);
             const auto start = timing ? timing->started : std::chrono::steady_clock::now();
@@ -16761,13 +17388,13 @@ bool ApiServer::start() {
     };
     limits.admission_wait = impl.options.store_owner_wait + std::chrono::minutes(2);
     // Answered before any route: logged and counted like a routed request, named by the reason.
-    limits.refused = [&impl](std::string_view method, unsigned status, std::string_view reason) {
-        const telemetry::Labels labels{{"method", std::string(method)},
-                                       {"route", std::string(reason)},
-                                       {"status", std::to_string(status)}};
+    limits.refused = [&impl](std::string_view sent, unsigned status, std::string_view reason) {
+        const std::string method(request_method_label(sent));
+        const telemetry::Labels labels{
+            {"method", method}, {"route", std::string(reason)}, {"status", std::to_string(status)}};
         impl.metrics.increment_counter("lake_http_requests_total", labels);
         RequestLogEntry entry{.ts = log_timestamp(),
-                              .method = std::string(method),
+                              .method = method,
                               .route = std::string(reason),
                               .status = static_cast<int>(status),
                               .duration_ms = 0.0,
@@ -16837,6 +17464,7 @@ bool ApiServer::start() {
     impl.server->start();
     impl.io_thread = lake::Thread([&impl] { impl.io_context.run(); });
     impl.maintenance_thread = lake::Thread([&impl] { impl.run_maintenance(); });
+    impl.stream_pass_thread = lake::Thread([&impl] { impl.run_stream_passes(); });
     impl.search_jobs_thread = lake::Thread([&impl] { impl.run_search_jobs(); });
     impl.is_running.store(true);
     impl.metrics.set_gauge("lake_up", {}, 1.0);
@@ -16916,7 +17544,7 @@ void ApiServer::stop() {
         impl.workspace_release_thread.join();
     impl.work_cv.notify_all();
     // In-flight requests have finished: write the repository usage they counted (lake#348) and
-    // the workspace audit events they queued (decision 52).
+    // the workspace audit events they queued.
     impl.flush_metering();
     impl.flush_audit();
     impl.flush_request_series();
@@ -17052,8 +17680,7 @@ void ApiServer::drain() {
          impl_->store_root_state.load() == StoreRootState::open) &&
         now >= impl_->next_mcp_stream_pass) {
         impl_->next_mcp_stream_pass = now + impl_->options.mcp_stream_interval;
-        Impl* impl = impl_.get();
-        impl_->schedule_maintenance("mcp connection streams", [impl] { impl->run_mcp_streams(); });
+        impl_->schedule_stream_pass();
     }
     // The registry and search segments live under the store root: only its owner removes them.
     if (impl_->options.store &&

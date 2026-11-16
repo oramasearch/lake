@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Ask Orama's page (`/ask`, lake#1128): the conversation across the page's width, for a signed-in
  * person; the operator and visitors see the home instead. */
 import { Navigate } from "react-router-dom";

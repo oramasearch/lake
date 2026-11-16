@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // `lake manifest` and the lists it publishes (lake#1119, orama-operator#936): the Stripe webhook
 // events are exactly the ones the handler dispatches on, the environment is exactly what main.cpp
 // reads, and the schema is the db/schema.sql compiled into the binary.
@@ -179,6 +181,19 @@ TEST(LakeManifest, MarksWhatTheOperatorMustSupply) {
                              "LAKE_AGENT_SERVICE_TOKEN"}) {
         EXPECT_TRUE(secret.contains(name)) << name;
     }
+}
+
+// orama-operator#1176 runs per-workspace library agents only for an image that lists this
+// (lake#871).
+TEST(LakeManifest, ListsTheFeaturesTheOperatorSwitchesOn) {
+    const auto manifest = lake::api::operator_manifest();
+    ASSERT_TRUE(manifest.contains("features"));
+    ASSERT_TRUE(manifest["features"].is_array());
+    const auto& features = manifest["features"];
+    EXPECT_NE(std::find(features.begin(), features.end(),
+                        nlohmann::json("agent_bus_workspace_credentials")),
+              features.end());
+    EXPECT_EQ(manifest["manifest_version"], 1) << "the array is additive";
 }
 
 TEST(LakeManifest, CarriesTheSchemaFileByteForByte) {

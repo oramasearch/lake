@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/usage_recorder.hpp"
 
 #include "lake/control/store.hpp"
@@ -41,7 +43,7 @@ std::int64_t hour_of(std::int64_t at_ms) {
 const std::vector<UsageDimension>& usage_dimensions() {
     static const std::vector<UsageDimension> dimensions{
         {"storage", "bytes", "last", "Storage"},
-        // What a workspace engine holds on its own volume (decision 61, lake#663): measured and
+        // What a workspace engine holds on its own volume (lake#663): measured and
         // shown, never billed, since the engine's disk is billed as its volume (`volumes`).
         {"engine_storage", "bytes", "last", "Engine Storage", false, false},
         {"transfer", "bytes", "sum", "Transfer"},
@@ -68,7 +70,7 @@ const std::vector<CapabilityMeter>& capability_meters() {
         {"create_workspace",
          {"cpu", "ram", "gpu", "vram", "volumes"},
          "its engine's resources and volume while it runs; what the engine holds on that volume is "
-         "engine_storage, shown and not billed (decision 61)"},
+         "engine_storage, shown and not billed"},
         {"start_workspace",
          {"cpu", "ram", "gpu", "vram", "volumes"},
          "its engine's resources and volume while it runs"},
@@ -91,8 +93,8 @@ const std::vector<CapabilityMeter>& capability_meters() {
         {"run_pipeline", {"cpu", "ram", "gpu", "vram"}, "in the workspace's engine"},
         {"start_experiment", {"cpu", "ram", "gpu", "vram"}, "its trials, in the engine"},
         {"start_solution", {"cpu", "ram", "gpu", "vram"}, "its first run, in the engine"},
-        // What the engine keeps is on its own volume, billed as `volumes` by its size (decision 61,
-        // lake#663); the bytes are engine_storage, shown and never billed.
+        // What the engine keeps is on its own volume, billed as `volumes` by its size
+        // (lake#663); the bytes are engine_storage, shown and never billed.
         {"load_drive_dataset", {"volumes"}, "the dataset, on the engine's volume"},
         // The engine's own capabilities, named in Lake (lake#650): their work and what they keep
         // are the workspace engine's CPU, RAM, GPU and volume.
@@ -192,6 +194,8 @@ const std::vector<std::pair<std::string_view, std::string_view>>& calls_only_cap
         {"create_application_webhook", "an identity record"},
         {"create_customer", "an account"},
         {"create_domain", "a routing record"},
+        // A DNS TXT lookup and, once it matches, the routing record create_domain held back.
+        {"verify_domain", "a routing record"},
         {"create_encryption_key", "a key record"},
         {"create_federation_issuer", "identity configuration"},
         {"create_grant", "a policy record"},
@@ -201,6 +205,7 @@ const std::vector<std::pair<std::string_view, std::string_view>>& calls_only_cap
         {"create_organization", "an account"},
         {"create_organization_space", "an account"},
         {"create_pki_authority", "a key record"},
+        {"create_acme_external_account_binding", "a credential derived, not stored (lake#919)"},
         {"create_secret_mount", "a secret mount record"},
         {"create_team", "a membership record"},
         {"create_token", "a credential"},
@@ -453,6 +458,7 @@ liquid::runtime::task<void> UsageRecorder::flush() {
         // and flush, off the request path.
         std::string customer_id;
         bool gone = store_ == nullptr || workspaces_ == nullptr;
+        bool deleted = false;
         if (!gone) {
             const auto workspace = store_->get_workspace(workspace_id);
             if (!workspace) {
@@ -468,13 +474,48 @@ liquid::runtime::task<void> UsageRecorder::flush() {
                 }
             } else if (workspace->desired == "deleted") {
                 gone = true;
+                deleted = true;
             } else {
                 customer_id = workspace->customer_id;
             }
         }
         if (gone) {
             for (const auto& [name, values] : metrics) {
-                count(delta.dropped_workspace_deleted, values.size());
+                // A deleted workspace's counter values still count on its bill (lake#988): they
+                // are added to the usage delete_workspace retained for it, as `late` points.
+                // Readings are not (the rollup holds the workspace's last), and without a
+                // retained set (billing off, or a workspace deleted before migration 0108)
+                // there is nowhere to keep them.
+                std::size_t dropped = values.size();
+                if (deleted && name == usage_metric) {
+                    dropped = 0;
+                    for (const auto& [key, value] : values) {
+                        control::RetainedUsagePoint point{.workspace_id = workspace_id,
+                                                          .source = "late",
+                                                          .at_ms = std::get<2>(key),
+                                                          .value =
+                                                              static_cast<double>(value.value)};
+                        const nlohmann::json labels =
+                            nlohmann::json::parse(std::get<3>(key), nullptr, false);
+                        if (labels.is_object()) {
+                            for (const auto& [label, text] : labels.items()) {
+                                if (!text.is_string()) {
+                                    continue;
+                                }
+                                if (label == "dimension") {
+                                    point.dimension = text.get<std::string>();
+                                } else if (label == "kind" || label == "class" ||
+                                           label == "model") {
+                                    point.labels[label] = text.get<std::string>();
+                                }
+                            }
+                        }
+                        if (point.dimension.empty() || !store_->add_retained_usage(point)) {
+                            ++dropped;
+                        }
+                    }
+                }
+                count(delta.dropped_workspace_deleted, dropped);
             }
             continue;
         }

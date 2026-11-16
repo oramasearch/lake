@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include <algorithm>
 #include <atomic>
 #include <charconv>
@@ -25,6 +27,7 @@
 #include "lake/api/tunnel_clients.hpp"
 #include "lake/api/white_label.hpp"
 #include "lake/control/agent_bus.hpp"
+#include "lake/control/agent_task_proxy.hpp"
 #include "lake/control/agent_library.hpp"
 #include "lake/control/agent_runs.hpp"
 #include "lake/control/memory_store.hpp"
@@ -141,6 +144,8 @@ int usage() {
         "  LAKE_SERVICE_DIR enables managed services and workspaces (the operator's mount)");
     std::println(
         "  LAKE_SERVICES_PER_CUSTOMER caps live services per customer (default 0: no limit)");
+    std::println(
+        "  LAKE_WORKSPACES_PER_CUSTOMER caps live workspaces per customer (default 0: no limit)");
     std::println("  LAKE_APPS_WILDCARD is the required parent domain for Ship app hosts");
     std::println("  LAKE_APPS_RUNTIME_IMAGE is the base image for source-backed Ship App builds");
     std::println("  LAKE_METHODOLOGY_RUNTIME_IMAGE is the oramasearch/methodology-runtime image "
@@ -201,11 +206,10 @@ int usage() {
                  "the operator's control rows (default LAKE_PUBLIC_HOST)");
     std::println("  LAKE_SIGN_IN_SSO_PROVIDER the SSO provider id that is the only way in for "
                  "people (not with Clerk)");
-    std::println("  LAKE_ORDER_SHEET JSON merged over the apex order sheet's default offers, "
-                 "prices and limits (docs/api/orders.md)");
-    std::println("  LAKE_RESEND_API_KEY Orama's Resend key for order email; LAKE_RESEND_FROM the "
-                 "sender (default Lake <orders@lake.live>); LAKE_SUPPORT_EMAIL where orders go "
-                 "(default support@orama.com)");
+    std::println("  LAKE_ORDER_SHEET the apex order sheet's offers, prices and limits, merged over "
+                 "a default that is off and sells nothing (docs/api/orders.md)");
+    std::println("  LAKE_RESEND_API_KEY the Resend key for email; LAKE_RESEND_FROM the "
+                 "sender; LAKE_SUPPORT_EMAIL where orders go (all three needed to send email)");
     std::println("  LAKE_BRAND_FILE a JSON brand; LAKE_BRAND_NAME, _SHORT_NAME, _COMPANY, "
                  "_ASSISTANT_NAME, _CONSOLE_TITLE, _BY_ORAMA, _LOGO, _LOGO_DARK, _FAVICON, "
                  "_ACCENT, _ACCENT_DARK, _SUPPORT_EMAIL, _EMAIL_FROM, _LEGAL_NAME, _TERMS_URL, "
@@ -307,7 +311,7 @@ int main(int argc, char** argv) {
     opts.clerk_publishable_key = env_or("LAKE_CLERK_PUBLISHABLE_KEY", "");
     opts.clerk_webhook_secret = env_or("LAKE_CLERK_WEBHOOK_SECRET", "");
     opts.clerk_secret_key = env_or("LAKE_CLERK_SECRET_KEY", "");
-    // The terms and privacy policy sign-up and sign-in link to (liquid-bridge#15): unset keeps
+    // The terms and privacy policy sign-up and sign-in link to: unset keeps
     // Orama's published pages, `off` shows no link, and a malformed URL stops lake.
     for (const auto& [name, value, target, fallback] :
          {std::tuple{"LAKE_TERMS_URL",
@@ -349,6 +353,8 @@ int main(int argc, char** argv) {
     // The cluster delivery key the operator publishes (a public key, not a secret): the only one
     // mint_sealed_secret seals a user's secret to (lake#625).
     opts.sealing_public_key = env_or("LAKE_SEALING_PUBLIC_KEY", "");
+    // The staging root for import_github_repository's checkouts (lake#925); unset, not offered.
+    opts.git_import_root = env_or("LAKE_GIT_IMPORT_ROOT", "");
     // Speech-to-text (docs/api/transcripts.md): without a key, transcribe answers not_supported.
     opts.openai_api_key = env_or("LAKE_OPENAI_API_KEY", "");
     opts.model_provider_url = env_or("LAKE_MODEL_PROVIDER_URL", "");
@@ -390,8 +396,8 @@ int main(int argc, char** argv) {
         }
         opts.balance = *balance;
     }
-    // Stripe (decision 57, lake#628): lake's own platform credentials, environment variables of
-    // the hosting platform (Railway; spec.env with a secretKeyRef on the dev cluster), never a
+    // Stripe (lake#628): lake's own platform credentials, environment variables of
+    // the hosting platform (for example spec.env with a secretKeyRef), never a
     // user's secret store. Read once here and never logged; a new key takes a restart.
     opts.stripe_keys = {env_or("LAKE_STRIPE_SECRET_KEY", ""), env_or("LAKE_STRIPE_WEBHOOK_SECRET", "")};
     opts.store_root = env_or("LAKE_STORE_ROOT", "");
@@ -467,7 +473,7 @@ int main(int argc, char** argv) {
     opts.search_memory_bytes = static_cast<std::size_t>(
         std::max<std::uint64_t>(1024ULL * 1024ULL, env_u64("LAKE_SEARCH_MEMORY_BYTES", 256ULL * 1024ULL * 1024ULL)));
     opts.public_host = env_or("LAKE_PUBLIC_HOST", "");
-    // A white-labelled Lake (lake#1136, docs/deployment/white-label-sign-in.md): the operator moves
+    // A white-labelled Lake (lake#1136, docs/api/clerk.md): the operator moves
     // LAKE_PUBLIC_HOST to the customer's host, keeps the Orama host as an alias, and keeps the
     // control rows named by the Orama host. Invalid values stop startup.
     std::string control_host;
@@ -564,6 +570,9 @@ int main(int argc, char** argv) {
     opts.apps_reserved_names = env_or("LAKE_APPS_RESERVED_NAMES", "");
     opts.apps_per_customer = env_u64("LAKE_APPS_PER_CUSTOMER");
     opts.app_replicas_per_customer = env_u64("LAKE_APP_REPLICAS_PER_CUSTOMER");
+    // lake#983: every active grant is projected into the cluster's one relay grants document.
+    opts.tunnel_grants_per_workspace = env_u64("LAKE_TUNNEL_GRANTS_PER_WORKSPACE", 100);
+    opts.tunnel_grants_per_customer = env_u64("LAKE_TUNNEL_GRANTS_PER_CUSTOMER", 500);
     opts.internal_url = env_or("LAKE_INTERNAL_URL", "");
     const std::string operator_zetta_url = env_or("LAKE_OPERATOR_ZETTA_URL", "");
     const std::string operator_zetta_token = env_or("LAKE_OPERATOR_ZETTA_TOKEN", "");
@@ -747,8 +756,10 @@ int main(int argc, char** argv) {
     }
     workspace_config.internal_url = opts.internal_url;
     workspace_config.agent_service_token = env_or("LAKE_AGENT_SERVICE_TOKEN", "");
-    workspace_config.agent_bus_tokens =
-        lake::control::read_agent_bus_tokens(env_or("LAKE_AGENT_BUS_DIR", ""));
+    // Re-read whenever the directory changes, so the operator adds or removes a workspace's bound
+    // credential without restarting lake (lake#871).
+    workspace_config.agent_bus_credentials =
+        std::make_shared<lake::control::AgentBusCredentials>(env_or("LAKE_AGENT_BUS_DIR", ""));
     if (const std::string limit = env_or("LAKE_SERVICES_PER_CUSTOMER", ""); !limit.empty()) {
         std::size_t parsed = 0;
         const auto [end, error] =
@@ -758,6 +769,16 @@ int main(int argc, char** argv) {
             return 2;
         }
         workspace_config.max_per_customer = parsed;
+    }
+    if (const std::string limit = env_or("LAKE_WORKSPACES_PER_CUSTOMER", ""); !limit.empty()) {
+        std::size_t parsed = 0;
+        const auto [end, error] =
+            std::from_chars(limit.data(), limit.data() + limit.size(), parsed);
+        if (error != std::errc() || end != limit.data() + limit.size()) {
+            std::println(stderr, "lake: LAKE_WORKSPACES_PER_CUSTOMER must be a whole number");
+            return 2;
+        }
+        workspace_config.max_workspaces_per_customer = parsed;
     }
     opts.allow_non_expiring_credentials =
         env_or("LAKE_ALLOW_NON_EXPIRING_CREDENTIALS", "true") != "false";

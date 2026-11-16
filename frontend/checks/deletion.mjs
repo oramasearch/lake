@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Screenshots of the delete and revoke confirmations (lake#645, docs/ui/deletion.md) at 1440 and 390
 // wide: an organization that still owns a workspace (blocked, with the workspace linked), one that
 // owns none (typed handle), a dataset, a secret mount and an Ask Orama conversation with the agent
@@ -21,12 +23,12 @@ const BASE = process.env.BASE ?? "http://localhost:5174";
 const viewer = {
   signed_in: true,
   administrator: false,
-  display_name: "Steve Sperandeo",
-  email: "steve@example.com",
+  display_name: "Ada Lovelace",
+  email: "ada@example.com",
   taap_id: "taap:me",
   customer_id: "me",
   workspace_id: "me-0",
-  spaces: [{ id: "me", name: "steve-x7f2", label: "Your workspaces", personal: true, kind: "individual", workspaces: [{ id: "me-0", name: "steve", customer_id: "me", status: "ready" }] }],
+  spaces: [{ id: "me", name: "ada-x7f2", label: "Your workspaces", personal: true, kind: "individual", workspaces: [{ id: "me-0", name: "ada", customer_id: "me", status: "ready" }] }],
   clerk: { enabled: false },
   password_sign_up: false,
   version: "dev",
@@ -46,8 +48,8 @@ const orgPlan = (blocked) => ({
 const accountPlan = (blocked) => ({
   user_id: "u-1",
   customer_id: "me",
-  handle: "steve-x7f2",
-  workspaces: [{ id: "me-0", name: "steve", environment: "dev", customer_id: "me" }],
+  handle: "ada-x7f2",
+  workspaces: [{ id: "me-0", name: "ada", environment: "dev", customer_id: "me" }],
   organizations: [
     { organization_id: "o-2", display_name: "Side project", handle: "side-project", role: "owner", other_owners: 0, other_members: 0, workspaces: [{ id: "w-2", name: "side" }], action: "delete" },
     { organization_id: "o-1", display_name: "Acme Analytics", handle: "acme-analytics", role: "owner", other_owners: blocked ? 0 : 1, other_members: 6, workspaces: [], action: blocked ? "blocked" : "leave" },
@@ -85,7 +87,7 @@ const SHOTS = [
   { tag: "conversation", path: "/?conversation=cv-1", open: "Delete", typed: "delete" },
   { tag: "dataset", path: "/w/me-0/train/dataset?name=orders&database=datasets", open: "Delete dataset", typed: "orders" },
   { tag: "account-blocked", path: "/settings?tab=profile", open: "Delete account", blocked: true },
-  { tag: "account", path: "/settings?tab=profile", open: "Delete account", typed: "steve-x7f2" },
+  { tag: "account", path: "/settings?tab=profile", open: "Delete account", typed: "ada-x7f2" },
 ];
 
 const browser = await chromium.launch();

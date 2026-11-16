@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Screenshots of the streams that start an agent (lake#677, docs/api/agent-launches.md#stream-triggers)
 // at 1440 and 390 wide: an agent's Design page with its streams under Where It Is Used, its Edit
 // drawer, and New agent on a frontier model. Run against `npx vite --port 5174`; every /v1 call is
@@ -19,12 +21,12 @@ const BASE = process.env.BASE ?? "http://localhost:5174";
 const viewer = {
   signed_in: true,
   administrator: false,
-  display_name: "Steve Sperandeo",
-  email: "steve@example.com",
+  display_name: "Ada Lovelace",
+  email: "ada@example.com",
   user_id: "user-1",
   customer_id: "me",
   workspace_id: "ws-1",
-  spaces: [{ id: "me", name: "steve-x7f2", label: "Your workspaces", personal: true, kind: "individual", workspaces: [{ id: "ws-1", name: "Support", customer_id: "me", status: "ready" }] }],
+  spaces: [{ id: "me", name: "ada-x7f2", label: "Your workspaces", personal: true, kind: "individual", workspaces: [{ id: "ws-1", name: "Support", customer_id: "me", status: "ready" }] }],
   clerk: { enabled: false },
   password_sign_up: false,
   config: { frontier_model: "gpt-4o" },
@@ -44,7 +46,7 @@ const agent = {
   created_at: "2026-10-10T09:00:00Z",
   updated_at: "2026-10-11T09:00:00Z",
 };
-const trigger = (id, stream) => ({ id, agent_id: "agent-7", agent_name: "Order Watcher", stream, zetta: "workspace", cursor: 41, set_by: "user-1", set_by_name: "Steve Sperandeo", created_at: "2026-10-11T10:00:00Z" });
+const trigger = (id, stream) => ({ id, agent_id: "agent-7", agent_name: "Order Watcher", stream, zetta: "workspace", cursor: 41, set_by: "user-1", set_by_name: "Ada Lovelace", created_at: "2026-10-11T10:00:00Z" });
 const answers = {
   viewer,
   workspace_status: { requested: true, ready: true, phase: "Ready", workspace_id: "ws-1" },

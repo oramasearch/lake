@@ -1,7 +1,10 @@
-/** API tokens (`/tokens`): create a named, scoped token in a drawer (its secret shown once, in this
+// SPDX-License-Identifier: MIT
+
+/** API tokens (`/tokens`), which Developer → API and MCP call keys: create a named, scoped token in a drawer (its secret shown once, in this
  * page's memory only) and revoke existing ones. The token rules (attenuation, never-expiring
  * tokens) are the capability's; the page only builds its input as the form handler did. */
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { KeyRound, Plus } from "lucide-react";
 import { act, useList } from "@/lib/api";
 import { Drawer } from "@/lib/overlay";
@@ -12,9 +15,7 @@ import { dateTime } from "@/lib/format";
 import { NameCell, PanelEmpty, When, matches } from "@/pages/organizations/shared";
 import { ActiveBadge, type SessionRow, sessionKind } from "./labels";
 import { messageOf, NO_WORKSPACE } from "./signIn";
-
-/** The capability scopes Liquid push and pull need. */
-const LIQUID_SCOPES = "refs,find_missing,push,pull,upload_chunks,read_chunk";
+import { LIQUID_SCOPES } from "@/pages/developer/logic";
 
 /** "a, b,,c " → ["a", "b", "c"]: trimmed, empties dropped. */
 export function commaSeparated(value: string): string[] {
@@ -55,7 +56,12 @@ export default function TokensPage() {
     <Page
       eyebrow="Account"
       title="API Tokens"
-      sub="Create named, scoped sessions and revoke them here."
+      sub={
+        <>
+          Create named, scoped tokens and revoke them here. The keys Developer → <Link to="/developer/api">API</Link> and <Link to="/developer/mcp">MCP</Link> make are API
+          tokens too, and are listed here.
+        </>
+      }
       actions={
         <Button variant="primary" onClick={() => setCreating(true)}>
           <Plus size={14} aria-hidden /> New token
@@ -231,7 +237,7 @@ function NewToken({ onClose, onCreated }: { onClose: () => void; onCreated: (sec
           required
           help={
             <>
-              For Liquid push and pull, use <code>{LIQUID_SCOPES}</code>{" "}
+              For liquid and liquify (clone, push, pull and reviews), use <code>{LIQUID_SCOPES}</code>{" "}
               <button type="button" className="button-ghost inline p-0 text-action underline" onClick={() => setScopes(LIQUID_SCOPES)}>
                 Use these
               </button>

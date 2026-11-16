@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Usage over time (lake#564): the dashboard's windows, units, changes, readings of several accounts
  * added up, the stacked chart, the CSV, limits in a person's units, the links other pages make, and
  * Home's workspace selection that Usage shares. `npm test`; the build runs it. */
@@ -16,6 +18,7 @@ import {
   mergeReadings,
   rangeOf,
   stackSeries,
+  csvCell,
   toCsv,
   toLimit,
   usageLink,
@@ -217,4 +220,13 @@ test("only the operator is offered the storage limit, and the form never starts 
   assert.equal(firstLimitDimension([{ dimension: "storage" }], true), "storage");
   assert.equal(firstLimitDimension([{ dimension: "storage" }], false), "");
   assert.equal(firstLimitDimension([], false), "");
+});
+
+test("a name a person chose stays literal text in the CSV (lake#1007)", () => {
+  assert.equal(csvCell("=HYPERLINK(\"https://example.test\")"), `"'=HYPERLINK(""https://example.test"")"`);
+  assert.equal(csvCell("+1"), "'+1");
+  assert.equal(csvCell("-2"), "'-2");
+  assert.equal(csvCell("@SUM(A1)"), "'@SUM(A1)");
+  assert.equal(csvCell("Home"), "Home");
+  assert.equal(csvCell(-3), "-3", "a number is written as it is");
 });

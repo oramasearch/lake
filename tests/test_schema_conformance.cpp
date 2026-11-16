@@ -1,7 +1,10 @@
+// SPDX-License-Identifier: MIT
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -9,6 +12,7 @@
 #include <spawn.h>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <sys/wait.h>
 #include <vector>
 
@@ -158,6 +162,57 @@ std::string prepare_conflict(const std::filesystem::path& root,
          .explanation = "Both writers changed the same text."})));
     checked(liquid::runtime::block_on(source.cut("record schema fixture conflict")));
     return liquid::to_string(conflict);
+}
+
+// A 16 kHz mono 16-bit WAV of `seconds` of silence, base64: audio whose length lake can measure,
+// as speech-to-text requires (lake#979).
+std::string wav(double seconds) {
+    const auto put = [](std::string& out, std::uint32_t value, int width) {
+        for (int index = 0; index < width; ++index) {
+            out.push_back(static_cast<char>((value >> (8 * index)) & 0xFF));
+        }
+    };
+    const auto bytes = static_cast<std::uint32_t>(seconds * 32000);
+    std::string out = "RIFF";
+    put(out, 36 + bytes, 4);
+    out += "WAVEfmt ";
+    put(out, 16, 4);
+    put(out, 1, 2);
+    put(out, 1, 2);
+    put(out, 16000, 4);
+    put(out, 32000, 4);
+    put(out, 2, 2);
+    put(out, 16, 2);
+    out += "data";
+    put(out, bytes, 4);
+    out.append(bytes, '\0');
+    return out;
+}
+
+std::string base64(std::string_view bytes) {
+    static constexpr char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    std::size_t index = 0;
+    for (; index + 2 < bytes.size(); index += 3) {
+        const std::uint32_t n = (static_cast<unsigned char>(bytes[index]) << 16) |
+                                (static_cast<unsigned char>(bytes[index + 1]) << 8) |
+                                static_cast<unsigned char>(bytes[index + 2]);
+        for (int shift = 18; shift >= 0; shift -= 6) {
+            out.push_back(alphabet[(n >> shift) & 63]);
+        }
+    }
+    if (index < bytes.size()) {
+        std::uint32_t n = static_cast<unsigned char>(bytes[index]) << 16;
+        if (index + 1 < bytes.size()) {
+            n |= static_cast<unsigned char>(bytes[index + 1]) << 8;
+        }
+        out.push_back(alphabet[(n >> 18) & 63]);
+        out.push_back(alphabet[(n >> 12) & 63]);
+        out.push_back(index + 1 < bytes.size() ? alphabet[(n >> 6) & 63] : '=');
+        out.push_back('=');
+    }
+    return out;
 }
 
 std::string signed_attestation() {
@@ -685,14 +740,14 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     }
     const json transcript_scope{{"customer_id", customer.id}, {"workspace_id", experiments.id}};
     auto dictation = transcript_scope;
-    dictation.update({{"name", "memo.webm"}, {"audio_base64", "c3BlZWNo"}});
+    dictation.update({{"name", "memo.wav"}, {"audio_base64", base64(wav(0.5))}});
     http.call("transcribe", dictation);
     auto transcript_input = transcript_scope;
     transcript_input.update({{"title", "Schema call"}, {"source", "text"}, {"text", "words"}});
     const auto transcript = http.call("create_transcript", transcript_input);
     auto from_audio = transcript_scope;
     from_audio.update(
-        {{"title", "Schema memo"}, {"source", "recording"}, {"audio_base64", "c3BlZWNo"}});
+        {{"title", "Schema memo"}, {"source", "recording"}, {"audio_base64", base64(wav(0.5))}});
     http.call("create_transcript", from_audio);
     http.call("list_transcripts", transcript_scope);
     http.read("list_transcripts",

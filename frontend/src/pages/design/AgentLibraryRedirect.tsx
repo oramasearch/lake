@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The old Design → Agent Library address (`/design/agent-library`, renamed lake#653): Design →
  * Agents, in the same workspace and with the same query. */
 import { Navigate, useLocation } from "react-router-dom";

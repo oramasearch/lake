@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // What the two stream workers share (lake#652, lake#677): acting as the person who set a stream,

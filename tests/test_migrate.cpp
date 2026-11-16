@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // `lake migrate` (lake#1119, orama-operator#936) does what the operator's PostgresSchema Job did:
 // the same database on an empty server and on one already at the current schema, idempotent, one
 // transaction, and runs against one database applying one at a time.

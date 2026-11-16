@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Who owns a secret mount (docs/ui/secrets.md, docs/api/secrets.md): the account that owns the
  * workspace, or an organization inside that account's space. `create_secret_mount` takes no
  * `organization_id` for the account and the organization's id otherwise. Pure, so `npm test`

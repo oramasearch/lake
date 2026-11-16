@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Train → Experiments → one run's charts (web_ui_experiments.cpp, run mode): its curves,
  * parameters and artifacts, refreshed live from `tail_experiment_events`. */
 import { useEffect, useState } from "react";

@@ -1,4 +1,6 @@
-// The prepaid account balance (lake#1114, liquid-bridge decision 67, docs/api/billing.md#balance):
+// SPDX-License-Identifier: MIT
+
+// The prepaid account balance (lake#1114, docs/api/billing.md#balance):
 // the balance's view and its math, top-ups credited once per payment from Stripe's webhook, the
 // charges refreshed from usage (a month's charge is its bill, a failed read holds the balance, an
 // issued invoice freezes its month), the 402 gate on the capabilities that start paid work and
@@ -368,8 +370,8 @@ TEST(Balance, TheViewFollowsTheBalance) {
     EXPECT_FALSE(lake::api::balance_settings_from_environment("", "", "", "", "5", ""))
         << "a refresh under 30 seconds";
 
-    EXPECT_EQ(lake::api::add_funds_link("https://lake.live", "abc"),
-              "https://lake.live/billing/add-funds?customer_id=abc");
+    EXPECT_EQ(lake::api::add_funds_link("https://lake.example.com", "abc"),
+              "https://lake.example.com/billing/add-funds?customer_id=abc");
 }
 
 TEST(Balance, ATopUpIsCreditedOncePerPayment) {
@@ -1565,6 +1567,7 @@ TEST(PaidWorkContract, EveryCapabilityThatStartsPaidWorkIsMarked) {
         {"create_encryption_key", "a key record"},
         {"create_federation_issuer", "a configuration"},
         {"create_pki_authority", "a credential"},
+        {"create_acme_external_account_binding", "a credential (lake#919)"},
         {"create_secret_mount", "a secret record"},
         {"create_application_organization", "an identity"},
         {"create_application_webhook", "a configuration"},

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // A test identity provider for SAML sign-in (lake#836): an RSA key, its certificate, and responses

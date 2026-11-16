@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The quickstart process as pure rules (lake#1128, docs/ui/quickstart.md), so `npm test` runs them
  * (tests/quickstart.test.ts): what a dropped file is sent as, the columns a first model trains on,
  * how often the page reads the status, when it publishes a trained model, the key put into the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/telemetry/metrics.hpp"
 
 #include <array>
@@ -256,9 +258,11 @@ public:
     control::Result<control::NetworkTunnelGrant>
     create_network_tunnel_grant(const control::NetworkScope& scope,
                                 const control::NetworkTunnelGrantSpec& spec,
-                                const control::NetworkActor& actor) override {
-        return call("create_network_tunnel_grant",
-                    [&] { return store_->create_network_tunnel_grant(scope, spec, actor); });
+                                const control::NetworkActor& actor,
+                                const control::NetworkTunnelGrantLimits& limits) override {
+        return call("create_network_tunnel_grant", [&] {
+            return store_->create_network_tunnel_grant(scope, spec, actor, limits);
+        });
     }
     control::Result<control::NetworkTunnelGrant>
     update_network_tunnel_grant(const control::NetworkScope& scope,
@@ -333,6 +337,10 @@ public:
     control::Result<std::map<std::string, std::string>>
     principal_names(const std::vector<std::string>& taap_ids) override {
         return call("principal_names", [&] { return store_->principal_names(taap_ids); });
+    }
+    control::Result<std::map<std::string, control::SignerName>>
+    signer_names(const std::vector<std::string>& taap_ids) override {
+        return call("signer_names", [&] { return store_->signer_names(taap_ids); });
     }
     control::Result<control::Organization>
     create_organization(const control::NewOrganization& value) override {
@@ -851,6 +859,25 @@ public:
     control::Result<void> add_app_transfer(const control::AppTransfer& row) override {
         return call("add_app_transfer", [&] { return store_->add_app_transfer(row); });
     }
+    control::Result<void>
+    retain_workspace_usage(const control::RetainedUsageSet& set,
+                           const std::vector<control::RetainedUsagePoint>& points) override {
+        return call("retain_workspace_usage",
+                    [&] { return store_->retain_workspace_usage(set, points); });
+    }
+    control::Result<void> add_retained_usage(const control::RetainedUsagePoint& point) override {
+        return call("add_retained_usage", [&] { return store_->add_retained_usage(point); });
+    }
+    control::Result<std::vector<control::RetainedUsagePoint>> retained_usage(
+        const std::string& customer_id, std::int64_t from_ms, std::int64_t to_ms) override {
+        return call("retained_usage",
+                    [&] { return store_->retained_usage(customer_id, from_ms, to_ms); });
+    }
+    control::Result<std::vector<control::RetainedUsageSet>>
+    retained_usage_sets(const std::string& customer_id) override {
+        return call("retained_usage_sets",
+                    [&] { return store_->retained_usage_sets(customer_id); });
+    }
     control::Result<control::BillingPlan>
     put_billing_plan(const control::BillingPlan& plan) override {
         return call("put_billing_plan", [&] { return store_->put_billing_plan(plan); });
@@ -1030,6 +1057,16 @@ public:
     record_cloud_order_email(const control::CloudOrderEmailOutcome& outcome) override {
         return call("record_cloud_order_email",
                     [&] { return store_->record_cloud_order_email(outcome); });
+    }
+    control::Result<control::CloudOrder> confirm_cloud_order_email(const std::string& id,
+                                                                   int max_age_seconds) override {
+        return call("confirm_cloud_order_email",
+                    [&] { return store_->confirm_cloud_order_email(id, max_age_seconds); });
+    }
+    control::Result<control::CloudOrderRecipientCounts>
+    count_cloud_order_recipients(const std::string& email) override {
+        return call("count_cloud_order_recipients",
+                    [&] { return store_->count_cloud_order_recipients(email); });
     }
     control::Result<std::vector<control::CloudOrderEvent>>
     unaudited_cloud_order_events(int limit) override {
@@ -1562,6 +1599,10 @@ public:
     control::Result<std::string> account_for_identity(const std::string& taap_id) override {
         return call("account_for_identity", [&] { return store_->account_for_identity(taap_id); });
     }
+    control::Result<std::string> registered_identity_document(const std::string& taap_id) override {
+        return call("registered_identity_document",
+                    [&] { return store_->registered_identity_document(taap_id); });
+    }
     control::Result<void> register_oauth_provider(const control::OAuthProvider& value) override {
         return call("register_oauth_provider",
                     [&] { return store_->register_oauth_provider(value); });
@@ -1602,6 +1643,26 @@ public:
     control::Result<control::BrowserKeyAdmission>
     admit_browser_key_call(const std::string& id) override {
         return call("admit_browser_key_call", [&] { return store_->admit_browser_key_call(id); });
+    }
+    control::Result<control::DomainClaim> claim_domain(const control::NewDomainClaim& in) override {
+        return call("claim_domain", [&] { return store_->claim_domain(in); });
+    }
+    control::Result<control::DomainClaim> get_domain_claim(const std::string& host) override {
+        return call("get_domain_claim", [&] { return store_->get_domain_claim(host); });
+    }
+    control::Result<control::DomainClaim> verify_domain_claim(const std::string& host,
+                                                              const std::string& repository_id,
+                                                              const std::string& environment,
+                                                              const std::string& token) override {
+        return call("verify_domain_claim", [&] {
+            return store_->verify_domain_claim(host, repository_id, environment, token);
+        });
+    }
+    control::Result<void> release_domain_claim(const std::string& host,
+                                               const std::string& repository_id,
+                                               const std::string& environment) override {
+        return call("release_domain_claim",
+                    [&] { return store_->release_domain_claim(host, repository_id, environment); });
     }
     control::Result<std::vector<control::Session>>
     list_sessions(const std::string& user_id, const std::string& pool_id) override {

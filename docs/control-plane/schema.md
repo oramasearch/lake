@@ -15,12 +15,52 @@ file records is in `schema_migrations`, otherwise the whole idempotent file. It 
 time, and prints the migration rows and guard tables it added as JSON. Exit 0 applied or current,
 1 a statement failed (rolled back), 2 usage, 3 the database unreachable within `--wait-seconds`.
 The server process never migrates. `lake manifest` publishes the schema's SHA-256, latest
-migration, guard table and every guard table, so the operator needs no copy of the file. The full
-contract is [`../deployment/operator-interface.md`](../deployment/operator-interface.md).
+migration, guard table and every guard table, so the operator needs no copy of the file.
 
 A new migration still follows the rules below: idempotent SQL, its row in `schema_migrations`, and a
 new `*_guard` table created by the newest migration (`LakeManifest.TheGuardTableIsTheNewestMigrations`
 fails otherwise).
+
+`0111_service_workspace_routing` (lake#1301,
+[orama-operator#781](https://github.com/oramasearch/orama-operator/issues/781)) adds the triggers
+`service_workspace_routing` on `services` and `workspace_service_routing` on `workspaces`. A
+service's `workspace_id` is NULL or a workspace of the service's own `customer_id`, checked on
+insert and on any update of either column; a workspace's `zetta_service_id` is NULL or a service of
+its own customer, and a workspace cannot move to another customer while services of its customer
+name it. Refusals are `23514`. Status writes and withdrawals are never checked. Rows that already
+disagree are reported as warnings once, not changed. No table or column changes; guard
+`service_workspace_routing_guard`; the operator must vendor this schema and select the guard before
+the image rolls. Numbered after the open `0106` (lake#1295), `0107` to `0109` (lake#1296) and `0110`
+(lake#1300). See [services](services.md#workspace-routing).
+
+`0109_principal_ids` (lake#872) adds `users_taap_id_format` and `organizations_taap_id_format`:
+a `taap_id` is NULL or `taap:` and printable ASCII, at most 512 characters, the rule every creation
+path already applies (`valid_principal_id`). `NOT VALID`, so rows from before lake#870 are not
+scanned; a write to such a row is refused until it is corrected. Guard `principal_ids_guard`; the
+operator must vendor this schema and select the guard. See
+[principal ids](../api/policy.md#principal-ids-lake870-lake872).
+
+`0108_retained_usage` (lake#988) adds `retained_usage_sets` (one row per deleted
+workspace: its account and the window `[from_at, to_at)` read) and `retained_usage` (that
+workspace's quantities: `source` `rollup` or `late`, `dimension`, `labels` as a JSON object of at
+most `kind`, `class` and `model`, `at`, `value`, `gauge`; primary key `(workspace_id, source,
+dimension, labels, at)`). Billing records are multitenancy (decision 56): no content, no object id.
+`delete_workspace` writes the rollup before the cascade where billing is on and refuses the deletion
+when it cannot; `usage_over_time` adds the rows for deleted workspaces. Additive; guard
+`retained_usage_guard`; the operator must vendor the schema and select the guard before the binary
+rolls. See [billing](../api/billing.md#a-deleted-workspaces-usage).
+
+`0107_order_email_confirmation` (lake#1000): `cloud_orders.contact_email_confirmed_at`,
+NULL until the person who sent an order form follows its confirmation link; until then the order
+mails its contact email only the confirmation and tells support nothing (a checkout order needs
+none). Order forms mailed before the migration count as confirmed, once. Two indexes serve the
+per-recipient limits (the address without case over a day, its domain over an hour). Additive;
+guard `order_email_confirmation_guard`; the operator vendors the schema and selects the guard
+before the binary rolls. See [orders](../api/orders.md#email).
+
+`0106_domain_claims` (lake#949) adds `domain_claims`, one row per custom-domain host across every
+account: who holds it and whether they proved control. See
+[Domain claims](#domain-claims-migration-0106_domain_claims). Additive; guard `domain_claims_guard`.
 
 `0105_agent_model_prices` (lake#1230) seeds the `model_tokens` rates of the gpt-6.x models the
 gateway now serves (`gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, `gpt-6-luna`) and the
@@ -32,6 +72,14 @@ another currency left alone. Additive; guard `agent_model_prices_guard`; the ope
 schema and select the guard before the binary rolls, or a Lake with billing on refuses the gpt-6.x
 models and gpt-5.5. See [billing](../api/billing.md#rates) and
 [the model gateway](../api/model-gateway.md#long-prompts).
+
+`0110_taap_chain_heads` (lake#1024) adds `taap_chain_heads` (`taap_id` primary key, `user_id`
+referencing `users` with cascade, `head_hash` a 64-character lowercase hex SHA-256, `chain_length`
+2 to 64, `updated_at`), index `taap_chain_heads_user_idx`. `sign_in_taap` locks the identifier's row,
+refuses a chain whose document at `chain_length` is not `head_hash`, and moves the head forward when
+the chain is longer; a never-rotated identity has no row. Additive; guard `taap_chain_heads_guard`;
+the operator must vendor this schema and select the guard before the binary rolls. See
+[identity](../api/identity.md#signing-in-with-a-taap-key-the-key-must-be-the-identitys).
 
 `0104_app_restarts` (lake#1228) adds `apps.restart_generation` (bigint, default 0, never
 negative): the generation `restart_app` wrote. The operator writes it on the app's pod template, so a
@@ -48,7 +96,7 @@ revoked by a session event. Rows issued before the migration stay NULL (unbound)
 `clerk_session_binding_guard`; the operator must vendor this schema and select the guard before the
 binary rolls. See [Clerk](../api/clerk.md#webhooks).
 
-`0094_clerk_revocation` (lake#948, LSR-085) adds `clerk_user_states`: upstream user id, the
+`0094_clerk_revocation` (lake#948) adds `clerk_user_states`: upstream user id, the
 last applied timestamp for that Clerk subject, an independent revocation watermark, suspension
 and terminal deletion. Both timestamps are Clerk milliseconds. Rows remain when an event precedes provisioning;
 revocation prevents re-exchange of old template JWTs. A ban, lock, deprovisioning or deletion
@@ -73,7 +121,7 @@ account is issued no session and its sessions no longer resolve) and `clerk_webh
 (each applied `svix-id`, its event type and Clerk user). Its guard is `clerk_webhooks_guard`. The
 operator must vendor this schema and select that guard. See [clerk.md](../api/clerk.md#webhooks).
 
-`0086_identity_links` (lake#762, decision 65) lets an account replace its managed key with the
+`0086_identity_links` (lake#762) lets an account replace its managed key with the
 person's own identity: `custodial_identities.wrapped_seed` becomes nullable and gains
 `seed_destroyed_at` (the seed is wiped, the public key kept, when the link commits);
 `identity_link_challenges` holds a pending link (the verified own document, the statement to sign,
@@ -406,7 +454,7 @@ one-shot copy moves the retired rows.
 
 ## Audit workspaces (migration `0063_audit_workspaces`)
 
-Decision 52 (lake#317, lake#318): `audit_events` keeps control-plane and identity events; events
+lake#317, lake#318: `audit_events` keeps control-plane and identity events; events
 about a workspace's data go to that workspace's own chain, `lake_audit_events` in its Zetta
 ([audit.md](../api/audit.md#which-log)). `audit_retention` stays and governs the central log.
 
@@ -421,7 +469,7 @@ table, and the central chain keeps every row so it still verifies.
 
 ## Repository records (migration `0064_repository_records`)
 
-Decision 54 (S10, S11). The `repositories` row stays as routing; what a person wrote about a
+The `repositories` row stays as routing; what a person wrote about a
 repository moves to its workspace, and the unused copy of liquid's refs goes
 ([repositories.md](../api/repositories.md#where-the-description-lives-lake315-part-2)).
 
@@ -437,7 +485,7 @@ statements the schema must contain; that entry goes when the operator vendors th
 
 ## Workspace deletions (migration `0065_workspace_deletions`)
 
-Decision 54 S12 (lake#514): deleting a workspace cascades to its repositories, apps, unfinished
+lake#514: deleting a workspace cascades to its repositories, apps, unfinished
 builds and tenant images ([workspaces.md](../api/workspaces.md#deletion)).
 
 | Table or change | Purpose |
@@ -452,7 +500,7 @@ A workspace deleted before the migration has no row, and repeating `delete_works
 
 ## Tenant image routes (migration `0068_oci_repository_routes`)
 
-Decision 54 S4-S6 (lake#383 phase A): the registry splits. A tenant image repository belongs to one
+lake#383 phase A: the registry splits. A tenant image repository belongs to one
 workspace, whose Zetta holds its manifests and tags as sealed records (`lake_oci_manifests`, keyed by
 digest and written `if_absent`; `lake_oci_tags`, keyed by repository and tag and moved at the
 revision read). Image addresses do not change: lake resolves this route before it reads any
@@ -473,10 +521,10 @@ table; its vendored schema rehearsal needs the new guard.
 
 ## Workspace volumes (migration `0069_workspace_volumes`)
 
-Decision 54 S13 (operator#259, operator#260, lake#380): after the move a workspace Zetta's volume
+operator#259, operator#260, lake#380: after the move a workspace Zetta's volume
 holds the workspace's liquid store, tenant images and search index, and on a one-node workspace it is
 the only copy. Lake writes desired state; the operator grows each workspace Zetta's claims, takes CSI
-snapshots and reports back here. It never talks to a workspace Zetta (decision 51). The
+snapshots and reports back here. It never talks to a workspace Zetta. The
 capabilities are in [volumes.md](../api/volumes.md). `0067` is held by the open lake#380 change.
 
 | Table or change | Purpose |
@@ -492,7 +540,7 @@ capabilities are in [volumes.md](../api/volumes.md). `0067` is held by the open 
 | `workspace_volumes_guard` | Guard table for migration `0069_workspace_volumes`. |
 
 A deleted workspace's policy and status rows stay, as its snapshots do: the operator's
-`VolumeSnapshotClass` retains their contents (decision 54 S12), and removing them is a separate,
+`VolumeSnapshotClass` retains their contents, and removing them is a separate,
 explicit action. `move_workspace_store` does not yet wait for a snapshot taken after the request
 (lake#380 wires that check once its change merges). The operator selects the new guard and reads
 these tables with the statements `tests/test_operator_contract.cpp` copies.
@@ -631,7 +679,7 @@ reads the tables is deployed.
 ## Service catalog migration
 
 `0025_service_catalog` replaces `service_kind_check` so `services.kind` also accepts `kafka`,
-`clickhouse`, `tidb`, `cassandra` and `valkey` (liquid-bridge decision 47). Dropping and re-adding
+`clickhouse`, `tidb`, `cassandra` and `valkey`. Dropping and re-adding
 the constraint is idempotent, and every existing row satisfies the wider list. The guard is
 `service_catalog_guard`; the operator vendors this schema and selects it before a binary that
 creates the new kinds is deployed.
@@ -659,7 +707,8 @@ stores `expires_at = 'infinity'`, which the existing `agent_sessions_expiry_chec
 reads back as `expires_at: "never"`. Idempotent (`ADD COLUMN IF NOT EXISTS`); guard
 `credentials_guard`. The operator vendors it and selects that guard before a binary that offers
 never-expiring credentials is deployed. Capabilities: [`../api/agents.md`](../api/agents.md) and
-[`../api/identity.md`](../api/identity.md).
+[`../api/identity.md`](../api/identity.md). Since lake#1346 no new agent key is minted without an
+expiry, and a stored `'infinity'` row no longer verifies; never-expiring tokens are unchanged.
 
 ## Agent launches migration
 
@@ -837,7 +886,7 @@ of the table left, and `copy_workspace_records` no longer accepts `ask_messages`
 
 ## Drop moved tables migration
 
-`0070_drop_moved_tables` (lake#311, decision 54) drops every retired copy of workspace data whose
+`0070_drop_moved_tables` (lake#311) drops every retired copy of workspace data whose
 one-shot copy was reported run and verified on dev: the tables `opportunities`, `stream_owners`,
 `drive_share_links`, `auth_app_webhook_deliveries`, `auth_app_webhook_events`, `auth_app_webhooks`,
 `auth_app_signing_keys`, `auth_app_organizations`, `auth_app_users`,
@@ -862,8 +911,8 @@ When it refuses, nothing is dropped. Either run `copy_workspace_records` `plan`,
 What stays: the routing rows (`auth_applications`, `repositories`, `agent_tasks`,
 `agent_task_status`), `drive_share_link_routes`, `secret_mount_routes`, `secret_lease_routes`, every
 policy object (environments, secret mounts and secrets), `keystore`, `audit_events` and
-`audit_retention` (decision 52: nothing of the central chain is removed), agent sessions and SSO
-logs (decision 53), the operator's desired state (decision 51), and the `workspace_assignments` rows
+`audit_retention` (nothing of the central chain is removed), agent sessions and SSO
+logs, the operator's desired state, and the `workspace_assignments` rows
 the earlier migrations recorded. The tables' original `CREATE`s and the dropped columns are removed
 from the earlier sections, and the earlier migration blocks that read them run only while they
 exist, so a fresh database never has them and a rerun never recreates them. Lake has no reader of
@@ -903,7 +952,7 @@ guard in its own pull request before a lake with this change is rolled.
 
 ## Billing migration
 
-`0073_billing` (lake#564, decision 56) adds billing records, in the control plane as multitenancy
+`0073_billing` (lake#564) adds billing records, in the control plane as multitenancy
 ([`../api/billing.md`](../api/billing.md)). Since lake#635 (usage only, no migration) each
 publication of the price list is one `billing_plans` row, `usage-<YYYYMM>-<publish µs>`, with no fee
 and nothing included ([how the list is stored](../api/billing.md#how-the-list-is-stored)):
@@ -933,7 +982,7 @@ pull request before a lake with this change is rolled.
 
 ## Payment provider migration
 
-`0074_payment_provider` (lake#620, decision 57) adds what Stripe needs
+`0074_payment_provider` (lake#620) adds what Stripe needs
 ([`../api/billing.md#stripe`](../api/billing.md#stripe)):
 
 - `billing_accounts` (customer, `provider`, `provider_customer_id`, created; primary key customer and
@@ -971,7 +1020,7 @@ with ([`../api/metering.md#resources`](../api/metering.md#resources)):
 
 Nothing is dropped; idempotent (the primary key is dropped and added again on every run); guard
 `workload_resources_guard`. The operator vendors the schema, selects that guard and fills the table
-in its own pull request ([orama-operator#288](https://github.com/oramasearch/orama-operator/pull/288))
+in its own pull request (orama-operator#288)
 before a lake with this change is rolled. `OperatorContract.*` prepares that pull request's
 statements against this schema.
 
@@ -1026,7 +1075,7 @@ repositories, as untrusted code ([`../api/methodologies.md#runs`](../api/methodo
 Nothing about the run's content is kept here: its parameters, data, metrics, log and artifact live in
 the workspace Zetta. Nothing is dropped; idempotent; guard `methodology_runs_guard`. The operator
 vendors the schema, selects that guard and runs the pods in its own pull request
-([orama-operator#291](https://github.com/oramasearch/orama-operator/issues/291)) before a lake with this
+(orama-operator#291) before a lake with this
 change is rolled.
 
 ## Store mounts migration
@@ -1066,7 +1115,7 @@ rolled; on an older schema lake's sample names app traffic as unread and records
 
 ## Methodology run queue migration
 
-`0082_methodology_run_queue` ([orama-operator#293](https://github.com/oramasearch/orama-operator/issues/293))
+`0082_methodology_run_queue` (orama-operator#293)
 adds the phase `Queued` to `methodology_run_status.phase`. The operator writes it, with a message
 saying why, while it holds a run back: its workspace already has
 `spec.methodologies.maxConcurrentRunsPerWorkspace` runs staging, running or collecting (oldest run
@@ -1078,7 +1127,7 @@ change.
 
 ## Methodology deployments migration
 
-`0083_methodology_deployments` ([lake#690](https://github.com/oramasearch/lake/issues/690)) serves a
+`0083_methodology_deployments` (lake#690) serves a
 workspace methodology's model from Ship → Models. `methodology_deployments` holds one row per
 deployment (lake writes it when the model is published and notifies `lake_services`): the workspace
 methodology, the engine's model id, the training run and image build whose image serves it, the
@@ -1111,7 +1160,7 @@ and selects that guard before the binary is deployed. See
 
 ## Unrouted repositories migration
 
-`0066_assign_unrouted_repositories` (decision 54 S14, lake#513) is the reviewed assignment `0051`
+`0066_assign_unrouted_repositories` (lake#513) is the reviewed assignment `0051`
 left open. Once, each repository whose `workspace_id` is still NULL (tombstoned ones included) is
 assigned its account's only live workspace when the account now has exactly one; a repository of a
 account with several live workspaces or none is left alone and reported by a warning. Each assignment
@@ -1126,7 +1175,7 @@ other change is refused as before. Nothing is added or dropped but the guard. Id
 
 ## Workspace store migration
 
-`0067_workspace_store` (lake#380, decision 54 S1-S3) adds `workspaces.store_moved_at timestamptz`,
+`0067_workspace_store` (lake#380) adds `workspaces.store_moved_at timestamptz`,
 NULL until `move_workspace_store` switches the workspace: from then on its repositories are served
 from its own encrypted liquid store in bucket `lake_store` of its workspace Zetta
 ([`../architecture/workspace-store.md`](../architecture/workspace-store.md)). The column is the only
@@ -1274,7 +1323,7 @@ schema and selects that guard before a lake with this change is rolled.
 
 `0089_cloud_orders` (lake#831, [`../api/orders.md`](../api/orders.md)) records the apex order
 sheet's orders. It is the contract the Orama operator provisions from
-(https://github.com/oramasearch/orama-operator/issues/634); the names below are fixed.
+(orama-operator#634); the names below are fixed.
 
 `cloud_orders`, one row per order, kept (a billing record):
 
@@ -1299,7 +1348,8 @@ sheet's orders. It is the contract the Orama operator provisions from
 | `claimed_by` | `text`, nullable, ≤ 255 | **the operator** | Which operator took the order |
 | `claimed_at` | `timestamptz`, nullable | **the operator** | |
 | `organization_id` | `uuid`, nullable, no foreign key | lake (lake#832) | The organization the order belongs to when the person ordering is signed in and chooses one; null for anonymous orders, which is every order today |
-| `support_emailed_state`, `customer_emailed_state` | `text`, nullable | lake | The last state each recipient was emailed about |
+| `support_emailed_state`, `customer_emailed_state` | `text`, nullable | lake | The last state each recipient was emailed about; `confirm` for the customer's confirmation (lake#1000) |
+| `contact_email_confirmed_at` | `timestamptz`, nullable (`0107`) | lake (lake#1000) | When the person who sent an order form confirmed its contact email; until then the order mails only the confirmation |
 | `email_attempts` | `integer` ≥ 0, default 0 | lake | Failed attempts since the last delivery |
 | `email_error` | `text NOT NULL DEFAULT ''`, ≤ 1,024 | lake | The last failure, or `LAKE_RESEND_API_KEY is not set` |
 | `email_retry_at` | `timestamptz`, nullable | lake | When the order pass may try again (also its five-minute hold) |
@@ -1338,7 +1388,7 @@ customer): `email` (required, `^[^@\s]+@[^@\s]+$`, at most 320 characters), `nam
 company name on the invoice, ≤ 256), `line1` and `line2` (≤ 256), `city` and `state` (≤ 128),
 `postal_code` (≤ 32), `country` (an ISO 3166-1 alpha-2 code in capitals or empty) and `updated_at`.
 Every field but `email` defaults to `''`. Lake alone writes it, through `set_billing_contact`, and
-sends it to the account's Stripe customer. A billing record (decision 56): no workspace content.
+sends it to the account's Stripe customer. A billing record: no workspace content.
 Additive and idempotent; guard `billing_contacts_guard`. The operator vendors the schema and selects
 that guard before a lake with this change is rolled.
 
@@ -1379,7 +1429,7 @@ tables for SAML sign-in through the Assertion Consumer Service:
   `used_at`. Expired rows are removed when the next response is accepted.
 
 The ACS consumes the request and inserts the assertion in one transaction, so each is accepted once.
-Sign-in state (decision 50): nothing from a workspace. Indexes `sso_saml_requests_expires_idx` and
+Sign-in state: nothing from a workspace. Indexes `sso_saml_requests_expires_idx` and
 `sso_saml_assertions_expires_idx`. Additive and idempotent; guard `saml_sign_in_guard`. The operator
 vendors the schema and selects that guard before a lake with this change is rolled.
 
@@ -1397,14 +1447,14 @@ lake with this change is rolled.
 
 ## Model token prices migration
 
-Migration `0095_model_token_prices` (LSR-095, lake#961) extends the `class` checks on
+Migration `0095_model_token_prices` (lake#961) extends the `class` checks on
 `billing_plan_prices` and `billing_invoice_lines` to accept exact `<model>/input` and
 `<model>/output` names for `model_tokens`. Other dimensions retain their GPU-style class checks;
 workload resource classes are unchanged. No records are rewritten. The new constraints preserve
 all existing class names, and reapplying the schema is idempotent.
 
 It also seeds the default gateway models' input and output prices (OpenAI's published price plus
-30%, Steve 2026-10-23), once, while `0095_model_token_prices` is not yet recorded: a new
+30%), once, while `0095_model_token_prices` is not yet recorded: a new
 publication for the current UTC month with the rates of the list in force (none on a fresh
 instance) plus the model rates, and the model rates added to any later list; an operator's rate for
 the same class is kept. The rates and their source are in
@@ -1419,7 +1469,7 @@ class syntax also requires updating the API schema and both database checks.
 
 ## Email Recovery Limits Migration
 
-`0096_email_recovery_limits` (lake#968, LSR-102) extends the recovery status check with
+`0096_email_recovery_limits` (lake#968) extends the recovery status check with
 `cancelled` and adds `offline_recovery_budgets` (`id`, `started_at`, `requests`). The global
 bucket and hashed client buckets admit bounded hourly requests across replicas; account starts
 lock the user and reuse an unexpired attempt before inserting. No address is persisted.
@@ -1428,12 +1478,12 @@ The [recovery contract](../api/recovery.md#email-recovery-budgets) lists limits 
 
 ## Cloud order entitlements migration
 
-`0097_cloud_order_entitlements` (lake#972, LSR-105) adds subscription status, paid-through and access deadlines (Unix seconds), the signed-event watermark, first-unpaid-invoice binding and per-order grace to `cloud_orders`. A partial unique index makes a subscription belong to one order; creating it fails the apply if two existing orders already share a subscription id. Defaults suspend orders without payment evidence. The operator reads `cloud_order_desired_state` on every reconciliation; the view names its columns instead of `cloud_orders.*`, so a later column on `cloud_orders` cannot fail a repeated apply; its entitlement and desired state expire at read time. Vendor this schema and select `cloud_order_entitlements_guard` before rolling Lake, and ship the paired operator suspension/event-registration change before enabling order provisioning. See [the contract and verification](../api/orders.md#recurring-entitlement-lsr-105-lake972).
+`0097_cloud_order_entitlements` (lake#972) adds subscription status, paid-through and access deadlines (Unix seconds), the signed-event watermark, first-unpaid-invoice binding and per-order grace to `cloud_orders`. A partial unique index makes a subscription belong to one order; creating it fails the apply if two existing orders already share a subscription id. Defaults suspend orders without payment evidence. The operator reads `cloud_order_desired_state` on every reconciliation; the view names its columns instead of `cloud_orders.*`, so a later column on `cloud_orders` cannot fail a repeated apply; its entitlement and desired state expire at read time. Vendor this schema and select `cloud_order_entitlements_guard` before rolling Lake, and ship the paired operator suspension/event-registration change before enabling order provisioning. See [the contract and verification](../api/orders.md#recurring-entitlement-lsr-105-lake972).
 
 ## Authentication attempts (migration `0098_authentication_attempts`)
 
 `authentication_attempts` keeps SHA-256 keys, failure/pending counts, window ids and fifteen-minute expiry times for the shared
-[account and client budgets](../api/identity.md#authentication-attempt-limits) (lake#966, LSR-100).
+[account and client budgets](../api/identity.md#authentication-attempt-limits) (lake#966).
 Admission commits independently of credential verification and serializes across PostgreSQL
 connections. Expired keys are pruned and live keys are capped at 100,000. Existing TOTP credentials
 also record `last_used_step` in `public_data`, updated while holding the credential row lock.
@@ -1444,7 +1494,7 @@ together; verify with `ctest --test-dir <build> --timeout 600 -R AuthenticationL
 ## Account balances (migration `0099_account_balances`)
 
 `0099_account_balances` (lake#1114, [`../api/billing.md#balance`](../api/billing.md#balance)) adds the
-prepaid balance's billing records (decision 56), every row cascading with its customer:
+prepaid balance's billing records, every row cascading with its customer:
 
 - `account_balances`, one row per account: `first_top_up_at`, `overdraft_limit_micros` (the
   operator's, null for the instance's, 0 to $1,000,000), the last refresh (`charges_refreshed_at`)
@@ -1490,7 +1540,7 @@ operator release carrying it, with that guard selected, rolls before a lake imag
 ## Coupon codes (migration `0101_coupons`)
 
 `0101_coupons` (lake#1156, [`../api/billing.md#coupon-codes`](../api/billing.md#coupon-codes))
-adds three tables, billing records in the control plane (decision 56):
+adds three tables, billing records in the control plane:
 
 - `billing_coupons`: one row per code. `code` is unique and stored normalized
   (`^[A-Z0-9]{4,32}$`); `amount_micros` whole cents from $0.01 to $10,000; `credit_days` 1 to
@@ -1519,11 +1569,36 @@ orama-operator#936), so an operator release carrying it through `0101_coupons`, 
 selected, rolls before a lake image that serves coupons, after the one for `0100_balance_grants`
 (unless lake#1147's `lake migrate` has taken the schema over by then).
 
+## Domain claims (migration `0106_domain_claims`)
+
+`0106_domain_claims` (lake#949, [`../api/platform.md#custom-domains`](../api/platform.md#custom-domains))
+adds `domain_claims`, one row per custom-domain host an environment has claimed. Multitenancy (which
+environment of which account holds a name), so in the control plane beside workspace routing,
+never in a workspace Zetta.
+
+- `host`, the primary key: lowercase (the table checks it), 1 to 253 characters. One claim per host
+  across every account of this Lake;
+- `customer_id`, `workspace_id` and `repository_id` (each cascades) and `environment` (1 to 256
+  characters): the environment that holds it, with index `domain_claims_environment_idx`;
+- `tls`, `acme` or `provided`: what the domain row is written with once verified;
+- `token`, unique, 64 lowercase hex digits: the value of the TXT record `_lake-challenge.<host>`;
+- `state`, `pending` or `verified`, and `verified_at`, set exactly when verified (a check);
+- `created_at`.
+
+`create_domain` inserts with `INSERT … ON CONFLICT (host) DO UPDATE … WHERE` the same repository and
+environment, so of two environments claiming one host at once only one gets a row back; the other
+answers `conflict`. `verify_domain` sets `verified` only on the row whose token it read.
+`delete_domain` deletes the environment's row. The Orama operator reads the verified rows (with each
+repository's `liquid_id`) and acts only on domain rows that match one. Additive: the table, its index
+and `domain_claims_guard`. Apply before the new binary (`lake migrate` from its image); an operator
+that predates it ignores the table and would route an unverified row an older lake image wrote, so
+roll the operator release that reads `domain_claims` first, then the lake image.
+
 ## Browser keys (migration `0102_browser_keys`)
 
 `0102_browser_keys` (lake#1152, [`../api/browser-keys.md`](../api/browser-keys.md)) adds
 `browser_keys`, one row per browser key: a credential, so in the control plane beside `sessions` and
-the keystore (multitenancy, decision 53), never in a workspace Zetta.
+the keystore (multitenancy), never in a workspace Zetta.
 
 - `id` (the key's id, also in its secret `lbk.<id>.<random>`), `customer_id` and `workspace_id`
   (both cascade), `index_id` (1 to 256 characters), `model_id` (empty: the key asks no model),
@@ -1542,3 +1617,21 @@ account-wide session events) leaves it working; `revoke_browser_key` ends it, an
 `desired` is `deleted` ends its keys. Additive: the table, its index and `browser_keys_guard`.
 Apply before the new binary: the schema through `0102` reaches the control database first (lake's
 `lake migrate`, or the operator's vendored copy).
+
+## App token generation (migration `0112_app_token_generation`)
+
+lake#1070. `apps.token_generation bigint NOT NULL DEFAULT 0` (Lake writes it; rotation increments
+it) and `apps.token_hashes_generation bigint` (the operator writes it with `token_hashes_json`;
+NULL until an operator that acknowledges rotation reports). An app token verifies only while the
+two are equal or the operator's is NULL. Guard `app_token_generation_guard`. Additive; the operator
+vendors the schema and selects the guard before the image rolls. See
+[web-apps.md](web-apps.md#token-rotation).
+
+## Agent session repositories (migration `0113_agent_session_repositories`)
+
+lake#1346. `agent_sessions.repository_id uuid REFERENCES repositories(id) ON DELETE SET NULL`: the
+repository an agent session acts for, which its `delegation/1` names by liquid's hex id (liquid
+v0.3.0, liquid#515). `mint_agent_session_key` requires it; a row without one (a key minted before
+this migration) no longer verifies. Guard `agent_session_repositories_guard`. Additive; numbered
+after `0112` (`0121` is taken by the open lake#1338). The operator vendors the schema and selects
+the guard before the image rolls. See [agents](../api/agents.md#delegation-and-transparency).

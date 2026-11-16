@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The Python templates a methodology draft starts from (docs/api/methodologies.md#drafts,
 // lake#655). Standard library only, so a draft's lock file is empty and its image installs nothing.
 // Each is the helpers below, then one template's fit, predict and score (and explain where it can).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Encryption Keys (`/encryption-keys?mount_id=`): a mount's named, versioned keys, never their
  * material (web_ui_encryption_keys, serve_encryption_keys_page), with New Key
  * (`create_encryption_key`, or `derive_encryption_key` from a parent), Rotate

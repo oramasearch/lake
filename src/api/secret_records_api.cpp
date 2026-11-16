@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Secrets in their mount's workspace Zetta (docs/api/secrets.md, lake#328-#332): mounts, secret
 // entries and versions, named encryption keys and data keys as sealed workspace records, with the
 // envelope lake has always used (LAKE_INSTANCE_KEK -> customer KEK -> data key -> ciphertext).

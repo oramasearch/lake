@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Usage (`/metering?customer_id=`): what a customer stores and the compute it used, its estimated
  * charge and its repository storage limit (web_ui_metering, serve_metering_page,
  * serve_metering_quota). Figures first; the limit is set in a dialog. */

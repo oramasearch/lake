@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/capabilities.hpp"
 
 #include <algorithm>
@@ -18,6 +20,7 @@
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 #include "lake_attestation.hpp"
+#include "repository_path_access.hpp"
 #include "repository_records_api.hpp"
 
 namespace lake::api {
@@ -191,7 +194,7 @@ json imported_artifacts(json artifacts, const json& provenance) {
 }
 
 // A forge record as an archive carries it. A webhook's signing secret never leaves lake, as
-// `list_webhooks` never answers it: export needs only read (LSR-024, lake#933).
+// `list_webhooks` never answers it: export needs only read (lake#933).
 json exported_forge_record(const control::ForgeRecord& record) {
     json exported = control::to_json(record);
     if (record.kind == "webhook" && exported["value"].is_object()) {
@@ -208,6 +211,21 @@ liquid::runtime::task<ApiResult> export_repository(const json& input, ApiContext
     const auto repository = context.store->get_repository(input.at("repository_id"));
     if (!repository) {
         co_return store_error(repository.error());
+    }
+    // An export carries every path, so a restricted folder the caller cannot read refuses it, as
+    // a pull does (lake#975).
+    const auto paths = RepositoryPathAccess::load(context, *repository);
+    if (!paths) {
+        co_return ApiResult::failure(paths.error().code, paths.error().message, paths.error().path);
+    }
+    const auto every = paths->reads_every_cut(context);
+    if (!every) {
+        co_return ApiResult::failure(every.error().code, every.error().message, every.error().path);
+    }
+    if (!*every) {
+        co_return ApiResult::failure("unauthorized",
+                                     "this repository has restricted folders you cannot read, so "
+                                     "it cannot be exported whole");
     }
     // The forge records come from the repository's workspace (lake#341).
     auto forge = RepositoryForge::open(context, *repository);
@@ -241,7 +259,7 @@ liquid::runtime::task<ApiResult> export_repository(const json& input, ApiContext
         co_return store_error(object.error());
     }
     // Who holds access is an administrator's to read (`list_grants` needs admin), so the archive of
-    // a caller without admin on the repository carries no grants (LSR-024, lake#933).
+    // a caller without admin on the repository carries no grants (lake#933).
     const auto administers = control::authorize(*context.store,
                                                 context.acting_identity,
                                                 object->id,
@@ -380,7 +398,7 @@ liquid::runtime::task<ApiResult> import_repository(const json& input, ApiContext
         }
         json value = imported_forge_value(record, provenance);
         if (kind == "webhook") {
-            // An archive carries no webhook secret (LSR-024), so the imported webhook signs with a
+            // An archive carries no webhook secret, so the imported webhook signs with a
             // new one nobody holds, never an empty or guessable key; its owner creates the webhook
             // again with their receiver's secret. An older archive's secret is kept.
             if (!value.is_object()) {

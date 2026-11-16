@@ -1,5 +1,8 @@
+// SPDX-License-Identifier: MIT
+
 #include "audit_test_support.hpp"
 #include "postgres_fixture.hpp"
+#include "repository_test_support.hpp"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -158,6 +161,34 @@ std::string create_customer(lake::control::Store& store, std::string suffix) {
     return customer ? customer->id : std::string{};
 }
 
+// The repository a session acts for, with the hex id liquid gave it (lake#1346).
+struct SessionRepository {
+    std::string id;
+    std::string liquid_id;
+};
+
+SessionRepository create_session_repository(lake::control::Store& store,
+                                            const std::string& customer_id,
+                                            const std::string& name) {
+    const auto repository = store.create_repository(
+        {customer_id, name, "", "private", lake::test::repository_workspace(store, customer_id)});
+    EXPECT_TRUE(repository) << repository.error().message;
+    if (!repository) {
+        return {};
+    }
+    const std::string liquid_id(64, name.size() % 2 == 0 ? 'a' : 'b');
+    const auto recorded = store.set_repository_liquid_id(repository->id, liquid_id);
+    EXPECT_TRUE(recorded) << recorded.error().message;
+    return {repository->id, liquid_id};
+}
+
+const liquid::attestation_attribute* attribute_of(const liquid::attestation& value,
+                                                  std::string_view name) {
+    const auto found =
+        std::ranges::find(value.attributes, name, &liquid::attestation_attribute::name);
+    return found == value.attributes.end() ? nullptr : &*found;
+}
+
 void grant_dispatcher(lake::control::Store& store,
                       const std::string& customer_id,
                       const std::string& dispatcher,
@@ -216,6 +247,8 @@ void exercise_agent_session(lake::control::Store& store,
     const std::string dispatcher = "taap:1:ed25519:dispatcher-" + instance;
     grant_dispatcher(store, customer_id, dispatcher);
     register_agent(store, customer_id, durable_agent, "2027-01-01T00:00:00Z");
+    const auto repository = create_session_repository(store, customer_id, "agent-work");
+    ASSERT_FALSE(repository.id.empty());
     context.acting_identity = dispatcher;
     context.operator_credential = false;
 
@@ -224,6 +257,7 @@ void exercise_agent_session(lake::control::Store& store,
                                  {"dispatcher_taap_id", dispatcher},
                                  {"durable_agent_taap_id", durable_agent},
                                  {"lifetime_seconds", 60},
+                                 {"repository_id", repository.id},
                                  {"scopes", json::array({"drip:write", "build:read"})}},
                                 context);
     ASSERT_TRUE(minted.ok) << minted.error.code << ": " << minted.error.message;
@@ -239,23 +273,46 @@ void exercise_agent_session(lake::control::Store& store,
     ASSERT_TRUE(stored) << stored.error().message;
     EXPECT_EQ(stored->durable_agent_taap_id, durable_agent);
     EXPECT_EQ(stored->dispatcher_taap_id, dispatcher);
+    EXPECT_EQ(stored->repository_id, repository.id);
+    EXPECT_EQ(minted.value.at("repository_id"), repository.id);
     EXPECT_EQ(stored->transparency_index, 0U);
 
+    // The delegation meets liquid v0.3.0's rules (lake#1346): Lake is its issuer and dispatcher,
+    // its subject is the durable agent's, it names the repository by liquid's id, and it ends.
     const auto encoded_attestation =
         from_base64url(minted.value.at("attestation").get<std::string>());
     const auto attestation = liquid::decode_attestation(encoded_attestation);
     ASSERT_TRUE(attestation) << attestation.error().message;
     EXPECT_EQ(attestation->profile, "delegation/1");
     EXPECT_EQ(attestation->subject_kind, liquid::attestation_subject_kind::actor);
-    EXPECT_TRUE(std::ranges::any_of(attestation->attributes, [&](const auto& attribute) {
-        const auto* value = std::get_if<std::string>(&attribute.value);
-        return attribute.name == "dispatcher" && value && *value == dispatcher;
-    }));
+    const auto lake_identity =
+        lake::audit::identity(store, {.instance_kek = std::string(instance_kek)});
+    ASSERT_TRUE(lake_identity);
+    EXPECT_EQ(attestation->issuer.taap_id, lake_identity->taap_id);
+    const auto* named_dispatcher = attribute_of(*attestation, "dispatcher");
+    ASSERT_NE(named_dispatcher, nullptr);
+    EXPECT_EQ(std::get<std::string>(named_dispatcher->value), lake_identity->taap_id);
+    liquid::actor agent_actor;
+    agent_actor.taap_id = durable_agent;
+    const auto expected_subject = liquid::delegation_subject(agent_actor);
+    ASSERT_TRUE(expected_subject);
+    EXPECT_EQ(attestation->subject.bytes, expected_subject->bytes);
+    const auto* named_repository = attribute_of(*attestation, "repository");
+    ASSERT_NE(named_repository, nullptr);
+    EXPECT_EQ(std::get<std::string>(named_repository->value), repository.liquid_id);
+    const auto* not_after = attribute_of(*attestation, "not_after");
+    ASSERT_NE(not_after, nullptr);
+    EXPECT_EQ(std::get<std::uint64_t>(not_after->value),
+              static_cast<std::uint64_t>(stored->expires_unix));
+    EXPECT_TRUE(liquid::validate_delegation(*attestation));
+    EXPECT_TRUE(liquid::check_delegation_window(*attestation, now));
     const auto state = log.state();
     ASSERT_TRUE(state) << state.error().message;
     EXPECT_EQ(state->tree_size, 1U);
     EXPECT_EQ(state->root_hash, stored->transparency_root);
-    const auto scan = log.scan_identity(dispatcher, state->tree_size, state->root_hash);
+    // The public statement names Lake, its issuer and dispatcher; the person who asked is in the
+    // session record and the audit.
+    const auto scan = log.scan_identity(lake_identity->taap_id, state->tree_size, state->root_hash);
     ASSERT_TRUE(scan) << scan.error().message;
     ASSERT_EQ(scan->matches.size(), 1U);
     EXPECT_EQ(scan->matches.front().attestation, stored->attestation);
@@ -303,10 +360,12 @@ void exercise_agent_session(lake::control::Store& store,
     const auto events =
         lake::test::audit_events(store, {.object = "agent_session/" + session_id, .limit = 100});
     ASSERT_TRUE(events) << events.error().message;
-    EXPECT_TRUE(std::ranges::any_of(*events, [](const lake::audit::Event& event) {
+    EXPECT_TRUE(std::ranges::any_of(*events, [&](const lake::audit::Event& event) {
         return event.draft.kind == "agent_session" &&
                event.draft.action == "mint_agent_session_key" && event.draft.outcome == "success" &&
-               !event.draft.details.contains("private_key");
+               !event.draft.details.contains("private_key") &&
+               event.draft.details.value("dispatcher_taap_id", "") == dispatcher &&
+               event.draft.details.value("repository_id", "") == repository.id;
     }));
     EXPECT_TRUE(std::ranges::any_of(*events, [](const lake::audit::Event& event) {
         return event.draft.kind == "agent_session" &&
@@ -319,8 +378,9 @@ void exercise_agent_session(lake::control::Store& store,
     std::filesystem::remove_all(root);
 }
 
-// lake#234: a key that never expires, allowed only by the customer's opt-in and the instance
-// switch, still verifies years later, and stops the moment it is revoked.
+// lake#1346: liquid v0.3.0 refuses a delegation without `not_after`, so a key that never expires
+// is refused whatever the customer and the instance allow, and a key stored without an expiry or a
+// repository (minted before) no longer verifies. Revocation still ends a key before its expiry.
 void exercise_non_expiring_session(lake::control::Store& store,
                                    const std::string& customer_id,
                                    const std::string& instance) {
@@ -342,45 +402,52 @@ void exercise_non_expiring_session(lake::control::Store& store,
     context.operator_credential = true;
     context.acting_identity = "admin";
     context.instance_kek = std::string(instance_kek);
-    const json request{{"customer_id", customer_id},
-                       {"dispatcher_taap_id", "taap:1:ed25519:dispatcher-" + instance},
-                       {"durable_agent_taap_id", "taap:1:ed25519:durable-" + instance},
-                       {"never_expires", true},
-                       {"scopes", json::array({"drip:write"})}};
+    const auto repository = create_session_repository(store, customer_id, "agent-never");
+    ASSERT_FALSE(repository.id.empty());
+    json request{{"customer_id", customer_id},
+                 {"dispatcher_taap_id", "taap:1:ed25519:dispatcher-" + instance},
+                 {"durable_agent_taap_id", "taap:1:ed25519:durable-" + instance},
+                 {"never_expires", true},
+                 {"repository_id", repository.id},
+                 {"scopes", json::array({"drip:write"})}};
     const std::string dispatcher = request.at("dispatcher_taap_id");
     grant_dispatcher(store, customer_id, dispatcher);
     register_agent(store, customer_id, request.at("durable_agent_taap_id"), "2027-01-01T00:00:00Z");
     context.acting_identity = dispatcher;
     context.operator_credential = false;
 
-    const auto off = registry.call("mint_agent_session_key", request, context);
-    ASSERT_FALSE(off.ok) << "off by default";
-    EXPECT_NE(off.error.message.find("allow_non_expiring_credentials"), std::string::npos);
+    const auto refused_by_default = registry.call("mint_agent_session_key", request, context);
+    ASSERT_FALSE(refused_by_default.ok);
+    EXPECT_EQ(refused_by_default.error.code, "invalid_input");
+    EXPECT_EQ(refused_by_default.error.path, "/never_expires");
 
+    // The customer's opt-in and the instance switch no longer make one.
     context.request_id.clear();
     const auto allowed =
         registry.call("set_customer_credential_policy",
                       {{"customer_id", customer_id}, {"allow_non_expiring_credentials", true}},
                       context);
     ASSERT_TRUE(allowed.ok) << allowed.error.message;
-    context.non_expiring_credentials_allowed = false;
-    context.request_id.clear();
-    const auto instance_off = registry.call("mint_agent_session_key", request, context);
-    ASSERT_FALSE(instance_off.ok) << "the instance switch overrides the customer";
-    EXPECT_NE(instance_off.error.message.find("LAKE_ALLOW_NON_EXPIRING_CREDENTIALS"),
-              std::string::npos);
     context.non_expiring_credentials_allowed = true;
+    context.request_id.clear();
+    const auto refused_when_allowed = registry.call("mint_agent_session_key", request, context);
+    ASSERT_FALSE(refused_when_allowed.ok);
+    EXPECT_EQ(refused_when_allowed.error.code, "invalid_input");
+    EXPECT_FALSE(refused_when_allowed.value.contains("private_key"));
+    const auto state = log.state();
+    ASSERT_TRUE(state) << state.error().message;
+    EXPECT_EQ(state->tree_size, 0U) << "a refused key appends no delegation";
 
+    // An expiring key is revocable before its expiry.
+    request.erase("never_expires");
     context.request_id.clear();
     const auto minted = registry.call("mint_agent_session_key", request, context);
     ASSERT_TRUE(minted.ok) << minted.error.code << ": " << minted.error.message;
-    EXPECT_EQ(minted.value.at("expires_at"), "never");
-    EXPECT_TRUE(minted.value.at("never_expires").get<bool>());
+    EXPECT_FALSE(minted.value.at("never_expires").get<bool>());
     const std::string session_id = minted.value.at("agent_session_id");
     const auto stored = store.get_agent_session(customer_id, session_id);
     ASSERT_TRUE(stored) << stored.error().message;
-    EXPECT_TRUE(stored->never_expires());
-    const std::vector<std::byte> body = bytes("a drip years later");
+    const std::vector<std::byte> body = bytes("a drip before the expiry");
     const auto seed = from_base64url(minted.value.at("private_key").get<std::string>());
     const auto signature = sign_drip(
         seed, minted.value.at("session_taap_id").get<std::string>(), stored->issued_at, body);
@@ -388,12 +455,9 @@ void exercise_non_expiring_session(lake::control::Store& store,
                     {"body", base64url(body)},
                     {"customer_id", customer_id},
                     {"signature", base64url(signature)}};
-
-    now += std::chrono::days{3650};
     context.request_id.clear();
-    const auto later = registry.call("verify_agent_session_drip", drip, context);
-    ASSERT_TRUE(later.ok) << later.error.code << ": " << later.error.message;
-
+    const auto verified = registry.call("verify_agent_session_drip", drip, context);
+    ASSERT_TRUE(verified.ok) << verified.error.code << ": " << verified.error.message;
     context.request_id.clear();
     const auto revoked =
         registry.call("revoke_agent_session",
@@ -405,6 +469,20 @@ void exercise_non_expiring_session(lake::control::Store& store,
     const auto refused = registry.call("verify_agent_session_drip", drip, context);
     ASSERT_FALSE(refused.ok);
     EXPECT_EQ(refused.error.message, "agent session key has been revoked");
+
+    // A key minted before lake#1346 (no repository) or one that never expires stops verifying.
+    auto before = *stored;
+    before.revoked_at.clear();
+    before.repository_id.clear();
+    const auto old_key = agents.verify_drip(before, body, signature);
+    ASSERT_FALSE(old_key);
+    EXPECT_EQ(old_key.error().code, "unauthorized");
+    before.repository_id = repository.id;
+    before.expires_at = "never";
+    before.expires_unix = 0;
+    const auto never = agents.verify_drip(before, body, signature);
+    ASSERT_FALSE(never);
+    EXPECT_EQ(never.error().code, "unauthorized");
     std::filesystem::remove_all(root);
 }
 
@@ -420,6 +498,11 @@ void exercise_delegation_authority(lake::control::Store& store, const std::strin
     const auto certificate = register_agent(store, customer, agent, "2027-01-01T00:00:00Z");
     register_agent(store, other_customer, foreign_agent, "2027-01-01T00:00:00Z");
     register_agent(store, customer, unknown_agent, "2027-01-01T00:00:00Z", "client");
+    const auto repository = create_session_repository(store, customer, "agent-authority");
+    const auto foreign_repository =
+        create_session_repository(store, other_customer, "agent-foreign");
+    ASSERT_FALSE(repository.id.empty());
+    ASSERT_FALSE(foreign_repository.id.empty());
     const auto now = std::chrono::sys_days{std::chrono::year{2026} / std::chrono::September / 5};
     lake::control::agents::Service agents([now] { return now; });
     const auto root = lake::test::fixture_path("agent-authority-" + suffix);
@@ -437,12 +520,13 @@ void exercise_delegation_authority(lake::control::Store& store, const std::strin
     json request{{"customer_id", customer},
                  {"dispatcher_taap_id", dispatcher},
                  {"durable_agent_taap_id", agent},
+                 {"repository_id", repository.id},
                  {"scopes", json::array({"drip:write"})}};
-    const auto refused = [&](const json& input) {
+    const auto refused = [&](const json& input, std::string_view code = "unauthorized") {
         context.request_id.clear();
         const auto result = registry.call("mint_agent_session_key", input, context);
         EXPECT_FALSE(result.ok);
-        EXPECT_EQ(result.error.code, "unauthorized") << result.error.message;
+        EXPECT_EQ(result.error.code, code) << result.error.message;
         EXPECT_FALSE(result.value.contains("private_key"));
         const auto state = log.state();
         ASSERT_TRUE(state) << state.error().message;
@@ -451,6 +535,16 @@ void exercise_delegation_authority(lake::control::Store& store, const std::strin
     auto forged = request;
     forged["dispatcher_taap_id"] = "taap:1:ed25519:victim";
     refused(forged);
+    // The repository must be a live one of this account (lake#1346).
+    for (const std::string other :
+         {foreign_repository.id, lake::control::new_uuid_v4(), std::string("not-a-uuid")}) {
+        auto input = request;
+        input["repository_id"] = other;
+        refused(input, "invalid_input");
+    }
+    auto unnamed = request;
+    unnamed.erase("repository_id");
+    refused(unnamed, "invalid_input");
     // Operator credentials have no acting TAAP identity and cannot name a dispatcher either.
     context.acting_identity = "admin";
     context.operator_credential = true;
@@ -468,13 +562,14 @@ void exercise_delegation_authority(lake::control::Store& store, const std::strin
     // A certificate that expires at the issuance instant is already expired.
     register_agent(store, customer, agent, "2026-09-05T00:00:00Z");
     refused(request);
-    // The same checks protect direct service callers and never-expiring session keys.
+    // The same checks protect direct service callers.
     const lake::audit::IdentityOptions options{.instance_kek = std::string(instance_kek)};
     lake::control::agents::MintRequest mint_request{.customer_id = customer,
                                                     .durable_agent_taap_id = agent,
                                                     .dispatcher_taap_id = dispatcher,
                                                     .scopes = {"drip:write"},
-                                                    .never_expires = true};
+                                                    .repository_id = repository.id,
+                                                    .liquid_repository_id = repository.liquid_id};
     auto direct = agents.mint(store, mint_request, dispatcher, options);
     ASSERT_FALSE(direct);
     EXPECT_EQ(direct.error().code, "unauthorized");
@@ -484,8 +579,22 @@ void exercise_delegation_authority(lake::control::Store& store, const std::strin
         ASSERT_FALSE(direct);
         EXPECT_EQ(direct.error().code, "unauthorized");
     }
+    // Every key ends within fifteen minutes, and a delegation names its repository.
+    for (const int lifetime : {0, 901}) {
+        auto unbounded = mint_request;
+        unbounded.lifetime_seconds = lifetime;
+        direct = agents.mint(store, unbounded, dispatcher, options);
+        ASSERT_FALSE(direct);
+        EXPECT_EQ(direct.error().code, "invalid_input");
+    }
+    auto unbound = mint_request;
+    unbound.liquid_repository_id.clear();
+    direct = agents.mint(store, unbound, dispatcher, options);
+    ASSERT_FALSE(direct);
+    EXPECT_EQ(direct.error().code, "invalid_input");
     direct = agents.mint(store, mint_request, dispatcher, options);
     ASSERT_TRUE(direct) << direct.error().message;
+    EXPECT_EQ(direct->record.repository_id, repository.id);
     context.request_id.clear();
     const auto minted = registry.call("mint_agent_session_key", request, context);
     ASSERT_TRUE(minted.ok) << minted.error.message;

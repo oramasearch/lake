@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** One transcript (`/w/<id>/transcript?id=<id>`, lake#561, docs/ui/transcripts.md): its title and
  * text, with Ask Orama about this (the panel opens with the transcript as its context), Copy, Edit
  * (a `Modal sheet`, so on a phone Save sits above the keyboard) and Delete, which names what it

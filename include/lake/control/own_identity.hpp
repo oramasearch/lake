@@ -1,6 +1,8 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
-// Using your own identity (lake#762, liquid-bridge decision 65,
+// Using your own identity (lake#762,
 // docs/api/identity.md#your-own-identity). An account that starts with a managed key may switch to
 // the person's own liquid identity. The person proves they hold that identity's key by signing a
 // statement lake issues for this account with `liquid sign artifact <challenge>`; libliquid's

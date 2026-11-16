@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A database's safe mode (lake#906, docs/ui/safe-mode.md): Off, Warn Writes or Warn All, kept in
  * the workspace per database or connection (`get_safe_mode`, `set_safe_mode`). A call the level
  * warns on is refused with `safe_mode_warning`, whose details carry the exact statements and a
@@ -13,7 +15,7 @@ export const SAFE_MODES: { mode: SafeMode; label: string; help: string }[] = [
   { mode: "warn_all", label: "Warn All", help: "Ask before every query." },
 ];
 
-/** The level a target has until someone sets one (Steve, 2026-10-23): a database is Off, so no
+/** The level a target has until someone sets one: a database is Off, so no
  * automated write waits for a person; a saved connection is Warn Writes, which prompts for nothing
  * because sources are read-only, until someone chooses Warn All. */
 export function defaultSafeMode(target: SafeModeTarget): SafeMode {

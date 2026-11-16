@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/mcp_connections.hpp"
 
 #include <algorithm>

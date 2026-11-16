@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Design → Opportunities, also at /design/discover (lake's discover_content): what Auto-Suggest Agent
  * recommended for the workspace's data, the workspace's scan running in the background (list_opportunities'
  * `last_scan`, read again every 3 seconds while it works, from any tab or device; lake#1195), project

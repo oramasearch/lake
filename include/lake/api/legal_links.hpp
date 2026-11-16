@@ -1,7 +1,9 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 // The terms of service and privacy policy that Lake's sign-up and sign-in pages link to
-// (liquid-bridge#15, docs/deployment/sign-in.md#terms-and-privacy). Instance configuration:
-// LAKE_TERMS_URL and LAKE_PRIVACY_URL, defaulting to Orama's published pages.
+// (docs/serving/configuration.md). Instance configuration: LAKE_TERMS_URL and LAKE_PRIVACY_URL,
+// with no default: an install that sets neither shows no legal links.
 
 #include <expected>
 #include <string>
@@ -9,8 +11,8 @@
 
 namespace lake::api {
 
-inline constexpr std::string_view default_terms_url = "https://www.orama.com/legal/terms";
-inline constexpr std::string_view default_privacy_url = "https://www.orama.com/legal/privacy";
+inline constexpr std::string_view default_terms_url = "";
+inline constexpr std::string_view default_privacy_url = "";
 
 // One link setting as read from the environment (`value` is getenv's answer, null when unset):
 // unset or empty keeps `fallback`; `off` removes the link (an empty URL, so no link is shown);

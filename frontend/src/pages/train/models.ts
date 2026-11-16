@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What Train → Models and Ship → Models share about a model (lake#599), as pure functions the
  * tests run: which trained records are versions of one model, its held-out score, the score over
  * its versions, how two versions differ, the pipeline steps it belongs to, the `predict` call to

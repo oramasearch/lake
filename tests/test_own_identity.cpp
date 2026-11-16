@@ -1,4 +1,6 @@
-// Managed keys and using your own identity (lake#762, liquid-bridge decision 65,
+// SPDX-License-Identifier: MIT
+
+// Managed keys and using your own identity (lake#762,
 // docs/api/identity.md#your-own-identity).
 #include "audit_test_support.hpp"
 #include "identity_proof_test_support.hpp"
@@ -317,6 +319,29 @@ std::string expect_use_own_identity(lake::control::Store& store, const std::stri
     const auto acts_for = store.account_for_identity(own.signer.identity().taap_id);
     EXPECT_TRUE(acts_for);
     EXPECT_EQ(*acts_for, account);
+    // A change signed with either key reads as the account's name and handle (lake#1326); a key
+    // no account acts for is absent, and never an email.
+    {
+        const auto user = store.get_user(person.acting_user_id);
+        EXPECT_TRUE(user);
+        const auto names = store.signer_names(
+            {account, own.signer.identity().taap_id, stranger.signer.identity().taap_id, ""});
+        EXPECT_TRUE(names) << (names ? "" : names.error().message);
+        if (names && user && customer) {
+            EXPECT_EQ(names->size(), 2U);
+            for (const std::string& key : {account, own.signer.identity().taap_id}) {
+                EXPECT_TRUE(names->contains(key)) << key;
+                if (!names->contains(key)) {
+                    continue;
+                }
+                EXPECT_EQ(names->at(key).kind, "user");
+                EXPECT_EQ(names->at(key).display_name, user->display_name);
+                EXPECT_EQ(names->at(key).handle, customer->name);
+                EXPECT_NE(names->at(key).display_name, user->email);
+            }
+            EXPECT_FALSE(names->contains(stranger.signer.identity().taap_id));
+        }
+    }
 
     // Signing in with the own key reaches the same account (sign_in_taap).
     {
@@ -569,6 +594,35 @@ TEST(OwnIdentity, ASignInDocumentNamingAnotherIdentityIsRefused) {
     EXPECT_FALSE(lake::control::own_identity::verify_document(base64url(*forged_encoded)));
 }
 
+// lake#1004: the replay key is what the signature authenticates. An extra member in the
+// signature object is refused, and the same signed assertion gives the same key however its
+// signature object is ordered.
+TEST(OwnIdentity, ATaapAssertionHasOneReplayKeyAndNoUnknownSignatureMembers) {
+    auto person = person_at(lake::test::fixture_path("taap-sign-in-replay"));
+    const std::int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
+    const std::string nonce = "taap-sign-in-replay-nonce";
+    const json signature = taap_sign_in_signature(person.signer, nonce, now);
+    const auto first = lake::control::identity_crypto::verify_taap_sign_in(
+        person.document, "lake", nonce, now, signature);
+    ASSERT_TRUE(first) << first.error();
+
+    json padded = signature;
+    padded["padding"] = "a fresh assertion id, once";
+    EXPECT_FALSE(lake::control::identity_crypto::verify_taap_sign_in(
+        person.document, "lake", nonce, now, padded));
+
+    json reordered = json::object();
+    for (auto it = signature.rbegin(); it != signature.rend(); ++it) {
+        reordered[it.key()] = it.value();
+    }
+    const auto again = lake::control::identity_crypto::verify_taap_sign_in(
+        person.document, "lake", nonce, now, reordered);
+    ASSERT_TRUE(again) << again.error();
+    EXPECT_EQ(again->assertion_id, first->assertion_id);
+}
+
 // A liquid push signed by the person's own key, linked to their account, is attributed to the
 // account in the push audit.
 TEST(OwnIdentity, APushFromTheLinkedKeyIsAttributedToTheAccount) {
@@ -686,7 +740,7 @@ liquid::identity_document signed_by(liquid::identity_document document, liquid::
     return document;
 }
 
-// The attack of lake#917 (LSR-006): the attacker's own key and document, with the victim's
+// The attack of lake#917: the attacker's own key and document, with the victim's
 // identifier written in and self-signed again with the attacker's key.
 std::string forged_document(Person& attacker, const std::string& victim_taap_id) {
     liquid::identity_document document = decoded_document(attacker.document);
@@ -723,7 +777,7 @@ json sign_in_taap_input(liquid::signer& signer,
     return input;
 }
 
-// lake#917 (LSR-006), against either store: a TAAP sign-in succeeds only with the key bound to the
+// lake#917, against either store: a TAAP sign-in succeeds only with the key bound to the
 // registered identity, its own first key or a rotation that key signed. A document naming the
 // victim's identifier with the attacker's key is refused, issues no session, and is audited.
 void expect_taap_sign_in_binds_the_key(lake::control::Store& store,
@@ -820,6 +874,12 @@ void expect_taap_sign_in_binds_the_key(lake::control::Store& store,
     }
 
     // A rotation the old key signed is bound: the new key signs in with the chain, not without.
+    // The first key is kept aside (a copy of the victim's liquid home taken before the rotation),
+    // as a leaked first key would be.
+    std::filesystem::copy(home / "victim", home / "victim-first-key",
+                          std::filesystem::copy_options::recursive);
+    Person first_key = person_at(home / "victim-first-key");
+    ASSERT_EQ(first_key.document, victim.document);
     liquid::identity_document successor;
     {
         LiquidHome scope(home / "victim");
@@ -842,6 +902,23 @@ void expect_taap_sign_in_binds_the_key(lake::control::Store& store,
     ASSERT_TRUE(with_chain.ok) << with_chain.error.message;
     EXPECT_EQ(store.context_for(with_chain.value.value("secret", ""))->user_id,
               victim_session.acting_user_id);
+
+    // lake#1024: that sign-in recorded the chain's head, so the replaced first key, alone, no
+    // longer signs in; the current key with the chain still does.
+    ApiContext replaced_visitor;
+    const ApiResult replaced_key = harness.call(
+        "sign_in_taap", sign_in_taap_input(first_key.signer, victim.document), replaced_visitor);
+    EXPECT_FALSE(replaced_key.ok) << "a replaced key signed in after the rotation was recorded";
+    EXPECT_EQ(replaced_key.error.code, "unauthorized");
+    EXPECT_NE(replaced_key.error.message.find("rotated"), std::string::npos)
+        << replaced_key.error.message;
+    EXPECT_FALSE(replaced_key.value.contains("secret"));
+    const ApiResult again_with_chain =
+        harness.call("sign_in_taap",
+                     sign_in_taap_input(
+                         victim.signer, successor_document, {victim.document, successor_document}),
+                     rotated_visitor);
+    EXPECT_TRUE(again_with_chain.ok) << again_with_chain.error.message;
 
     // A successor that declares the old key compromised and is signed only by the new key passes
     // liquid's verify_chain, but nothing the old key signed binds it: refused.

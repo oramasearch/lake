@@ -59,7 +59,7 @@ foreign or deleted IDs are refused; stopped or unready workspaces do not reach a
 
 ## Dev-cluster cutover
 
-Steve explicitly approved automatic replacement on 2026-09-29: this cluster is a development
+Automatic replacement was approved on 2026-09-29: this cluster is a development
 environment with no production data. Operator#217 deleting the legacy `prod-ws-*` clusters,
 volumes and credentials is intended. There is no approval guard or data-preserving adoption
 requirement. The replacement namespace is `<environment>-ws-<first 12 workspace UUID hex digits>`.

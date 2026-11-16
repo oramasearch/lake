@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/application_user_records.hpp"
 
 #include "lake/control/store.hpp"

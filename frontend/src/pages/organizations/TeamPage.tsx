@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Team settings (`/team?id=`): the team's members and how many access entries it has
  * (web_ui_team, serve_team_page). */
 import { useState } from "react";

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Drives (lake#561): paths, names, the upload and move plans, range selection, upload chunks and
  * what a shortcut opens; Drives → Storage and storage drives (lake#656). `npm test`; the build runs
  * it. */

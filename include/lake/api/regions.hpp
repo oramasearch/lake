@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <expected>
@@ -9,7 +11,7 @@
 
 #include <nlohmann/json.hpp>
 
-// Regions (lake#757, decision 64, docs/api/regions.md): production runs one Lake per region
+// Regions (lake#757, docs/api/regions.md): production runs one Lake per region
 // (eu.lake.live, us.lake.live), and the apex host (lake.live) is a region picker. The operator
 // supplies every value as an environment variable; Lake has no region setting of its own. With none
 // set (nonprod, local) Lake behaves as before and shows no picker.

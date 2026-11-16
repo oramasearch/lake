@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/drive_share_links.hpp"
 
 #include <algorithm>

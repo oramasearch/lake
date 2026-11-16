@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // A workspace's own methodologies from Python code (docs/api/methodologies.md, lake#655): the pure
 // parts. What a manifest must say, the lock file and entrypoint checks Validate makes before
 // anything runs, the drafts and the copies of Orama's, the image's Dockerfile, the validation

@@ -1,4 +1,6 @@
-// Billing (lake#564, decision 56, docs/api/billing.md): price_list, set_price_list,
+// SPDX-License-Identifier: MIT
+
+// Billing (lake#564, docs/api/billing.md): price_list, set_price_list,
 // billing_account, set_billing_contact, bill_preview, issue_invoice, resend_invoice,
 // list_invoices, get_invoice, record_invoice_payment and void_invoice, with the manual payment
 // provider. Registered only where LAKE_BILLING is on.
@@ -8,12 +10,13 @@
 // row, and invoices with their lines); the usage a bill prices is read from each workspace Zetta
 // through usage_over_time, and only the quantity billed per dimension is kept, on the invoice's
 // lines. Every call is
-// policy-checked and audited in the central log (decision 52): billing is account configuration.
+// policy-checked and audited in the central log: billing is account configuration.
 
 #include "lake/api/balance.hpp"
 #include "lake/api/billing.hpp"
 #include "lake/api/stripe.hpp"
 
+#include <atomic>
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -1125,11 +1128,24 @@ liquid::runtime::task<NoticeOutcome> receive_payment_notice(PaymentProviders& pr
     }
     const std::string name(provider->name());
     if (!notice) {
-        record({},
-               "billing.payment.notice",
-               "billing/" + name,
-               "denied",
-               {{"provider", name}, {"reason", notice.error().code}});
+        // A notice that does not authenticate is anyone's request (lake#1002): it is
+        // counted, and at most one signed audit event a minute records how many were refused, so
+        // unauthenticated traffic cannot append to the central audit log at will.
+        static std::atomic<std::uint64_t> refused_since_summary{0};
+        static std::atomic<std::int64_t> last_summary_seconds{0};
+        refused_since_summary.fetch_add(1);
+        const std::int64_t seconds =
+            std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+        std::int64_t last = last_summary_seconds.load();
+        if (seconds - last >= 60 && last_summary_seconds.compare_exchange_strong(last, seconds)) {
+            record({},
+                   "billing.payment.notice",
+                   "billing/" + name,
+                   "denied",
+                   {{"provider", name},
+                    {"reason", notice.error().code},
+                    {"refused_since_last_summary", refused_since_summary.exchange(0)}});
+        }
         co_return answer(notice.error().code == "not_supported" ? 404 : 400,
                          notice.error().code,
                          notice.error().message);

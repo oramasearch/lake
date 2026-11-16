@@ -78,17 +78,17 @@ For example, with a key in `LAKE_KEY` ([REST API and OpenAPI](/docs/developer)),
 your account owns, write a secret into it and read it back:
 
 ```
-curl -s https://lake.oramadev.net/v1/create_secret_mount \
+curl -s https://lake.example.com/v1/create_secret_mount \
   -H "Authorization: Bearer $LAKE_KEY" -H 'Content-Type: application/json' \
   -d '{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "payments"}'
-curl -s https://lake.oramadev.net/v1/put_secret \
+curl -s https://lake.example.com/v1/put_secret \
   -H "Authorization: Bearer $LAKE_KEY" -H 'Content-Type: application/json' \
   -d '{"mount_id": "<mount id>", "name": "database/password", "value": {"password": "<the password>"}}'
-curl -s "https://lake.oramadev.net/v1/read_secret?mount_id=<mount id>&name=database/password" \
+curl -s "https://lake.example.com/v1/read_secret?mount_id=<mount id>&name=database/password" \
   -H "Authorization: Bearer $LAKE_KEY"
 ```
 
-`<mount id>` is the `id` the first call answers. Replace `lake.oramadev.net` with your Lake's
+`<mount id>` is the `id` the first call answers. Replace `lake.example.com` with your Lake's
 address.
 
 ## Write a Secret

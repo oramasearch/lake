@@ -1,4 +1,6 @@
-// The prepaid account balance (lake#1114, liquid-bridge decision 67, docs/api/billing.md#balance):
+// SPDX-License-Identifier: MIT
+
+// The prepaid account balance (lake#1114, docs/api/billing.md#balance):
 // the balance's view and its 402 gate, the warning every answer carries, the payment provider's
 // notices (a top-up paid, a card saved, an auto top-up that failed), the refresh of the charges by
 // the store root's owner with its emails and auto top-ups, and the capabilities account_balance,

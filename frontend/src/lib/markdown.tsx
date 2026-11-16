@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Markdown as lake renders it (lake/api/markdown.hpp), in the browser with react-markdown and
  * remark-gfm: raw HTML stays text, every heading gets a stable lowercase anchor (a repeated one
  * numbered -2, -3, …; docs/ui/forge.md), links to app pages stay in the app and every other link

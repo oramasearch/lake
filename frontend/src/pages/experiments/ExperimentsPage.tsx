@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Train → Experiments (formerly web_ui_experiments.cpp list mode, serve_experiments_agent_form and
  * the start and compare scripts): the figures, Experiments Agent's turn (asked from a drawer) with
  * its editable proposal and confirmed start, the filter, Start an Experiment in a drawer, the

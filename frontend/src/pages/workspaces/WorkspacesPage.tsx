@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Ship → Workspaces: every workspace the person can reach, grouped by owner as the top bar's
  * picker groups them (lake#638), with their phase and storage, New Workspace in a dialog that asks
  * the owner, Rename, Settings (the model the workspace's agents call, lake#1230), and the typed-name

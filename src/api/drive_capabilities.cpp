@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/capabilities.hpp"
 
 #include <algorithm>
@@ -317,6 +319,38 @@ std::expected<std::string, ApiError> drive_upload_object(const json& input, ApiC
     return location->object.id;
 }
 
+// Whether the caller may `action` the node at `path` as it was at `revision` (lake#923).
+// A history operation reads revisions other than the `ref` its object was resolved
+// from, and the node a path names can differ between them (a folder renamed away and another
+// made under its name), so each revision it reads is authorized on its own.
+std::optional<ApiResult> authorize_drive_revision(const json& input,
+                                                  const std::string& revision,
+                                                  std::string_view action,
+                                                  ApiContext& context) {
+    if (context.operator_credential || context.acting_identity == "admin") {
+        return std::nullopt;
+    }
+    json at = input;
+    at["ref"] = revision;
+    const auto location = nearest_drive_location(at, context, false);
+    if (!location) {
+        return ApiResult::failure(location.error().code, location.error().message, location.error().path);
+    }
+    const auto decision = control::authorize(*context.store,
+                                             context.acting_identity,
+                                             location->object.id,
+                                             std::string(action),
+                                             context.authorization_cache);
+    if (!decision) {
+        return ApiResult::failure(decision.error().code, decision.error().message);
+    }
+    if (!decision->allowed) {
+        return ApiResult::failure(
+            "unauthorized", "principal is not allowed to read this path at " + revision);
+    }
+    return std::nullopt;
+}
+
 std::expected<std::string, ApiError> drive_history_object(const json& input, ApiContext& context) {
     const auto location = nearest_drive_location(input, context, false);
     if (!location) {
@@ -612,7 +646,7 @@ std::expected<void, ApiError> require_drive_share_role(const DriveLocation& loca
         return {};
     }
     // ensure_folder_location may have materialized policy objects since registry authorization.
-    control::AuthorizationCache cache;
+    control::AuthorizationCache cache = control::fresh_cache_like(context.authorization_cache);
     for (const std::string action : {"read", "write", "admin", "deploy", "review", "share"}) {
         if (action != "share" && !control::role_allows(role, action)) {
             continue;
@@ -651,7 +685,7 @@ authorize_drive_operations(const control::Repository& repository,
                            const std::vector<RepositoryTreeEntry>& entries,
                            const std::vector<RepositoryWriteOperation>& operations,
                            ApiContext& context) {
-    control::AuthorizationCache cache;
+    control::AuthorizationCache cache = control::fresh_cache_like(context.authorization_cache);
     auto require_write = [&](const std::string& path) -> SyncStoreResult<void> {
         const auto location = drive_location_at(repository, entries, path, context, false);
         if (!location) {
@@ -807,6 +841,76 @@ std::string new_link_secret() {
     std::string secret = control::new_uuid_v4() + control::new_uuid_v4();
     std::erase(secret, '-');
     return secret;
+}
+
+// The number written by the digits of `text` from `begin`, `count` of them, or nothing when one
+// of them is not a digit.
+std::optional<int> digits_at(std::string_view text, std::size_t begin, std::size_t count) {
+    int value = 0;
+    for (std::size_t index = begin; index < begin + count; ++index) {
+        const char digit = text[index];
+        if (digit < '0' || digit > '9') {
+            return std::nullopt;
+        }
+        value = value * 10 + (digit - '0');
+    }
+    return value;
+}
+
+// A fraction of a second written with `count` digits, as microseconds.
+std::chrono::microseconds fraction_microseconds(int value, std::size_t count) {
+    for (std::size_t index = count; index < 6; ++index) {
+        value *= 10;
+    }
+    for (std::size_t index = 6; index < count; ++index) {
+        value /= 10;
+    }
+    return std::chrono::microseconds{value};
+}
+
+// A share link's expiry is an RFC 3339 UTC time, `YYYY-MM-DDTHH:MM:SS[.fraction]Z`, with a real
+// date and time (lake#1319): expiry is decided by comparing that text with the clock's, so a
+// value in any other shape could never expire or would expire at another time than it says.
+std::optional<std::chrono::sys_time<std::chrono::microseconds>>
+share_link_expiry(std::string_view text) {
+    if (text.size() < 20 || text.back() != 'Z') {
+        return std::nullopt;
+    }
+    if (text[4] != '-' || text[7] != '-' || text[10] != 'T' || text[13] != ':' || text[16] != ':') {
+        return std::nullopt;
+    }
+    const auto year = digits_at(text, 0, 4);
+    const auto month = digits_at(text, 5, 2);
+    const auto day = digits_at(text, 8, 2);
+    const auto hour = digits_at(text, 11, 2);
+    const auto minute = digits_at(text, 14, 2);
+    const auto second = digits_at(text, 17, 2);
+    if (!year || !month || !day || !hour || !minute || !second) {
+        return std::nullopt;
+    }
+    if (*hour > 23 || *minute > 59 || *second > 59) {
+        return std::nullopt;
+    }
+    const std::chrono::year_month_day date{std::chrono::year{*year},
+                                           std::chrono::month{static_cast<unsigned>(*month)},
+                                           std::chrono::day{static_cast<unsigned>(*day)}};
+    if (!date.ok()) {
+        return std::nullopt;
+    }
+    std::chrono::microseconds fraction{0};
+    if (text.size() > 20) {
+        const std::size_t count = text.size() - 21;
+        if (text[19] != '.' || count == 0 || count > 9) {
+            return std::nullopt;
+        }
+        const auto value = digits_at(text, 20, count);
+        if (!value) {
+            return std::nullopt;
+        }
+        fraction = fraction_microseconds(*value, count);
+    }
+    return std::chrono::sys_days{date} + std::chrono::hours{*hour} + std::chrono::minutes{*minute} +
+           std::chrono::seconds{*second} + fraction;
 }
 
 bool link_is_active(const control::DriveShareLink& link) {
@@ -1300,15 +1404,43 @@ json drive_input_schema(bool path_required) {
 RepositoryWriteAuthorizer
 repository_write_authorizer(const control::Repository& repository,
                             const std::vector<RepositoryWriteOperation>& operations,
-                            ApiContext& context) {
+                            ApiContext& context,
+                            std::string ref,
+                            BranchProtectionLoad protection) {
     std::vector<RepositoryWriteOperation> paths;
     for (const auto& operation : operations) {
         paths.push_back(
             {.kind = operation.kind, .path = operation.path, .source_path = operation.source_path});
     }
-    return [repository, paths = std::move(paths), &context](const auto& entries) {
+    return [repository, paths = std::move(paths), &context, ref = std::move(ref),
+            protection = std::move(protection)](const auto& entries) -> SyncStoreResult<void> {
+        // The branch's rules first, as a push's reference update (lake#924): a direct write adds
+        // one change on top of the branch, so it is a fast-forward by the acting person.
+        if (!protection) {
+            return std::unexpected(SyncStoreError{
+                "unavailable", "branch protection could not be read: " + protection.error().message});
+        }
+        const BranchRefUpdate update{.name = ref, .old_head = std::nullopt, .new_head = {},
+                                     .fast_forward = true};
+        if (auto evaluated = evaluate_branch_protection(*context.store,
+                                                        context.acting_identity,
+                                                        context.authorization_cache,
+                                                        *protection,
+                                                        update);
+            !evaluated) {
+            return std::unexpected(evaluated.error());
+        }
         return authorize_drive_operations(repository, entries, paths, context);
     };
+}
+
+BranchProtectionLoad branch_protection_blocking(ApiContext& context,
+                                                const control::Repository& repository) {
+    auto loaded = liquid::runtime::block_on(load_branch_protection(context, repository));
+    if (!loaded) {
+        return std::unexpected(SyncStoreError{"unavailable", loaded.error().message});
+    }
+    return std::move(*loaded);
 }
 
 void register_drive_capabilities(Registry& registry) {
@@ -1482,7 +1614,7 @@ void register_drive_capabilities(Registry& registry) {
             }
             std::vector<RepositoryWriteOperation> operations{
                 {.kind = RepositoryWriteKind::Folder, .path = target}};
-            auto authorize = repository_write_authorizer(repository, operations, context);
+            auto authorize = repository_write_authorizer(repository, operations, context, input.at("ref"), branch_protection_blocking(context, repository));
             return committed_drive_change(
                 repository,
                 "drive.folder.created",
@@ -1586,7 +1718,7 @@ void register_drive_capabilities(Registry& registry) {
                 uploaded += operation.contents.size();
             }
             record_workspace_transfer(context, repository->workspace_id, uploaded, 0);
-            auto authorize = repository_write_authorizer(*repository, operations, context);
+            auto authorize = repository_write_authorizer(*repository, operations, context, input.at("ref"), branch_protection_blocking(context, *repository));
             return committed_drive_change(
                 *repository,
                 "drive.files.uploaded",
@@ -1654,7 +1786,7 @@ void register_drive_capabilities(Registry& registry) {
             std::vector<RepositoryWriteOperation> operations{
                 {.kind = RepositoryWriteKind::Moved, .path = destination, .source_path = source}};
             auto authorize =
-                [&, check = repository_write_authorizer(repository, operations, context)](
+                [&, check = repository_write_authorizer(repository, operations, context, input.at("ref"), branch_protection_blocking(context, repository))](
                     const std::vector<RepositoryTreeEntry>& tree) -> SyncStoreResult<void> {
                 if (const auto allowed = check(tree); !allowed) {
                     return allowed;
@@ -1735,7 +1867,7 @@ void register_drive_capabilities(Registry& registry) {
                                                  ? RepositoryWriteKind::DeletedFolder
                                                  : RepositoryWriteKind::DeletedFile;
             std::vector<RepositoryWriteOperation> operations{{.kind = kind, .path = path}};
-            auto authorize = repository_write_authorizer(repository, operations, context);
+            auto authorize = repository_write_authorizer(repository, operations, context, input.at("ref"), branch_protection_blocking(context, repository));
             return committed_drive_change(
                 repository,
                 "drive.path.deleted",
@@ -1813,6 +1945,12 @@ void register_drive_capabilities(Registry& registry) {
             const auto repository = context.store->get_repository(input.at("repository_id"));
             if (!repository) {
                 return store_error(repository.error());
+            }
+            for (const char* side : {"left", "right"}) {
+                if (auto refused =
+                        authorize_drive_revision(input, input.at(side).get<std::string>(), "read", context)) {
+                    return *refused;
+                }
             }
             auto left = context.sync_store->repository_file(
                 repository->customer_id, repository->id, input.at("left"), input.at("path"));
@@ -1978,7 +2116,7 @@ void register_drive_capabilities(Registry& registry) {
                 conflict_id,
                 resolution,
                 std::move(blob),
-                repository_write_authorizer(*repository, operations, context));
+                repository_write_authorizer(*repository, operations, context, "main", branch_protection_blocking(context, *repository)));
             if (!resolved) {
                 return sync_error(resolved.error());
             }
@@ -2018,6 +2156,13 @@ void register_drive_capabilities(Registry& registry) {
             if (!repository) {
                 return store_error(repository.error());
             }
+            // The version restored is read as it was (lake#923): its node at change_id must be
+            // readable, not only the node the path names now. The write to the current tree is
+            // checked by repository_write_authorizer.
+            if (auto refused = authorize_drive_revision(
+                    input, input.at("change_id").get<std::string>(), "read", context)) {
+                return *refused;
+            }
             std::vector<RepositoryWriteOperation> operations{
                 {.kind = RepositoryWriteKind::File, .path = input.at("path")}};
             const auto restored = context.sync_store->restore_repository_file(
@@ -2025,7 +2170,7 @@ void register_drive_capabilities(Registry& registry) {
                 repository->id,
                 input.at("change_id"),
                 input.at("path"),
-                repository_write_authorizer(*repository, operations, context));
+                repository_write_authorizer(*repository, operations, context, "main", branch_protection_blocking(context, *repository)));
             if (!restored) {
                 return sync_error(restored.error());
             }
@@ -2122,7 +2267,8 @@ void register_drive_capabilities(Registry& registry) {
                                               "/principal_taap_id");
                 }
                 if (!context.operator_credential) {
-                    control::AuthorizationCache cache;
+                    control::AuthorizationCache cache =
+                        control::fresh_cache_like(context.authorization_cache);
                     const auto administers = control::authorize(*context.store,
                                                                 context.acting_identity,
                                                                 location->object.id,
@@ -2411,18 +2557,22 @@ void register_drive_capabilities(Registry& registry) {
         .description = "Create a folder-scoped link with an explicit role and expiry. The link is "
                        "held in the workspace Zetta of `workspace_id`, a workspace of the "
                        "repository's account; its bearer token names that workspace.",
-        .input_schema = {{"type", "object"},
-                         {"properties",
-                          {{"repository_id", {{"type", "string"}}},
-                           {"workspace_id", {{"type", "string"}}},
-                           {"ref", {{"type", "string"}}},
-                           {"path", {{"type", "string"}}},
-                           {"role", {{"type", "string"}, {"enum", json::array({"read", "write"})}}},
-                           {"expires_at", {{"type", "string"}}}}},
-                         {"required",
-                          json::array({"repository_id", "workspace_id", "ref", "path", "role",
-                                       "expires_at"})},
-                         {"additionalProperties", false}},
+        .input_schema =
+            {{"type", "object"},
+             {"properties",
+              {{"repository_id", {{"type", "string"}}},
+               {"workspace_id", {{"type", "string"}}},
+               {"ref", {{"type", "string"}}},
+               {"path", {{"type", "string"}}},
+               {"role", {{"type", "string"}, {"enum", json::array({"read", "write"})}}},
+               {"expires_at",
+                {{"type", "string"},
+                 {"description",
+                  "RFC 3339 UTC time in the future, "
+                  "YYYY-MM-DDTHH:MM:SS[.fraction]Z"}}}}},
+             {"required",
+              json::array({"repository_id", "workspace_id", "ref", "path", "role", "expires_at"})},
+             {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
         .object = "drive folder",
@@ -2431,7 +2581,16 @@ void register_drive_capabilities(Registry& registry) {
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
             const std::string expires_at = input.at("expires_at");
-            if (expires_at <= control::now_iso8601()) {
+            const auto expiry = share_link_expiry(expires_at);
+            if (!expiry) {
+                co_return ApiResult::failure(
+                    "invalid_input",
+                    "expires_at must be an RFC 3339 UTC time, YYYY-MM-DDTHH:MM:SS[.fraction]Z",
+                    "/expires_at");
+            }
+            const auto now =
+                std::chrono::floor<std::chrono::microseconds>(std::chrono::system_clock::now());
+            if (*expiry <= now) {
                 co_return ApiResult::failure(
                     "invalid_input", "expires_at must be in the future", "/expires_at");
             }

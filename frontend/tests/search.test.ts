@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Ship → Search Index (zetta#1243, lake#596): a hit shows the matched row's fields, in the index's
  * field order, instead of the workspace's internal row id.

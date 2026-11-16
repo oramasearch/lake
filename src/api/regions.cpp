@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/regions.hpp"
 
 #include <algorithm>
@@ -377,7 +379,7 @@ std::expected<Regions, std::string> regions_from_environment(std::string_view re
             item.host = lower(item.host);
             if (!valid_host(item.host)) {
                 return std::unexpected(std::format(
-                    "{}.host must be a host name such as eu.lake.live, not \"{}\"", at, item.host));
+                    "{}.host must be a host name such as eu.lake.example.com, not \"{}\"", at, item.host));
             }
             if (!names.insert(item.name).second) {
                 return std::unexpected(
@@ -414,7 +416,7 @@ std::expected<Regions, std::string> regions_from_environment(std::string_view re
     if (!apex_host.empty()) {
         regions.apex_host = lower(apex_host);
         if (!valid_host(regions.apex_host)) {
-            return std::unexpected("LAKE_APEX_HOST must be a host name such as lake.live");
+            return std::unexpected("LAKE_APEX_HOST must be a host name such as lake.example.com");
         }
         if (regions.list.empty()) {
             return std::unexpected("LAKE_APEX_HOST needs LAKE_REGIONS: the picker lists them");

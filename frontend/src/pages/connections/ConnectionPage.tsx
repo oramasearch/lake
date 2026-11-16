@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** One connection (`/w/<id>/connections/connection?name=<name>`, lake#651): what it is, its source
  * tables with their columns (`list_source_tables`, nothing pulled), "Load into a dataset" for any
  * table or a query of one's own, and delete behind a typed confirmation. */

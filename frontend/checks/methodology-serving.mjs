@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Screenshots of Ship → Model for a model a workspace methodology trained (lake#690,
 // docs/ui/ship.md) at 1440 and 390 wide: published and starting, then serving with Try It's
 // predictions. Run against `npx vite --port 5175`; every /v1 call is answered by the mocks below,
@@ -17,9 +19,9 @@ mkdirSync(OUT, { recursive: true });
 const BASE = process.env.BASE ?? "http://localhost:5175";
 
 const viewer = {
-  signed_in: true, administrator: false, display_name: "Steve Sperandeo", email: "steve@example.com", taap_id: "taap:me",
+  signed_in: true, administrator: false, display_name: "Ada Lovelace", email: "ada@example.com", taap_id: "taap:me",
   customer_id: "me", workspace_id: "me-0",
-  spaces: [{ id: "me", name: "steve-x7f2", label: "Your workspaces", personal: true, kind: "individual", workspaces: [{ id: "me-0", name: "steve", customer_id: "me", status: "ready" }] }],
+  spaces: [{ id: "me", name: "ada-x7f2", label: "Your workspaces", personal: true, kind: "individual", workspaces: [{ id: "me-0", name: "ada", customer_id: "me", status: "ready" }] }],
   clerk: { enabled: false }, password_sign_up: false, version: "dev",
 };
 const model = {

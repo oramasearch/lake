@@ -1,5 +1,7 @@
-/** The terms and privacy sentence under every sign-up and sign-in form, Clerk's and lake's own
- * (liquid-bridge#15). The links come from `viewer.legal` and open in a new tab, so a half-filled
+// SPDX-License-Identifier: MIT
+
+/** The terms and privacy sentence under every sign-up and sign-in form, Clerk's and lake's own.
+ * The links come from `viewer.legal` and open in a new tab, so a half-filled
  * form is kept. Renders nothing when the instance links to neither document. */
 import { useSession } from "@/lib/session";
 import { legalNotice } from "@/lib/legalLinks";

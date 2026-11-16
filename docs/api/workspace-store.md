@@ -1,8 +1,8 @@
 # Moving a Workspace's Repositories into Its Store
 
-Refs [lake#380](https://github.com/oramasearch/lake/issues/380). The design is
-[architecture/workspace-store.md](../architecture/workspace-store.md); the decisions are liquid-bridge
-decision 54 S1-S3 and the [plan](../architecture/workspace-storage-plan.md#lake380-the-liquid-store).
+Refs lake#380. The design is
+[architecture/workspace-store.md](../architecture/workspace-store.md); the decisions are in the
+[plan](../architecture/workspace-storage-plan.md#lake380-the-liquid-store).
 
 **Status: implemented in the source tree; not deployed; no workspace on dev is switched.** It needs liquid
 `8955519` or later (liquid#332, write-once index runs).
@@ -44,7 +44,7 @@ A transfer report has `repository_id`, `absent` (the account store never held it
   reopens the workspace store before the next use, which liquid's recovery requires. Run `copy`
   again.
 - The plan's precondition of a fresh snapshot of the workspace volume and of lake's store volume
-  ([orama-operator#260](https://github.com/oramasearch/orama-operator/issues/260)) is not checked:
+  (orama-operator#260) is not checked:
   the snapshot desired state exists (migration `0069`), but the move does not request a snapshot or
   wait for one yet. Make sure recent snapshots exist before `copy`.
 - A repository created in a switched workspace is created in its store at creation. One created
@@ -55,7 +55,7 @@ A transfer report has `repository_id`, `absent` (the account store never held it
   workspaces wait at most one repository's copy. `switch` refuses the account's requests too.
 - Once switched, the workspace's search index lives beside its store as sealed `search/` objects and
   is rebuilt from its repositories on first use; releases made before the switch keep no tag
-  snapshot there ([search.md](search.md#where-the-index-lives-lake381-decision-54-s8)).
+  snapshot there ([search.md](search.md#where-the-index-lives-lake381)).
 - liquid's sync client does not yet retry a `503` with `Retry-After` (liquid#340): rerun a
   `liquid push` or `pull` refused during a move.
 
@@ -130,11 +130,11 @@ Otherwise it answers `customer_id` (the account) and:
 
 1. Deploy an image with this change and liquid `8955519` or later, and Zetta with the object capability on every
    workspace Zetta (dev Zetta has it). Apply migration `0067`.
-2. Snapshot `lake-prod-store` and each workspace Zetta's volume.
+2. Snapshot the Lake's store volume and each workspace Zetta's volume.
 3. For each workspace: `plan`, then `copy`, then `verify` until `complete`, then `switch`.
 4. Check the workspace's repository pages, a `liquid pull`, and a push; `store_moved_at` is set.
 5. Leave `LAKE_STORE_ROOT/<space>/store` in place until every workspace of the account is switched
-   and Steve approves removing it; then run `remove_space_store` with `dry_run: true`, check the
+   and an operator approves removing it; then run `remove_space_store` with `dry_run: true`, check the
    paths and bytes, and run it again with `dry_run: false`.
 
 **A workspace switched with no repository before lake#383 phase B** (on dev

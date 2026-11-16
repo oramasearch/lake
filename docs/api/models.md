@@ -27,8 +27,7 @@ pull receives zero bytes, and the source and destination trees match.
 Repository capabilities use the repository policy object. Read capabilities allow anonymous
 access only when the repository is public; action capabilities require repository `write`
 access. Without `revision`, `get_dataset` and `get_model` read private workspace metadata and
-require a signed-in Lake caller with `read` on the customer that owns the workspace (lake#970,
-LSR-104). Supplying `customer_id` and `workspace_id` grants no access. The shared workspace
+require a signed-in Lake caller with `read` on the customer that owns the workspace (lake#970). Supplying `customer_id` and `workspace_id` grants no access. The shared workspace
 customer resolver requires authentication before accepting either an explicit customer or an
 Application Agent task's customer; Registry enforces credential scopes and customer `read` before
 dispatch. All capabilities are registered once for `/v1/openapi.json` and `POST /mcp`.
@@ -139,7 +138,7 @@ trained one. The engine's page is zetta `docs/ml/model-import.md`.
   - a random-forest or decision-tree classifier (averaged probabilities, not a logistic link);
   - categorical splits, and exponential objectives.
 
-  The random-forest classifier is [lake#697](https://github.com/oramasearch/lake/issues/697).
+  The random-forest classifier is lake#697.
 
 **Download.** `export_model` is a named engine read: `read` on the account, recorded as
 `export_model` in the workspace's audit. It answers a model version's weights as a file:
@@ -191,6 +190,26 @@ then are the attestations stored and indexed against that model revision. Reads 
 remain available. Tampered bytes, a changed subject, a different dataset digest, an invalid
 profile, or a missing dataset revision are refused. These are the same attestation primitives and
 signature checks used by `liquid attest verify`; Lake retains both signed records by digest.
+
+### Who issued an attestation (lake#1020)
+
+libliquid attributes an attestation only through the issuer's identity chain (liquid#383), and
+Lake's process holds its own chain alone. So Lake passes the chain itself: when the issuer's TAAP
+identifier is one a person registered with Lake, the initial identity document they signed up with
+(`identity_documents`) or the own identity their account linked (`identity_links.own_document`), that
+document is given to `liquid::verify_attestation` as `issuer_chain`, and the signature must be made
+by its key. An issuer no account registered gets no chain, so liquid reads the process's identity
+store: Lake's own identity still verifies, and anyone else is refused as an `unknown signer`. The
+same rule applies to the attestations listed on a repository artifact (`verified: false` with the
+unknown-signer reason). A store that cannot be read gives no chain, so the answer fails closed.
+A refused `attach_model_provenance` answers `invalid_input` with liquid's reason in the message
+(`a provenance attestation was refused: unknown signer: no identity chain binds this name to a
+key`, lake#1354), the same reason `verify_model_provenance` answers as `reason`.
+
+Limits: a rotated identity's later documents are not stored, so a statement signed by a key after
+its first rotation is refused (the same follow-up as in [identity.md](identity.md), Limits); a
+managed key (`custodial_identities`) has no identity document, so statements signed with one are
+refused as an unknown signer.
 
 The model JSON includes `training_provenance`, and the server-rendered model page displays the
 dataset and code revisions, run identity, parameters, environment digest, attestation digests,
@@ -244,6 +263,9 @@ model and dataset transfers.
   deduplication and repeat-pull resumption with a 4 GiB logical two-revision model.
 - `ModelProvenance.SignedDatasetChainVerifiesAndTamperingIsRefused` proves a signed
   dataset-to-model chain and rejects altered attestation bytes.
+- `ModelProvenance.ARegisteredIssuerVerifiesThroughTheirDocumentAndAnUnknownOneDoesNot` signs
+  the chain with a key Lake's process does not hold: a registered person's chain verifies through
+  their stored document, and an unregistered identity's is refused as an unknown signer.
 - `HuggingFaceHttp.CommonModelAndDatasetCallsUseRepositoryCapabilities` covers the supported HTTP
   requests directly, including LFS and the model page.
 - `HuggingFaceClient.CommonFlowsRunWhenPythonClientIsInstalled` covers the listed client calls

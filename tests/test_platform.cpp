@@ -1,8 +1,11 @@
+// SPDX-License-Identifier: MIT
+
 #include "audit_test_support.hpp"
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <array>
+#include <expected>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -325,7 +328,7 @@ protected:
         return std::move(*opened);
     }
 
-    // The repository's workspace audit, in chain order (decision 52: a deployment's phases are
+    // The repository's workspace audit, in chain order (a deployment's phases are
     // the repository's data). The chain is verified on every read.
     std::vector<lake::audit::Event> workspace_audit() {
         auto opened = records();
@@ -379,6 +382,37 @@ protected:
         }
         return std::move(*completed);
     }
+
+    // The tenant's DNS (lake#949): the TXT records each name holds, as verify_domain reads them.
+    std::map<std::string, std::vector<std::string>> txt_records;
+    void use_fake_dns() {
+        context.txt_resolver =
+            [this](
+                const std::string& name) -> std::expected<std::vector<std::string>, std::string> {
+            const auto found = txt_records.find(name);
+            return found == txt_records.end() ? std::vector<std::string>{} : found->second;
+        };
+    }
+
+    // create_domain, then publishes the record it answered and verifies it: what a tenant does to
+    // have the operator route a host.
+    ApiResult create_verified_domain(const std::string& host, const std::string& tls = "acme") {
+        use_fake_dns();
+        ApiResult created = call_async("create_domain",
+                                       {{"repository_id", repository.id},
+                                        {"environment", "production"},
+                                        {"host", host},
+                                        {"tls", tls}});
+        if (!created.ok) {
+            return created;
+        }
+        const json& record = created.value.at("verification").at("record");
+        txt_records[record.at("name").get<std::string>()] = {"v=spf1 -all",
+                                                             record.at("value").get<std::string>()};
+        return call_async(
+            "verify_domain",
+            {{"repository_id", repository.id}, {"environment", "production"}, {"host", host}});
+    }
 };
 
 TEST(ZettaControlLiteral, QuotesApostrophesAndRejectsControlCharacters) {
@@ -428,7 +462,7 @@ TEST_F(PlatformFixture, SyncCreatesEnvironmentLatestPhaseAndAuditEvent) {
     const auto object = store->get_policy_object(object_id);
     ASSERT_TRUE(object);
     EXPECT_EQ(object->object_type, "environment");
-    // The phase is in the repository's workspace audit, not the central log (decision 52).
+    // The phase is in the repository's workspace audit, not the central log.
     auto central = lake::test::audit_events(*store, {});
     ASSERT_TRUE(central);
     EXPECT_FALSE(std::ranges::any_of(*central, [](const lake::audit::Event& event) {
@@ -481,11 +515,7 @@ TEST_F(PlatformFixture, EnvironmentValuesDomainsAndSecretScanningUseAppendOnlyRo
     EXPECT_FALSE(secret.ok);
     EXPECT_EQ(secret.error.message, "use a sealed secret");
 
-    ApiResult domain = call_async("create_domain",
-                                  {{"repository_id", repository.id},
-                                   {"environment", "production"},
-                                   {"host", "www.example.test"},
-                                   {"tls", "acme"}});
+    ApiResult domain = create_verified_domain("www.example.test");
     ASSERT_TRUE(domain.ok) << domain.error.message;
     EXPECT_FALSE(control->domains.back().at("ordering_token").get<std::string>().empty());
     environment = get_environment("production");
@@ -649,6 +679,193 @@ TEST_F(PlatformFixture, ReadRoleCannotWriteAndDeployRoleIsRequiredForDomains) {
                          {"host", "www.example.test"},
                          {"tls", "acme"}});
     EXPECT_TRUE(domain.ok) << domain.error.message;
+
+    // None of this Lake's own names can be claimed (lake#949): its host, the zone it is in, an
+    // alias, and the apps wildcard, in any case.
+    context.public_host = "lake-dev.platform.test";
+    context.host_aliases = {"lake.other.test"};
+    context.apps_wildcard = "*.apps.platform.test";
+    for (const char* platform : {"lake-dev.platform.test",
+                                 "login.lake-dev.platform.test",
+                                 "login.platform.test",
+                                 "Platform.Test",
+                                 "lake.other.test",
+                                 "a.lake.other.test",
+                                 "someone.apps.platform.test"}) {
+        const ApiResult refused = call_async("create_domain",
+                                             {{"repository_id", repository.id},
+                                              {"environment", "production"},
+                                              {"host", platform},
+                                              {"tls", "acme"}});
+        EXPECT_FALSE(refused.ok) << platform;
+        EXPECT_EQ(refused.error.path, "/host") << platform;
+    }
+    EXPECT_TRUE(call_async("create_domain",
+                           {{"repository_id", repository.id},
+                            {"environment", "production"},
+                            {"host", "other.test"},
+                            {"tls", "acme"}})
+                    .ok);
+}
+
+// Custom-domain claims (lake#949): a host is one environment's on this Lake, across accounts, and
+// reaches the operator only once the tenant proved control with the TXT record create_domain
+// answered.
+TEST_F(PlatformFixture, AnUnverifiedDomainIsNeverWrittenForTheOperator) {
+    // The environment exists once the sync has mirrored its deployment (lake#913).
+    ASSERT_TRUE(sync());
+    use_fake_dns();
+    ApiResult created = call_async("create_domain",
+                                   {{"repository_id", repository.id},
+                                    {"environment", "production"},
+                                    {"host", "WWW.Example.Test"},
+                                    {"tls", "acme"}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_EQ(created.value.at("host"), "www.example.test");
+    const json& verification = created.value.at("verification");
+    EXPECT_EQ(verification.at("state"), "pending");
+    EXPECT_EQ(verification.at("record").at("type"), "TXT");
+    EXPECT_EQ(verification.at("record").at("name"), "_lake-challenge.www.example.test");
+    const std::string token = verification.at("record").at("value");
+    EXPECT_EQ(token.size(), 64U);
+    EXPECT_TRUE(control->domains.empty());
+    const auto claim = store->get_domain_claim("www.example.test");
+    ASSERT_TRUE(claim);
+    EXPECT_EQ(claim->state, "pending");
+    EXPECT_EQ(claim->customer_id, repository.customer_id);
+    EXPECT_EQ(claim->workspace_id, repository.workspace_id);
+    EXPECT_EQ(claim->repository_id, repository.id);
+
+    // Asking again answers the same record, and still writes nothing.
+    ApiResult again = call_async("create_domain",
+                                 {{"repository_id", repository.id},
+                                  {"environment", "production"},
+                                  {"host", "www.example.test"},
+                                  {"tls", "provided"}});
+    ASSERT_TRUE(again.ok) << again.error.message;
+    EXPECT_EQ(again.value.at("verification").at("record").at("value"), token);
+    EXPECT_EQ(again.value.at("tls"), "provided");
+    EXPECT_TRUE(control->domains.empty());
+    ASSERT_TRUE(sync());
+    const auto environment = get_environment("production");
+    ASSERT_TRUE(environment);
+    EXPECT_TRUE(environment->at("domains").empty());
+}
+
+TEST_F(PlatformFixture, VerifyDomainFailsUntilTheRecordHoldsTheToken) {
+    // The environment exists once the sync has mirrored its deployment (lake#913).
+    ASSERT_TRUE(sync());
+    use_fake_dns();
+    ApiResult created = call_async("create_domain",
+                                   {{"repository_id", repository.id},
+                                    {"environment", "production"},
+                                    {"host", "www.example.test"},
+                                    {"tls", "acme"}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const json input{{"repository_id", repository.id},
+                     {"environment", "production"},
+                     {"host", "www.example.test"}};
+
+    // No record yet.
+    ApiResult missing = call_async("verify_domain", input);
+    EXPECT_FALSE(missing.ok);
+    EXPECT_EQ(missing.error.code, "conflict");
+    EXPECT_NE(missing.error.message.find("has no TXT record yet"), std::string::npos);
+    // Someone else's token.
+    txt_records["_lake-challenge.www.example.test"] = {std::string(64, 'a')};
+    ApiResult wrong = call_async("verify_domain", input);
+    EXPECT_FALSE(wrong.ok);
+    EXPECT_EQ(wrong.error.code, "conflict");
+    EXPECT_NE(wrong.error.message.find("does not hold this claim's token"), std::string::npos);
+    // No name server answered.
+    context.txt_resolver =
+        [](const std::string&) -> std::expected<std::vector<std::string>, std::string> {
+        return std::unexpected(std::string("the name server did not answer in time"));
+    };
+    ApiResult unreachable = call_async("verify_domain", input);
+    EXPECT_FALSE(unreachable.ok);
+    EXPECT_EQ(unreachable.error.code, "store_unavailable");
+    EXPECT_TRUE(control->domains.empty());
+    ASSERT_TRUE(store->get_domain_claim("www.example.test"));
+    EXPECT_EQ(store->get_domain_claim("www.example.test")->state, "pending");
+
+    // The record holds the token: the claim is verified and the operator gets the request.
+    use_fake_dns();
+    txt_records["_lake-challenge.www.example.test"] = {
+        created.value.at("verification").at("record").at("value").get<std::string>()};
+    ApiResult verified = call_async("verify_domain", input);
+    ASSERT_TRUE(verified.ok) << verified.error.message;
+    EXPECT_EQ(verified.value.at("verification").at("state"), "verified");
+    EXPECT_FALSE(verified.value.at("verification").at("verified_at").get<std::string>().empty());
+    ASSERT_EQ(control->domains.size(), 1U);
+    EXPECT_EQ(control->domains.back().at("host"), "www.example.test");
+    EXPECT_EQ(control->domains.back().at("tls"), "acme");
+    EXPECT_FALSE(control->domains.back().at("deleted").get<bool>());
+    EXPECT_EQ(store->get_domain_claim("www.example.test")->state, "verified");
+
+    // Verifying another environment's or an unclaimed host is not_found.
+    ApiResult unclaimed = call_async("verify_domain",
+                                     {{"repository_id", repository.id},
+                                      {"environment", "production"},
+                                      {"host", "other.example.test"}});
+    EXPECT_FALSE(unclaimed.ok);
+    EXPECT_EQ(unclaimed.error.code, "not_found");
+}
+
+TEST_F(PlatformFixture, AHostIsClaimedByOneEnvironmentAcrossCustomers) {
+    // The environment exists once the sync has mirrored its deployment (lake#913).
+    ASSERT_TRUE(sync());
+    ApiResult first = create_verified_domain("shop.example.test");
+    ASSERT_TRUE(first.ok) << first.error.message;
+
+    // Another account's repository, in its own workspace.
+    const auto user =
+        store->create_user({"taap:1:ed25519:platform-other", "other@example.test", "Other"});
+    ASSERT_TRUE(user);
+    const auto customer = store->create_customer({"individual", user->id, "", "other"});
+    ASSERT_TRUE(customer);
+    const auto other = store->create_repository(
+        {customer->id, "other", "", "private", workspaces->create(customer->id, "home")});
+    ASSERT_TRUE(other);
+    // A deployment id is the operator's, one per deployment across repositories: this one is not
+    // the fixture repository's `deployment-1`.
+    json other_deployment = deployment_row(other->id, "deploying", "2026-09-06T00:01:00Z");
+    other_deployment["deployment_id"] = "deployment-other";
+    control->deployments.push_back(std::move(other_deployment));
+    const auto synced = sync();
+    ASSERT_TRUE(synced) << synced.error().code << ": " << synced.error().message;
+    const std::size_t rows = control->domains.size();
+
+    const json taken{{"repository_id", other->id},
+                     {"environment", "production"},
+                     {"host", "shop.example.test"},
+                     {"tls", "acme"}};
+    ApiResult refused = call_async("create_domain", taken);
+    EXPECT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "conflict");
+    EXPECT_EQ(refused.error.path, "/host");
+    EXPECT_EQ(control->domains.size(), rows);
+    EXPECT_EQ(store->get_domain_claim("shop.example.test")->repository_id, repository.id);
+    // Another environment of the same repository is refused too.
+    ApiResult staging = call_async("create_domain",
+                                   {{"repository_id", repository.id},
+                                    {"environment", "staging"},
+                                    {"host", "shop.example.test"},
+                                    {"tls", "acme"}});
+    EXPECT_FALSE(staging.ok);
+
+    // delete_domain releases the claim and writes the tombstone; then the host is free.
+    ApiResult deleted = call_async("delete_domain",
+                                   {{"repository_id", repository.id},
+                                    {"environment", "production"},
+                                    {"host", "shop.example.test"}});
+    ASSERT_TRUE(deleted.ok) << deleted.error.message;
+    EXPECT_TRUE(control->domains.back().at("deleted").get<bool>());
+    EXPECT_FALSE(store->get_domain_claim("shop.example.test"));
+    ApiResult claimed = call_async("create_domain", taken);
+    ASSERT_TRUE(claimed.ok) << claimed.error.message;
+    EXPECT_EQ(claimed.value.at("verification").at("state"), "pending");
+    EXPECT_EQ(store->get_domain_claim("shop.example.test")->repository_id, other->id);
 }
 
 // A lake without the platform mirror answers its reads and writes `not_supported` (501), which a
@@ -777,11 +994,7 @@ TEST_F(LiquidIdFixture, ADeploymentNamingTheLiquidIdIsShownOnItsRepository) {
     ASSERT_TRUE(set.ok) << set.error.message;
     EXPECT_EQ(control->environment_env.back().at("repository"),
               "00112233445566778899AABBCCDDEEFF");
-    ApiResult domain = call_async("create_domain",
-                                  {{"repository_id", repository.id},
-                                   {"environment", "production"},
-                                   {"host", "www.example.test"},
-                                   {"tls", "acme"}});
+    ApiResult domain = create_verified_domain("www.example.test");
     ASSERT_TRUE(domain.ok) << domain.error.message;
     EXPECT_EQ(control->domains.back().at("repository"), "00112233445566778899AABBCCDDEEFF");
     json ready_domain = control->domains.back();

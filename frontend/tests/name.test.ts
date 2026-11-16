@@ -1,6 +1,8 @@
+// SPDX-License-Identifier: MIT
+
 /**
- * The product's name is Lake, with a capital L, and the app is the Lake Console (decision 59,
- * lake#642). Technical names keep their form: hostnames (`lake.live`, `lake.oramadev.net`), the MCP
+ * The product's name is Lake, with a capital L, and the app is the Lake Console
+ * (lake#642). Technical names keep their form: hostnames (`lake.example.com`, `lake.example.net`), the MCP
  * server name and other code values quoted alone (`"lake"`), identifiers (`lake_tok_`, `lake-theme`,
  * `LAKE_KEY`), paths (`/skills/lake/SKILL.md`), the ciphertext prefix `lake:v1:`, issue references
  * (`lake#642`) and anything inside `<code>`. Every other lowercase "lake" outside a comment is a
@@ -67,7 +69,7 @@ test("a lowercase lake is found in strings, templates and JSX text, not in techn
   assert.equal(lines("// lake in a comment\n/* lake */\n{/* the lake#577 decision */}"), 0);
   assert.equal(lines('const SERVER_NAME = "lake"; <option value="lake">Lake Sign-In</option>'), 0);
   assert.equal(lines("  lake: [\"M4 3h8v2H6v6h6v2H4z\"],"), 0);
-  assert.equal(lines('fetch("https://lake.oramadev.net/v1"); const home = "lake.live";'), 0);
+  assert.equal(lines('fetch("https://lake.example.net/v1"); const home = "lake.example.com";'), 0);
   assert.equal(lines("const skill = `${origin}/skills/lake/SKILL.md`; const k = `lake-SKILL.md`;"), 0);
   assert.equal(lines('const key = "lake_tok_K"; localStorage.getItem("lake-theme"); env.LAKE_KEY;'), 0);
   assert.equal(lines('help="lake:v1:<key id>:<version>:<sealed>"'), 0);

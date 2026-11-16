@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** "From your phone": a short help, opened in place, for bringing a voice memo, a recorded call or a
  * file from an iPhone or an Android phone into lake (lake#561), ported from rev-os's
  * `components/phone/FromYourPhone.tsx`. Beside the microphone in Ask Orama and beside Upload on the

@@ -1,4 +1,6 @@
-// The apex order sheet (lake#831, docs/api/orders.md): its configuration, the order form's checks,
+// SPDX-License-Identifier: MIT
+
+// The apex order sheet (docs/api/orders.md): its configuration, the order form's checks,
 // the status link, the emails and the abuse limit. Pure apart from OrderRateLimiter's clock-driven
 // state.
 
@@ -22,119 +24,26 @@ namespace {
 
 using nlohmann::json;
 
-// The default order sheet: the offers, prices and credit Steve gave on 2026-10-18 (lake#831). The
-// providers and regions are the clouds Orama runs on or can be asked for; only Azure is `checkout`,
-// because the operator creates clusters on Azure only today (orama-operator#634), and only in the
-// Azure regions it can reach (orama-operator#635, cloudRegionLocations): the Asia regions are
-// listed but ordered with the order form. Private Warehouse and every offer above it list their
-// own domain, white-labelled (lake#1129); the shared option does not. It is on request until the
-// white-labelled warehouse is delivered (the gaps linked from lake#1129).
+// The default order sheet: off, with no offers, no providers and no trust claims. An instance that
+// sells through the apex sets every offer, price, credit, provider and region in LAKE_ORDER_SHEET
+// (docs/api/orders.md#configuration); lake ships none of its own.
 constexpr std::string_view default_sheet = R"json({
-  "enabled": true,
+  "enabled": false,
   "url": "",
   "currency": "USD",
   "shared": {
     "title": "Shared",
-    "summary": "Your own workspaces on Lake's shared regions. Pay only for what you use, billed by the minute at the published price list.",
-    "features": [
-      "No monthly fee: usage-based",
-      "Backups included",
-      "Europe and United States"
-    ],
+    "summary": "Your own workspaces on this Lake's shared regions. Pay only for what you use, at the published price list.",
+    "features": [],
     "price_list_url": "",
-    "promise": "Train and serve a model in 5 minutes for under $5",
+    "promise": "",
     "show_promise": false
   },
-  "offers": {
-    "private_warehouse": {
-      "title": "Private Warehouse",
-      "summary": "A dedicated warehouse on shared hardware, in a shared region.",
-      "features": [
-        "Your own warehouse, isolated from other customers",
-        "Backups included",
-        "Provisioned automatically once paid",
-        "Your own domain, white-labelled (available on request)"
-      ],
-      "monthly_usd": 1000,
-      "starting_from": false,
-      "credit_percent": 40,
-      "checkout": true
-    },
-    "dedicated_cluster": {
-      "title": "Dedicated Cluster",
-      "summary": "A dedicated Kubernetes cluster on the cloud provider and in the region you choose, including regions beyond the shared ones.",
-      "features": [
-        "Your own Kubernetes cluster",
-        "Choose the cloud provider and the region",
-        "Backups included",
-        "Your own domain, white-labelled (available on request)"
-      ],
-      "monthly_usd": 5000,
-      "starting_from": false,
-      "credit_percent": 40,
-      "checkout": true
-    },
-    "on_prem": {
-      "title": "On-Prem",
-      "summary": "Source available, full service (Metis), SOC 2 compliant. On any cloud provider or on bare metal, with any accelerators, in any region.",
-      "features": [
-        "Any cloud provider or bare metal, with any accelerators (GPUs and others)",
-        "Any region, and multi-region deployments with geo-based load balancing and failover",
-        "Full service (Metis)",
-        "Backups included",
-        "Your own domain, white-labelled (available on request)"
-      ],
-      "monthly_usd": 10000,
-      "starting_from": true,
-      "credit_percent": 40,
-      "checkout": false
-    }
-  },
-  "providers": [
-    {
-      "id": "azure",
-      "label": "Microsoft Azure",
-      "checkout": true,
-      "regions": [
-        {"id": "eastus", "label": "United States (Virginia)"},
-        {"id": "westus2", "label": "United States (Washington)"},
-        {"id": "swedencentral", "label": "Europe (Sweden)"},
-        {"id": "westeurope", "label": "Europe (Netherlands)"},
-        {"id": "canadacentral", "label": "Canada (Toronto)"},
-        {"id": "japaneast", "label": "Asia (Tokyo)", "checkout": false},
-        {"id": "southeastasia", "label": "Asia (Singapore)", "checkout": false}
-      ]
-    },
-    {
-      "id": "aws",
-      "label": "Amazon Web Services",
-      "checkout": false,
-      "regions": [
-        {"id": "us-east-1", "label": "United States (Virginia)"},
-        {"id": "eu-north-1", "label": "Europe (Stockholm)"},
-        {"id": "ca-central-1", "label": "Canada (Montreal)"},
-        {"id": "ap-northeast-1", "label": "Asia (Tokyo)"},
-        {"id": "ap-southeast-1", "label": "Asia (Singapore)"}
-      ]
-    },
-    {
-      "id": "gcp",
-      "label": "Google Cloud",
-      "checkout": false,
-      "regions": [
-        {"id": "us-central1", "label": "United States (Iowa)"},
-        {"id": "europe-north1", "label": "Europe (Finland)"},
-        {"id": "northamerica-northeast1", "label": "Canada (Montreal)"},
-        {"id": "asia-northeast1", "label": "Asia (Tokyo)"},
-        {"id": "asia-southeast1", "label": "Asia (Singapore)"}
-      ]
-    }
-  ],
-  "trust": [
-    {"text": "SOC 2 compliant: ask for the report", "url": "mailto:support@orama.com?subject=SOC%202%20report"},
-    {"text": "Source available, with access to the source code", "url": "mailto:support@orama.com?subject=Source%20access"}
-  ],
-  "limits": {"orders_per_client_per_hour": 5, "orders_per_hour": 60}
+  "offers": {},
+  "providers": [],
+  "trust": [],
+  "limits": {"orders_per_client_per_hour": 5, "orders_per_hour": 60,
+             "orders_per_email_per_day": 3, "orders_per_domain_per_hour": 20}
 })json";
 
 constexpr std::array offer_ids{std::string_view{"private_warehouse"},
@@ -314,7 +223,7 @@ std::expected<OrderSheet, std::string> order_sheet_from_environment(std::string_
     }
     sheet.url = *url;
     if (!sheet.url.empty() && !https_url(sheet.url)) {
-        return std::unexpected(at + ".url must be an https URL such as https://lake.live/");
+        return std::unexpected(at + ".url must be an https URL such as https://lake.example.com/");
     }
     auto currency = text_at(merged, "currency", at + ".currency");
     if (!currency) {
@@ -330,7 +239,7 @@ std::expected<OrderSheet, std::string> order_sheet_from_environment(std::string_
     for (auto [key, target] : {std::pair{"title", &sheet.shared_title},
                                std::pair{"summary", &sheet.shared_summary},
                                std::pair{"promise", &sheet.promise}}) {
-        auto value = text_at(shared, key, at + ".shared." + key);
+        auto value = text_at(shared, key, at + ".shared." + key, std::string_view(key) != "promise");
         if (!value) {
             return std::unexpected(value.error());
         }
@@ -350,6 +259,9 @@ std::expected<OrderSheet, std::string> order_sheet_from_environment(std::string_
         return std::unexpected(at + ".shared.price_list_url must be an https URL");
     }
     sheet.show_promise = boolean_at(shared, "show_promise", false);
+    if (sheet.show_promise && sheet.promise.empty()) {
+        return std::unexpected(at + ".shared.promise must be a non-empty string to be shown");
+    }
 
     const json offers = merged.value("offers", json::object());
     if (!offers.is_object()) {
@@ -367,7 +279,10 @@ std::expected<OrderSheet, std::string> order_sheet_from_environment(std::string_
     for (const std::string_view id : offer_ids) {
         const std::string field = at + ".offers." + std::string(id);
         const auto found = offers.find(std::string(id));
-        if (found == offers.end() || !found->is_object()) {
+        if (found == offers.end() || found->is_null()) {
+            continue; // an offer this Lake does not sell
+        }
+        if (!found->is_object()) {
             return std::unexpected(field + " must be an object");
         }
         OrderOffer offer;
@@ -475,8 +390,9 @@ std::expected<OrderSheet, std::string> order_sheet_from_environment(std::string_
         }
         sheet.providers.push_back(std::move(provider));
     }
-    if (sheet.providers.empty()) {
-        return std::unexpected(at + ".providers must list at least one provider");
+    if (sheet.providers.empty() && sheet.find_offer("dedicated_cluster") != nullptr) {
+        return std::unexpected(at + ".providers must list at least one provider for a dedicated "
+                                    "cluster");
     }
 
     const json trust = merged.value("trust", json::array());
@@ -517,8 +433,23 @@ std::expected<OrderSheet, std::string> order_sheet_from_environment(std::string_
     if (!per_hour) {
         return std::unexpected(per_hour.error());
     }
+    auto per_email = whole_at(
+        limits, "orders_per_email_per_day", at + ".limits.orders_per_email_per_day", 1, 1'000);
+    if (!per_email) {
+        return std::unexpected(per_email.error());
+    }
+    auto per_domain = whole_at(limits,
+                               "orders_per_domain_per_hour",
+                               at + ".limits.orders_per_domain_per_hour",
+                               1,
+                               100'000);
+    if (!per_domain) {
+        return std::unexpected(per_domain.error());
+    }
     sheet.orders_per_client_per_hour = static_cast<int>(*per_client);
     sheet.orders_per_hour = static_cast<int>(*per_hour);
+    sheet.orders_per_email_per_day = static_cast<int>(*per_email);
+    sheet.orders_per_domain_per_hour = static_cast<int>(*per_domain);
     return sheet;
 }
 
@@ -697,9 +628,34 @@ bool order_status_token_matches(std::string_view key,
     return signed_link_matches(key, "lake-order-status\n" + std::string(order_id), token);
 }
 
+std::string order_confirmation_token(std::string_view key, std::string_view order_id) {
+    return signed_link_signature(key, "lake-order-confirm\n" + std::string(order_id));
+}
+
+bool order_confirmation_token_matches(std::string_view key,
+                                      std::string_view order_id,
+                                      std::string_view token) {
+    return signed_link_matches(key, "lake-order-confirm\n" + std::string(order_id), token);
+}
+
+std::string order_email_state(const control::CloudOrder& order, std::string_view recipient) {
+    if (recipient == "customer" && !control::cloud_order_contact_confirmed(order)) {
+        return "confirm";
+    }
+    return order.state;
+}
+
 std::vector<std::string> order_email_recipients_due(const control::CloudOrder& order) {
     std::vector<std::string> due;
     const std::string& state = order.state;
+    if (!control::cloud_order_contact_confirmed(order)) {
+        // lake#1000: the address has not been shown to be the sender's. It gets one email, the
+        // confirmation, and support hears of the order only once it is confirmed.
+        if (state == "submitted" && order.customer_emailed_state.empty()) {
+            due.emplace_back("customer");
+        }
+        return due;
+    }
     if ((state == "submitted" || state == "paid" || state == "failed") &&
         order.support_emailed_state != state) {
         due.emplace_back("support");
@@ -748,6 +704,9 @@ Email order_email_in_lake_words(const OrderSheet& sheet,
     std::string fields = ordered;
     fields += "Name: " + order.contact_name + "\n";
     fields += "Email: " + order.contact_email + "\n";
+    if (!order.contact_email_confirmed_at.empty()) {
+        fields += "Email confirmed: " + order.contact_email_confirmed_at + "\n";
+    }
     fields +=
         "Company: " + (order.company.empty() ? std::string("(none given)") : order.company) + "\n";
     fields += "State: " + order.state + "\n";
@@ -792,6 +751,18 @@ Email order_email_in_lake_words(const OrderSheet& sheet,
     }
     email.to = {order.contact_email};
     email.reply_to = customer_support;
+    if (!control::cloud_order_contact_confirmed(order)) {
+        // lake#1000: whoever typed this address may not own it, so this email says only that an
+        // order form named it, and how to confirm it or ignore it. No offer, price or field.
+        email.subject = "Confirm your email for Lake order " + order.id;
+        email.text = "Someone sent an order form on the Lake order sheet with this email address. "
+                     "If it was you, confirm it here and we will pass your order to our team:\n\n" +
+                     std::string(status_url) +
+                     "\n\nThe link works for 7 days. If it was not you, ignore this email: nothing "
+                     "more is sent to this address about it.\n\nOrder: " +
+                     order.id + "\n";
+        return email;
+    }
     std::string lead;
     if (order.state == "submitted") {
         email.subject = "We received your Lake order (" + order.id + ")";

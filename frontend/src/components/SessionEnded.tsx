@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** "Your session has ended". A 401 anywhere, on a read or a write, means the session expired or was
  * revoked. The page stays where it is (what the person typed is still on it); this notice offers
  * Sign in again, which comes back to the same address. */

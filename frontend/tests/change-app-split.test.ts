@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** The app page's Change App split screen (lake#1241): it opens from the page's top and closes back
  * to it, the divider resizes within bounds, and the App's frame reloads once a confirmed change is
  * deployed and Ready. `npm test`; the build runs it. */
@@ -75,7 +77,7 @@ test("the divider resizes between a quarter and three quarters, and is remembere
 });
 
 test("only an http(s) App address is framed", () => {
-  assert.equal(frameUrl("https://reports.us.lake.live"), "https://reports.us.lake.live");
+  assert.equal(frameUrl("https://reports.us.lake.example.com"), "https://reports.us.lake.example.com");
   assert.equal(frameUrl("javascript:alert(1)"), "");
   assert.equal(frameUrl(undefined), "");
 });

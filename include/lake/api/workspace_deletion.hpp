@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <cstddef>
@@ -15,7 +17,7 @@
 #include "lake/api/registry.hpp"
 #include "lake/control/store.hpp"
 
-// Deleting a workspace cascades (decision 54 S12, lake#514, docs/api/workspaces.md#deletion).
+// Deleting a workspace cascades (lake#514, docs/api/workspaces.md#deletion).
 //
 // One PostgreSQL transaction (Store::delete_workspace_cascade) tombstones the workspace's
 // repositories with their retention ended, deletes its apps, cancels its unfinished builds, sets

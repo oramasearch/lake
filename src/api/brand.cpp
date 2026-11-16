@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The instance brand (lake#1135, lake#1137, docs/serving/brand.md): read and validated once at
 // start, then read by every surface that names the product.
 
@@ -238,13 +240,25 @@ std::string lowercase(std::string_view text) {
     return out;
 }
 
-// Whether an address is Lake's or Orama's own (lake.live, orama.com, oramadev.net).
-bool lake_address(std::string_view address) {
+// An address's domain, lower case ("" for none).
+std::string domain_of(std::string_view address) {
     const std::string lower = lowercase(address_of(address));
     const std::size_t at = lower.rfind('@');
-    const std::string domain = at == std::string::npos ? lower : lower.substr(at + 1);
-    for (const std::string_view own : {"lake.live", "orama.com", "oramadev.net"}) {
-        if (domain == own || domain.ends_with("." + std::string(own))) {
+    return at == std::string::npos ? std::string() : lower.substr(at + 1);
+}
+
+// Whether an address is on the domain of this Lake's own sender or support address
+// (LAKE_RESEND_FROM, LAKE_SUPPORT_EMAIL), or beneath it: a custom brand must use its own.
+bool lake_address(std::string_view address,
+                  std::string_view resend_from,
+                  std::string_view support_email) {
+    const std::string domain = domain_of(address);
+    if (domain.empty()) {
+        return false;
+    }
+    for (const std::string_view own_address : {resend_from, support_email}) {
+        const std::string own = domain_of(own_address);
+        if (!own.empty() && (domain == own || domain.ends_with("." + own))) {
             return true;
         }
     }
@@ -539,7 +553,8 @@ std::expected<Brand, std::string> brand_from_sources(const BrandSources& given,
         return std::unexpected("LAKE_BRAND_SUPPORT_EMAIL must be set for a custom brand: people "
                                "would be told to write to Orama");
     }
-    if (!plausible_email_address(sources.support_email) || lake_address(sources.support_email)) {
+    if (!plausible_email_address(sources.support_email) ||
+        lake_address(sources.support_email, resend_from, support_email)) {
         return std::unexpected(
             "LAKE_BRAND_SUPPORT_EMAIL must be one email address of the brand's own domain");
     }
@@ -555,7 +570,8 @@ std::expected<Brand, std::string> brand_from_sources(const BrandSources& given,
         }
         brand.email_from = sources.email_from;
     }
-    if (lake_address(brand.email_from) || brand.email_from == default_resend_from) {
+    if (brand.email_from.empty() || lake_address(brand.email_from, resend_from, support_email) ||
+        brand.email_from == default_resend_from) {
         return std::unexpected("LAKE_BRAND_EMAIL_FROM must be set for a custom brand, on a domain "
                                "verified in Resend: email would still be sent as " +
                                brand.email_from);

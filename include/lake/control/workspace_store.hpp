@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <array>
@@ -22,7 +24,7 @@
 
 #include <liquid/store.hpp>
 
-// A workspace's liquid store in its workspace Zetta (decision 54 S1 and S3, lake#380,
+// A workspace's liquid store in its workspace Zetta (lake#380,
 // docs/architecture/workspace-store.md). Lake opens one liquid store per workspace on
 // ZettaObjectBackend, a liquid store_backend over Zetta's object routes (zetta
 // docs/data/object-store.md) in bucket `lake_store`, and owns it through ZettaStoreOwner, a liquid

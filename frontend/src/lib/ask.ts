@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Opening Ask Orama from a page with something to ask about (lake#561): the transcript page's "Ask
  * Orama about this". The shell owns the panel; a page calls `openAsk` and the shell opens it with
  * the request. */

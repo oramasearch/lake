@@ -14,12 +14,15 @@
 - A checkout of `zetta-bridge`. `LAKE_ZETTA_SOURCE_DIR` is required and must name its
   `modules/zetta` directory; lake compiles the client transport and its runtime event
   implementation from it and links them to its own Boost.HTTP, Beast2, Capy and Corosio targets,
-  so the binary carries one networking stack. `CLAUDE.md` names the one authorized checkout.
+  so the binary carries one networking stack. `CONTRIBUTING.md` names the one authorized checkout.
   The target also compiles that checkout's `src/core/runtime.cpp`, which supplies the transport's
   synchronized asynchronous event definitions; it does not link the engine or change the pin.
+- A checkout of liquid. `LAKE_LIQUID_SOURCE_DIR` names it (default `../liquid`, the sibling module
+  in liquid-bridge); lake builds libliquid from it, library-only. liquid is not a submodule of lake:
+  liquid-bridge's pin is the one source of truth, and lake builds and is released against it, liquid
+  v0.3.0 (`66b5bb9`) since lake#1346.
 - Submodules. Clone with `--recurse-submodules` or run `git submodule update --init --recursive`
-  before configuring: libliquid (library-only, pinned to liquid `main`), Boost.HTTP, Beast2 and
-  libpqxx are vendored under `modules/`. Boost and GoogleTest arrive through FetchContent on the
+  before configuring: Boost.HTTP, Beast2 and libpqxx are vendored under `modules/`. Boost and GoogleTest arrive through FetchContent on the
   first configure. [`dependencies.md`](dependencies.md) records every direct pin and the private
   patch-carrier update procedure.
 
@@ -34,8 +37,7 @@ cmake --build build -j 6
 ```
 
 The configure step is Release by default and exports `compile_commands.json`. GitHub Actions
-repeats this build with the Dockerfile's Ubuntu 24.04, clang-19 and CMake 3.31.5 toolchain on
-every push and pull request; see [`ci.md`](ci.md).
+repeats this build with the Dockerfile's Ubuntu 24.04, clang-19 and CMake 3.31.5 toolchain.
 
 Lake's own targets and its test binaries compile with `-Werror=return-type`. A coroutine that
 returns `liquid::runtime::task<T>` carries a `result<T>`, so its promise has `return_value` and no
@@ -102,8 +104,8 @@ LAKE_TEST_DB_URI="postgresql://$USER@127.0.0.1:5432/lake_test" \
 ```
 
 Tests use the shared per-test database fixture and independent KEK values; see
-[`testing.md`](testing.md). The Docker-based equivalent that CI uses, and the `huggingface_hub`
-virtual environment for the model-client integration, are in [`ci.md`](ci.md).
+[`testing.md`](testing.md). The model-client integration tests need the `huggingface_hub` Python
+client in a virtual environment; without it they skip.
 
 ## Run
 
@@ -122,7 +124,7 @@ server cleanly; the routes it serves are in [`../serving/http.md`](../serving/ht
 
 ## Verify and change
 
-A change to the toolchain or to a required dependency updates this page, the `Dockerfile`,
-[`ci.md`](ci.md) and [`container-image.md`](container-image.md) in the same change. Before
+A change to the toolchain or to a required dependency updates this page, the `Dockerfile`
+and [`container-image.md`](container-image.md) in the same change. Before
 finishing any change, `cmake --build build && ctest --test-dir build` must be green and the
-binary smoke-tested by hand, as `CLAUDE.md` requires.
+binary smoke-tested by hand, as `CONTRIBUTING.md` requires.

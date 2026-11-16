@@ -17,22 +17,22 @@ zetta#1469) and reads the system CA bundle itself, so the list also names
 `src/core/connect/egress_policy.cpp`, `connector_destinations.cpp`, `destination_policy.cpp` and
 `src/core/api/system_trust_store.cpp` (lake#1086). When a new Zetta pin fails to link with undefined
 `zetta::` symbols, add the source that defines each one to that list. The minimal context the
-cluster BuildKit lane uses (`build/contexts/zetta-pin`, liquid-bridge's `liquid-dev` skill) is
+cluster BuildKit lane uses (`build/contexts/zetta-pin`) is
 `git archive <pin> include src` of the bridge's Zetta checkout, so it carries every one of them;
 regenerate it whenever the pin moves.
 
 ## Publish a deployment image
 
 Deployment images are built by GitHub Actions, not by a developer workstation, and go to the
-**private** Docker Hub repository `oramasearch/lake`. After the required credentials in
-[`ci.md`](ci.md) are configured, create an immutable Docker-compatible Git tag and push it:
+**private** Docker Hub repository `oramasearch/lake`. After the workflow's credentials are
+configured, create an immutable Docker-compatible Git tag and push it:
 
 ```sh
 git tag <tag>
 git push origin <tag>
 ```
 
-The [`image` workflow](../../.github/workflows/image.yml) checks out the pinned bridge source,
+The `image` workflow checks out the pinned bridge source,
 supplies its Zetta module as the named build context, builds `linux/amd64`, and publishes
 `oramasearch/lake:<tag>` plus `oramasearch/lake:sha-<short-sha>`. It rejects `latest`; `latest`
 and workstation-built deployment images are not used. The workflow supplies the full checked-out
@@ -40,15 +40,13 @@ source revision and a UTC creation time as build arguments. The runtime image st
 `org.opencontainers.image.revision` and `org.opencontainers.image.created`; the binary embeds the
 revision and returns it in `GET /v1/server_info`.
 
-Wait for the workflow to succeed before updating `Lake.spec.image`; the deployment runbook is in
-[`../deployment/aks.md`](../deployment/aks.md).
+Wait for the workflow to succeed before updating `Lake.spec.image`.
 
 ## Run it under the operator
 
 The `Lake` CR on `orama-operator` runs the image: `spec.image: oramasearch/lake:<tag>`,
-`spec.pullSecretName: oramasearch-dockerhub` (the Secret must exist in `spec.namespace`), port
-4900 by default (`spec.port`), and no args needed. The manual dispatch path for an unpublished tag
-is in [`ci.md`](ci.md).
+`spec.pullSecretName: <registry-secret>` (the Secret must exist in `spec.namespace`), port
+4900 by default (`spec.port`), and no args needed.
 
 ## Local verification
 
@@ -75,9 +73,34 @@ produce the release image natively.
 ## Change the image recipe
 
 Keep `Dockerfile` and `.dockerignore` as the image recipe; the context excludes `build/` and
-`.git/`. When the build-stage toolchain changes, update [`ci.yml`](../../.github/workflows/ci.yml),
-[`ci.md`](ci.md) and [`local.md`](local.md) in the same change so pull-request builds and local
+`.git/`. When the build-stage toolchain changes, update the CI workflow and
+[`local.md`](local.md) in the same change so pull-request builds and local
 builds use the image toolchain.
+
+### Pinned inputs (lake#1003)
+
+Every base image is named by tag and digest, so a rebuild of the same source gets the same bytes
+even when the tag moves: `node:22-bookworm-slim@sha256:e9f565d3…` for the web app stage and
+`ubuntu:24.04@sha256:2198e4c6…` for the build and runtime stages (the image index digest, which
+covers every platform). The CMake installer is checked against the SHA-256 Kitware publishes
+(`cmake-<version>-SHA-256.txt`) before it runs, as OpenSSL's archive already was. In
+`CMakeLists.txt` the Boost archive carries the `URL_HASH` Boost publishes beside it
+(`<archive>.txt`), and GoogleTest is fetched by the commit of its `v1.17.0` tag (`52eb8108…`), not
+by the tag. A changed archive fails configure.
+
+To move one, read the new value without pulling or pushing anything and change it in a reviewed
+commit:
+
+```sh
+docker buildx imagetools inspect ubuntu:24.04 | grep '^Digest:'
+curl -sL https://github.com/boostorg/boost/releases/download/<release>/<archive>.txt
+curl -sL https://github.com/Kitware/CMake/releases/download/v<version>/cmake-<version>-SHA-256.txt
+git ls-remote https://github.com/google/googletest.git 'refs/tags/<tag>*'   # the ^{} line for an annotated tag
+```
+
+Not pinned by this change: the LLVM apt script (`llvm.sh` installs packages signed by a key fetched
+from the same host, so a hash of the script alone would not help), and libliquid's own
+`FetchContent` dependencies, which liquid's `CMakeLists.txt` selects, not lake.
 
 ## The compiler cache
 

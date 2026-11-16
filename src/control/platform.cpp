@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/platform.hpp"
 #include "lake/control/workspace_audit.hpp"
 
@@ -729,7 +731,7 @@ PlatformService::sync(PlatformRecordsOpener open, PlatformLiquidIdReader read_li
         // Each newly observed phase is audited before its deployment row is written, so a sync
         // that fails here records it again next time rather than never. A deployment is the
         // repository's data, so its phases go to the audit of the repository's workspace
-        // (decision 52, docs/api/audit.md#workspace-audit), appended by this loop, off any
+        // (docs/api/audit.md#workspace-audit), appended by this loop, off any
         // request path.
         std::optional<WorkspaceAuditTail> audit_tail;
         if (error.empty()) {

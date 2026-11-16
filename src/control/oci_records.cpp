@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/oci_records.hpp"
 
 #include <algorithm>

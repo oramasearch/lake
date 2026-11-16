@@ -32,7 +32,7 @@ by the registry. The store retains the issuing session and rejects descendants a
 ancestor or linked device is revoked or expires. The complete derivation and migration contract is
 [`identity.md`](identity.md#token-derivation-and-revocation).
 
-## Principal ids (lake#870)
+## Principal ids (lake#870, lake#872)
 
 **What.** The principal `admin` is the operator's: `authorize` allows it everything, and the
 registry skips the policy check for it. Only the admin token acts as it. Every identity a person,
@@ -56,13 +56,37 @@ characters (`valid_principal_id`, `src/control/policy.cpp`).
   grant, so a grant written for another tenant's link id could have repointed it. Lake still creates
   `share-link:` grants itself when a link is made.
 
+- **Nobody but Lake chooses a new SSO or SCIM account's identity** (lake#872): the account a
+  just-in-time sign-in or a SCIM create makes gets a managed key Lake mints, and any `taap_id` or
+  `taapId` the caller sends is ignored ([SSO](sso.md)). Before, an unauthenticated SAML or OIDC
+  caller, or an organization's SCIM client, named it without holding its key.
+- **One principal id, one principal** (lake#872): `create_user`, `create_organization`, the SCIM
+  create and the just-in-time user answer `conflict` for an identity any user (in any pool) or
+  organization already has, so no new principal inherits another's grants or name.
+- **The database refuses anything else** (lake#872, migration `0109_principal_ids`):
+  `users_taap_id_format` and `organizations_taap_id_format` check the same rule, `NOT VALID` so
+  rows from before lake#870 are not scanned; a write to such a row is refused until it is
+  corrected. The operator must vendor the schema and select `principal_ids_guard`.
+
 **Why.** Policy decisions are keyed by the principal string, so a stored identity equal to `admin`,
 or to an identity lake sets in code (`agent-service:`, `share-link:`, `sso-provider/`), would inherit
-what that identity may do. The remaining work on unscoped principals is lake#872.
+what that identity may do, and so would a new account given another principal's identity.
+
+**Grants name identities, not accounts, on purpose.** A grant names a TAAP id, not a user id and
+pool. Since lake#912 a session of an application pool carries no Lake grants, and every creation
+path above now validates the id, takes it from a key Lake minted or a proof of the key, and
+refuses one another principal holds. A grant on a TAAP id therefore reaches only the Lake-pool
+account holding that key; naming user ids would also break grants made before an account exists
+(invitations, imported grants) and identities that move between accounts (*Use my own
+identity*).
 
 **Verify.** `PrincipalIds.*` (`tests/test_sso.cpp`) and
 `PostgresIdentity.OperatorPrincipalIsNeverAPersonsIdentity` (`tests/test_postgres_identity.cpp`),
-which plants a user named `admin` in the database and shows its session is refused.
+which shows the database refuses a user named `admin`, then plants one as an old row would be and
+shows its session is refused. `PrincipalIds.NoCreationPathTakesAnIdentityAnotherPrincipalHolds`
+covers collisions, `PrincipalIds.NoCreationPathAcceptsTheOperatorIdentity` a SCIM client's
+ignored `taap_id`, and `SamlSignIn.TheAcsSignsInOnceAndRefusesReplayTamperingAndUnsolicitedResponses`
+the managed key of a just-in-time SAML account.
 
 ## Objects and grants
 
@@ -70,7 +94,7 @@ which plants a user named `admin` in the database and shows its session is refus
 |---|---|---|
 | `list_objects` | `read` on `parent_id`; operator admin may list roots | child objects |
 | `get_object` | `read` on `id` | one object |
-| `create_object` | `admin` on `parent_id`; a `path` named for the repository it sits in ([below](#an-object-counts-only-inside-its-own-account-lake913)) | child object |
+| `create_object` | `admin` on `parent_id`; a `path` named for the repository it sits in ([below](#an-object-counts-only-inside-its-own-account-lake913)), for a node of its tree at `ref` (default `main`), under the object of the nearest folder above that node that has one ([below](#a-path-object-sits-where-its-node-lies-lake1030)) | child object |
 | `list_grants` | `admin` on `object_id` | direct grants |
 | `create_grant` | `admin` on `object_id` | grant, with the attestation lake signed for it |
 | `revoke_grant` | `admin` on the grant's object | the revoked grant ([below](#revoking-a-grant)) |
@@ -168,7 +192,7 @@ other accounts can learn: a repository folder is `<repository_id>:<node_id>`, a 
 sit under `secrets/<customer_id>`. Before lake#913, `create_object` took any type and any external
 id under any parent the caller administered, so an account could create those objects first, under
 its own repository or customer, and govern another account's folders, future environments or
-future secret mounts with its own grants (finding LSR-002 of the 2026-10 security review).
+future secret mounts with its own grants (found in a security review).
 
 **The rule, in two places.**
 
@@ -218,6 +242,73 @@ folder, environment and `secrets/<customer_id>` ids, and objects planted before 
 in the store) neither let it upload into the other account's folder nor claim its branch rule,
 environment or secret mounts, while the owner keeps its access.
 
+## A path object sits where its node lies (lake#1030)
+
+**What.** After lake#913 a path object's external id had to name the repository its parent sits in,
+but not where in the repository. Admin on one folder's object let its holder call `create_object`
+under that folder with the node id of a sibling folder, or of any other node of the repository;
+the object counted for that node, and the folder administrator's grants governed it.
+
+**The rule.** For every caller but the operator (who keeps it for repair), `create_object` reads
+the repository's tree at `ref` (default `main`) and refuses a `path` object (`invalid_input`) when:
+
+- no file or folder of that tree has the node id the external id names (`/external_id`); a branch
+  rule's `<repository_id>:<ref>` names no node, so it is refused too, and only
+  `set_branch_protection` makes those;
+- the parent is not the object of the nearest folder above the node that has one in this
+  repository, or the repository's own object when none does (`/parent_id`). That is where the
+  drive capabilities link folder objects (`link_folder_chain`), so a path object is made only by
+  an administrator of the folder it lies in, never beside it or below another folder's object.
+
+A tombstoned repository is `conflict`; no repository store is `store_unavailable`.
+
+**Verify.** `Drive.CreateObjectPlacesAPathObjectByTheTree`: a folder administrator cannot claim a
+file beside the folder, an unknown node or a branch rule; a repository administrator cannot place
+an object for a file inside a folder that has its own object under the repository; each places the
+objects of its own folder.
+
+## Restricted folders hold for every repository read (lake#975)
+
+**What.** A `path` object with `inherit = false` cuts its folder or file off from the
+repository's grants. Drive always decided a path by the nearest object on it that counts
+(`nearest_drive_location`). Before lake#975 the other reads of repository content authorized only
+the repository, so a repository reader without a grant on the cut still read what it protects
+(lake#975). Now every one decides each path the way Drive
+does, through `RepositoryPathAccess` (`src/api/repository_path_access.cpp`):
+
+| Read | What a cut the caller cannot read does |
+|---|---|
+| `repository_file` | `unauthorized` at `/path` |
+| `repository_tree` | its entries are left out |
+| `change_diff` | an entry is left out unless every path it names is readable at a revision that holds it (the change, or its first parent for a move or a delete) |
+| `list_conflicts` | a conflict is left out unless its path is readable at the sides that hold it |
+| `search` | a hit is left out, decided at the change it was found in |
+| Drive search (`search_drives`) | names under the cut are not found |
+| `pull`, `read_chunk`, `export_repository` | `unauthorized`: they carry every path and cannot leave a folder out, so they need `read` on every cut of the repository |
+
+**How.** `RepositoryPathAccess::load` reads the repository's path objects once, level by level
+below the repository's own object (only objects there count, lake#913). A repository with no
+object that cuts inheritance needs nothing more. Otherwise the tree at the ref read gives each
+path's nodes; the path's deciding object is found top down exactly as Drive finds it, and only
+paths with a cut on that chain are authorized, in one `authorize_batch`. It fails closed: a path
+the tree does not hold, a tree that cannot be read, or a repository with more than 10,000 path
+objects refuses the path. The operator, and a build's or an app's source credential reading the
+revision it was minted for, read every path. Commit messages and authors (`list_changes`,
+`get_change`) are the repository's, not a path's, and stay readable to its readers.
+
+**Verify.** `Drive.RepositoryReadsHonourRestrictedFolders`: a repository reader without a grant
+on a restricted folder is refused its file, does not see it in the tree and cannot export the
+repository; a grant on the folder gives both back.
+
+## An agent's decisions stay in its workspace (lake#985)
+
+A decision made for an agent's task, launch or schedule credential is confined to that credential's
+account and workspace (`AuthorizationConfinement` on the authorization cache, set by
+`prepare_call`): an object is allowed only when its full parent chain, past any inheritance cut,
+reaches that account's `customer` object and every repository on it belongs to that workspace,
+whatever grants the person the agent acts for holds elsewhere. Unprovable is outside. See
+[agent-bus.md](agent-bus.md#a-task-credential-is-confined-to-its-workspace).
+
 ## Verify and change
 
 `Policy.InheritsDownTheGraphAndStopsAtACut`,
@@ -225,7 +316,7 @@ environment or secret mounts, while the owner keeps its access.
 `Policy.EffectiveAccessMatchesAuthorization`, the identity scope test, and the WebAuthn test are
 the executable contract. The registry test also
 enumerates every capability and requires object/action metadata. Run the Postgres fixture from
-[`../build/ci.md`](../build/ci.md) to exercise the recursive query used in production.
+[`../build/local.md`](../build/local.md) to exercise the recursive query used in production.
 
 New capabilities must name their object, action, and object resolver. New list or search paths
 must call `authorize_batch` on candidates before returning them. Do not add authorization in an

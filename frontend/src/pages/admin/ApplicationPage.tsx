@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Application (`/application?id=`): one identity application's settings and the links to its
  * users, organizations, events and hosted sign-in (web_ui_application, serve_application_page). */
 import { Building2, ExternalLink, Users, Webhook } from "lucide-react";

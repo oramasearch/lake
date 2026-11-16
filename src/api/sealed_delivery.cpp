@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // mint_sealed_secret and the sealed-secret envelope version 1 (lake#625): a user's workspace secret
 // delivered to a Kubernetes Secret the operator writes, sealed so that only the target cluster can
 // open it. See include/lake/api/sealed_delivery.hpp and docs/api/secrets.md#projections.
@@ -439,14 +441,45 @@ liquid::runtime::task<ApiResult> mint(const json& input, ApiContext& context) {
     }
     // Lake seals only to the delivery key the operator gave this lake (LAKE_SEALING_PUBLIC_KEY),
     // so a credential that reaches this capability cannot have a value sealed to another key.
-    if (!context.sealing_public_key.empty() && public_key_text != context.sealing_public_key) {
+    // Without that key nothing is delivered: lake never seals to a key the caller chose
+    // (lake#950).
+    if (context.sealing_public_key.empty()) {
+        co_return refused("store_unavailable",
+                          "this lake has no cluster delivery key (LAKE_SEALING_PUBLIC_KEY)",
+                          "/recipient/public_key");
+    }
+    if (public_key_text != context.sealing_public_key) {
         co_return refused("invalid_input",
                           "recipient is not this lake's cluster delivery key",
                           "/recipient/public_key");
     }
 
+    // The workspace the projection is for, from the app's, service's or store's own row. Every
+    // delivery checks the mount belongs to it, not only the write that named the mount
+    // (lake#950, lake#971).
+    const std::string workspace_id = input.value("workspace_id", "");
+    if (workspace_id.empty()) {
+        co_return refused(
+            "invalid_input", "workspace_id names the workspace the secret is for", "/workspace_id");
+    }
     const json& source = input.at("source");
     const std::string type = source.value("type", "");
+    const std::string named_mount =
+        type == "lake"      ? source.value("lake", json::object()).value("mount", "")
+        : type == "dynamic" ? source.value("dynamic", json::object()).value("engine", "")
+                            : std::string{};
+    if (!named_mount.empty()) {
+        if (context.store == nullptr) {
+            co_return refused("store_unavailable", "no store to check the secret mount");
+        }
+        const auto route = context.store->get_secret_mount_route(named_mount);
+        if (!route || route->workspace_id != workspace_id) {
+            // The same answer for a missing mount and another workspace's: nothing is disclosed.
+            co_return refused("not_found",
+                              "no such secret mount in workspace " + workspace_id,
+                              "/source");
+        }
+    }
     // The values are read as the operator, the only caller that reaches this handler; every read
     // is recorded in the mount's workspace audit by read_secret / lease_dynamic_secret.
     ApiContext inner = context;
@@ -663,6 +696,7 @@ void register_sealed_delivery_capabilities(Registry& registry) {
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"attestation", {{"type", "object"}}},
+                           {"workspace_id", {{"type", "string"}}},
                            {"recipient",
                             {{"type", "object"},
                              {"properties",
@@ -674,7 +708,7 @@ void register_sealed_delivery_capabilities(Registry& registry) {
                              {"required",
                               json::array({"cluster", "namespace", "name", "kid", "public_key"})}}},
                            {"source", {{"type", "object"}}}}},
-                         {"required", json::array({"recipient", "source"})},
+                         {"required", json::array({"workspace_id", "recipient", "source"})},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"},
                           {"properties",

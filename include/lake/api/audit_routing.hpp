@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <optional>
@@ -11,7 +13,7 @@
 #include "lake/api/registry.hpp"
 #include "lake/audit/audit.hpp"
 
-// Where an audit event is written (decision 52, lake#317, docs/api/audit.md#which-log). Lake's
+// Where an audit event is written (lake#317, docs/api/audit.md#which-log). Lake's
 // audit splits by subject:
 //
 // - the **central** hash-chained log in lake's PostgreSQL keeps control-plane and identity events:
@@ -40,6 +42,20 @@ std::span<const std::string_view> workspace_audit_capabilities();
 // events recorded outside the registry (`push_change`, `reference_update`, `deployment_phase`).
 // Migration 0063 and the copy assign the central events of these actions to their workspace.
 std::vector<std::string> workspace_audit_actions();
+
+// The workspace of the object a call's input names (a repository by `repository_id`, `repository`
+// or a repository capability's `id`; a secret mount; an application; an app by `app_id`; a build by
+// `build_id`), read from its routing row before the handler runs; empty when the input names none
+// or the row cannot be read. `public_repository` is set when the object is a public repository,
+// which anyone may read. Each lookup is one indexed PostgreSQL read (lake#918 uses it to bind an
+// agent's credential to its workspace whatever the handler derives).
+struct NamedObjectWorkspace {
+    std::string workspace_id;
+    bool public_repository = false;
+};
+NamedObjectWorkspace named_object_workspace(const Capability* capability,
+                                            const nlohmann::json& input,
+                                            const ApiContext& context);
 
 // Where one event goes. `workspace_id` and `customer_id` are set only for the workspace log.
 struct AuditRoute {

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Formatting — numbers are mono and tabular in the UI; these produce the text. */
 
 export function money(value: unknown, opts: { compact?: boolean; cents?: boolean } = {}): string {

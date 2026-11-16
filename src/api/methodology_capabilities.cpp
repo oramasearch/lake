@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // A workspace's own methodologies from Python code beside Orama's read-only catalogue
 // (docs/api/methodologies.md, lake#655).
 //
@@ -393,11 +395,33 @@ struct FileChange {
 };
 
 // Commits the changes to the folder on `main`; answers the new change id.
+// The branch rules of `repository`, read before a methodology write (lake#924).
+liquid::runtime::task<BranchProtectionLoad> methodology_protection(ApiContext& context,
+                                                                   const control::Repository& repository) {
+    auto loaded = co_await load_branch_protection(context, repository);
+    if (!loaded) {
+        co_return BranchProtectionLoad(
+            std::unexpected(SyncStoreError{"unavailable", loaded.error().message}));
+    }
+    co_return std::move(*loaded);
+}
+
+// The rules methodology_protection read, or `unavailable` when the read itself failed, so a write
+// whose rules could not be read is refused rather than made without them.
+template <typename Awaited> BranchProtectionLoad protection_or_unavailable(Awaited awaited) {
+    if (!awaited) {
+        return std::unexpected(SyncStoreError{"unavailable", awaited.error().message});
+    }
+    return std::move(*awaited);
+}
+
+// `protection`: the repository's branch rules, read by the caller before the write (lake#924).
 std::expected<std::string, ApiResult> commit_files(ApiContext& context,
                                                    const control::Repository& repository,
                                                    const std::string& folder,
                                                    const std::vector<FileChange>& changes,
-                                                   const std::string& message) {
+                                                   const std::string& message,
+                                                   BranchProtectionLoad protection) {
     std::vector<RepositoryWriteOperation> operations;
     for (std::size_t index = 0; index < changes.size(); ++index) {
         const auto path = control::methodology_path(folder, changes[index].path);
@@ -425,7 +449,8 @@ std::expected<std::string, ApiResult> commit_files(ApiContext& context,
         }
         operations.push_back(std::move(operation));
     }
-    auto authorize = repository_write_authorizer(repository, operations, context);
+    auto authorize =
+        repository_write_authorizer(repository, operations, context, "main", std::move(protection));
     const auto committed = context.sync_store->commit_repository_files(repository.customer_id,
                                                                        repository.id,
                                                                        "main",
@@ -658,7 +683,8 @@ image_build(ApiContext& context,
             const std::string& customer_id,
             const std::string& workspace_id,
             const json& entry,
-            const MethodologyManifest& manifest) {
+            const MethodologyManifest& manifest,
+            bool may_build = true) {
     const json code = entry.value("code", json::object());
     const std::string repository = code.value("repository_id", std::string());
     const std::string revision = code.value("revision", std::string());
@@ -671,6 +697,12 @@ image_build(ApiContext& context,
             build->desired != "cancelled") {
             co_return std::expected<control::Build, ApiResult>(*build);
         }
+    }
+    if (!may_build) {
+        // A read reconciling an experiment (lake#1001) uses the image already built; it
+        // never starts a build.
+        co_return std::expected<control::Build, ApiResult>(std::unexpected(refused(
+            "conflict", "the methodology's image is not built; the trial waits for it")));
     }
     if (context.methodology_runtime_image.empty()) {
         co_return std::expected<control::Build, ApiResult>(std::unexpected(refused(
@@ -786,7 +818,10 @@ liquid::runtime::task<ApiResult> queue_run(ApiContext& context,
               {"revision", code.value("revision", std::string())},
               {"project", request.project.empty() ? json(nullptr) : json(request.project)},
               {"graph", request.graph.empty() ? json(nullptr) : json(request.graph)},
-              {"created_by", acting_author(context)},
+              {"created_by", request.created_by ? (request.created_by->first.empty()
+                                                       ? request.created_by->second
+                                                       : request.created_by->first)
+                                                : acting_author(context)},
               {"created_at", created->created_at},
               {"result", nullptr},
               {"model_id", nullptr}};
@@ -1137,7 +1172,12 @@ liquid::runtime::task<ApiResult> create_methodology(const json& input, ApiContex
         }
         repository = *created;
         auto committed = commit_files(
-            context, repository, folder, changes, "Create the methodology " + probe.manifest->name);
+            context,
+            repository,
+            folder,
+            changes,
+            "Create the methodology " + probe.manifest->name,
+            protection_or_unavailable(co_await methodology_protection(context, repository)));
         if (!committed) {
             co_return committed.error();
         }
@@ -1319,11 +1359,13 @@ liquid::runtime::task<ApiResult> update_methodology(const json& input, ApiContex
             {std::string(control::methodology_manifest_file), manifest.dump(2) + "\n"});
     }
     if (!changes.empty()) {
-        auto committed = commit_files(context,
-                                      *repository,
-                                      folder,
-                                      changes,
-                                      input.value("message", std::string("Edit the methodology")));
+        auto committed = commit_files(
+            context,
+            *repository,
+            folder,
+            changes,
+            input.value("message", std::string("Edit the methodology")),
+            protection_or_unavailable(co_await methodology_protection(context, *repository)));
         if (!committed) {
             co_return committed.error();
         }
@@ -1478,8 +1520,13 @@ liquid::runtime::task<ApiResult> duplicate_methodology(const json& input, ApiCon
     if (!repository) {
         co_return repository.error();
     }
-    auto committed =
-        commit_files(context, *repository, "", changes, "Duplicate " + id + " as " + name);
+    auto committed = commit_files(
+        context,
+        *repository,
+        "",
+        changes,
+        "Duplicate " + id + " as " + name,
+        protection_or_unavailable(co_await methodology_protection(context, *repository)));
     if (!committed) {
         co_return committed.error();
     }
@@ -1603,6 +1650,8 @@ liquid::runtime::task<ApiResult> validate_methodology(const json& input, ApiCont
         {{"findings", findings}, {"ready", true}, {"run", queued.value["run"]}});
 }
 
+std::string quoted_table(const std::string& dataset);
+
 liquid::runtime::task<ApiResult> run_methodology(const json& input, ApiContext& context) {
     const std::string customer_id = input.at("customer_id");
     const std::string workspace_id = input.at("workspace_id");
@@ -1630,8 +1679,10 @@ liquid::runtime::task<ApiResult> run_methodology(const json& input, ApiContext& 
                           "/id");
     }
     const std::string dataset = input.at("dataset");
-    if (dataset.find('.') == std::string::npos) {
-        co_return refused("invalid_input", "dataset is <database>.<table>", "/dataset");
+    if (quoted_table(dataset).empty()) {
+        co_return refused("invalid_input",
+                          "dataset is <database>.<table>, letters, digits, '_' and single '-'",
+                          "/dataset");
     }
     auto checked =
         settled_api(co_await checked_entry_code(context, customer_id, workspace_id, entry));
@@ -1962,7 +2013,8 @@ trial_source(ApiContext& context,
              const std::string& customer_id,
              const std::string& workspace_id,
              const std::string& methodology_id,
-             const std::optional<json>& manifest_json) {
+             const std::optional<json>& manifest_json,
+             bool may_build) {
     using Result = std::expected<TrialSource, std::string>;
     auto found = control::settled(
         co_await methodology_entry(context, customer_id, workspace_id, methodology_id));
@@ -1993,8 +2045,8 @@ trial_source(ApiContext& context,
         manifest = checked->manifest;
     }
     source.manifest = *manifest;
-    auto build = settled_api(
-        co_await image_build(context, customer_id, workspace_id, source.entry, source.manifest));
+    auto build = settled_api(co_await image_build(
+        context, customer_id, workspace_id, source.entry, source.manifest, may_build));
     if (!build) {
         co_return Result(std::unexpected(build.error().error.message));
     }
@@ -2029,7 +2081,8 @@ liquid::runtime::task<json> end_trial(ApiContext& context,
 }
 
 // Dispatches every runner work item without a claim, and ends every trial whose run ended without
-// a result, until the engine has nothing new to run; answers the claims by trial.
+// a result, until the engine has nothing new to run; answers the claims by trial. `by` names who
+// the runs are for when it is not the caller; `may_build` false uses only an image already built.
 liquid::runtime::task<std::map<std::string, json>>
 drive_trials(ApiContext& context,
              const std::string& customer_id,
@@ -2037,7 +2090,8 @@ drive_trials(ApiContext& context,
              const std::string& experiment_id,
              json runner,
              const std::optional<json>& manifest_json,
-             std::optional<std::pair<std::string, std::string>> by) {
+             std::optional<std::pair<std::string, std::string>> by,
+             bool may_build = true) {
     // Recording another trial's result, Lake acts with that run's credential, which cannot start an
     // image build: a trial it cannot run then waits for the next reconcile (get_experiment) rather
     // than failing.
@@ -2114,7 +2168,8 @@ drive_trials(ApiContext& context,
             if (!source && !source_error) {
                 auto got = awaited(
                     co_await trial_source(context, customer_id, workspace_id,
-                                          item.value("methodology", std::string()), manifest_json),
+                                          item.value("methodology", std::string()), manifest_json,
+                                          may_build),
                     std::expected<TrialSource, std::string>(
                         std::unexpect, std::string("Lake could not read the methodology")));
                 if (got) {
@@ -2167,11 +2222,23 @@ std::expected<control::MethodologyRun, ApiResult> own_run(ApiContext& context,
 }
 
 std::string quoted_table(const std::string& dataset) {
-    // The engine's SQL subset takes database.table names as they are; refuse anything else.
+    // The engine's SQL subset takes database.table names as they are; refuse anything else. Each
+    // component starts with a letter, digit or '_' and never holds "--", which starts a comment in
+    // the engine's SQL and would hide the LIMIT and OFFSET that follow (lake#997).
     const bool plain = std::ranges::all_of(dataset, [](unsigned char c) {
         return std::isalnum(c) != 0 || c == '_' || c == '.' || c == '-';
     });
-    return plain && std::ranges::count(dataset, '.') == 1 ? dataset : std::string();
+    if (!plain || std::ranges::count(dataset, '.') != 1 || dataset.contains("--")) {
+        return {};
+    }
+    const auto dot = dataset.find('.');
+    for (const std::string_view part :
+         {std::string_view(dataset).substr(0, dot), std::string_view(dataset).substr(dot + 1)}) {
+        if (part.empty() || part.front() == '-' || part.back() == '-') {
+            return {};
+        }
+    }
+    return dataset;
 }
 
 liquid::runtime::task<ApiResult> methodology_run_input(const json& input, ApiContext& context) {
@@ -2260,6 +2327,10 @@ liquid::runtime::task<ApiResult> methodology_run_input(const json& input, ApiCon
                 co_return failed(page.error());
             }
             rows = page->value("rows", json::array());
+            // A second cap on what came back, whatever the statement did.
+            if (rows.is_array() && rows.size() > static_cast<std::size_t>(wanted)) {
+                rows.erase(rows.begin() + wanted, rows.end());
+            }
             for (const json& column : page->value("columns", json::array())) {
                 if (column.is_string()) {
                     columns.push_back(column.get<std::string>());
@@ -2996,10 +3067,41 @@ predict_methodology_model(ApiContext& context,
                                   {"entity_column", key}});
 }
 
+namespace {
+
+// Who started an experiment: whoever its trials' Lake runs are for (each later trial is queued for
+// the starter of the one before). nullopt while no trial has a run.
+liquid::runtime::task<std::optional<std::pair<std::string, std::string>>>
+experiment_starter(ApiContext& context,
+                   const std::string& customer_id,
+                   const std::string& workspace_id,
+                   const std::string& experiment_id) {
+    auto claims = control::settled(
+        co_await trial_claims(context, customer_id, workspace_id, experiment_id));
+    if (!claims) {
+        co_return std::nullopt;
+    }
+    for (const auto& [trial, claim] : *claims) {
+        const json run_id = claim.value("run_id", json(nullptr));
+        if (!run_id.is_string()) {
+            continue;
+        }
+        if (const auto run = context.store->get_methodology_run(run_id.get<std::string>());
+            run && run->customer_id == customer_id && run->workspace_id == workspace_id &&
+            (!run->created_by_user_id.empty() || !run->created_by_taap_id.empty())) {
+            co_return std::pair{run->created_by_user_id, run->created_by_taap_id};
+        }
+    }
+    co_return std::nullopt;
+}
+
+} // namespace
+
 liquid::runtime::task<json> current_experiment(ApiContext& context,
                                                const std::string& customer_id,
                                                const std::string& workspace_id,
-                                               json experiment) {
+                                               json experiment,
+                                               ExperimentReconcile reconcile) {
     if (!experiment.is_object() || !experiment.contains("spec") ||
         !control::workspace_methodology_id(
             experiment.at("spec").value("methodology", std::string()))) {
@@ -3008,13 +3110,27 @@ liquid::runtime::task<json> current_experiment(ApiContext& context,
     const std::string experiment_id = experiment.value("id", std::string());
     json runner = experiment.value("runner", json::array());
     std::map<std::string, json> claims;
-    if (experiment.value("status", std::string()) != "running") {
+    // Reconciling for the starter (lake#1001): the runs are queued for whoever started the
+    // experiment, never for the caller, only from an image already built, and a trial whose source
+    // cannot be prepared waits instead of being stopped. With no starter known yet, nothing is done.
+    std::optional<std::pair<std::string, std::string>> by;
+    if (reconcile == ExperimentReconcile::as_starter) {
+        by = awaited(co_await experiment_starter(context, customer_id, workspace_id, experiment_id),
+                     std::optional<std::pair<std::string, std::string>>{});
+        if (!by) {
+            reconcile = ExperimentReconcile::none;
+        }
+    }
+    if (reconcile == ExperimentReconcile::none) {
+        // Presented as it stands: nothing queued, ended or stopped.
+    } else if (experiment.value("status", std::string()) != "running") {
         // An experiment that ended (stopped, failed or complete) runs nothing more.
         static_cast<void>(
             co_await stop_experiment_runs(context, customer_id, workspace_id, experiment_id));
     } else if (!runner.empty()) {
         claims = awaited(co_await drive_trials(context, customer_id, workspace_id, experiment_id,
-                                               runner, std::nullopt, std::nullopt),
+                                               runner, std::nullopt, by,
+                                               reconcile == ExperimentReconcile::as_caller),
                          std::map<std::string, json>{});
         // Ending a trial may have admitted others or ended the experiment: read it again.
         auto again = control::settled(co_await engine(

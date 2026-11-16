@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+
 """Offline checks of agents.py's own logic, with no Lake: what T3 ranks accounts by (lake#1258).
 
     python3 tools/e2e/test_agents.py

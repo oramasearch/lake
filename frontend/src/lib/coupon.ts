@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * A coupon code carried through sign-up (lake#1156, docs/ui/balance.md#coupon-codes). An ad links to
  * `lake.live/?code=LAKE50`; the apex picker carries the query to the chosen region. The web app

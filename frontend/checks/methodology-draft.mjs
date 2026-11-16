@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // New Methodology's Ask Orama (lake#688) in the real app, at 1440 and 390 px: Design → Methodologies,
 // New methodology, a name and a description, Ask Orama; the drawer while Ask Orama writes, then the
 // draft it wrote (checked by Lake), then a draft Lake refused (its template, with the failing
@@ -20,11 +22,11 @@ const BASE = process.env.BASE ?? "http://localhost:5174";
 const viewer = {
   signed_in: true,
   administrator: false,
-  display_name: "Steve Sperandeo",
-  email: "steve@example.com",
+  display_name: "Ada Lovelace",
+  email: "ada@example.com",
   customer_id: "c1",
   workspace_id: "ws1",
-  spaces: [{ id: "c1", name: "steve", label: "Steve", personal: true, workspaces: [{ id: "ws1", name: "Main", customer_id: "c1", status: "ready" }] }],
+  spaces: [{ id: "c1", name: "ada", label: "Ada", personal: true, workspaces: [{ id: "ws1", name: "Main", customer_id: "c1", status: "ready" }] }],
   clerk: { enabled: false },
   password_sign_up: false,
   version: "dev",

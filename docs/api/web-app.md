@@ -43,7 +43,7 @@ answers `401`: a visitor, or a browser holding a dead cookie, gets `signed_in: f
 | `workspace_id` | when there is one | the workspace asked for when it is live in one of the caller's accounts, else that account's only workspace, else absent |
 | `clerk` | yes | `{enabled, publishable_key, frontend_api}` from `LAKE_CLERK_PUBLISHABLE_KEY` ([clerk.md](clerk.md)) |
 | `password_sign_up` | yes | lake's own sign-up is open: false under Clerk, where people sign up through Clerk. The `lake`-pool password entries refuse by the same rule (`403 forbidden`, lake#1098) |
-| `legal` | yes | `{terms_url, privacy_url}`: the terms of service and privacy policy that every sign-up and sign-in form links to, from `LAKE_TERMS_URL` and `LAKE_PRIVACY_URL` (default Orama's published pages); an empty URL means no link ([sign-in.md](../deployment/sign-in.md#terms-and-privacy), liquid-bridge#15) |
+| `legal` | yes | `{terms_url, privacy_url}`: the terms of service and privacy policy that every sign-up and sign-in form links to, from `LAKE_TERMS_URL` and `LAKE_PRIVACY_URL` (no default); an empty URL means no link ([configuration](../serving/configuration.md)) |
 | `external_origin`, `public_host` | yes | lake's browser origin (`LAKE_EXTERNAL_ORIGIN`, else `https://<LAKE_PUBLIC_HOST>`, else the origin of the request) and `LAKE_PUBLIC_HOST`; clone and push URLs use the origin |
 | `config` | yes | `{frontier_model}` for Create an Agent (`LAKE_AGENT_MODEL`); empty for a visitor. The base model's path (`LAKE_BASE_AGENT_MODEL`) is no longer answered (lake#594): `workspace_act create_agent` fills it in for a `native` agent sent without `model` |
 | `version`, `revision` | yes | as `server_info` reports them |

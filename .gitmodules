@@ -4,11 +4,11 @@
 	branch = develop
 [submodule "modules/corosio"]
 	path = modules/corosio
-	url = git@github.com:oramasearch/corosio.git
+	url = https://github.com/oramasearch/corosio.git
 	branch = orama-main
 [submodule "modules/http"]
 	path = modules/http
-	url = git@github.com:oramasearch/http.git
+	url = https://github.com/oramasearch/http.git
 	branch = zetta-patches
 [submodule "modules/beast2"]
 	path = modules/beast2
@@ -19,5 +19,5 @@
 	url = https://github.com/jtv/libpqxx.git
 [submodule "modules/oramacore-cpp"]
 	path = modules/oramacore-cpp
-	url = git@github.com:oramasearch/oramacore-cpp.git
+	url = https://github.com/oramasearch/oramacore-cpp.git
 	branch = main

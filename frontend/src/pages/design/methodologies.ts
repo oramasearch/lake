@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Design → Methodologies with a workspace's own methodologies from Python code beside Orama's
  * (lake#655, docs/api/methodologies.md): who an entry is from, the toolbar's filter, a workspace

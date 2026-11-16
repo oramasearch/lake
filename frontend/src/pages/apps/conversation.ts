@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** A conversation with the Application Agent that changes one App (lake#1240,
  * docs/ui/apps.md#changing-an-app-in-a-conversation): the thread `get_app_conversation` answers, what
  * each turn shows, the proposal Confirm applies, and when a confirmed change has been applied. Pure,

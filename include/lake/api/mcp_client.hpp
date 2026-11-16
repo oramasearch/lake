@@ -1,6 +1,8 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
-// Lake as an MCP client (decision 60, lake#652, docs/api/mcp-connections.md): the protocol a
+// Lake as an MCP client (lake#652, docs/api/mcp-connections.md): the protocol a
 // workspace's MCP connection speaks to a remote MCP server, Streamable HTTP or the older HTTP+SSE
 // transport. Everything here is pure: the HTTP exchange is injected as an McpHttp, which the
 // server implements over its outbound client (src/api/http_server.cpp, the one TU that names HTTP
@@ -119,8 +121,9 @@ std::shared_ptr<McpHttp> make_mcp_http(bool allow_private_addresses);
 
 // Whether an address may be reached by an MCP connection: not loopback, private (RFC 1918, ULA),
 // link-local (the cloud metadata address included), carrier-grade NAT, unspecified, multicast or
-// reserved. An IPv4-mapped or NAT64 IPv6 address is judged by its IPv4 address. `bytes` is 4 or
-// 16 bytes in network order.
+// reserved. An IPv4-mapped, well-known NAT64 or 6to4 IPv6 address is judged by its IPv4 address;
+// otherwise only global unicast (2000::/3) is public, minus Teredo, benchmarking, ORCHID and
+// documentation ranges. `bytes` is 4 or 16 bytes in network order.
 bool mcp_public_address(const std::vector<std::uint8_t>& bytes);
 
 struct McpUrl {

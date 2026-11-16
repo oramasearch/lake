@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Which failed reads are worth asking again, and which say a feature is not set up (lake#575).
  * Pure, so `npm test` covers it (tests/errors.test.ts); `api.ts` hands `shouldRetry` to every query.
  *

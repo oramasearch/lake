@@ -1,4 +1,6 @@
-// Stripe, lake's payment provider (decision 57, lake#620, docs/api/billing.md#stripe): lake's own
+// SPDX-License-Identifier: MIT
+
+// Stripe, lake's payment provider (lake#620, docs/api/billing.md#stripe): lake's own
 // client for Stripe's REST API and the check of its webhook signatures. No Stripe SDK ("We write
 // our own"); the HTTP exchange is injected (StripeHttp), the server's outbound client in lake.
 
@@ -141,7 +143,7 @@ std::expected<json, std::string> answer_object(const StripeResponse& response,
 }
 
 // The tags on every object Lake creates in a Stripe account it shares with Orama Cloud v1 and with
-// other Lakes (orama-bridge#199, lake#855), as fields under `prefix` (`metadata`,
+// other Lakes (lake#855), as fields under `prefix` (`metadata`,
 // `subscription_data[metadata]`): orama_app=lake, and lake_instance, this Lake's public host, when
 // it has one. Lake's own keys are lake_*. It never sets Cloud v1's bare team_id, plan_id,
 // addon_type or addon_config: Cloud v1's webhook handlers read those, so a Lake object carrying one
@@ -969,6 +971,11 @@ std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_vie
         if (notice.foreign) {
             return notice;
         }
+        // An invoice marked paid without a payment never activates an order (lake#1033).
+        if (invoice_event && object.value("paid_out_of_band", false)) {
+            notice.provider_status = "paid_out_of_band";
+            return notice;
+        }
         control::CloudOrderSubscriptionEvent update;
         update.provider = "stripe";
         update.event_id = notice.event_id;
@@ -1028,7 +1035,12 @@ std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_vie
     if (notice.event_type.starts_with("invoice.")) {
         notice.foreign = foreign_object(object, "lake_customer_id", instance);
     }
-    if (notice.event_type == "invoice.paid") {
+    if (notice.event_type == "invoice.paid" && object.value("paid_out_of_band", false)) {
+        // Marked paid in Stripe without a payment (lake#1033): anything else holding a
+        // key for this account can do that, so the invoice stays due and the notice is recorded
+        // for an operator to review.
+        notice.provider_status = "paid_out_of_band";
+    } else if (notice.event_type == "invoice.paid") {
         notice.state = "paid";
         notice.provider_status = "paid";
     } else if (notice.event_type == "invoice.voided") {

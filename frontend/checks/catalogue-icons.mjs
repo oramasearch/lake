@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // The catalogue icons (lake#639) in the real app, light and dark, at 1440 and 390 px: Design →
 // Solutions, Methodologies, a solution, a methodology, Opportunities, the Catalogue Icons gallery and
 // Search's Solutions place. Run against `npx vite --port 5174`; every /v1 call is answered by the
@@ -19,11 +21,11 @@ const BASE = process.env.BASE ?? "http://localhost:5174";
 const viewer = {
   signed_in: true,
   administrator: false,
-  display_name: "Steve Sperandeo",
-  email: "steve@example.com",
+  display_name: "Ada Lovelace",
+  email: "ada@example.com",
   customer_id: "c1",
   workspace_id: "ws1",
-  spaces: [{ id: "c1", name: "steve", label: "Steve", personal: true, workspaces: [{ id: "ws1", name: "Main", customer_id: "c1", status: "ready" }] }],
+  spaces: [{ id: "c1", name: "ada", label: "Ada", personal: true, workspaces: [{ id: "ws1", name: "Main", customer_id: "c1", status: "ready" }] }],
   clerk: { enabled: false },
   password_sign_up: false,
   version: "dev",

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <map>
@@ -19,11 +21,33 @@ struct AuthorizationDecision {
     bool inherited = false;
 };
 
+// The account and workspace an agent's task, launch or schedule credential was made for (lake#985).
+// While `active`, a decision allows only an object under the customer object whose
+// external id is `customer_id`, and, when `workspace_id` is set, every repository on its path must
+// belong to that workspace. An empty `customer_id` while active matches no object: a credential
+// whose row could not be read is confined to nothing.
+struct AuthorizationConfinement {
+    bool active = false;
+    std::string customer_id;
+    std::string workspace_id;
+};
+
 struct AuthorizationCache {
     std::map<std::string, std::vector<ObjectPathEntry>> paths;
     std::map<std::string, std::map<std::string, std::vector<Grant>>> grants;
     std::map<std::string, std::set<std::string>> loaded_grant_objects;
+    AuthorizationConfinement confinement;
+    // Whether each object a confined decision checked lies inside the confinement.
+    std::map<std::string, bool> confined_objects;
 };
+
+// A new, empty cache that keeps `from`'s confinement. A check that must not reuse loaded paths
+// (because policy objects may have been made since) still decides inside the same confinement.
+inline AuthorizationCache fresh_cache_like(const AuthorizationCache& from) {
+    AuthorizationCache fresh;
+    fresh.confinement = from.confinement;
+    return fresh;
+}
 
 struct EffectiveAccessEntry {
     std::string principal_taap_id;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Design → Catalogue Icons (lake#639, `/design/icons`): every solution and methodology icon at
  * 20, 32 and 64 px, the family glyphs and the monogram a new entry falls back to, for reviewing the
  * set. It reads nothing; the glyphs are `lib/catalogueIcons.ts`. Not in the rail; linked from

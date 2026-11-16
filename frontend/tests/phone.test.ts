@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Lake on a phone, ported from rev-os (lake#561): recording formats, the keyboard, following new
  * answers, which files a transcript is made from, and which phone. `npm test`; the build runs it. */
 import { test } from "node:test";

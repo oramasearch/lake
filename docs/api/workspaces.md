@@ -71,7 +71,7 @@ customer's policy object and is authorized by lake before anything reaches Zetta
 | `predict` | action (POST, changes nothing) | `read` | Score rows through one **published** model from outside lake (lake#250): `{customer_id, workspace_id, model_id, rows, entity_column?, top_k?}` (`model` is the deprecated name of `model_id`); checks the model is published (`get_model`), then Zetta's `score`. Each `ranked` entry is `{entity, row, risk}`: `row` is the record's position in `rows`, and `entity` the value of its `entity_column` field (default `entity`), omitted when the record has none (lake#450). The engine numbers the rows itself; lake maps each number back. The engine's "score: row 2 has no 'tenure'" (zero-based) is answered `invalid_input` at `/rows/2/tenure`, with the message counting from one and naming the row's key when it is a string or number: "score: row 3 ('partial') has no 'tenure'" (lake#819). A clustering model (the engine's model kind `segmentation`, lake#1243) answers `assignments` instead of a ranking, one per row in order, `{row, entity, segment_id, distance, label}`, each record's nearest segment, mapped back like `ranked`; `top_k` is not sent for it. That needs an engine that places a row in a segment (zetta#1497); an engine that reads only gradient-boosted weights refuses with *weights unavailable: /: required property 'objective' not found*, which Lake answers `not_supported` at `/model_id` in plain words (the model is a clustering model, its segments are on its page), never the schema words. The engine's `score` and `explain`, called by name, answer that refusal `not_supported` too. Ship → Models shows each published model's `curl`. Every answer about a model the workspace has, a refusal included, is counted in the workspace's per-model series with its status class and duration (lake#599, [../serving/telemetry.md](../serving/telemetry.md#the-per-model-prediction-series)); a model id the workspace does not know is never counted |
 | `model_traffic` | read | `read` | A workspace's `predict` traffic (lake#599): `{customer_id, workspace_id, model_id?, from_ms?, to_ms?, step_ms?}`, by default the last 24 hours in about 48 steps (`step_ms` a whole number of minutes, at most 31 days and 10,000 steps). Answers `{from_ms, to_ms, step_ms, models: [{model_id, calls, errors, client_errors, server_errors, mean_ms?, steps: [{at_ms, calls, errors, mean_ms?}]}], requests: {total, by_status_class}, drift: {measured: false, why}}` from the workspace Zetta's `lake_model_calls` and `lake_model_call_ms` series and its `lake_requests` series (`capability` `predict`) through `query_metric`; a series never written reads as no traffic. Drift is not measured: the workspace keeps no reference distribution of a model's training data. Ship → Models and a model's Monitoring view read it |
 | `edit_pipeline` | action | `write` | One validated pipeline edit (`op`: add_step, rename_step, kind_step, remove_step, add_edge, remove_edge, set_attribute (step, name, value; null clears), rename), or `edits`: a list applied in order as one save, all or nothing (how a Project Agent proposal is applied). Every step keeps its `attributes` (source, table, target, algo) through every edit. It reads the graph, applies the edit with `lake::api::pipeline`, refuses one that leaves duplicate ids, unknown kinds, dangling edges or a cycle, and saves the whole graph with `save_graph` by its id. The page's forms, REST and MCP all edit through it |
-| `workspace_sql` | read (GET, or POST with a JSON body for a long statement, lake#594) | `read` | One read-only query (`statement` starting SELECT or WITH, at most a trailing semicolon, optional `database`, optional `intent` for the engine's trace) through Zetta's `sql`; also served as `sql` on the workspace Zetta route, capped at 5,000 rows there ([SQL on this route](#sql-on-this-route), lake#1229); DDL, writes, users and several statements are refused before anything reaches the workspace. A statement that does not start with SELECT or WITH is refused at `/statement` naming the word it starts with (`it starts with 'SELEC'`), so a typo reads as one; a read the workspace cannot parse gets the workspace's own error with the token's position (lake#450). The workspace speaks Zetta's SQL subset — one `WHERE` comparison, `COUNT(*)`/`COUNT(col)`/`SUM`/`AVG`/`MIN`/`MAX` with or without `GROUP BY` (without, the whole table is one group and the answer one row), `GROUP BY` on any column including text, `ORDER BY`, `LIMIT`, `OFFSET` (zetta#1039, zetta#1218), no joins or expressions; a column no row carries is an error naming the table's columns — and the description says so, because agents write their queries from it. Audit kind `workspace.sql` |
+| `workspace_sql` | read (GET, or POST with a JSON body for a long statement, lake#594) | `read` | One read-only query (`statement` starting SELECT or WITH, at most a trailing semicolon, optional `database`, optional `intent` for the engine's trace) through Zetta's `sql`; also served as `sql` on the workspace Zetta route, capped at 5,000 rows there ([SQL on this route](#sql-on-this-route), lake#1229); DDL, writes, users and several statements are refused before anything reaches the workspace. The guard reads the text as a SQL parser does and also refuses anything two parsers could split differently: a comment (`--`, `/*`), a dollar quote (`$$`, `$tag$`), a backslash inside a string, and a string or quoted name left open. A `;` inside a quoted value or name is fine (lake#926). A statement that does not start with SELECT or WITH is refused at `/statement` naming the word it starts with (`it starts with 'SELEC'`), so a typo reads as one; a read the workspace cannot parse gets the workspace's own error with the token's position (lake#450). The workspace speaks Zetta's SQL subset — one `WHERE` comparison, `COUNT(*)`/`COUNT(col)`/`SUM`/`AVG`/`MIN`/`MAX` with or without `GROUP BY` (without, the whole table is one group and the answer one row), `GROUP BY` on any column including text, `ORDER BY`, `LIMIT`, `OFFSET` (zetta#1039, zetta#1218), no joins or expressions; a column no row carries is an error naming the table's columns — and the description says so, because agents write their queries from it. Audit kind `workspace.sql` |
 | `list_datasets` | read | `read` | The direct dataset catalogue. It calls Zetta `list_datasets` and adds a stable `<database>/<name>` `id` (the form `get_dataset` takes) and a `kind` (`data`, or `result` for an engine output table) to each row |
 | `list_runs` | read | `read` | A direct REST/MCP run list with optional `project`, `solution` and bounded `limit` filters. Each retained summary is completed concurrently with `get_run` so it includes status, stage reached and the final error line without serial fan-out |
 | `get_pipeline` | read | `read` | A pipeline's graph, approval, `step_status` from the latest run, and its `runs`, newest first — what the pipeline page shows |
@@ -146,15 +146,15 @@ Zetta capability.
 
 ## Settings
 
-**Issue:** [lake#1230](https://github.com/oramasearch/lake/issues/1230) · **Code:**
+**Issue:** lake#1230 · **Code:**
 `src/api/workspace_settings_capabilities.cpp`, `src/control/workspace_settings.cpp` · **Tests:**
 `Stores/WorkspaceRecordStores.AWorkspaceChoosesItsAgentModelAmongTheServedChatModels`,
 `ModelCompletion.AnAgentTurnCallsItsWorkspacesModelAndUnsetMeansGpt61Sol`
 
 A workspace has one setting today, `agent_model`: the model every agent turn of the workspace calls
 through Lake's model gateway, whatever model the agent asks for
-([model-gateway.md](model-gateway.md#the-workspaces-model)). Steve, 2026-10-26: *"let's the users
-choose"*, *"default to sol"*.
+([model-gateway.md](model-gateway.md#the-workspaces-model)). People choose the model;
+the default is `gpt-6.1-sol`.
 
 - **Allowed values** are the chat models this Lake serves: `LAKE_MODEL_GATEWAY_MODELS` (by default
   `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, `gpt-6-luna`, `gpt-5.5`, `gpt-5`, `gpt-4o`) without
@@ -169,7 +169,7 @@ choose"*, *"default to sol"*.
 - **Where.** The settings are workspace data, so they are one sealed record in the workspace's Zetta,
   collection `lake_workspace_settings`, key `workspace`, found by the account
   ([workspace-records.md](../architecture/workspace-records.md)). Nothing of them is in lake's Postgres
-  (the bridge's multitenancy rule; decision 51). The record carries who changed it last (`set_by`) and
+  (the multitenancy rule). The record carries who changed it last (`set_by`) and
   when (`updated_at`); the change is audited in the workspace's own log with the previous and new model.
 
 `get_workspace_settings` answers:
@@ -214,7 +214,7 @@ The Data list requests only `database` and `name` through
 partitions and samples belong to the dataset detail page, whose sample uses `LIMIT 20`.
 Connections, the projected dataset list, generators, Lake services and storage are independent
 reads in one concurrent batch. Zetta currently materializes dataset summaries before SQL
-projection, so [zetta#1195](https://github.com/oramasearch/zetta/issues/1195) still needs to remove
+projection, so zetta#1195 still needs to remove
 its row/file scans; this change reduces response and rendering work, not that upstream scan.
 
 Methodologies lists no longer fetch the solutions catalogue; methodology details still do.
@@ -244,9 +244,9 @@ solution operating-state batch remains concurrent and reuses that run result.
 
 ## Deletion
 
-Deleting a workspace cascades (decision 54 S12,
-[lake#514](https://github.com/oramasearch/lake/issues/514)). It cannot be undone: the workspace
-Zetta's volume snapshots ([orama-operator#260](https://github.com/oramasearch/orama-operator/issues/260))
+Deleting a workspace cascades
+(lake#514). It cannot be undone: the workspace
+Zetta's volume snapshots (orama-operator#260)
 are the only copy left.
 
 **What is destroyed.** `delete_workspace {dry_run: true}` and the confirmation on `/workspaces`
@@ -264,16 +264,23 @@ list it, with `counts` (`repositories`, `live_repositories`, `tombstoned_reposit
   takes no step of its own for it;
 - its apps (desired `deleted`) and its unfinished builds (desired `cancelled`);
 - its tenant images: every repository routed to it in `oci_repository_routes`
-  ([lake#383](https://github.com/oramasearch/lake/issues/383), state `routed`), whose manifests and
+  (lake#383, state `routed`), whose manifests and
   tags go with its Zetta; and what the instance registry still holds from before that split,
   `<space>/<name>` and `<space>/cache/<name>` for each of its apps and each image its builds target
   (state `tagged`), unless an app or build of another live workspace of the account uses the name.
+
+**Its usage is kept first** where billing is on
+([lake#988](https://github.com/oramasearch/lake/issues/988),
+[billing.md](billing.md#a-deleted-workspaces-usage)): before the transaction, lake reads the usage
+no issued invoice has billed yet from the workspace Zetta and writes it, as quantities only, to
+`retained_usage`. If that read or write fails, `delete_workspace` answers `store_unavailable` and
+nothing is deleted.
 
 **One PostgreSQL transaction** tombstones the repositories, deletes the apps, cancels the builds,
 deletes the workspace's image routes, sets the workspace's desired state to `deleted` with its
 services `absent`, and records the
 deletion with everything it destroyed in `workspace_deletions` (migration
-`0065_workspace_deletions`). The operator reads only the desired state, as before (decision 51).
+`0065_workspace_deletions`). The operator reads only the desired state, as before.
 
 **After the commit**, lake removes what lives outside PostgreSQL and records the central audit:
 
@@ -298,12 +305,12 @@ and answers the recorded deletion; the dry run of a deleted workspace answers th
 
 The repositories' content stays in the account's liquid store until the collector reclaims it, as
 for any tombstone whose retention has ended. A workspace whose repositories moved into its own store
-([lake#380](https://github.com/oramasearch/lake/issues/380), [workspace-store.md](workspace-store.md))
+(lake#380, [workspace-store.md](workspace-store.md))
 has that store closed and its bucket lease released before lake reports the deletion complete
 (`WorkspaceContent::close_workspace_store` in `include/lake/api/workspace_deletion.hpp`, set by the
 HTTP server to `SyncStore::close_workspace_store`), and the operator's deletion of the namespace and
 volume destroys the bytes. Tenant image routes are deleted in the transaction
-([lake#383](https://github.com/oramasearch/lake/issues/383) phase A); their blobs move into the
+(lake#383 phase A); their blobs move into the
 workspace's store, and go with it, in phase B.
 
 **Result.** `delete_workspace` answers the workspace's row (desired `deleted`) and `deletion`:
@@ -410,8 +417,8 @@ the operator wrote the bare token and every App with workspace data stopped at s
 `GET <base>/zetta/v1/sql?statement=…` (what app-runtime's `workspace.sql()` sends) and
 `POST <base>/zetta/v1/sql` with a JSON body (`statement`, and optionally `database`,
 `safe_mode_confirmation`, `intent`) run Lake's [`workspace_sql`](#capabilities), not the
-engine's `sql` (lake#1229, lake#1212). An App has only the access its binding gives it (Steve,
-2026-10-26), so:
+engine's `sql` (lake#1229, lake#1212). An App has only the access its binding gives it,
+so:
 
 - **A read.** It needs what every read on this route needs: an App's binding with `read`, or `read`
   on the customer for a person, or `workspace_sql` among an agent turn's scopes. Anything else is
@@ -437,7 +444,26 @@ and `WorkspaceSql.GatewayRowCap*`.
 | Variable | Set by | Meaning |
 |---|---|---|
 | `LAKE_SERVICE_DIR` | operator | Mounted service connections, including the workspace's token |
-| `LAKE_SERVICES_PER_CUSTOMER` | optional | Live services per customer, the workspace included (default `0`: no limit) |
+| `LAKE_SERVICES_PER_CUSTOMER` | optional | Live services per customer, each workspace's own Zetta included (default `0`: no limit). `create_workspace` and the first workspace's request count it too (lake#987) |
+| `LAKE_WORKSPACES_PER_CUSTOMER` | optional | Live (not deleted) workspaces per customer (default `0`: no limit, lake#987) |
+
+### Per-account workspace limit (lake#987)
+
+Each workspace becomes a namespace with its own Zetta and a volume, so one account could otherwise
+take shared capacity from every other. `create_workspace`, and the first workspace an account's
+request makes, count in the same transaction as the insert, under the customer's row lock:
+
+- the account's live workspaces (`desired` not `deleted`) against `LAKE_WORKSPACES_PER_CUSTOMER`;
+- the account's live services (`desired = 'present'`) against `LAKE_SERVICES_PER_CUSTOMER`, since
+  the new workspace's Zetta service row is one. Before, that row was inserted outside the check
+  `create_service` makes.
+
+Over either, the call answers `quota_exceeded` (HTTP 507, as `create_service` at its limit) and nothing is written; another account
+is unaffected. A deleted workspace no longer counts. Both default to `0`, no limit; the values for
+lake.live are the operator's to render (the Lake's `spec.env`), and the operator's own instance-wide
+`spec.workspaces.maxWorkspaces` stays as a second bound. Verify:
+`WorkspaceLimits.MemoryStoreRefusesTheNextWorkspaceOnly` and
+`WorkspaceLimits.PostgresStoreRefusesTheNextWorkspaceOnly` (`tests/test_postgres.cpp`).
 
 Without `LAKE_SERVICE_DIR`, the pages say Design, Train and Ship are not available on this lake,
 and the capabilities answer `store_unavailable`. `LAKE_DATA_PLANE_*`, `LAKE_WORKSPACE_DIR` and
@@ -466,7 +492,7 @@ name, and watch `kubectl -n lake get oramazettacluster` lose `<lake>-<workspace>
 ## Known limits
 
 Status: checked on 2026-10-01 against the dev cluster (lake `36679e1`, workspace Zetta
-`dev-13979173`) during the UX review recorded in liquid-bridge `docs/reviews/lake-ux/2026-10-01.md`.
+`dev-13979173`) during a UX review.
 
 - A workspace is stopped with `update_workspace` (`desired: "stopped"`), which withdraws its
   primary Zetta service as [the contract](../control-plane/workspaces.md) describes, or deleted
@@ -480,12 +506,12 @@ Status: checked on 2026-10-01 against the dev cluster (lake `36679e1`, workspace
   with a lake key and the `workspace_id`. The review called a published model this way from
   outside the cluster. Unpublishing stops those calls.
 - Workspace reads time out after 15 seconds and actions after 60. Run reports load:
-  `get_run_report` answers since https://github.com/oramasearch/zetta/issues/1007 was fixed.
+  `get_run_report` answers since zetta#1007 was fixed.
 
 ## Pipeline Work Budgets
 
 Lake limits a pipeline to 50,000 steps and 100,000 edges, and an `edit_pipeline` batch to
-256 edits (lake#967, LSR-101). Oversized stored graphs are refused by both `edit_pipeline` and
+256 edits (lake#967). Oversized stored graphs are refused by both `edit_pipeline` and
 `render_pipeline` before their arrays are copied. Edit growth is checked per operation, including
 intermediate states. `save_pipeline` and `workspace_act` with `save_graph` enforce the same counts
 before forwarding to the engine. A direct engine client can still store a larger graph; Lake

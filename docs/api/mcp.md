@@ -92,10 +92,10 @@ and returns the conflict digest, selected value digest, and change digest. Both 
 the registry and appear under `outputSchema.properties.value` in `tools/list`.
 
 ```sh
-curl -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' https://lake.oramadev.net/mcp
+curl -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' https://lake.example.com/mcp
 curl -H "Authorization: Bearer <token>" -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_customers","arguments":{"limit":5}}}' \
-  https://lake.oramadev.net/mcp
+  https://lake.example.com/mcp
 ```
 
 ## Developer → MCP, llms.txt and the Lake skill (lake#202)
@@ -150,7 +150,9 @@ the storage quota) have their own groups; issues stay with Repositories.
 
 `GET /llms.txt` and `GET /llms-full.txt` are **public** (`text/plain`, cached 5 minutes):
 what Lake is and what it does today (Data, Design, Train, Ship, Ask Orama, organizations and
-access, secrets, usage and billing), how to connect, every tool by group (llms-full adds each tool's description and input
+access, secrets, usage and billing; repositories name the liquid CLI that clones and pushes them,
+liquify, the IDE that opens them, and `server_info`'s supported liquid releases, lake#1324), how to
+connect, every tool by group (llms-full adds each tool's description and input
 schema), the flows and the rules an agent must keep (an edited pipeline is proposed again, a gate
 failure runs nothing, search needs a published index, deleting destroys data). Every word in them
 says **Lake** and never `space` (the account, the workspace or the organization instead, whichever

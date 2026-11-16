@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** /changes?repository_id= (web_ui_repository_log): the repository's changes, newest first, with
  * their figures (changes, authors, the latest) and a search over message, author and id. */
 import { useState } from "react";
@@ -5,7 +7,9 @@ import { Link, useSearchParams } from "react-router-dom";
 import { Clock, GitCommitHorizontal, History, Users } from "lucide-react";
 import { DataTable, Empty, SearchInput, Stat, StatRow, Toolbar } from "@/lib/ui";
 import { dateTime, relative } from "@/lib/format";
-import { ForgePage, Identifier, itemsOf, pending, ToRepositories, useForgeRead, useRepositoryTrail, type Change, type Items, type Repository } from "./forge";
+import { useSession } from "@/lib/session";
+import { ForgePage, Identifier, itemsOf, pending, SignerName, ToRepositories, useForgeRead, useRepositoryTrail, type Change, type Items, type Repository, type WithPeople } from "./forge";
+import { signerText } from "./signers";
 
 export default function ChangesPage() {
   const [params] = useSearchParams();
@@ -16,7 +20,8 @@ export default function ChangesPage() {
 
 function ChangeLog({ id }: { id: string }) {
   const repository = useForgeRead<Repository>("get_repository", { id });
-  const changes = useForgeRead<Items<Change>>("list_changes", { id });
+  const changes = useForgeRead<Items<Change> & WithPeople>("list_changes", { id });
+  const { viewer } = useSession();
   const [search, setSearch] = useState("");
   useRepositoryTrail(repository.data, "Changes");
   const wait = pending(repository, changes);
@@ -24,14 +29,16 @@ function ChangeLog({ id }: { id: string }) {
   const encoded = encodeURIComponent(id);
   const all = itemsOf(changes.data);
   const needle = search.trim().toLowerCase();
-  const rows = needle ? all.filter((change) => `${change.message} ${change.author} ${change.id}`.toLowerCase().includes(needle)) : all;
+  const people = changes.data?.people;
+  // An author is found by name, handle or key (lake#1326).
+  const rows = needle ? all.filter((change) => `${change.message} ${signerText(change.author, people)} ${change.author} ${change.id}`.toLowerCase().includes(needle)) : all;
   const authors = new Set(all.map((change) => change.author));
   return (
     <ForgePage title="Change Log" repository={repository.data!} tab="changes" sub="Every change cut on this repository, newest first.">
       {all.length > 0 && (
         <StatRow cols={3}>
           <Stat label="Changes" value={all.length} icon={GitCommitHorizontal} sub="in the log" />
-          <Stat label="Authors" value={authors.size} icon={Users} sub="distinct identities" />
+          <Stat label="Authors" value={authors.size} icon={Users} sub="distinct signers" />
           <Stat label="Latest" value={relative(all[0]?.occurred_at)} icon={Clock} sub={dateTime(all[0]?.occurred_at)} />
         </StatRow>
       )}
@@ -75,7 +82,12 @@ function ChangeLog({ id }: { id: string }) {
               </div>
             ),
           },
-          { key: "author", label: "Author", sort: (change) => change.author, render: (change) => <code>{change.author}</code> },
+          {
+            key: "author",
+            label: "Author",
+            sort: (change) => signerText(change.author, people),
+            render: (change) => <SignerName id={change.author} people={people} viewer={viewer.taap_id} />,
+          },
           {
             key: "when",
             label: "When",

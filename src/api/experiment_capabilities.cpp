@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/capabilities.hpp"
 
 #include <algorithm>
@@ -120,6 +122,21 @@ ApiResult authorize_list(const json& input, ApiContext& context) {
         }
     }
     return ApiResult::success(json::object());
+}
+
+// Whether the caller may change the account's experiments (its write grant), as start_experiment
+// requires; an operator credential may.
+bool may_change_experiments(const json& input, ApiContext& context) {
+    if (context.operator_credential) {
+        return true;
+    }
+    const auto object = customer_object(input, context);
+    if (!object) {
+        return false;
+    }
+    const auto decision = control::authorize(*context.store, context.acting_identity, *object,
+                                             "write", context.authorization_cache);
+    return decision && decision->allowed;
 }
 
 // An engine message says "study"; the person reads "experiment" (lake#561).
@@ -370,9 +387,16 @@ Task dispatch(ApiContext& context, const json& input, const std::string& name,
     const std::string customer_id = input.at("customer_id");
     const std::string workspace_id = input.at("workspace_id");
     if (result.ok && (name == "start_experiment" || name == "get_experiment")) {
+        // Reading never acts for the reader (lake#1001): one who may only read sees the
+        // experiment as it stands; one who may change it reconciles it for its starter.
+        ExperimentReconcile reconcile = ExperimentReconcile::as_caller;
+        if (name == "get_experiment") {
+            reconcile = may_change_experiments(input, context) ? ExperimentReconcile::as_starter
+                                                               : ExperimentReconcile::none;
+        }
         json answered = result.value;
-        auto current =
-            co_await current_experiment(context, customer_id, workspace_id, std::move(answered));
+        auto current = co_await current_experiment(context, customer_id, workspace_id,
+                                                   std::move(answered), reconcile);
         if (current) {
             result.value = std::move(*current);
         }
@@ -391,7 +415,8 @@ Task dispatch(ApiContext& context, const json& input, const std::string& name,
                                                       {{"study", experiment_id}}));
                 again.ok) {
                 static_cast<void>(co_await current_experiment(context, customer_id, workspace_id,
-                                                              std::move(again.value)));
+                                                              std::move(again.value),
+                                                              ExperimentReconcile::as_starter));
             }
             result.value.erase("runner");
         }

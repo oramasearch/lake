@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+
 """Vendor agent-runtime's skills into lake (agent-runtime#7).
 
 agent-runtime decides what each skill lets a person's agent do (its `skills.py`) and publishes it
@@ -11,7 +13,7 @@ twice, so it is written twice from that one file:
 - frontend/src/pages/train/agent-skills.json: the skills the Agent Factory and the agent pages
   offer, with their labels.
 
-    tools/agents/vendor-agent-skills.py ~/dev/oramasearch/codex-work/wt/agent-runtime/issue-7/skills.json
+    tools/agents/vendor-agent-skills.py ../agent-runtime/skills.json
     tools/agents/vendor-agent-skills.py <skills.json> --check   # exit 1 when lake's copy differs
 """
 

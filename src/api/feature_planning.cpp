@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Feature planning for a dataset in a workspace (lake#1153, docs/api/feature-planning.md).
 #include "feature_planning.hpp"
 

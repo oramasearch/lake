@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Data → Connections (lake#651): the route and its place in the rail, the old Datasets links, the
  * empty state's figures, and the add and delete flow's inputs. `npm test`; the build runs it. */
 import { test } from "node:test";

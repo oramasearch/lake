@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Usage over time (lake#564, docs/api/metering.md#usage-over-time): the bounded recorder that
 // writes each workspace's `lake_usage` and `lake_storage` series, the owner loop's sample,
 // usage_over_time across workspaces, usage limits and record_model_usage.
@@ -634,6 +636,52 @@ TEST(RecordModelUsage, CountsAnAgentRunsTokensInItsWorkspace) {
     EXPECT_EQ(rig.call("record_model_usage", tokens, person).error.code, "unauthorized");
 }
 
+// lake#871: a library agent's bus credential reports usage only for a task of its own agent that
+// it is serving now. Another agent's task, a task nobody claimed and a finished one are refused,
+// whichever workspace they are in.
+TEST(RecordModelUsage, ABusCredentialReportsOnlyItsOwnRunningTask) {
+    UsageRig rig;
+    const auto own = rig.store->create_agent_task({.customer_id = rig.customer,
+                                                   .agent = "agent-ask-orama",
+                                                   .kind = "api",
+                                                   .workspace_id = rig.lab,
+                                                   .scopes = {"agent_turn"}});
+    ASSERT_TRUE(own) << own.error().message;
+    const auto others = rig.store->create_agent_task({.customer_id = rig.customer,
+                                                      .agent = "agent-project",
+                                                      .kind = "api",
+                                                      .workspace_id = rig.home,
+                                                      .scopes = {"workspace_query"}});
+    ASSERT_TRUE(others) << others.error().message;
+    ASSERT_TRUE(rig.store->claim_agent_task(others->id, "agent-project", "project-claim"));
+
+    auto bus = rig.context();
+    bus.acting_identity = "agent-service:agent-ask-orama";
+    bus.operator_credential = false;
+    bus.credential_kind = "agent_service";
+    bus.agent_service = "agent-ask-orama";
+    const auto tokens = [](const std::string& task_id) {
+        return json{{"model_name", "gpt-5"},
+                    {"input_tokens", 10},
+                    {"output_tokens", 5},
+                    {"task_id", task_id}};
+    };
+    const auto another_agents = rig.call("record_model_usage", tokens(others->id), bus);
+    EXPECT_EQ(another_agents.error.code, "conflict");
+    EXPECT_EQ(another_agents.error.path, "/task_id");
+    EXPECT_EQ(rig.call("record_model_usage", tokens(own->id), bus).error.code, "conflict")
+        << "a task nobody claimed is not being served";
+
+    ASSERT_TRUE(rig.store->claim_agent_task(own->id, "agent-ask-orama", "ask-claim"));
+    const auto running = rig.call("record_model_usage", tokens(own->id), bus);
+    ASSERT_TRUE(running.ok) << running.error.message;
+    EXPECT_EQ(running.value["workspace_id"], rig.lab);
+
+    ASSERT_TRUE(rig.store->record_agent_task_event(own->id, "agent-ask-orama", "Succeeded"));
+    EXPECT_EQ(rig.call("record_model_usage", tokens(own->id), bus).error.code, "conflict")
+        << "a finished task's usage is no longer reported through the bus credential";
+}
+
 TEST(UsageSample, ReadsEachWorkspacesStoredBytesAndRunningServices) {
     UsageRig rig;
     rig.workspaces.zetta->answers["list_datasets"] = {
@@ -690,8 +738,8 @@ TEST(UsageSample, CountsTheSecondsOfATranscriptMadeFromAudio) {
                                 {"workspace_id", rig.home},
                                 {"title", "Call"},
                                 {"source", "recording"},
-                                {"audio_base64", "AAAA"},
-                                {"audio_name", "call.webm"}},
+                                {"audio_base64", base64(wav(61.2))},
+                                {"audio_name", "call.wav"}},
                                context);
     ASSERT_TRUE(made.ok) << made.error.message;
     flush(rig.recorder);
@@ -1128,7 +1176,7 @@ TEST(UsageSample, RecordsWhatTheEngineHoldsByKind) {
     const std::string not_measured = read.value["not_measured"].dump();
     EXPECT_NE(not_measured.find("inside workspace lab"), std::string::npos) << not_measured;
     EXPECT_EQ(not_measured.find("home"), std::string::npos) << not_measured;
-    // Decision 61 (lake#663): what an engine holds on its own volume is shown as engine_storage,
+    // lake#663: what an engine holds on its own volume is shown as engine_storage,
     // never billed; the volume is billed, as `volumes`.
     const json* engine = dimension(read.value, "engine_storage");
     ASSERT_NE(engine, nullptr);
@@ -1141,7 +1189,7 @@ TEST(UsageSample, RecordsWhatTheEngineHoldsByKind) {
     EXPECT_TRUE((*storage)["billed"].get<bool>());
 }
 
-// Decision 61 (lake#663): storage is billed for what Lake holds outside an engine's volume
+// lake#663: storage is billed for what Lake holds outside an engine's volume
 // (repositories, images, transcripts, drive files), never for what the engine holds on it.
 TEST(UsageOverTime, StorageIsWhatLakeHoldsAndTheEngineVolumeIsNotBilledTwice) {
     UsageRig rig;
@@ -1186,8 +1234,8 @@ TEST(UsageOverTime, CountsDictationInTheWorkspaceItWasDictatedIn) {
     };
     const json dictation{{"customer_id", rig.customer},
                          {"workspace_id", rig.lab},
-                         {"name", "dictation.webm"},
-                         {"audio_base64", "AAAA"}};
+                         {"name", "dictation.wav"},
+                         {"audio_base64", base64(wav(7.2))}};
     const auto heard = rig.call("transcribe", dictation, context);
     ASSERT_TRUE(heard.ok) << heard.error.message;
     EXPECT_EQ(heard.value["text"], "add a churn project");
@@ -1201,13 +1249,29 @@ TEST(UsageOverTime, CountsDictationInTheWorkspaceItWasDictatedIn) {
     measured["audio_base64"] = base64(wav(4.25));
     measured["name"] = "dictation.wav";
     ASSERT_TRUE(rig.call("transcribe", measured, context).ok);
-    // A recording whose length cannot be read counts nothing (and the audit says so).
-    ASSERT_TRUE(rig.call("transcribe", dictation, context).ok);
+    // A recording whose length cannot be read is refused before the model is called (lake#979).
+    json unmeasurable = dictation;
+    unmeasurable["audio_base64"] = "AAAA";
+    unmeasurable["name"] = "dictation.webm";
+    EXPECT_EQ(rig.call("transcribe", unmeasurable, context).error.code, "invalid_input");
+    // A header that understates the data, or a model that reports less, never shortens what is
+    // billed: the longer of the two is.
+    std::string understated = wav(3.0);
+    understated[40] = understated[41] = understated[42] = understated[43] = 0;
+    understated[40] = static_cast<char>(0x10); // 16 bytes of data claimed of 96000
+    json short_header = dictation;
+    short_header["audio_base64"] = base64(understated);
+    context.transcriber = [](const lake::api::TranscriptionRequest&) {
+        return std::expected<lake::api::Transcription, lake::api::ApiError>(
+            lake::api::Transcription{"more", 0.5, "whisper-1"});
+    };
+    ASSERT_TRUE(rig.call("transcribe", short_header, context).ok);
     flush(rig.recorder);
     auto& lab = rig.workspaces.records(rig.lab);
     EXPECT_EQ(lab.metric_total("lake_usage", {{"dimension", "speech"}, {"kind", "dictation"}}),
-              8 + 5)
-        << "7.2 seconds reported and 4.25 measured, each rounded up";
+              8 + 5 + 3)
+        << "7.2 seconds, 4.25 measured, and 3 measured where the header said less and the model "
+           "0.5; each rounded up";
     EXPECT_EQ(lab.metric_total("lake_usage", {{"dimension", "model_tokens"}}), 0)
         << "a dictation records speech and no model tokens";
     EXPECT_EQ(
@@ -1225,7 +1289,7 @@ TEST(UsageOverTime, CountsDictationInTheWorkspaceItWasDictatedIn) {
                   {"granularity", "hour"},
                   {"dimensions", json::array({"speech"})}});
     ASSERT_TRUE(read.ok) << read.error.message;
-    EXPECT_EQ(dimension(read.value, "speech")->at("total"), 13);
+    EXPECT_EQ(dimension(read.value, "speech")->at("total"), 16);
     EXPECT_EQ(read.value["not_measured"].dump().find("dictation"), std::string::npos)
         << "nothing about dictation is left unmeasured";
 }

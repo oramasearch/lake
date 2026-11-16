@@ -1,6 +1,6 @@
 # Data → MCP Connections
 
-**Status: implemented 2026-10-11 in the source tree (lake#652, decision 60); not deployed.** The
+**Status: implemented 2026-10-11 in the source tree (lake#652); not deployed.** The
 pages for a workspace's MCP connections ([API](../api/mcp-connections.md)). They live under Data,
 after Transcripts, and call only `/v1` capabilities.
 

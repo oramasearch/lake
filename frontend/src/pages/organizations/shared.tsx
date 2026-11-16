@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** What the organization, administration and search pages share: lake's `panel` sections, the
  * server's "meta" breadcrumb (rail group › rail item › the page's subject), GET filter forms that
  * become the URL, and the role and date cells. */

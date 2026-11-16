@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "audit_test_support.hpp"
 #include "identity_proof_test_support.hpp"
 #include "personal_customer_test_support.hpp"
@@ -250,7 +252,7 @@ protected:
         std::ranges::copy_if(*events, std::back_inserter(matches), [&](const auto& event) {
             return event.draft.request_id == id;
         });
-        // Decision 52: an application's events belong to its workspace's audit, queued there by
+        // An application's events belong to its workspace's audit, queued there by
         // the server's AuditRecorder; the operator's `audit` reads both logs.
         bool workspace_event = false;
         if (matches.empty() &&

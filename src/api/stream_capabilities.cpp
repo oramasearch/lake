@@ -1,4 +1,7 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/api/capabilities.hpp"
+#include "lake/api/agent_stream_triggers.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -180,10 +183,7 @@ std::string topic_name(std::string name) {
     return name;
 }
 bool reserved(const std::string& name) {
-    return name == "agent-events" || name.starts_with("agent-") ||
-           name.starts_with("app-events.") || name.starts_with("build-events.") ||
-           name.starts_with("run-metrics.") || name.starts_with("study-events.") ||
-           name.starts_with("inbox:");
+    return system_stream_name(name);
 }
 
 Task proxy(ApiContext& context, const json& input, std::string capability, json args) {
@@ -255,8 +255,10 @@ Task browse(ApiContext& context, const json& input) {
     const std::string selected_agent = input.value("agent", "");
     if (input.at("zetta") == "workspace" && requested == "agent-events" && !selected_task.empty()) {
         const auto task = context.store->get_agent_task(selected_task);
+        // Someone else's turn is private to them (lake#986): the same answer as none.
         if (!task || task->customer_id != input.at("customer_id").get<std::string>() ||
-            task->workspace_id != input.at("workspace_id").get<std::string>()) {
+            task->workspace_id != input.at("workspace_id").get<std::string>() ||
+            (!context.operator_credential && task->requested_by_user_id != context.acting_user_id)) {
             co_return ApiResult::failure("not_found", "no such task in this workspace");
         }
     }
@@ -311,13 +313,33 @@ Task browse(ApiContext& context, const json& input) {
         }
         if (!shared) {
             value["topic"] = requested;
-            if (requested == "agent-events" && (!selected_task.empty() || !selected_agent.empty())) {
+            if (requested == "agent-events") {
+                // A workspace member reads the events of their own turns only: a turn's answer is
+                // the requester's (lake#986). The operator reads every one.
+                std::map<std::string, bool> mine;
+                const auto own = [&](const std::string& task_id) {
+                    if (context.operator_credential) {
+                        return true;
+                    }
+                    const auto known = mine.find(task_id);
+                    if (known != mine.end()) {
+                        return known->second;
+                    }
+                    bool is_mine = false;
+                    if (!task_id.empty() && !context.acting_user_id.empty()) {
+                        const auto task = context.store->get_agent_task(task_id);
+                        is_mine = task && task->requested_by_user_id == context.acting_user_id;
+                    }
+                    mine.emplace(task_id, is_mine);
+                    return is_mine;
+                };
                 auto& rows = value["events"].get_ref<json::array_t&>();
                 std::erase_if(rows, [&](const json& event) {
                     const auto payload = json::parse(event.at("payload").get<std::string>(), nullptr, false);
                     return !payload.is_object() ||
                         (!selected_task.empty() && payload.value("task_id", "") != selected_task) ||
-                        (!selected_agent.empty() && payload.value("agent", "") != selected_agent);
+                        (!selected_agent.empty() && payload.value("agent", "") != selected_agent) ||
+                        !own(payload.value("task_id", ""));
                 });
             }
             co_return ApiResult::success(std::move(value));

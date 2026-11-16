@@ -1,12 +1,15 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <chrono>
-#include <expected>
 #include <cstdint>
+#include <expected>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <liquid/runtime.hpp>
@@ -46,6 +49,14 @@ inline const std::vector<std::string> agent_launch_scopes{"workspace_query",
                                                           "read_mcp_tool",
                                                           "call_mcp_tool"};
 
+// The engine actions a run's code calls directly, by Lake's names (agent-runtime#11, *Direct
+// actions*): check_pipeline and start_run (skill train), generate_dataset (generate-data), decide
+// and record_outcome (call-api); the engine's own policy governs them. A launch's or schedule's
+// `workspace_act` runs these and the actions its scopes name, nothing else (lake#918):
+// every other change is a proposal a person confirms.
+inline const std::vector<std::string> agent_run_direct_actions{
+    "check_pipeline", "start_run", "generate_dataset", "decide", "record_outcome"};
+
 // A skill a person may grant an agent (agent-runtime#7), vendored from agent-runtime's skills.json
 // by tools/agents/vendor-agent-skills.py into src/control/agent_skills.cpp: its name, the label
 // the Agent Factory and the agent pages show, and the Lake reads it grants. A skill's changes are
@@ -62,8 +73,37 @@ const std::vector<AgentSkill>& agent_skills();
 std::vector<std::string> agent_launch_scopes_for(const std::vector<std::string>& skills);
 
 // The same, from an agent record's `skills` (anything that is not an array of strings grants
-// nothing beyond agent_launch_scopes).
+// nothing beyond agent_launch_scopes), plus its dataset work area (dataset_work_area_scopes) and
+// work_area_recorded_scope.
 std::vector<std::string> agent_launch_scopes_for(const nlohmann::json& agent);
+
+// A dataset work area on a launch's, schedule's or service's credential (lake#1055).
+// An agent whose `work_area` is `{kind: "dataset", detail: "<id>[, <id>...]"}` gets
+// one scope `dataset:<database>/<name>` per dataset, stored with the row's scopes when it is made
+// and never changed. `<database>/<name>` and `<database>.<name>` are the same dataset; a bare
+// `<name>` is `datasets/<name>`, Lake's default database, never a table of that name elsewhere.
+// A dataset work area that is empty or names anything malformed gives the one scope `dataset:`,
+// which confines the run to no dataset at all. Any other work area gives no scope.
+inline constexpr std::string_view dataset_work_area_scope = "dataset:";
+std::vector<std::string> dataset_work_area_scopes(const nlohmann::json& agent);
+// A confined agent whose definition is in a Lake repository (`definition: {source: "lake",
+// repository_id, revision}`) also gets `agent_definition:<repository id>@<revision>`, so it may
+// read that one revision of that repository to load itself (agent_definition_source reads it back).
+inline constexpr std::string_view agent_definition_scope = "agent_definition:";
+std::optional<std::pair<std::string, std::string>>
+agent_definition_source(const std::vector<std::string>& scopes);
+// `<database>/<name>` for a dataset id in any of those forms, or nothing when it is malformed.
+std::optional<std::string> canonical_dataset(std::string_view id);
+// Every launch, schedule and service row Lake makes from an agent's record carries this scope
+// (agent_launch_scopes_for), saying its scopes were derived with the agent's work area. A row
+// without it was made before Lake confined runs to their work area (lake#1055) and keeps the
+// broader scopes it was given: lake re-creates a conversation service like that on its next turn,
+// and list_agent_launches and list_agent_schedules flag the rest with `recreate`.
+inline constexpr std::string_view work_area_recorded_scope = "work_area_recorded";
+bool records_work_area(const std::vector<std::string>& scopes);
+// The datasets a credential's scopes confine it to (each `<database>/<name>`), or nullopt when
+// the scopes carry no dataset work area. An empty list confines it to nothing.
+std::optional<std::vector<std::string>> dataset_work_area(const std::vector<std::string>& scopes);
 
 // A schedule's cron expression (docs/api/agent-launches.md): the five fields a Kubernetes CronJob
 // takes (minute, hour, day of month, month, day of week), or one of @hourly, @daily, @weekly,
@@ -109,6 +149,13 @@ AgentLaunchProgress agent_launch_progress(const AgentLaunch& launch,
 
 // A store timestamp, YYYY-MM-DDTHH:MM:SSZ, as a time point; nothing when it is not one.
 std::optional<std::chrono::sys_seconds> utc_seconds(std::string_view text);
+
+// The bearer lake presents to one person's service launch (agent-runtime#14): hex
+// HMAC-SHA256 of "agent-launch:<launch id>" keyed by the Lake's agent service token
+// (LAKE_AGENT_SERVICE_TOKEN). The Orama operator gives the launch the same value as its
+// AGENT_SERVICE_TOKEN, so the person's code in that pod never holds the Lake's token, which every
+// library agent accepts, and one launch's token does not open another.
+std::string agent_launch_service_token(std::string_view lake_token, std::string_view launch_id);
 
 // One turn to an agent's service: POST <endpoint>/v1/turn with the service token as bearer.
 // Injected so tests need no HTTP server.

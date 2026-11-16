@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 // SAML sign-in for enterprise SSO providers (docs/api/sso.md#saml-sign-in, lake#836): the steps the

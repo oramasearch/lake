@@ -1,10 +1,12 @@
+// SPDX-License-Identifier: MIT
+
 // Coupon codes for ads (lake#1156, docs/api/billing.md#coupon-codes): the operator creates a code
 // worth an amount of cloud credit (create_coupon, list_coupons, disable_coupon), and a person
 // redeems it for an account they administer (redeem_coupon), in Billing or carried through sign-up
 // by a `?code=` link. A redemption is an ordinary grant from Orama, given through
 // give_balance_grant (lake#1134) with the reference `coupon:<coupon id>:<customer id>`, so the
 // spending order, expiry, no-overdraft rule, email and idempotency are the grant's. Billing, so the
-// records are in the control plane (decision 56) and registered only where billing is on.
+// records are in the control plane and registered only where billing is on.
 
 #include <algorithm>
 #include <array>

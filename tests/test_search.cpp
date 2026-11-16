@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "audit_test_support.hpp"
 #include <atomic>
 #include <chrono>
@@ -492,6 +494,17 @@ TEST(Search, SubstringRegexAndRankedQueriesUseTheirExpectedOrder) {
         service.query({"/quick\\s+brown/", "customer", "", "", 20}, "admin", control);
     ASSERT_TRUE(regex) << regex.error().message;
     EXPECT_EQ(regex->items.size(), 2U);
+
+    // lake#984: a pattern that can backtrack without end, or an overlong one, is refused.
+    for (const std::string pattern : {"/(a+)+$/", "/(x*y?)*/", "/(\\w+\\s?)+z/"}) {
+        const auto refused = service.query({pattern, "customer", "", "", 20}, "admin", control);
+        ASSERT_FALSE(refused) << pattern;
+        EXPECT_EQ(refused.error().code, "invalid_input") << pattern;
+    }
+    const auto overlong =
+        service.query({"/" + std::string(300, 'a') + "/", "customer", "", "", 20}, "admin", control);
+    ASSERT_FALSE(overlong);
+    EXPECT_EQ(overlong.error().code, "invalid_input");
 }
 
 TEST(Search, RegisteredCapabilityReturnsAuthorizedHits) {

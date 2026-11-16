@@ -29,6 +29,14 @@ received that person's session.
 SAML providers sign people in through Lake's Assertion Consumer Service; see
 [SAML sign-in](#saml-sign-in) below.
 
+**A just-in-time account's identity is Lake's choice** (lake#872). The OIDC callback, the SAML
+ACS, `sign_in_saml` and the operator's `sign_in_sso` give the account a provider's first sign-in
+creates a managed key Lake mints (`audit::give_managed_key`, kept in `custodial_identities`).
+The TAAP id the browser named when it started the flow (`start_sso_oidc`'s document,
+`start_sso_saml`'s `taap_id`) or `sign_in_sso`'s `taap_id` is ignored. Before, an unauthenticated
+caller chose it, and nothing proved they held its key. A new account also never takes an identity
+any user or organization holds (`conflict`).
+
 `start_sso_oidc` creates an authorization-code flow for an enterprise OIDC provider. It reuses
 the identity core's state, PKCE verifier, nonce, one-use callback, and cached JWKS verification.
 The REST start sets the same per-flow HttpOnly browser cookie as OAuth, and the shared callback
@@ -49,10 +57,12 @@ Argon2id hash stored for one enabled provider; the token identifies the provider
 the target organization. SCIM responses use `application/scim+json`, SCIM resource schemas,
 `ListResponse`, and the SCIM error schema.
 
-A user create requires `externalId` or `userName` and the person's TAAP identity. The identity is
-accepted as top-level `taapId` or as `taapId` in
-`urn:orama:params:scim:schemas:extension:taap:2.0:User`; it binds the provisioned credential to
-the durable identity instead of treating the SCIM bearer as that identity. `userName`, the first
+A user create requires `externalId` or `userName`. **Lake chooses the account's TAAP identity**
+(lake#872): every account a SCIM create makes gets a managed key Lake mints, as a Clerk or password
+sign-up does. A `taapId`, top-level or in `urn:orama:params:scim:schemas:extension:taap:2.0:User`,
+is dropped: it is neither used nor stored nor answered. Before, the SCIM client named it, so an
+organization's provider could give its user the identity of another organization, of a person who
+had not signed up yet, or of anyone a grant named, and that user inherited the grants. `userName`, the first
 email value, `displayName`, and `active` map into the lake user. Setting `active` to false or
 deleting the resource revokes every active session and removes SCIM-managed team membership.
 
@@ -88,25 +98,27 @@ Lake is the SAML 2.0 service provider (Web Browser SSO profile, lake#836). For a
 All three need no credential and answer `404` for a provider that is not an enabled SAML provider.
 The metadata says `WantAssertionsSigned="true"` and `AuthnRequestsSigned="false"`.
 
-**The flow.** `start_sso_saml` (`{provider_id, device_name?, taap_id?, return_to?}`, no credential)
+**The flow.** `start_sso_saml` (`{provider_id, device_name?, taap_id?, return_to?}`, no credential;
+`taap_id` is accepted and ignored, lake#872)
 or the start route records a one-use AuthnRequest for ten minutes and answers the IdP's sign-in URL:
 the provider metadata's HTTP-Redirect `SingleSignOnService` (HTTPS, or loopback for tests), with
 the request DEFLATE-encoded in `SAMLRequest`. The metadata's `entityID` must equal the provider's
 `issuer`. The IdP posts its `SAMLResponse` to the ACS. Lake verifies it (below), consumes the request
 it answers, records the assertion, runs `sign_in_sso`'s provisioning (federation issuer policy, the
-SCIM user or just-in-time provisioning with the request's `taap_id`), sets `lake_session` and
+SCIM user or just-in-time provisioning with a managed key Lake mints), sets `lake_session` and
 redirects to `return_to` (a same-origin path) or `/`. `RelayState` is not used. Every outcome is
 one `authentication` audit event on `saml/<id>` (method `saml`; outcome `success`, `denied` with the
 reason, or `failure`). The ACS takes the IdP's cross-site form post, so it is exempt from the
 [cross-site check](../serving/http.md#cross-site-requests); it never reads the session a cookie
 carries, it replaces it.
 
-`sign_in_saml` (`{provider_id, saml_response, taap_id?, device_name?}`, no credential) is the same
+`sign_in_saml` (`{provider_id, saml_response, taap_id?, device_name?}`, no credential; `taap_id`
+ignored) is the same
 verification through the registry, for a client that relays the response itself; it answers the
 session instead of a cookie. Both refuse a response that answers no outstanding request.
 
-**What a response must be.** Verification is Lake's own (`src/control/saml.cpp`, no XML library;
-the bridge's *We write our own* rule and decision 32), and it fails closed:
+**What a response must be.** Verification is Lake's own (`src/control/saml.cpp`, no XML library:
+Lake writes its own verifier), and it fails closed:
 
 - **XML.** A strict reader: one root, an optional XML declaration, comments (dropped), the five
   predefined entities and character references. DTDs, other entities, CDATA and processing
@@ -175,12 +187,12 @@ also set (a Lake signs in through Clerk or through the customer's provider, neve
   page's same-origin `return_to`, OIDC calls `start_sso_oidc`.
 - **Users must be provisioned through SCIM for now.** A first sign-in creates a user only with
   just-in-time provisioning and a TAAP id in the sign-in, which a person from the customer's IdP
-  does not carry. Minting a managed key for such a person, as a Clerk sign-in does (decision 65), is
-  [lake#1166](https://github.com/oramasearch/lake/issues/1166). Enterprise OIDC also waits for
-  [lake#1022](https://github.com/oramasearch/lake/issues/1022) on Postgres; SAML works.
+  does not carry. Minting a managed key for such a person, as a Clerk sign-in does, is
+  lake#1166. Enterprise OIDC also waits for
+  lake#1022 on Postgres; SAML works.
 
 The runbook, with the Clerk alternative, is
-[`../deployment/white-label-sign-in.md`](../deployment/white-label-sign-in.md). Tests:
+[`clerk.md`](clerk.md). Tests:
 `WhiteLabelSsoOnly.*` in `tests/test_white_label.cpp`, `frontend/tests/sso-sign-in.test.ts`.
 
 ## How to verify

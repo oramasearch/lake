@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "lake/control/workspace_settings.hpp"
 
 #include <chrono>

@@ -27,7 +27,7 @@ Lake never reads `CF-Connecting-IP` or the first `X-Forwarded-For` hop: a sender
 ingress without passing Cloudflare can write either. Which visitor address to believe is the
 ingress's decision (ingress-nginx's `forwarded-for-header: CF-Connecting-IP` with
 `proxy-real-ip-cidr` limited to Cloudflare's ranges,
-https://github.com/oramasearch/orama-operator/issues/720), and lake counts what the ingress decided.
+orama-operator#720), and lake counts what the ingress decided.
 
 The code is `lake::api::client_address` (`include/lake/api/client_address.hpp`), called from the
 HTTP adapter's `order_client_address`; the peer and the listener come from the connection
@@ -69,11 +69,11 @@ at start with an error naming it. Lake logs the ranges it believes once at start
 ### Why the default is the private ranges
 
 The default must not change anything for a deployment whose operator does not set the variable
-yet (the umbrella rule: a setting a new version needs is the operator's, and ships with it).
+yet (a setting a new version needs is the operator's, and ships with it).
 
 - **Trusting no one by default would put every visitor in one bucket.** Behind ingress-nginx the
   peer is the ingress pod, which every visitor shares. An image rolled before its operator set the
-  variable would rate-limit lake.live as a whole: after 60 Clerk exchanges in a minute, or 100
+  variable would rate-limit a whole Lake: after 60 Clerk exchanges in a minute, or 100
   failed sign-ins in fifteen minutes, from anyone, everyone is refused.
 - **Inside a cluster every proxy has a private address**, so the default keeps the behaviour lake
   had before lake#1083 for every in-cluster peer.
@@ -125,6 +125,10 @@ global budgets still hold such a caller.
   `HttpServer.AuthenticationClientBudgetIgnoresForwardedHeadersFromAnUntrustedPeer` sends 100 failed
   recoveries, each with a new `X-Real-IP`. From an untrusted peer the 101st is `rate_limited`; from
   a trusted one a new address still has its budget.
+- `OrdersApex.ForwardingHeadersFromAnUntrustedPeerNeverMakeAFreshBucket` (`tests/test_orders.cpp`,
+  lake#1006): with `none` on the main listener, ten orders from one peer, each with a new
+  `X-Real-IP` and `X-Forwarded-For`, are one client past its limit; the proxy listener still
+  counts a new visitor.
 - `HttpServer.ForwardedHeadersAreBelievedOnlyOnTheProxyListener`: with `none` on the main listener,
   100 rotated addresses on the proxy port are 100 clients, 100 on the main port are one (the 101st
   is `rate_limited`), and both listeners serve `/healthz`.
