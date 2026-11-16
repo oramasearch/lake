@@ -164,9 +164,11 @@ returns exactly one named `sync_ref_verdict` for each update. Each update names 
 its server-derived prior and proposed heads, and reports whether the old head is reachable from the
 new head. Push computes this context before invoking callbacks in frame order and before repository
 import. A refused verdict applies only to that ref and preserves its reason string; a callback task
-error refuses every affected ref. Object uploads that arrived earlier remain content-addressed data
-eligible for collection. Embedders can perform authorization and audit work without reimplementing
-the wire format.
+error refuses every affected ref. Since liquid v0.3.0 (liquid#403) the server stages chunk uploads
+in a private quarantine rather than the store: a push that imports anything moves the staged objects
+its roots reach into the store first, and a refused push discards them, so a push is authorized
+before its uploads are stored. Embedders can perform authorization and audit work without
+reimplementing the wire format.
 
 The server imports shared metadata with accepted ref frames and leaves refused refs at their
 pre-push heads. With `atomic: true`, any refusal prevents metadata import. Originally refused refs
@@ -195,6 +197,18 @@ policy, and signed outcome audit use the same path as JSON capabilities. Request
 bounded at 64 MiB and accepts fixed-length or HTTP chunked bodies before passing one byte span to
 `sync_server`.
 
+Lake keeps one `sync_server` per open repository (`RepositoryState::sync`, made on first use in
+`src/api/http_server.cpp`), because the chunk uploads and the push that claims them arrive as
+separate requests and must meet the same server's quarantine (lake#1346). The quarantine is a
+private directory under `LAKE_STORE_ROOT/.sync-staging/`, on lake's volume
+rather than the pod's temporary directory, removed when the repository closes; staged uploads
+expire after liquid's `upload_ttl` (one hour) and the quarantine holds at most liquid's
+`upload_quota_bytes` (1 GiB) at once. The server's authorizer calls the authorizer of the push it
+is serving, set only while that push runs; the repository's store lane serializes requests, so one
+push is authorized at a time, and outside a push it refuses. A repository closed between its
+uploads and its push (its workspace store's lease lost, a drain) loses the staged uploads; the
+push then fails and the client's retry uploads them again.
+
 Push additionally calls the policy engine with the repository object and `write` action once for
 each change through `sync_server_options::authorize`. Before the push, lake reads the
 repository's branch protection rules (and the reviews or releases they ask for) from the
@@ -211,13 +225,16 @@ require `read`; push and chunk upload require `write`.
 The five binary paths add accepted request and returned response byte counts to the customer's
 current UTC-hour metering row. Chunk writes also sample the store's exact unique raw bytes.
 `LAKE_STORAGE_QUOTA_BYTES` limits that gauge: a write that would cross it returns `busy` (HTTP
-429), while reads continue and existing bytes stay complete. See [metering.md](metering.md).
+429), while reads continue and existing bytes stay complete. Because uploads wait in the
+quarantine until their push, a chunk write counts the unique bytes the repository has staged since
+its last push as already stored, so the uploads of one push cannot together cross the quota. See
+[metering.md](metering.md).
 
 Lake returns one verdict per reference from branch-protection evaluation. A normal push applies
 accepted refs, leaves refused refs unchanged, and returns every outcome with the precise
 reference-and-rule reason. An atomic push with any refusal changes no ref and still reports every
-outcome. Shared metadata imports only when at least one ref can apply; uploaded objects remain in
-the content-addressed store regardless of the outcomes.
+outcome. Shared metadata imports only when at least one ref can apply; the uploads of a push that
+imports nothing are discarded from the quarantine and never reach the store.
 
 Lake opens one caller-owned `liquid::store` at
 `LAKE_STORE_ROOT/<customer-id>/store` and passes it through `repository_options.store` when opening

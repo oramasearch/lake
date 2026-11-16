@@ -17,9 +17,12 @@
   so the binary carries one networking stack. `CONTRIBUTING.md` names the one authorized checkout.
   The target also compiles that checkout's `src/core/runtime.cpp`, which supplies the transport's
   synchronized asynchronous event definitions; it does not link the engine or change the pin.
+- A checkout of liquid. `LAKE_LIQUID_SOURCE_DIR` names it (default `../liquid`, the sibling module
+  in liquid-bridge); lake builds libliquid from it, library-only. liquid is not a submodule of lake:
+  liquid-bridge's pin is the one source of truth, and lake builds and is released against it, liquid
+  v0.3.0 (`66b5bb9`) since lake#1346.
 - Submodules. Clone with `--recurse-submodules` or run `git submodule update --init --recursive`
-  before configuring: libliquid (library-only, pinned to liquid `main`), Boost.HTTP, Beast2 and
-  libpqxx are vendored under `modules/`. Boost and GoogleTest arrive through FetchContent on the
+  before configuring: Boost.HTTP, Beast2 and libpqxx are vendored under `modules/`. Boost and GoogleTest arrive through FetchContent on the
   first configure. [`dependencies.md`](dependencies.md) records every direct pin and the private
   patch-carrier update procedure.
 
