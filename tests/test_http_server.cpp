@@ -1150,7 +1150,8 @@ TEST_P(HttpResponseIsolation, FreshSignUpOwnsFirstRepositoryWithZeroInitialMeter
         const std::string tls_signin = tls->request(
             "POST",
             "/v1/sign_in_password",
-            with_identity({{"email", email}, {"password", password_}, {"device_name", "browser"}}),
+            nlohmann::json{{"email", email}, {"password", password_}, {"device_name", "browser"}}
+                .dump(),
             "",
             "HTTP/1.1",
             {},
@@ -1186,8 +1187,10 @@ TEST_P(HttpResponseIsolation, FreshSignUpOwnsFirstRepositoryWithZeroInitialMeter
     // lake#977): a page elsewhere cannot post a credential and sign this browser in.
     {
         auto browser = connect();
+        // Signing in takes no identity document: only sign-up does.
         const std::string credential =
-            with_identity({{"email", email}, {"password", password_}, {"device_name", "browser"}});
+            nlohmann::json{{"email", email}, {"password", password_}, {"device_name", "browser"}}
+                .dump();
         const std::string cross = browser->request("POST",
                                                    "/v1/sign_in_password",
                                                    credential,
@@ -4506,7 +4509,8 @@ TEST_P(HttpResponseIsolation, ProtectedAppAuthorizationHandsOffAHostOnlySession)
     EXPECT_EQ(response_header(exchanged, "x-orama-user"), principal->user_id);
     EXPECT_EQ(response_header(exchanged, "x-orama-space"), workspace->id);
     const std::string app_cookie_header = response_header(exchanged, "set-cookie");
-    EXPECT_TRUE(app_cookie_header.starts_with("lake_app_session="));
+    // Always Secure, so always the __Host- name: no sibling host can plant or shadow it (LSR-115).
+    EXPECT_TRUE(app_cookie_header.starts_with("__Host-lake_app_session=")) << app_cookie_header;
     EXPECT_NE(app_cookie_header.find("; Path=/; Secure; HttpOnly; SameSite=Lax"),
               std::string::npos);
     EXPECT_EQ(app_cookie_header.find("Domain="), std::string::npos);
@@ -4536,7 +4540,7 @@ TEST_P(HttpResponseIsolation, ProtectedAppAuthorizationHandsOffAHostOnlySession)
     const std::string expired = connection.request("GET",
                                                    auth_path,
                                                    {},
-                                                   "lake_app_session=" + *expired_token,
+                                                   "__Host-lake_app_session=" + *expired_token,
                                                    "HTTP/1.1",
                                                    {},
                                                    {},

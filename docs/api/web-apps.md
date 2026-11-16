@@ -132,7 +132,7 @@ answers 2xx, and a private one redirects an anonymous visitor to `/apps/authoriz
 
 `GET /v1/apps/auth`, including its `/w/<workspace>/v1/apps/auth` form, resolves a live protected
 app by the host of `X-Original-URL` (ingress-nginx sets `Host` to Lake's Service and sends no
-`X-Forwarded-Host` on the auth subrequest), falling back to `X-Forwarded-Host` or `Host`. A valid host-only `lake_app_session` returns 200 with
+`X-Forwarded-Host` on the auth subrequest), falling back to `X-Forwarded-Host` or `Host`. A valid host-only `__Host-lake_app_session` returns 200 with
 `X-Orama-User` and `X-Orama-Space`. The signed token carries `app_id`, `user_id`, `workspace_id`,
 `iat`, and `exp`; its HMAC-SHA256 key is derived from the instance KEK with HKDF label
 `lake/app-session/v1`, and it expires after 12 hours. Lake rechecks current workspace membership
@@ -164,8 +164,11 @@ single-use code and redirects to `rd` with `__lake_code` appended. The forward-a
 atomically spends that code, returns the identity headers, and sets:
 
 ```text
-lake_app_session=<token>; Path=/; Secure; HttpOnly; SameSite=Lax
+__Host-lake_app_session=<token>; Path=/; Secure; HttpOnly; SameSite=Lax
 ```
+
+The cookie is always `Secure`, so it always carries the `__Host-` prefix (LSR-115): a sibling
+host can neither set nor shadow it, and only that name is read.
 
 There is deliberately no `Domain` attribute, so customer app code receives only its own app
 cookie and never Lake's `lake_session`. `/logout` cannot clear cookies on app hosts. The 12-hour
