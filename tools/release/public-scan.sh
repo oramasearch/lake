@@ -49,18 +49,20 @@ categories=(
     'private-refs|(orama-bridge|orama-work)'
 )
 # Role addresses a public tree may name.
-allowed_people='(support|security|noreply|no-reply|hello|info)@orama'
+allowed_people='(support|security|opensource|conduct|noreply|no-reply|hello|info)@orama'
 # Home directories of container users (the image's own user, the browser image's), not people.
 allowed_paths='/home/(lake|pptruser)/'
 
 agent_files=(CLAUDE.md AGENTS.md .claude .codex)
+# The agent instruction files stay in the repository; their content is not scanned.
+kept=(":(exclude)CLAUDE.md" ":(exclude)AGENTS.md")
 
 grep_tree() {
     local pattern="$1"
     if [[ -n "$revision" ]]; then
-        git grep -n -I -E -e "$pattern" "$revision" -- . ":(exclude)$self" || true
+        git grep -n -I -E -e "$pattern" "$revision" -- . ":(exclude)$self" "${kept[@]}" || true
     else
-        git grep -n -I -E -e "$pattern" -- . ":(exclude)$self" || true
+        git grep -n -I -E -e "$pattern" -- . ":(exclude)$self" "${kept[@]}" || true
     fi
 }
 
