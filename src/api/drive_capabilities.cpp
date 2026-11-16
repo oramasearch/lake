@@ -843,6 +843,76 @@ std::string new_link_secret() {
     return secret;
 }
 
+// The number written by the digits of `text` from `begin`, `count` of them, or nothing when one
+// of them is not a digit.
+std::optional<int> digits_at(std::string_view text, std::size_t begin, std::size_t count) {
+    int value = 0;
+    for (std::size_t index = begin; index < begin + count; ++index) {
+        const char digit = text[index];
+        if (digit < '0' || digit > '9') {
+            return std::nullopt;
+        }
+        value = value * 10 + (digit - '0');
+    }
+    return value;
+}
+
+// A fraction of a second written with `count` digits, as microseconds.
+std::chrono::microseconds fraction_microseconds(int value, std::size_t count) {
+    for (std::size_t index = count; index < 6; ++index) {
+        value *= 10;
+    }
+    for (std::size_t index = 6; index < count; ++index) {
+        value /= 10;
+    }
+    return std::chrono::microseconds{value};
+}
+
+// A share link's expiry is an RFC 3339 UTC time, `YYYY-MM-DDTHH:MM:SS[.fraction]Z`, with a real
+// date and time (lake#1319): expiry is decided by comparing that text with the clock's, so a
+// value in any other shape could never expire or would expire at another time than it says.
+std::optional<std::chrono::sys_time<std::chrono::microseconds>>
+share_link_expiry(std::string_view text) {
+    if (text.size() < 20 || text.back() != 'Z') {
+        return std::nullopt;
+    }
+    if (text[4] != '-' || text[7] != '-' || text[10] != 'T' || text[13] != ':' || text[16] != ':') {
+        return std::nullopt;
+    }
+    const auto year = digits_at(text, 0, 4);
+    const auto month = digits_at(text, 5, 2);
+    const auto day = digits_at(text, 8, 2);
+    const auto hour = digits_at(text, 11, 2);
+    const auto minute = digits_at(text, 14, 2);
+    const auto second = digits_at(text, 17, 2);
+    if (!year || !month || !day || !hour || !minute || !second) {
+        return std::nullopt;
+    }
+    if (*hour > 23 || *minute > 59 || *second > 59) {
+        return std::nullopt;
+    }
+    const std::chrono::year_month_day date{std::chrono::year{*year},
+                                           std::chrono::month{static_cast<unsigned>(*month)},
+                                           std::chrono::day{static_cast<unsigned>(*day)}};
+    if (!date.ok()) {
+        return std::nullopt;
+    }
+    std::chrono::microseconds fraction{0};
+    if (text.size() > 20) {
+        const std::size_t count = text.size() - 21;
+        if (text[19] != '.' || count == 0 || count > 9) {
+            return std::nullopt;
+        }
+        const auto value = digits_at(text, 20, count);
+        if (!value) {
+            return std::nullopt;
+        }
+        fraction = fraction_microseconds(*value, count);
+    }
+    return std::chrono::sys_days{date} + std::chrono::hours{*hour} + std::chrono::minutes{*minute} +
+           std::chrono::seconds{*second} + fraction;
+}
+
 bool link_is_active(const control::DriveShareLink& link) {
     if (!link.revoked_at.empty()) {
         return false;
@@ -2487,18 +2557,22 @@ void register_drive_capabilities(Registry& registry) {
         .description = "Create a folder-scoped link with an explicit role and expiry. The link is "
                        "held in the workspace Zetta of `workspace_id`, a workspace of the "
                        "repository's account; its bearer token names that workspace.",
-        .input_schema = {{"type", "object"},
-                         {"properties",
-                          {{"repository_id", {{"type", "string"}}},
-                           {"workspace_id", {{"type", "string"}}},
-                           {"ref", {{"type", "string"}}},
-                           {"path", {{"type", "string"}}},
-                           {"role", {{"type", "string"}, {"enum", json::array({"read", "write"})}}},
-                           {"expires_at", {{"type", "string"}}}}},
-                         {"required",
-                          json::array({"repository_id", "workspace_id", "ref", "path", "role",
-                                       "expires_at"})},
-                         {"additionalProperties", false}},
+        .input_schema =
+            {{"type", "object"},
+             {"properties",
+              {{"repository_id", {{"type", "string"}}},
+               {"workspace_id", {{"type", "string"}}},
+               {"ref", {{"type", "string"}}},
+               {"path", {{"type", "string"}}},
+               {"role", {{"type", "string"}, {"enum", json::array({"read", "write"})}}},
+               {"expires_at",
+                {{"type", "string"},
+                 {"description",
+                  "RFC 3339 UTC time in the future, "
+                  "YYYY-MM-DDTHH:MM:SS[.fraction]Z"}}}}},
+             {"required",
+              json::array({"repository_id", "workspace_id", "ref", "path", "role", "expires_at"})},
+             {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
         .object = "drive folder",
@@ -2507,7 +2581,16 @@ void register_drive_capabilities(Registry& registry) {
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
             const std::string expires_at = input.at("expires_at");
-            if (expires_at <= control::now_iso8601()) {
+            const auto expiry = share_link_expiry(expires_at);
+            if (!expiry) {
+                co_return ApiResult::failure(
+                    "invalid_input",
+                    "expires_at must be an RFC 3339 UTC time, YYYY-MM-DDTHH:MM:SS[.fraction]Z",
+                    "/expires_at");
+            }
+            const auto now =
+                std::chrono::floor<std::chrono::microseconds>(std::chrono::system_clock::now());
+            if (*expiry <= now) {
                 co_return ApiResult::failure(
                     "invalid_input", "expires_at must be in the future", "/expires_at");
             }

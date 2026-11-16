@@ -6452,6 +6452,91 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
     }
 }
 
+// lake#1319: a share link's expiry is an RFC 3339 UTC time with a real date and time; any other
+// text was compared as text and could make a bearer link that never expires.
+TEST(Drive, ShareLinkExpiryIsAnRfc3339UtcTime) {
+    Surface surface;
+    DriveWorkspaces workspaces(surface);
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const ApiResult owner = surface.call(
+        "create_user", {{"taap_id", "taap:1:ed25519:owner"}, {"display_name", "Owner"}});
+    ASSERT_TRUE(owner.ok) << owner.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", owner.value["id"]}, {"name", "owner"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository = surface.call(
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"name", "drive"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const auto repository_object =
+        surface.store.find_policy_object("repository", repository.value["id"]);
+    ASSERT_TRUE(repository_object);
+    ASSERT_TRUE(surface.store.create_grant({"taap:1:ed25519:owner",
+                                            repository_object->id,
+                                            "admin",
+                                            "attestation-owner",
+                                            "admin",
+                                            "request-owner"}));
+    const std::string workspace = workspaces.create(customer.value["id"], "home");
+    surface.ctx.operator_credential = false;
+    surface.ctx.acting_identity = "taap:1:ed25519:owner";
+    const auto create = [&](const std::string& expires_at) {
+        return surface.call("create_drive_share_link",
+                            {{"repository_id", repository.value["id"]},
+                             {"workspace_id", workspace},
+                             {"ref", "main"},
+                             {"path", "shared"},
+                             {"role", "read"},
+                             {"expires_at", expires_at}});
+    };
+
+    for (const std::string refused : {"never",
+                                      "9",
+                                      "",
+                                      "2999-01-01",
+                                      "2999-01-01T00:00:00",
+                                      "2999-01-01T00:00:00+14:00",
+                                      "2999-01-01T00:00:00-02:00",
+                                      "2999-01-01T00:00:00z",
+                                      "2999-01-01 00:00:00Z",
+                                      "2999-02-30T00:00:00Z",
+                                      "2999-13-01T00:00:00Z",
+                                      "2999-01-01T24:00:00Z",
+                                      "2999-01-01T00:60:00Z",
+                                      "2999-01-01T00:00:60Z",
+                                      "2999-01-01T00:00:00.Z",
+                                      "2999-01-01T00:00:00.1234567890Z",
+                                      "2999-01-01T00:00:00,5Z",
+                                      "+999-01-01T00:00:00Z",
+                                      "2020-01-01T00:00:00Z"}) {
+        const ApiResult result = create(refused);
+        EXPECT_FALSE(result.ok) << refused;
+        EXPECT_EQ(result.error.code, "invalid_input") << refused;
+        EXPECT_EQ(result.error.path, "/expires_at") << refused;
+    }
+
+    const auto soon = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()) +
+                      std::chrono::hours(1);
+    for (const std::string accepted : {std::format("{:%Y-%m-%dT%H:%M:%SZ}", soon),
+                                       std::string("2999-01-01T00:00:00Z"),
+                                       std::string("2999-02-28T23:59:59.5Z"),
+                                       std::string("2996-02-29T12:00:00.123456789Z")}) {
+        const ApiResult result = create(accepted);
+        ASSERT_TRUE(result.ok) << accepted << ": " << result.error.message;
+        surface.ctx.authorized = false;
+        surface.ctx.acting_identity.clear();
+        const ApiResult opened = surface.call("resolve_drive_share_link",
+                                              {{"token", result.value["token"]}, {"ref", "main"}});
+        EXPECT_TRUE(opened.ok) << accepted << ": " << opened.error.message;
+        surface.ctx.authorized = true;
+        surface.ctx.acting_identity = "taap:1:ed25519:owner";
+    }
+}
+
 // lake#585: a person shares a folder with someone by email or handle, from the space's people;
 // lake writes and signs the grant's attestation, and a digest a caller makes up is refused.
 TEST(Drive, SharingByEmailOrHandleIsAttestedByLake) {
