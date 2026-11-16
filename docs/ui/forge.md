@@ -36,8 +36,9 @@ use the full value.
 the panel explains the missing setting and shows no commands
 ([../serving/configuration.md](../serving/configuration.md)). The first block runs `liquid clone`
 into a new directory and enters it; the second runs `liquid push` from that checkout after changes
-have been captured and named. The panel tells the person to export an account token from
-**Tokens** as `LIQUID_TOKEN` before running either; the token is never in the URL
+have been captured and named. The panel tells the person to create an API token under Account →
+**Tokens** with the *liquid and liquify* scopes and export it as `LIQUID_TOKEN` before running
+either; the token is never in the URL
 ([../api/sync.md](../api/sync.md)). URLs and directory names are shell-quoted. A last line names
 liquify, liquid's IDE, as the place to open the repository: `liquify '<directory>'` on the checkout,
 or a clone from liquify's start screen with the repository URL (lake#1324). The named-lake

@@ -52,22 +52,28 @@ The answer's `secret` is the key. Leave out `expires_in_seconds` for the default
 1. Open the account menu (top right) and choose **Tokens**. The **API Tokens** page lists your
    tokens with their scopes and expiry.
 2. Press **New token**.
-3. Enter the **Name** and the **Capability scopes, comma separated**. For `liquid` push and pull,
-   press the suggested scope list to fill in `refs,find_missing,push,pull,upload_chunks,read_chunk`.
+3. Enter the **Name** and the **Capability scopes, comma separated**. For liquid and liquify,
+   press **Use these** to fill in `refs,find_missing,push,pull,upload_chunks,read_chunk,list_reviews,create_review,update_review,list_review_comments,create_review_comment,map_review_anchors,list_branch_protections`: clone, pull and push, and the reviews liquify reads and
+   writes.
 4. Optionally set **Expiry in seconds** (empty means as long as this session allows, at most 30
    days), tick **Static exception** or **Never expires**, and give a reason.
 5. Press **Create token**, and copy it from *Copy this token now. It is not shown again.*
 
-## Keys for the liquid Command
+## Keys for liquid and liquify
 
-`liquid clone`, `liquid pull` and `liquid push` read your key from `LIQUID_TOKEN`. Make a key with
-the push and pull scopes:
+`liquid clone`, `liquid pull`, `liquid push` and `liquid review`, and liquify, the IDE, read your
+key from `LIQUID_TOKEN`. Make one key with the *liquid and liquify* scopes. Developer → API's
+**Named capabilities** help and the Tokens drawer both fill them in with one click. They clone,
+pull and push (`refs`, `find_missing`, `push`, `pull`, `upload_chunks`, `read_chunk`), and list,
+open, update and comment on reviews (`list_reviews`, `create_review`, `update_review`,
+`list_review_comments`, `create_review_comment`, `map_review_anchors`, `list_branch_protections`).
+A key with only the sync scopes clones and pushes, but liquify cannot open reviews with it.
 
 - REST: `POST /v1/create_token` with
-  `{"name": "liquid on my laptop", "scopes": ["refs", "find_missing", "push", "pull", "upload_chunks", "read_chunk"]}`.
+  `{"name": "liquid on my laptop", "scopes": ["refs", "find_missing", "push", "pull", "upload_chunks", "read_chunk", "list_reviews", "create_review", "update_review", "list_review_comments", "create_review_comment", "map_review_anchors", "list_branch_protections"]}`.
 
-Then `export LIQUID_TOKEN=<the key>` before running `liquid`. The key keeps your repository
-permissions. See [The liquid CLI](/docs/cli).
+Then `export LIQUID_TOKEN=<the key>` before running `liquid` or liquify. The key keeps your
+repository permissions. See [The liquid CLI](/docs/cli).
 
 ## Search-Only Keys
 

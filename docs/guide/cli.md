@@ -54,8 +54,9 @@ with a linked successor, optionally moving it to a FIDO2 or PIV hardware key
 liquid authenticates to Lake with a token, not a password.
 
 1. Open the account menu → **Tokens** → **New token**.
-2. Name it, and in **Capability scopes, comma separated** enter
-   `refs,find_missing,push,pull,upload_chunks,read_chunk` (the drawer offers them in one click).
+2. Name it, and in **Capability scopes, comma separated** press **Use these** beside the
+   *liquid and liquify* list, which fills in
+   `refs,find_missing,push,pull,upload_chunks,read_chunk,list_reviews,create_review,update_review,list_review_comments,create_review_comment,map_review_anchors,list_branch_protections`: clone, pull and push, and the reviews liquify opens and comments on.
 3. Create it and copy the secret; it is shown once.
 4. Export it in your shell: `export LIQUID_TOKEN=<the token>`.
 
