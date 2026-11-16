@@ -4455,6 +4455,15 @@ TEST_P(HttpResponseIsolation, ProtectedAppAuthorizationHandsOffAHostOnlySession)
                            lake_cookie);
     ASSERT_TRUE(wrong_redirect.starts_with("HTTP/1.1 400")) << wrong_redirect;
 
+    // A bearer never opens the handoff, alone or beside the session (lake#1058).
+    const std::string bearer_session = lake_cookie.substr(lake_cookie.find('=') + 1);
+    for (const std::string& cookie : {std::string(), return_cookie + "; " + lake_cookie}) {
+        const std::string by_bearer =
+            connection.request("GET", authorize, {}, cookie, "HTTP/1.1", bearer_session);
+        EXPECT_TRUE(by_bearer.starts_with("HTTP/1.1 403")) << by_bearer;
+        EXPECT_EQ(by_bearer.find("__lake_code"), std::string::npos) << by_bearer;
+    }
+
     const std::string authorized =
         connection.request("GET", authorize, {}, return_cookie + "; " + lake_cookie);
     ASSERT_TRUE(authorized.starts_with("HTTP/1.1 302")) << authorized;

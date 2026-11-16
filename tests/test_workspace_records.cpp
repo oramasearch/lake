@@ -107,6 +107,31 @@ inline std::string test_base64_encode(std::string_view bytes) {
     }
     return out;
 }
+
+// A mono 16 kHz, 16-bit PCM WAV of `seconds` of silence: audio whose length lake can measure, as
+// speech-to-text requires (lake#979).
+inline std::string test_wav(double seconds) {
+    const auto put = [](std::string& out, std::uint32_t value, int width) {
+        for (int index = 0; index < width; ++index) {
+            out.push_back(static_cast<char>((value >> (8 * index)) & 0xFF));
+        }
+    };
+    const auto bytes = static_cast<std::uint32_t>(seconds * 32000);
+    std::string out = "RIFF";
+    put(out, 36 + bytes, 4);
+    out += "WAVEfmt ";
+    put(out, 16, 4);
+    put(out, 1, 2);
+    put(out, 1, 2);
+    put(out, 16000, 4);
+    put(out, 32000, 4);
+    put(out, 2, 2);
+    put(out, 16, 2);
+    out += "data";
+    put(out, bytes, 4);
+    out.append(bytes, '\0');
+    return out;
+}
 inline std::string test_base64_decode(std::string_view text) {
     std::string out;
     unsigned value = 0;
@@ -858,7 +883,9 @@ TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {
     };
 
     // Without a key, speech-to-text is refused and nothing is written.
-    const std::string audio = "data:audio/webm;codecs=opus;base64,c3BlZWNo"; // "speech"
+    const std::string speech = test_wav(1.0);
+    const std::string silence = test_wav(2.0);
+    const std::string audio = "data:audio/webm;codecs=opus;base64," + test_base64_encode(speech);
     const auto unconfigured =
         t.call(first, "transcribe", in(first, 0, {{"name", "memo"}, {"audio_base64", audio}}));
     EXPECT_EQ(unconfigured.error.code, "not_supported");
@@ -871,10 +898,10 @@ TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {
 
     // The fake transcriber: what it was sent, and the text it answers.
     std::vector<lake::api::TranscriptionRequest> heard;
-    t.transcriber = [&heard](const lake::api::TranscriptionRequest& request)
+    t.transcriber = [&heard, &silence](const lake::api::TranscriptionRequest& request)
         -> std::expected<lake::api::Transcription, lake::api::ApiError> {
         heard.push_back(request);
-        if (request.audio == "silence") {
+        if (request.audio == silence) {
             return std::unexpected(
                 lake::api::ApiError{"engine_error", "OpenAI could not transcribe the audio"});
         }
@@ -892,12 +919,12 @@ TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {
                     {"seconds", 42.5},
                     {"model", "gpt-4o-transcribe"}}));
     ASSERT_EQ(heard.size(), 1U);
-    EXPECT_EQ(heard[0].audio, "speech");
+    EXPECT_EQ(heard[0].audio, speech);
     EXPECT_EQ(heard[0].file_name, "memo.webm");
     EXPECT_EQ(heard[0].mime, "audio/webm");
     EXPECT_EQ(heard[0].language, "en");
     const auto failing = t.call(
-        first, "transcribe", in(first, 0, {{"name", "x.wav"}, {"audio_base64", "c2lsZW5jZQ=="}}));
+        first, "transcribe", in(first, 0, {{"name", "x.wav"}, {"audio_base64", test_base64_encode(silence)}}));
     EXPECT_EQ(failing.error.code, "engine_error");
     // A text file is refused before it reaches the speech service (lake#594).
     const std::size_t sent_before = heard.size();

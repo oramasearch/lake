@@ -262,6 +262,8 @@ native agents still answer within the call (a follow-up).
 
 `agent_turn` delivers one message to any agent and returns its answer:
 
+**A confirmation is a person's** (LSR-183, lake#989). `context.confirmed_proposal` sent with an agent's own credential (an `agent_task`, `agent_launch`, `agent_schedule` or `agent_service` credential) is `unauthorized`, and `context.confirmed_promotion` from one grants no promotion scopes. Only a turn a person starts can confirm.
+
 | Agent | Where the turn goes | What it is handed |
 |---|---|---|
 | **Ask Orama** (`agent-ask-orama`) | its service, `LAKE_AGENT_ENDPOINTS` | a key for this turn derived from the person's credential, carrying **every read capability and `agent_turn`, never an action**, and `lake_url` |

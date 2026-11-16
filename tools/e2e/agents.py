@@ -52,14 +52,23 @@ def api(method, capability, body=None):
         return json.loads(error.read() or b"{}")
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
 def app_answers(url):
-    request = urllib.request.Request(
-        url, method="GET", headers={"Authorization": token, "User-Agent": "lake-e2e-agents"})
+    """Whether an app host serves the app, without ever sending it a Lake credential (lake#1058):
+    a public app answers 2xx with a body; a private one sends an anonymous visitor to Lake's
+    /apps/authorize handoff, which shows its ingress and forward auth are in place."""
+    request = urllib.request.Request(url, method="GET", headers={"User-Agent": "lake-e2e-agents"})
+    opener = urllib.request.build_opener(_NoRedirect)
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
+        with opener.open(request, timeout=60) as response:
             return 200 <= response.status < 300 and bool(response.read())
-    except urllib.error.HTTPError:
-        return False
+    except urllib.error.HTTPError as error:
+        location = error.headers.get("Location", "")
+        return error.code in (302, 303, 307) and "/apps/authorize" in location
 
 
 def turn(agent, message, kind="api", context=None, budget=330, extra=None):

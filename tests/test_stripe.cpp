@@ -464,6 +464,22 @@ TEST(StripeClient, FormsCentsAndEvents) {
     EXPECT_TRUE(other->state.empty() && other->provider_status.empty());
     EXPECT_FALSE(parse("not json"));
     EXPECT_FALSE(parse(R"({"type":"invoice.paid"})"));
+
+    // Marked paid in Stripe without a payment (lake#1033): the invoice stays due, recorded.
+    json out_of_band = json::parse(event("evt_5", "invoice.paid", "in_9"));
+    out_of_band["data"]["object"]["paid_out_of_band"] = true;
+    const auto marked = parse(out_of_band.dump());
+    ASSERT_TRUE(marked);
+    EXPECT_EQ(marked->state, "");
+    EXPECT_EQ(marked->provider_status, "paid_out_of_band");
+    // Nor does it activate an order.
+    json order = out_of_band;
+    order["data"]["object"]["subscription_details"] = {{"metadata", {{"lake_order_id", "o-1"}}}};
+    order["data"]["object"]["subscription"] = "sub_1";
+    const auto order_notice = parse(order.dump());
+    ASSERT_TRUE(order_notice);
+    EXPECT_FALSE(order_notice->order_subscription.has_value());
+    EXPECT_EQ(order_notice->provider_status, "paid_out_of_band");
 }
 
 // Whose invoice an event is about, in a Stripe account shared with Cloud v1 and other Lakes

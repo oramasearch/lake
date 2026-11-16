@@ -104,12 +104,17 @@ workspace instead; that is not built.
 
 `gpt-4o-transcribe`, the default model, reports tokens, not seconds, so lake measures the audio it
 is about to send (`audio_duration_seconds`, `src/api/audio_duration.cpp`, lake#658), from the
-container's own bytes and never by guessing: WAV (the data chunk over the byte rate), FLAC
+container's own bytes and never by guessing: WAV (every byte after the data chunk's header, over the
+smaller of the declared byte rate and the one its sample format implies, so a header cannot shorten
+it), FLAC
 (STREAMINFO), Ogg Opus and Vorbis (the last page's granule position), WebM and Matroska (the
 segment's Duration, or for a browser's recording without one the latest block's time), MP4 and M4A
 (the movie header, or a fragmented recording's summed sample durations) and MP3 (a Xing, Info or
-VBRI frame count, else the bit rate). The model's own figure wins when it reports one. A recording
-lake cannot read counts no speech; its audit event says `speech_seconds: null`.
+VBRI frame count, else the bit rate). **The longer of the model's figure and lake's is billed**, and
+a recording whose length lake cannot read is **refused** (`invalid_input`) before the model is called
+(LSR-112, lake#979). Before that, the model's figure won and an unreadable recording counted no
+speech, so speech-to-text could run on the platform key unbilled. Per-account rate limits and a spend
+check before the call are not built.
 
 ## The audio is never kept
 

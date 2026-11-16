@@ -3848,6 +3848,12 @@ std::string application_turn_kind(const json& input) {
 // app also needs `context.confirm_public`. Answers the proposal the turn carries.
 liquid::runtime::task<ApiResult>
 verified_confirmed_proposal(const json& input, ApiContext& context, std::string_view agent) {
+    // A confirmation is a person's (LSR-183, lake#989): an agent's credential can never confirm
+    // a proposal, however it got the proposal's id and digest.
+    if (context.credential_kind.starts_with("agent_")) {
+        co_return ApiResult::failure(
+            "unauthorized", "a proposal is confirmed by a person, not an agent", "/context");
+    }
     const bool experiments = agent == "agent-experiments";
     // An Application Agent proposal is confirmed by a turn of the kind that proposed it: app,
     // repair or change (lake#1207).
@@ -7432,7 +7438,9 @@ void register_agent_run_capabilities(Registry& registry) {
                         scopes.insert(scopes.end(), {"get_study", "get_study_analysis"});
                         const json confirmed =
                             body["context"].value("confirmed_promotion", json());
-                        if (confirmed.is_object() && confirmed.value("confirm", false) &&
+                        // Only a person's turn carries a promotion confirmation (lake#989).
+                        if (!context.credential_kind.starts_with("agent_") &&
+                            confirmed.is_object() && confirmed.value("confirm", false) &&
                             confirmed.value("promotion", json()).is_object()) {
                             scopes.push_back("workspace_act");
                             scopes.push_back("promote_trial");

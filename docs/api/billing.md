@@ -358,6 +358,7 @@ audit log at will.
    | Event | Lake invoice | `provider_status` |
    |---|---|---|
    | `invoice.paid` | `due` → `paid` (`paid_at`) | `paid` |
+   | `invoice.paid` with `paid_out_of_band: true` | unchanged (`due`): marked paid in Stripe without a payment, which anything else with a key for the account can do (lake#1033); it never activates an order either | `paid_out_of_band`, for an operator to review |
    | `invoice.payment_failed` | stays `due` | `payment_failed` |
    | `invoice.voided` | `due` → `void` (`voided_at`, note "Voided in Stripe") | `void` |
 
