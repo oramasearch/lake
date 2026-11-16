@@ -12,7 +12,8 @@ commit plus a SHA-256 digest for every file.
 an unreviewed addition or removal. `tools/ui/build-tokens.mjs` is dependency-free Node and writes
 the same token layer twice:
 
-- `frontend/src/styles/tokens.css`, which the web app imports;
+- `frontend/src/styles/tokens.css`, which the web app imports, under the
+  `/* SPDX-License-Identifier: MIT */` line every source file carries (`tools/spdx-headers.py`);
 - `src/api/web_ui_tokens.inc`, the server's copy, still used by the pages lake renders itself
   (an identity application's hosted sign-in pages).
 
@@ -169,7 +170,7 @@ no smooth scrolling.
 
 ## Contrast proof
 
-`node tools/ui/check-contrast.mjs` (CTest `lake-ui-contrast`) resolves the committed generated tokens (`src/api/web_ui_tokens.inc`, identical to `tokens.css`) and fails if normal text
+`node tools/ui/check-contrast.mjs` (CTest `lake-ui-contrast`) resolves the committed generated tokens (`src/api/web_ui_tokens.inc`, identical to `tokens.css` but for its licence line) and fails if normal text
 or semantic status text is below 4.5:1, or if a focus indicator or strong boundary is below 3:1.
 The current output is:
 

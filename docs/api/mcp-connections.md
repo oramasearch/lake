@@ -76,7 +76,7 @@ address its name resolves to must be public: loopback, private (RFC 1918, unique
 (the cloud metadata address `169.254.169.254` included), carrier-grade NAT, multicast and reserved
 addresses are refused, also through IPv4-mapped, NAT64 and 6to4 IPv6, so a connection cannot reach
 Lake's own network (its Postgres, the workspace Zettas). An IPv6 address is public only inside
-global unicast (`2000::/3`), never Teredo, benchmarking, ORCHID or documentation space (LSR-265,
+global unicast (`2000::/3`), never Teredo, benchmarking, ORCHID or documentation ranges (LSR-265,
 lake#1008), so IPv4-compatible, local-use NAT64 and site-local forms are refused too. The check runs on the addresses actually
 connected to, after resolution, so a name that resolves to a private address is refused however it
 was spelled. A Lake started with `LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1` (local development and tests

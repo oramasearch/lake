@@ -129,6 +129,11 @@ constexpr std::array environment = {
         false,
         false,
         "HTTP(S) origin for repository commands (default https://$LAKE_PUBLIC_HOST)"},
+    EnvironmentVariable{"LAKE_GIT_IMPORT_ROOT",
+                        false,
+                        false,
+                        "Staging root import_github_repository reads, one folder per customer "
+                        "(lake#925)"},
     EnvironmentVariable{"LAKE_HOST_ALIASES", false, false, "Other hosts that are this Lake; browser pages there redirect to LAKE_PUBLIC_HOST (lake#1136)"},
     EnvironmentVariable{"LAKE_HTTP_HEADER_TIMEOUT_SECONDS",
                         false,

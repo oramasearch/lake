@@ -56,6 +56,8 @@ constexpr std::array central = std::to_array<std::string_view>({
     "configure_recovery_contact",
     "convert_personal_space",
     "copy_workspace_records",
+    // An ACME account binding is a credential of the customer's certificate authority (lake#919).
+    "create_acme_external_account_binding",
     // A browser key is a credential, kept with the others in the control plane (lake#1152).
     "create_browser_key",
     // Coupon codes are billing, in the control plane (lake#1156).

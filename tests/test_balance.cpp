@@ -1567,6 +1567,7 @@ TEST(PaidWorkContract, EveryCapabilityThatStartsPaidWorkIsMarked) {
         {"create_encryption_key", "a key record"},
         {"create_federation_issuer", "a configuration"},
         {"create_pki_authority", "a credential"},
+        {"create_acme_external_account_binding", "a credential (lake#919)"},
         {"create_secret_mount", "a secret record"},
         {"create_application_organization", "an identity"},
         {"create_application_webhook", "a configuration"},
