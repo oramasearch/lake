@@ -3817,6 +3817,18 @@ TEST(AgentRuns, EachPersonTalksToAPythonAgentThroughTheirOwnLaunch) {
     ASSERT_TRUE(theirs.ok) << theirs.error.message;
     ASSERT_EQ(r.agents.turns.size(), before + 2);
     EXPECT_EQ(std::get<0>(r.agents.turns.back()), "http://al-admin:8080");
+    // agent-runtime#14: each launch is called with its own token, never the Lake's, which every
+    // library agent accepts.
+    EXPECT_EQ(std::get<1>(r.agents.turns.back()),
+              lake::control::agent_launch_service_token("service-token", admin_launch));
+    EXPECT_EQ(std::get<1>(r.agents.turns[before]),
+              lake::control::agent_launch_service_token("service-token", writer_launch));
+    EXPECT_NE(std::get<1>(r.agents.turns.back()), "service-token");
+    EXPECT_NE(std::get<1>(r.agents.turns.back()), std::get<1>(r.agents.turns[before]));
+    // The operator derives the same value (orama-operator launchServiceToken): HMAC-SHA256 of
+    // "agent-launch:<launch id>" keyed by the Lake's token, in hex.
+    EXPECT_EQ(lake::control::agent_launch_service_token("k", "al-1"),
+              "c5447490ca4b85399ec15e9025cdf93a5390197f3e3aea8bf66120e91411da6c");
 
     // The writer's launch acts as the writer, never as the administrator.
     const auto acting = r.store.context_for(writer_credential);

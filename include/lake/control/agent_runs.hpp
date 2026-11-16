@@ -110,6 +110,13 @@ AgentLaunchProgress agent_launch_progress(const AgentLaunch& launch,
 // A store timestamp, YYYY-MM-DDTHH:MM:SSZ, as a time point; nothing when it is not one.
 std::optional<std::chrono::sys_seconds> utc_seconds(std::string_view text);
 
+// The bearer lake presents to one person's service launch (agent-runtime#14): hex
+// HMAC-SHA256 of "agent-launch:<launch id>" keyed by the Lake's agent service token
+// (LAKE_AGENT_SERVICE_TOKEN). The Orama operator gives the launch the same value as its
+// AGENT_SERVICE_TOKEN, so the person's code in that pod never holds the Lake's token, which every
+// library agent accepts, and one launch's token does not open another.
+std::string agent_launch_service_token(std::string_view lake_token, std::string_view launch_id);
+
 // One turn to an agent's service: POST <endpoint>/v1/turn with the service token as bearer.
 // Injected so tests need no HTTP server.
 class AgentCaller {
