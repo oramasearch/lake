@@ -33,8 +33,7 @@ protected:
         } else {
             store = std::make_shared<lake::control::InMemoryStore>();
         }
-        const auto user =
-            store->create_user({"taap:1:ed25519:lease-owner", "lease@example.test", "Owner"});
+        const auto user = store->create_user({owner_taap, "lease@example.test", "Owner"});
         ASSERT_TRUE(user);
         const auto customer = store->create_customer({"individual", user->id, "", "lease-owner"});
         ASSERT_TRUE(customer);
@@ -42,6 +41,7 @@ protected:
         ASSERT_TRUE(workspace);
         customer_id = customer->id;
         workspace_id = workspace->id;
+        user_id = user->id;
         const auto task = store->create_agent_task({.customer_id = customer_id,
                                                     .agent = "agent-project",
                                                     .kind = "solution:lease-project",
@@ -147,7 +147,53 @@ protected:
         return completed->ok ? completed->value.at("events") : json::array();
     }
 
-    std::string uri, customer_id, workspace_id, task_id;
+    // The operator's half of a launch or schedule: it writes the credential's digest (lake#231).
+    void report_launch_credential(const std::string& launch_id, const std::string& credential) {
+        const std::string digest = lake::control::identity_crypto::sha256_hex(credential);
+        if (auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store.get())) {
+            ASSERT_TRUE(memory->set_agent_launch_status(launch_id, "Running", "", "", digest));
+            return;
+        }
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO agent_launch_status (launch_id, phase, credential_sha256) "
+                       "VALUES ($1::uuid, 'Running', $2)",
+                       launch_id,
+                       digest);
+        tx.commit();
+    }
+
+    void report_schedule_credential(const std::string& schedule_id, const std::string& credential) {
+        const std::string digest = lake::control::identity_crypto::sha256_hex(credential);
+        if (auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store.get())) {
+            ASSERT_TRUE(memory->set_agent_cron_schedule_status(schedule_id, "Ready", "", digest));
+            return;
+        }
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO agent_cron_schedule_status (schedule_id, phase, "
+                       "credential_sha256) VALUES ($1::uuid, 'Ready', $2)",
+                       schedule_id,
+                       digest);
+        tx.commit();
+    }
+
+    lake::control::AgentLaunch launch_in(const std::string& workspace) {
+        const auto launch = store->create_agent_launch({.customer_id = customer_id,
+                                                        .agent_id = "a-1",
+                                                        .agent_name = "Watcher",
+                                                        .mode = "job",
+                                                        .trigger = "manual",
+                                                        .scopes = {"server_info"},
+                                                        .created_by_user_id = user_id,
+                                                        .created_by_taap_id = owner_taap,
+                                                        .workspace_id = workspace});
+        EXPECT_TRUE(launch) << launch.error().message;
+        return launch ? *launch : lake::control::AgentLaunch{};
+    }
+
+    std::string uri, customer_id, workspace_id, task_id, user_id;
+    const std::string owner_taap = "taap:1:ed25519:lease-owner";
     std::filesystem::path directory;
     std::shared_ptr<lake::control::Store> store;
     std::shared_ptr<lake::test::StreamCaller> caller = std::make_shared<lake::test::StreamCaller>();
@@ -586,6 +632,68 @@ TEST_P(AgentLeases, ADispatchEventCarriesIdsOnlyNotTheTasksKind) {
         }
     }
     EXPECT_TRUE(found);
+}
+
+// lake#1311: deleting a workspace withdraws everything acting for it. Its launches, schedules and
+// unfinished tasks become absent in the deletion's transaction, so their credentials stop, while
+// the same person's launch in another workspace keeps running.
+TEST_P(AgentLeases, DeletingAWorkspaceStopsItsAgentCredentials) {
+    const auto claimed = call("claim_agent_task", json::object());
+    ASSERT_TRUE(claimed.ok) << claimed.error.message;
+    const std::string task_credential = claimed.value["body"]["lake_token"];
+    ASSERT_TRUE(store->context_for(task_credential));
+
+    const auto launch = launch_in(workspace_id);
+    const std::string launch_credential = "lal." + launch.id + ".0123456789abcdef0123456789abcdef";
+    report_launch_credential(launch.id, launch_credential);
+    ASSERT_TRUE(store->context_for(launch_credential));
+
+    const auto schedule = store->create_agent_cron_schedule({.customer_id = customer_id,
+                                                             .agent_id = "a-1",
+                                                             .agent_name = "Watcher",
+                                                             .cron = "0 9 * * 1",
+                                                             .scopes = {"server_info"},
+                                                             .created_by_user_id = user_id,
+                                                             .created_by_taap_id = owner_taap,
+                                                             .workspace_id = workspace_id});
+    ASSERT_TRUE(schedule) << schedule.error().message;
+    const std::string schedule_credential =
+        "las." + schedule->id + ".0123456789abcdef0123456789abcdef";
+    report_schedule_credential(schedule->id, schedule_credential);
+    ASSERT_TRUE(store->context_for(schedule_credential));
+
+    const auto other = store->create_workspace({customer_id, "elsewhere", "dev", ""});
+    ASSERT_TRUE(other) << other.error().message;
+    const auto kept = launch_in(other->id);
+    const std::string kept_credential = "lal." + kept.id + ".fedcba9876543210fedcba9876543210";
+    report_launch_credential(kept.id, kept_credential);
+
+    const auto deleted = store->delete_workspace_cascade({workspace_id, owner_taap, {}});
+    ASSERT_TRUE(deleted) << deleted.error().message;
+
+    EXPECT_FALSE(store->context_for(task_credential)) << "the task's credential stops";
+    EXPECT_FALSE(store->context_for(launch_credential)) << "the launch's credential stops";
+    EXPECT_FALSE(store->context_for(schedule_credential)) << "the schedule's credential stops";
+    EXPECT_TRUE(store->context_for(kept_credential)) << "another workspace's launch keeps acting";
+
+    const auto stopped = store->get_agent_launch(launch.id);
+    ASSERT_TRUE(stopped);
+    EXPECT_EQ(stopped->desired, "absent");
+    EXPECT_EQ(stopped->stop_reason, "Stopped: the workspace was deleted.");
+    EXPECT_EQ(stopped->generation, launch.generation + 1);
+    const auto unscheduled = store->get_agent_cron_schedule(schedule->id);
+    ASSERT_TRUE(unscheduled);
+    EXPECT_EQ(unscheduled->desired, "absent");
+    EXPECT_EQ(unscheduled->generation, schedule->generation + 1);
+    const auto task = store->get_agent_task(task_id);
+    ASSERT_TRUE(task);
+    EXPECT_EQ(task->desired, "absent");
+    EXPECT_EQ(task->phase, "Failed");
+    EXPECT_EQ(task->message, "Stopped: the workspace was deleted.");
+    EXPECT_FALSE(task->finished_at.empty());
+    const auto running = store->get_agent_launch(kept.id);
+    ASSERT_TRUE(running);
+    EXPECT_EQ(running->desired, "present");
 }
 
 TEST(AgentBusKeys, AFileNameNamesTheAgentAndItsBoundWorkspace) {

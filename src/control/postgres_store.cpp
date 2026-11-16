@@ -4388,6 +4388,8 @@ public:
             tx.exec_params("DELETE FROM store_mounts m USING stores s WHERE s.id = m.store_id "
                            "AND s.workspace_id = $1::uuid",
                            request.workspace_id);
+            // Nothing acts for a deleted workspace any more (lake#1311).
+            withdraw_workspace_agents(tx, request.workspace_id);
             const auto inserted = tx.exec_params(
                 std::string("INSERT INTO workspace_deletions (workspace_id, customer_id, "
                             "workspace_name, requested_by, repositories, apps, builds, images) "
@@ -6013,6 +6015,39 @@ public:
             "'Stopped: the account that requested this task is disabled.' ELSE ts.notice END, "
             "finished_at = coalesce(ts.finished_at, now()), updated_at = now()",
             user_id);
+        for (const pqxx::result* rows : {&launches, &schedules}) {
+            for (const pqxx::row& row : *rows) {
+                tx.exec_params("SELECT pg_notify('lake_services', $1)", row[0].as<std::string>());
+            }
+        }
+    }
+
+    // lake#1311: a deleted workspace's agent launches, schedules and tasks are withdrawn in the
+    // deletion's transaction, as revoke_agent_delegations does for a disabled account, so their
+    // credentials stop authenticating and the operator stops their workloads.
+    static void withdraw_workspace_agents(pqxx::work& tx, const std::string& workspace_id) {
+        const auto launches = tx.exec_params(
+            "UPDATE agent_launches SET desired = 'absent', generation = generation + 1, "
+            "stop_reason = 'Stopped: the workspace was deleted.', updated_at = now() "
+            "WHERE workspace_id = $1::uuid AND desired = 'present' RETURNING id::text",
+            workspace_id);
+        const auto schedules = tx.exec_params(
+            "UPDATE agent_cron_schedules SET desired = 'absent', generation = generation + 1, "
+            "updated_at = now() WHERE workspace_id = $1::uuid AND desired = 'present' "
+            "RETURNING id::text",
+            workspace_id);
+        tx.exec_params(
+            "WITH withdrawn AS (UPDATE agent_tasks SET desired = 'absent' "
+            "WHERE workspace_id = $1::uuid AND desired = 'present' RETURNING id) "
+            "INSERT INTO agent_task_status AS ts (task_id, phase, notice, finished_at) "
+            "SELECT id, 'Failed', 'Stopped: the workspace was deleted.', now() FROM withdrawn "
+            "ON CONFLICT (task_id) DO UPDATE SET credential_sha256 = '', lease_until = NULL, "
+            "retry_notice_pending = false, "
+            "phase = CASE WHEN ts.phase IN ('', 'Running') THEN 'Failed' ELSE ts.phase END, "
+            "notice = CASE WHEN ts.phase IN ('', 'Running') THEN "
+            "'Stopped: the workspace was deleted.' ELSE ts.notice END, "
+            "finished_at = coalesce(ts.finished_at, now()), updated_at = now()",
+            workspace_id);
         for (const pqxx::result* rows : {&launches, &schedules}) {
             for (const pqxx::row& row : *rows) {
                 tx.exec_params("SELECT pg_notify('lake_services', $1)", row[0].as<std::string>());
