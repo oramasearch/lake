@@ -205,6 +205,7 @@ const std::vector<std::pair<std::string_view, std::string_view>>& calls_only_cap
         {"create_organization", "an account"},
         {"create_organization_space", "an account"},
         {"create_pki_authority", "a key record"},
+        {"create_acme_external_account_binding", "a credential derived, not stored (lake#919)"},
         {"create_secret_mount", "a secret mount record"},
         {"create_team", "a membership record"},
         {"create_token", "a credential"},

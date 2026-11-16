@@ -127,7 +127,7 @@ void log_database_diagnostic(std::string_view code, std::string_view message) {
     std::println(stderr, "{}", entry.dump());
 }
 
-constexpr std::array<ErrorCode, 40> documented_error_codes{{
+constexpr std::array<ErrorCode, 42> documented_error_codes{{
     {"invalid_input", 400, "The input is at fault; `path` points at the field."},
     {"secret_required",
      400,
@@ -148,6 +148,12 @@ constexpr std::array<ErrorCode, 40> documented_error_codes{{
      "`help` links to the page that makes a new key."},
     {"unauthorized", 403, "The credential is valid but does not grant this call on this object."},
     {"mfa_required", 403, "The account must finish multi-factor verification first."},
+    {"external_account_required",
+     403,
+     "An ACME account needs a valid External Account Binding for this customer (lake#919)."},
+    {"incorrect_response",
+     403,
+     "The ACME HTTP-01 challenge URL did not answer the challenge's key authorization (lake#919)."},
     {"identity_proof_required",
      403,
      "An identity document becomes an account's identity only with a fresh signature by its key: "
