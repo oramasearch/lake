@@ -627,3 +627,6 @@ linked in device notices. Migration `0096_email_recovery_limits` awaits operator
 Recurring order entitlement (lake#972): [orders.md](orders.md#recurring-entitlement-lake972) describes signed renewal/end events, deadline-based grace and the required operator suspension contract.
 
 Password, MFA and recovery entry points share [authentication attempt limits](identity.md#authentication-attempt-limits) across REST, hosted forms and MCP (lake#966).
+
+Repository visibility (lake#1310): `set_repository_visibility` needs `admin` on the repository or
+its account; a writer is refused. See [repositories.md](repositories.md#public-repositories).

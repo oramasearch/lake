@@ -5313,7 +5313,8 @@ void register_repository_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "set_repository_visibility",
         .title = "Set repository visibility",
-        .description = "Set a live repository to private, organization, or public.",
+        .description = "Set a live repository to private, organization, or public. Needs admin "
+                       "on the repository or its account.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"id", {{"type", "string"}}},
@@ -5325,7 +5326,9 @@ void register_repository_capabilities(Registry& registry) {
         .output_schema = repository_schema(),
         .kind = CapabilityKind::Action,
         .object = "repository",
-        .action = "write",
+        // Publishing takes the repository out of the account's control, so it needs admin, as
+        // branch protection and replication do; a writer is refused (lake#1310).
+        .action = "admin",
         .resolve_object = entity_object("repository", "id"),
         .handler = [](const json& in, ApiContext& ctx) {
             return ctx.store ? one_result(ctx.store->set_repository_visibility(in.at("id"),

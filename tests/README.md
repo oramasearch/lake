@@ -1086,3 +1086,7 @@ schedules are flagged `recreate`. See [agent-launches.md](../docs/api/agent-laun
 `WebApps.OperatorHashesRestrictEveryPurposeAndRotationRevokesOldTokens` check lake#1070: with an
 operator that reports no generation, rotation clears the hashes; with one that does, it leaves them
 and the unacknowledged generation revokes them until the operator writes the next.
+`Repositories.OnlyAnAdministratorChangesVisibility` gives one identity `write` and another `admin`
+on a private repository: the writer can rename it but `set_repository_visibility` answers
+`unauthorized` and the repository stays private, while the administrator makes it public
+(lake#1310).
