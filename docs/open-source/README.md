@@ -46,7 +46,7 @@ trufflehog git "file://$PWD" --json --no-update > trufflehog.jsonl
 
 Keep the reports out of the tree: an unredacted finding is the secret itself.
 
-Run on 2026-11-15 (1,554 commits; gitleaks 8 rules, trufflehog 3.99.9 with verification):
+Run on 2026-11-15 (1,554 commits; gitleaks 8.30.1, trufflehog 3.99.9 with verification):
 gitleaks reported 44 findings, 11 distinct values in 11 files; trufflehog reported 9, none
 verified. Every one is a fixture or not a secret:
 
