@@ -1,6 +1,5 @@
 # This workflow is commented out: lake has no hosted CI. The proof of a change is the local
-# suite (docs/build/local.md) and the Linux lane; see docs/build/ci.md. Uncomment every line
-# below to restore it.
+# suite (docs/build/local.md) and the Linux lane. Uncomment every line below to restore it.
 #
 # name: ci
 #
