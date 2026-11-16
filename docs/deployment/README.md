@@ -1,6 +1,6 @@
 # Deployment
 
-- **[Edge certificates for app hosts](edge-certificates.md) (human action, Steve, open):** Advanced Certificate
+- **[Edge certificates for app hosts](edge-certificates.md) (human action, Steve, done 2026-10-26):** Advanced Certificate
   Manager on `lake.live` and `oramadev.net` and the two zone tokens' permissions, so `<app>.<lake host>` gets an edge
   certificate and the `lake.live` zone settings apply (lake#798, a production degradation).
 - [White-label sign-in](white-label-sign-in.md): sign-in on a Lake that serves a customer's own
