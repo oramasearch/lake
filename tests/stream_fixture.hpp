@@ -200,6 +200,32 @@ public:
         }
         co_return fail("unknown_capability");
     }
+
+    // Zetta-Dataset-Scope (lake#1055): each scoped call's capability and header value. With
+    // `enforces_dataset_scope`, server_info under a scope is refused as zetta#1515 refuses it;
+    // without it the call is answered like any other, as a Zetta that does not know the header.
+    bool enforces_dataset_scope = false;
+    std::vector<std::pair<std::string, std::string>> scoped;
+
+    liquid::runtime::task<control::ZettaControlResult<json>>
+    scoped_call(std::string url, std::string token, std::string capability, bool read, json input,
+                std::string scope) override {
+        bool refuse = false;
+        {
+            std::lock_guard lock(mutex);
+            scoped.emplace_back(capability, scope);
+            refuse = enforces_dataset_scope && capability == "server_info";
+        }
+        if (refuse) {
+            co_return control::ZettaControlResult<json>(std::unexpected(control::ZettaControlError{
+                "unauthorized",
+                "'server_info' cannot run under a dataset scope",
+                "",
+                {{"dataset_scope", scope}, {"datasets_read", nullptr}}}));
+        }
+        co_return control::settled(co_await call(
+            std::move(url), std::move(token), std::move(capability), read, std::move(input)));
+    }
 };
 
 struct StreamWorkspace {

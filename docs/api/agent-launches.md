@@ -100,9 +100,9 @@ area on the credential itself:
   scopes never change. `<database>/<name>` and `<database>.<name>` are the same dataset; a bare
   `<name>` is `datasets/<name>`, Lake's default database. An empty or malformed dataset work area
   gives the one scope `dataset:`, which confines the run to no dataset. An agent whose definition
-  is in a Lake repository also gets `agent_definition:<repository id>@<revision>`. No migration:
-  the scopes are the row's existing `scopes`. A launch or schedule made before this change keeps
-  its scopes until it is made again.
+  is in a Lake repository also gets `agent_definition:<repository id>@<revision>`. Every row Lake
+  makes from an agent's record also carries `work_area_recorded`. No migration: the scopes are the
+  row's existing `scopes`.
 - **Only what can be shown to stay inside is allowed**, at dispatch (`work_area_refusal` in
   `src/api/registry.cpp`), for named capabilities and for the generic `workspace_query`,
   `workspace_act` and `workspace_sql` routes, and so for `/workspaces/<customer>/zetta/v1/...`,
@@ -116,13 +116,61 @@ area on the credential itself:
   `<datasets>`; `<capability>` cannot be shown to stay inside that work area*. The model gateway
   and usage reports verify their own credential and are not affected.
 
-Verify: `AgentWorkArea.ADatasetWorkAreaBecomesCanonicalScopes` and
-`Streams.ADatasetConfinedLaunchCredentialStaysInItsWorkArea` (tests/test_streams.cpp).
+- **A query is the engine's to confine** ([zetta#1515](https://github.com/oramasearch/zetta/issues/1515)).
+  A read-only `workspace_sql` (also `/workspaces/<customer>/zetta/v1/sql`) of a credential with a
+  work area of at least one dataset, and that holds `workspace_sql`, is not refused by Lake. Lake
+  sends it to the workspace Zetta with the header `Zetta-Dataset-Scope: <database>/<name>, ...`,
+  and the engine runs it only when every table it reads is in the work area. Its refusal is
+  `unauthorized` with `details.datasets_read` and `details.outside`, passed back as the engine
+  wrote it. Lake sends the query only to an engine that enforces the header: before the first
+  scoped call to a workspace Zetta (and again 30 seconds later, and whenever the service's
+  generation or address changes) it calls `server_info` under a scope, which an enforcing engine
+  refuses with `details.dataset_scope` and an older one answers. On an older engine the query is
+  `unauthorized` (*this workspace's engine cannot confine sql to a work area yet*) and is never
+  sent, so a Zetta that ignores the header never runs it unconfined. A scoped call is never
+  answered from, or kept in, Lake's definitions cache. No launch is granted `workspace_sql` today
+  (no skill reads it), so this is the path a query takes once one is.
+- **`list_datasets` and `get_dataset` carry the header too**
+  ([zetta#1519](https://github.com/oramasearch/zetta/issues/1519)): the engine answers only the
+  scope's datasets for `list_datasets`, and reads only the one dataset `get_dataset` names. Lake
+  still confines both itself, as above, so they are checked twice. A confined `get_dataset` always
+  goes with its `database` named beside `dataset` (the engine refuses a bare name under a scope),
+  and Lake refuses one without it rather than send it. On an engine that does not enforce the
+  header, these two are sent without it, as before, since Lake's own check stands alone there;
+  only `sql` is refused on such an engine (`control::engine_must_enforce_dataset_scope`).
+- **The other calls Lake proves inside go without the header.** Under a scope the engine refuses
+  every capability that does not declare what it reads (everything but `sql`, `list_datasets` and
+  `get_dataset`), so `workspace_openapi`, `get_agent` and the definition's repository reads are
+  checked by Lake as above and sent as before. The engine capabilities that carry the header are
+  `control::engine_checks_dataset_scope`; when the engine declares the reads of another, it is
+  added there, and its refusal above is lifted in the same change if Lake refuses it. The engine
+  keeps `score`, `explain`, `analyze_dataset`, `plan_features`, the dataset writes and the
+  pipeline actions refused under a scope, and so does Lake.
+- **Runs made before this change are re-created or flagged.** A launch, schedule or conversation
+  service whose scopes lack `work_area_recorded` was made before Lake confined runs to their work
+  area and may hold broader scopes than its agent allows; its scopes cannot change. Decided under
+  Steve's 2026-11-14 delegation, taking the recommendation on lake#1055 (re-create them): Lake
+  re-creates what it owns, and flags what a person owns.
+  - A person's conversation service (`agent_turn` to a Python agent) whose scopes are not the ones
+    the agent's record gives now is withdrawn on their next turn and a new one started; the turn
+    answers `starting`, as for a first turn.
+  - `list_agent_launches` answers `recreate: true` for a present service, or an unfinished job,
+    made before the change, and `list_agent_schedules` for a present schedule. Launch the agent
+    again (and stop the old run), or make the schedule again (and remove the old one).
 
-Not enforced by Lake: the engine's own reads of a dataset inside a `workspace_act` capability
-(for example a run started on an allowed table that joins another) are refused today only because
-every action is refused in a dataset work area; allowing actions there needs the engine to report
-which datasets an action reads (an index's database-qualified source, zetta).
+Verify: `AgentWorkArea.ADatasetWorkAreaBecomesCanonicalScopes`,
+`Streams.ADatasetConfinedLaunchCredentialStaysInItsWorkArea` and
+`Streams.ADatasetConfinedLaunchQueriesOnlyUnderTheEnginesDatasetScope` (tests/test_streams.cpp);
+`Workspaces.ADatasetScopedCallRunsOnlyWhereTheEngineEnforcesTheScope`,
+`Workspaces.ZettaCallerSendsTheDatasetScopeHeader`,
+`Workspaces.DatasetScopeHelpersNameTheWorkAreaAndTheEnginesRefusal` and
+`AgentRuns.RunsMadeBeforeWorkAreasAreRecreatedOrFlagged` (tests/test_workspaces.cpp).
+
+Not enforced yet: the engine's own reads of a dataset inside a `workspace_act` capability (for
+example a run started on an allowed table that joins another) are refused today only because every
+action is refused in a dataset work area; allowing actions there needs the engine to declare which
+datasets an action reads under `Zetta-Dataset-Scope` (zetta#1515 and zetta#1519 declare `sql`,
+`list_datasets` and `get_dataset` only).
 
 ## Schedules
 

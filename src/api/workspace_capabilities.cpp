@@ -60,6 +60,15 @@ call_workspace(ApiContext& context,
                 std::unexpected(control::ZettaControlError{"invalid_input", std::move(problem)}));
         }
     }
+    // A dataset-confined credential (lake#1055): an engine call the workspace Zetta can check
+    // (sql, list_datasets, get_dataset) carries the work area wherever the engine enforces it,
+    // and sql runs nowhere else. Lake proves every other call it lets such a credential make
+    // (registry.cpp, work_area_refusal) and sends it as before, since the engine refuses a
+    // capability that does not declare its reads.
+    std::optional<std::vector<std::string>> dataset_scope;
+    if (control::engine_checks_dataset_scope(capability)) {
+        dataset_scope = control::dataset_work_area(context.scopes);
+    }
     const auto timing = context.workspace_call_timing;
     const std::size_t round = timing
         ? timing->completed_rounds.load(std::memory_order_relaxed) + 1 : 0;
@@ -76,7 +85,7 @@ call_workspace(ApiContext& context,
                     completed, round, std::memory_order_relaxed)) {
                 }
             }
-        }, context.cache_workspace_definitions);
+        }, context.cache_workspace_definitions, std::move(dataset_scope));
     if (!completed) {
         co_return std::unexpected(completed.error());
     }
@@ -3492,7 +3501,12 @@ json launch_json(const control::AgentLaunch& launch) {
             {"exit_code", launch.exit_code ? json(*launch.exit_code) : json(nullptr)},
             {"result", launch.result},
             {"created_at", launch.created_at},
-            {"created_by_taap_id", launch.created_by_taap_id}};
+            {"created_by_taap_id", launch.created_by_taap_id},
+            // Made before Lake confined runs to their dataset work area (lake#1055): its scopes
+            // may be broader than its agent allows until it is launched again.
+            {"recreate",
+             launch.desired == "present" && !control::records_work_area(launch.scopes) &&
+                 (launch.mode == "service" || !launch.exit_code)}};
 }
 
 // A background turn as callers see it (lake#269). A finished Project Agent proposal names the
@@ -3798,7 +3812,11 @@ json schedule_json(const control::AgentCronSchedule& schedule) {
             {"message", progress.message},
             {"last_schedule_at", schedule.last_schedule_at},
             {"created_at", schedule.created_at},
-            {"created_by_taap_id", schedule.created_by_taap_id}};
+            {"created_by_taap_id", schedule.created_by_taap_id},
+            // Made before Lake confined runs to their dataset work area (lake#1055): its runs may
+            // have broader scopes than its agent allows until the schedule is made again.
+            {"recreate",
+             schedule.desired == "present" && !control::records_work_area(schedule.scopes)}};
 }
 
 // Read on the customer, for the list_ capabilities, which authorize themselves.
@@ -7743,10 +7761,21 @@ void register_agent_run_capabilities(Registry& registry) {
             if (!launches) {
                 co_return ApiResult::failure(launches.error().code, launches.error().message);
             }
-            const auto live = std::ranges::find_if(*launches, [&](const control::AgentLaunch& l) {
+            auto live = std::ranges::find_if(*launches, [&](const control::AgentLaunch& l) {
                 return l.mode == "service" && l.desired == "present" &&
                        l.created_by_user_id == context.acting_user_id;
             });
+            // A service's scopes never change, so one whose scopes are not what the agent's record
+            // gives now is re-created (lake#1055): a service made before Lake confined runs to
+            // their dataset work area holds broader scopes than its agent allows.
+            std::vector<std::string> scopes = control::agent_launch_scopes_for(*record);
+            if (live != launches->end() && live->scopes != scopes) {
+                if (auto withdrawn = context.store->withdraw_agent_launch(live->id); !withdrawn) {
+                    co_return ApiResult::failure(withdrawn.error().code,
+                                                 withdrawn.error().message);
+                }
+                live = launches->end();
+            }
             if (live == launches->end()) {
                 auto started = context.store->create_agent_launch(
                     control::NewAgentLaunch{.customer_id = customer_id,
@@ -7754,7 +7783,7 @@ void register_agent_run_capabilities(Registry& registry) {
                                             .agent_name = record->value("name", std::string()),
                                             .mode = "service",
                                             .trigger = "conversation",
-                                            .scopes = control::agent_launch_scopes_for(*record),
+                                            .scopes = std::move(scopes),
                                             .created_by_user_id = context.acting_user_id,
                                             .created_by_taap_id = context.acting_identity,
                                             .workspace_id = input.at("workspace_id")});

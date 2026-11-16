@@ -49,7 +49,12 @@ Ask Orama's turn key is generated from. See
 `registry.cpp` also enforces a launch's dataset work area (lake#1055): `work_area_input` names the
 database on a confined `get_dataset`, `work_area_refusal` refuses at dispatch every call that
 cannot be shown to stay inside the work area, and `confine_answer` keeps only its datasets in a
-`list_datasets` answer. See [agent-launches.md](../../docs/api/agent-launches.md#a-runs-dataset-work-area).
+`list_datasets` answer. A read-only `workspace_sql` is the one call it leaves to the engine alone:
+`call_workspace` (`workspace_capabilities.cpp`) passes the work area to `WorkspaceService::call` for
+`sql`, `list_datasets` and `get_dataset`, which sends it as `Zetta-Dataset-Scope` (zetta#1515,
+zetta#1519) and refuses the query on an engine that does not enforce the header. `agent_turn` re-creates a person's conversation service whose scopes are not the
+ones its agent's record gives now, and `launch_json` and `schedule_json` answer `recreate` for a row
+made before lake#1055. See [agent-launches.md](../../docs/api/agent-launches.md#a-runs-dataset-work-area).
 
 `browser_key_capabilities.cpp` registers `create_browser_key`, `list_browser_keys` and
 `revoke_browser_key` (lake#1152). A browser key acts as no person: `authorize_browser_key` in

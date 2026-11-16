@@ -71,7 +71,8 @@ const std::vector<AgentSkill>& agent_skills();
 std::vector<std::string> agent_launch_scopes_for(const std::vector<std::string>& skills);
 
 // The same, from an agent record's `skills` (anything that is not an array of strings grants
-// nothing beyond agent_launch_scopes), plus its dataset work area (dataset_work_area_scopes).
+// nothing beyond agent_launch_scopes), plus its dataset work area (dataset_work_area_scopes) and
+// work_area_recorded_scope.
 std::vector<std::string> agent_launch_scopes_for(const nlohmann::json& agent);
 
 // A dataset work area on a launch's, schedule's or service's credential (LSR-181 companion,
@@ -91,6 +92,13 @@ std::optional<std::pair<std::string, std::string>>
 agent_definition_source(const std::vector<std::string>& scopes);
 // `<database>/<name>` for a dataset id in any of those forms, or nothing when it is malformed.
 std::optional<std::string> canonical_dataset(std::string_view id);
+// Every launch, schedule and service row Lake makes from an agent's record carries this scope
+// (agent_launch_scopes_for), saying its scopes were derived with the agent's work area. A row
+// without it was made before Lake confined runs to their work area (lake#1055) and keeps the
+// broader scopes it was given: lake re-creates a conversation service like that on its next turn,
+// and list_agent_launches and list_agent_schedules flag the rest with `recreate`.
+inline constexpr std::string_view work_area_recorded_scope = "work_area_recorded";
+bool records_work_area(const std::vector<std::string>& scopes);
 // The datasets a credential's scopes confine it to (each `<database>/<name>`), or nullopt when
 // the scopes carry no dataset work area. An empty list confines it to nothing.
 std::optional<std::vector<std::string>> dataset_work_area(const std::vector<std::string>& scopes);

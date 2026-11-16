@@ -309,6 +309,13 @@ requests by kind for the process metrics and a request's `Server-Timing`, and
 `WorkspaceService::endpoint`, and `store.hpp` `Workspace::store_moved_at` and
 `mark_workspace_store_moved` (migration `0067`).
 
+`zetta_workspace.hpp`'s `dataset_scope_header`, `dataset_scope_header_value`,
+`engine_checks_dataset_scope`, `engine_must_enforce_dataset_scope`, `dataset_scope_refusal`, `WorkspaceCaller::scoped_call` and the
+`dataset_scope` argument of `WorkspaceService::call` send a dataset-confined credential's work area
+to the workspace Zetta as `Zetta-Dataset-Scope` (lake#1055, zetta#1515), only to an engine a probe
+shows enforces it. `agent_runs.hpp`'s `work_area_recorded_scope` and `records_work_area` tell a row
+made with its work area from one made before (docs/api/agent-launches.md#a-runs-dataset-work-area).
+
 `store.hpp`'s `WorkloadResources` (lake#643, migration `0075_workload_resources`) is what the Orama
 operator reports a workload is scheduled with; `Store::workload_resources` lists every row and
 `put_workload_resources` is the operator's write, for tests. `BillingPrice::class_name` and
